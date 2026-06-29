@@ -1,0 +1,72 @@
+// ===========================================================================
+// Shared Types — included via `include "shared_types.dspi"` by interfaces
+// that need these types. Not a standalone interface.
+// ===========================================================================
+
+// Value — the universal EAVT data type. All attribute values are stored as
+// one of these variants. Serialized via slot protocol: payload-less variants
+// = 1 slot (discriminant); payload variants = discriminant + fields.
+enum Value {
+  Text(String),
+  Bytes(Vec<u8>),
+  Bool(u8),
+  Int64(i64),
+  Float64(f64),
+  Timestamp(i64),
+  // Unknown discriminant + raw value in slots.
+  // Used when the type is not known at compile time.
+  Unknown(i8, u64),
+}
+
+// ValueType — schema-level type discriminant (declared via declare_attr).
+// Stored in the resolver for type validation.
+enum ValueType {
+  String,
+  Ref,
+  Long,
+  Keyword,
+  Boolean,
+  Instant,
+  Bytes,
+  Float,
+  Blob,
+}
+
+// Opaque structs — types that cross FFI as 1 boxed pointer.
+// The struct definition lives in handwritten Rust code; the DSL merely
+// declares the name so codegen can generate descriptors and encode/decode
+// glue (Box::into_raw / Box::from_raw).
+
+// Cursor over a KV store column family. Wraps Arc<RefCell<dyn Cursor>>.
+// Spier-compiler and spier-query receive cursors from Transactor/KVStore
+// and iterate via vtable (step/seek/skip_group) with zero per-call FFI.
+opaque struct CursorHandle;
+
+// Tower client for the Transactor spier. Passed as a parameter to
+// Compiler and Planner so they can resolve schema at compile time.
+opaque struct DynSpireTransactor;
+
+// O(1) snapshot of the MemTable (Arc clone of the SkipMaps).
+// Used by KVStore during flush: snapshot + clear + merge with PageStore.
+opaque struct MemTableSnapshot;
+
+// Wrapper for RustStmt (enum that can't be opaque directly).
+// Crosses FFI as 1 boxed pointer.
+opaque struct RustStmtSt;
+
+// Wrapper for DatalogIR.
+opaque struct DatalogIRSt;
+
+// Wrapper for QueryPlanResult.
+opaque struct QueryPlanSt;
+
+// Compiled VM program (instructions + registers + var bindings).
+opaque struct VMProgram;
+
+// Arc<VMProgram> — refcounted handle to a compiled program.
+// Caller owns the refcount; cleanup via Arc + Drop.
+opaque struct ProgramHandle;
+
+// Arc<RefCell<dyn VMResultStream>> — resumable VM execution session.
+// Pull-based: caller pulls batches via session_next_batch.
+opaque struct SessionHandle;

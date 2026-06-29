@@ -1,0 +1,38 @@
+// ===========================================================================
+// Compiler — DatalogNumIR to VM bytecode (stage 2: plan + emit)
+// ===========================================================================
+//
+// The Compiler is the second stage of the compilation pipeline:
+//   1. SqlFrontend (separate spier): SQL string → DatalogIR
+//   2. Query engine (commons::datalog::resolve): DatalogIR → DatalogNumIR
+//   3. Compiler (this spier): DatalogNumIR → VMProgram
+//
+// Stage 3 consists of:
+//   a. Planner (loaded internally): DatalogNumIR → QueryPlan
+//   b. Bytecode Emitter: QueryPlan → VMProgram
+//
+// No transactor dependency — all schema metadata and cardinality estimates
+// come pre-computed in DatalogNumIR (resolve_ir + compute_stats).
+
+include "opaque_types.dspi";
+
+interface Compiler {
+    // Compile a resolved DatalogNumIR into a VMProgram (SELECT queries).
+    // Uses the planner internally to decide join order, then emits bytecode.
+    // Returns CompileResultSt (program + plan traces for EXPLAIN).
+    fn compile_select(num_ir: DatalogNumIRSt) -> CompileResultSt;
+
+    // Compile DML that requires a scan plan (UPDATE, DELETE with WHERE).
+    // The DatalogNumIR provides the scan plan (from a fake SELECT built
+    // by the frontend). The RustStmt provides SET values / retract pairs.
+    // sql_params: packed Vec<Value> for resolving %N placeholders in
+    // DELETE retract conditions (UPDATE uses Param opcodes at VM time).
+    // Returns CompileResultSt (program + plan traces).
+    fn compile_dml_scan(stmt: RustStmtSt, num_ir: DatalogNumIRSt, sql_params: &[u8]) -> CompileResultSt;
+
+    // Compile direct DML without a scan plan (UPSERT, ATTRIBUTE, PARTITION,
+    // DELETE with direct eid). Pure codegen, no planner needed.
+    // sql_params: packed Vec<Value> (query_codec format) for param resolution.
+    // Returns CompileResultSt (program, empty traces).
+    fn compile_dml_direct(stmt: RustStmtSt, sql_params: &[u8]) -> CompileResultSt;
+}

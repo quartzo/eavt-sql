@@ -1,0 +1,24 @@
+// ===========================================================================
+// Planner — DatalogNumIR to Query Plan (index ordering + specs)
+// ===========================================================================
+//
+// Takes a DatalogNumIR (attr IDs pre-resolved + cardinality stats embedded
+// by compiler) and decides:
+// - Join order (which variable to resolve first)
+// - Index to use for each pattern (eavt, aevt, avet, vaet)
+// - Specs: Var (scan), Bound (lookup), BoundAttr/BoundValue (range)
+//
+// The planner is a pure function — no transactor dependency.
+// All schema metadata and cardinality estimates come pre-computed
+// in DatalogNumIR (resolve_ir + compute_stats).
+
+include "opaque_types.dspi";
+
+interface Planner {
+    // Plan using pre-computed cardinality estimates from DatalogNumIR.
+    // No transactor needed — stats are embedded by the compiler.
+    fn plan(ir: DatalogNumIRSt) -> QueryPlanSt;
+
+    // Serialize the plan as a string (for debugging/EXPLAIN).
+    fn to_string(plan: QueryPlanSt) -> String;
+}

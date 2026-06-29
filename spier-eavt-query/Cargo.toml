@@ -1,0 +1,17 @@
+[package]
+name = "spier-eavt-query"
+version = "0.1.0"
+edition = "2021"
+description = "DynSpire Spier — EAVT query engine (SQL compiler + VM, tower over spier-transactor)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+dynspire = { git = "https://github.com/quartzo/dynspire" }
+dynspire-commons = { path = "../dynspire-commons" }
+dynspire-libs = { path = "../dynspire-libs" }
+chrono = "0.4"
+
+[build-dependencies]
+dynspire-codegen = { git = "https://github.com/quartzo/dynspire" }

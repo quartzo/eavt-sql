@@ -1,0 +1,21 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Rust / Cargo
+target/
+
+# DynSpire codegen-emitted Python clients (per-spier generated/)
+generated/
+
+# Maturin native extensions
+*.so
+*.pyd
+
+# Virtual environments
+.venv
+:memory:.blobs/

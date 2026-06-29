@@ -1,0 +1,32 @@
+// ===========================================================================
+// SqlFrontend — SQL parsing + Datalog IR building (stage 1 of compilation)
+// ===========================================================================
+//
+// Wraps spier-sql-parse and spier-datalog into a single frontend spier.
+// Called by the query engine (eavt-query) to produce a DatalogIR from SQL.
+//
+// The query engine then resolves attribute IDs and computes cardinality
+// stats (via commons::datalog::resolve, using its own transactor handle),
+// producing a DatalogNumIR that is passed to the compiler (stage 2).
+//
+// For UPDATE/DELETE statements, build_datalog internally constructs a
+// fake SELECT from the WHERE conditions before calling the datalog spier.
+
+include "opaque_types.dspi";
+
+interface SqlFrontend {
+    // Parse a SQL string into an AST (RustStmt).
+    // Returns RustStmtSt (boxed pointer wrapper around the RustStmt enum).
+    // Errors on syntactically invalid SQL.
+    fn parse(sql: &str) -> RustStmtSt;
+
+    // Build Datalog IR from a RustStmt + params.
+    // For SELECT/DatalogSelect: builds directly.
+    // For UPDATE/DELETE: builds from a fake SELECT constructed from WHERE
+    // conditions (projections = first alias eid).
+    // For other stmt types: returns an error.
+    //
+    // params: packed Vec<Value> (query_codec format).
+    // Resolves %1, %2, ... placeholders into the provided values.
+    fn build_datalog(stmt: RustStmtSt, sql_params: &[u8]) -> DatalogIRSt;
+}

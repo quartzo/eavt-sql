@@ -1,0 +1,21 @@
+[package]
+name = "eavt-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Interactive SQL REPL client for EAVT databases (gRPC)"
+
+[[bin]]
+name = "eavt-repl"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+rustyline = "14"
+hex = "0.4"
+tonic = "0.13"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio-stream = "0.1"
+prost = "0.13"
+
+[build-dependencies]
+tonic-build = "0.13"

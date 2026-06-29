@@ -1,0 +1,8 @@
+// Pre-registers shared types (Value, ValueType, opaque structs) so that
+// query_engine.dspi's build skips their definitions. The spier imports them
+// from dynspire-commons instead.
+include "../../dynspire-commons/src/shared_types.dspi";
+
+interface _Register {
+    fn _noop() -> ();
+}

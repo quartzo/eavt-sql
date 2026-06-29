@@ -1,0 +1,4 @@
+[workspace]
+members = ["dynspire-commons", "eavt-cli", "eavt-server", "dynspire-libs", "spier-blobstore-memory", "spier-blobstore-file", "spier-blobstore-s3", "spier-journal-file", "spier-memtable", "spier-kvstore", "spier-transactor", "spier-datalog", "spier-eavt-query", "spier-sql-parse", "spier-sql-frontend", "spier-planner", "spier-compiler"]
+default-members = ["dynspire-commons", "eavt-cli", "eavt-server", "dynspire-libs", "spier-blobstore-memory", "spier-blobstore-file", "spier-blobstore-s3", "spier-journal-file", "spier-memtable", "spier-kvstore", "spier-transactor", "spier-datalog", "spier-eavt-query", "spier-sql-parse", "spier-sql-frontend", "spier-planner", "spier-compiler"]
+resolver = "2"

@@ -1,0 +1,18 @@
+[package]
+name = "spier-blobstore-s3"
+version = "0.1.0"
+edition = "2021"
+description = "DynSpire Spier - S3-backed BlobStore backend"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dynspire = { git = "https://github.com/quartzo/dynspire" }
+dynspire-commons = { path = "../dynspire-commons" }
+rusty-s3 = "0.9"
+ureq = { version = "2", features = ["tls"] }
+url = "2"
+
+[build-dependencies]
+dynspire-codegen = { git = "https://github.com/quartzo/dynspire" }

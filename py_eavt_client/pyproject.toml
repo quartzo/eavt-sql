@@ -1,0 +1,25 @@
+[project]
+name = "eavt-client"
+version = "0.1.0"
+description = "Python gRPC client for EAVT database"
+requires-python = ">=3.13"
+dependencies = [
+    "grpcio>=1.81",
+    "grpcio-tools>=1.81",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eavt_client"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-timeout>=2.4.0",
+]

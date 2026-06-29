@@ -1,0 +1,16 @@
+[package]
+name = "spier-memtable"
+version = "0.1.0"
+edition = "2021"
+description = "DynSpire Spier — MemTable write buffer (crossbeam SkipMap per CF, Arc-swap snapshots, materialized scan)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+crossbeam-skiplist = "0.1"
+dynspire = { git = "https://github.com/quartzo/dynspire" }
+dynspire-commons = { path = "../dynspire-commons" }
+
+[build-dependencies]
+dynspire-codegen = { git = "https://github.com/quartzo/dynspire" }

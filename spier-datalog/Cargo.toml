@@ -1,0 +1,15 @@
+[package]
+name = "spier-datalog"
+version = "0.1.0"
+edition = "2021"
+description = "DynSpire Spier — Datalog IR builder (SQL AST → Datalog patterns)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dynspire = { git = "https://github.com/quartzo/dynspire" }
+dynspire-commons = { path = "../dynspire-commons", features = ["serde"] }
+
+[build-dependencies]
+dynspire-codegen = { git = "https://github.com/quartzo/dynspire" }

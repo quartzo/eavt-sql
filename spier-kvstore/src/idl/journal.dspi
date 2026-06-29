@@ -1,0 +1,28 @@
+// ===========================================================================
+// Journal — Write-Ahead Log (WAL) for crash recovery
+// ===========================================================================
+//
+// The Journal is the durability layer. Every KV write is appended to the
+// journal BEFORE being applied to the MemTable. On open, the journal is
+// replayed to reconstruct MemTable state.
+//
+// On-disk wire format: [u32 klen][key][u32 vlen][value] repeated.
+//
+// journal_read() returns this same format packed into Vec<u8>.
+
+interface Journal {
+    // Append a key-value entry to the journal.
+    // Called by KVStore::put() before writing to the MemTable.
+    // The write is synchronous (fsync in the file backend).
+    fn journal_append(key: &[u8], value: &[u8]) -> ();
+
+    // Read the entire journal as a packed buffer.
+    // Format: [u32 klen][key][u32 vlen][value] repeated until EOF.
+    // Used on startup to replay into the MemTable.
+    fn journal_read() -> Vec<u8>;
+
+    // Truncate the journal (erase all contents).
+    // Called after a successful flush — data is now durable in PageStore
+    // and the journal is no longer needed for recovery.
+    fn journal_truncate() -> ();
+}

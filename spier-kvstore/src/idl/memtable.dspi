@@ -1,0 +1,51 @@
+// ===========================================================================
+// MemTable — In-memory write buffer with lock-free SkipMap per CF
+// ===========================================================================
+//
+// The MemTable is the in-memory write structure. It uses crossbeam SkipMap
+// (key-only, value is always ()) per column family. Snapshots are O(1)
+// via Arc clone of the SkipMap.
+//
+// Flush lifecycle:
+//   1. snapshot() — O(1) Arc clone of each CF's SkipMap
+//   2. clear() — O(1) per CF (swap in empty SkipMap); old snapshots keep
+//      the pre-clear SkipMap alive via Arc
+//   3. flush scan -> merge with PageStore -> commit
+//   4. truncate journal
+//
+// All reads require a snapshot parameter. Between snapshot() and clear(),
+// writes to the live MemTable are visible to the snapshot too
+// (SkipMap is mutable through &).
+
+include "storage_opaque.dspi";
+
+interface MemTable {
+    // Write a key-only entry to the given CF. Returns total MemTable size
+    // after the write (for flush threshold checking).
+    fn put(cf: u32, key: &[u8]) -> u64;
+
+    // Batch write.
+    // Packed format: [u8 cf][u32 klen][key] repeated.
+    // Returns total MemTable size after the batch.
+    fn batch_write(ops: &[u8]) -> u64;
+
+    // Clear all CFs (swap in empty SkipMaps).
+    // O(1) per CF. Existing snapshots remain valid via Arc.
+    fn clear() -> ();
+
+    // Create an O(1) snapshot of the MemTable (Arc clone of each CF).
+    // The snapshot is opaque — crosses as 1 boxed pointer.
+    fn snapshot() -> MemTableSnapshot;
+
+    // Scan keys with prefix in CF, ascending order.
+    // Returns packed buffer: [u32 klen][key] repeated.
+    // Requires snapshot parameter.
+    fn scan_prefix(snap: MemTableSnapshot, cf: u32, prefix: &[u8]) -> Vec<u8>;
+
+    // Same as scan_prefix but descending order.
+    fn scan_prefix_reverse(snap: MemTableSnapshot, cf: u32, prefix: &[u8]) -> Vec<u8>;
+
+    // Check if a key exists in the CF.
+    // Requires snapshot parameter.
+    fn contains(snap: MemTableSnapshot, cf: u32, key: &[u8]) -> bool;
+}

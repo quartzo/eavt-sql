@@ -1,0 +1,15 @@
+[package]
+name = "spier-transactor"
+version = "0.1.0"
+edition = "2021"
+description = "DynSpire Spier — EAVT engine (loads spier-kvstore for KV operations)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+dynspire = { git = "https://github.com/quartzo/dynspire" }
+dynspire-commons = { path = "../dynspire-commons" }
+
+[build-dependencies]
+dynspire-codegen = { git = "https://github.com/quartzo/dynspire" }

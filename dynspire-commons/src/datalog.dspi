@@ -1,0 +1,21 @@
+// ===========================================================================
+// Datalog — AST to Datalog IR compilation
+// ===========================================================================
+//
+// Takes a RustStmt (from SqlParse) and serialized params, produces a
+// DatalogIR (patterns + find_vars + range_bounds).
+//
+// Params: Vec<Value> serialized via query_codec::encode_values().
+// Format: [u8 tag][payload] repeated.
+
+include "opaque_types.dspi";
+
+interface Datalog {
+    // Build Datalog IR from a RustStmt + params.
+    // params: packed Vec<Value> (query_codec format).
+    // Resolves %1, %2, ... placeholders into the provided values.
+    fn build(stmt: RustStmtSt, params: &[u8]) -> DatalogIRSt;
+
+    // Serialize the IR as a string (for debugging/EXPLAIN).
+    fn to_string(ir: DatalogIRSt) -> String;
+}

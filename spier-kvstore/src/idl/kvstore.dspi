@@ -1,0 +1,133 @@
+// ===========================================================================
+// KVStore — Key-only multi-CF store (MemTable + PageStore + flush)
+// ===========================================================================
+//
+// The KVStore is the storage layer above BlobStore/Journal and below
+// the Transactor. It manages 4 column families (eavt, aevt, avet, vaet),
+// all key-only (value is always implicit — the key encodes e, a, v, t).
+//
+// Read layers (merged at runtime):
+//   MemTable snapshot -> flush_snap -> GenericPageStore (BTreeMap -> BlobStore)
+//
+// Auto-flush: background poller checks memtable_size against flush_threshold
+// (default 64MB). Non-blocking: uses try_lock.
+//
+// GC: old blobs tracked as dead groups. gc_full() removes roots older than
+// gc_max_age_secs (12h) or beyond gc_max_root_count (10).
+
+include "storage_opaque.dspi";
+
+interface KVStore {
+    // --- Writes ---
+
+    // Write a key-only entry to the CF.
+    fn put(cf: u32, key: &[u8]) -> ();
+
+    // Batch of key-only writes to a single CF.
+    // Packed format: [u32 klen][key] repeated.
+    fn batch_put(cf: u32, keys: &[u8]) -> ();
+
+    // Multi-CF batch write.
+    // Packed format: [u8 cf][u32 klen][key] repeated.
+    fn batch_write(ops: &[u8]) -> ();
+
+    // Replay keys from journal (without re-appending to journal).
+    // Used during startup recovery.
+    fn replay(cf: u32, keys: &[u8]) -> ();
+
+    // --- Reads (point + scan) ---
+
+    // Point lookup: check if key exists in CF.
+    fn get(cf: u32, key: &[u8]) -> bool;
+
+    // Scan keys with prefix in CF (ascending).
+    // Returns packed: [u32 klen][key] repeated.
+    fn scan(cf: u32, prefix: &[u8]) -> Vec<u8>;
+
+    // Same as scan but descending.
+    fn scan_reverse(cf: u32, prefix: &[u8]) -> Vec<u8>;
+
+    // List all keys in CF (full scan).
+    // Returns packed: [u32 klen][key] repeated.
+    fn items(cf: u32) -> Vec<u8>;
+
+    // --- Cursors (zero-copy, vtable dispatch) ---
+
+    // Open an ascending cursor over a prefix in CF.
+    // Returns CursorHandle (Arc<RefCell<dyn Cursor>> as boxed pointer).
+    // Rust callers use step/seek/skip_group via vtable — zero per-call FFI.
+    fn open_cursor_direct(cf: u32, prefix: &[u8]) -> CursorHandle;
+
+    // Open a descending cursor.
+    fn open_cursor_reverse_direct(cf: u32, prefix: &[u8]) -> CursorHandle;
+
+    // Check if cursor still has data (not exhausted).
+    fn cursor_valid(cursor: CursorHandle) -> bool;
+
+    // Copy the cursor's current key into buf.
+    // Returns false if cursor exhausted (cur_key may be stale).
+    // Takes &mut Vec<u8> out-param (writes directly into caller's allocation).
+    fn cursor_current_key(cursor: CursorHandle, buf: &mut Vec<u8>) -> bool;
+
+    // Advance cursor to the next key.
+    fn cursor_step(cursor: CursorHandle) -> ();
+
+    // Position cursor at the first key >= target.
+    fn cursor_seek(cursor: CursorHandle, target: &[u8]) -> ();
+
+    // Skip all keys sharing the first `group_end` bytes.
+    // Optimization to skip entire entity/attribute groups.
+    fn cursor_skip_group(cursor: CursorHandle, group_end: u32) -> ();
+
+    // Update the cursor's upper bound (dynamic range scan).
+    fn cursor_update_end(cursor: CursorHandle, end: &[u8]) -> ();
+
+    // --- Journal delegation ---
+
+    // Append to the internal journal.
+    fn journal_put(key: &[u8], value: &[u8]) -> ();
+
+    // Read entire journal. Packed: [u32 klen][key][u32 vlen][value] repeated.
+    fn journal_scan() -> Vec<u8>;
+
+    // --- Stats and admin ---
+
+    // Journal size in bytes.
+    fn journal_size() -> u64;
+
+    // Total active MemTable size (all CFs, in bytes).
+    fn memtable_size() -> u64;
+
+    // Number of entries in MemTable for a specific CF.
+    fn memtable_count(cf: u32) -> u64;
+
+    // Database path on disk.
+    fn path() -> String;
+
+    // Estimated size between [start, end) in CF.
+    fn approximate_sizes(cf: u32, start: &[u8], end: &[u8]) -> u64;
+
+    // Stats for a specific CF.
+    // Packed: [u16 name_len][name][u64 x5].
+    fn cf_stats(cf: u32) -> Vec<u8>;
+
+    // Global database stats.
+    // Packed: [u64 total_sst][u64 total_live].
+    fn db_stats() -> Vec<u8>;
+
+    // Full garbage collection.
+    // Returns packed result with roots_scanned, roots_removed, etc.
+    // Non-blocking: uses try_lock, returns Busy if another op holds the lock.
+    fn gc_full(dry_run: bool, nowait: bool) -> Vec<u8>;
+
+    // Operational status of internal structures.
+    // target: "" = summary, "btree"/"btree:avet" = B-tree, "memtable" = state.
+    fn internal_status(target: &str) -> String;
+
+    // Manual flush of MemTable to PageStore.
+    // Non-blocking: uses try_lock.
+    fn flush() -> ();
+
+    // Close the database (stop background poller, final flush).
+    fn close() -> ();
+}

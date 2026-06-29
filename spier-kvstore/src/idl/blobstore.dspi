@@ -1,0 +1,47 @@
+// ===========================================================================
+// BlobStore — Opaque blob storage with UUIDs
+// ===========================================================================
+//
+// Lowest layer of storage. Each blob is identified by a [u8; 16] UUID.
+// PageStores store data as blobs and maintain a BTreeMap of
+// key_bytes -> blob_uuid.
+//
+// Backends: in-memory (HashMap) for tests, file (zstd + journal),
+// or S3.
+//
+// BlobStore also supports "named roots" — blobs indexed by string instead
+// of UUID. Used by GenericPageStore to persist the BTree root page.
+
+interface BlobStore {
+    // Store a blob and return its generated UUID.
+    // Data is compressed with zstd in the file backend.
+    fn put(data: &[u8]) -> [u8; 16];
+
+    // Store a blob with a pre-determined UUID.
+    // Used when the caller already has the UUID (e.g. journal replay).
+    fn put_at(id: [u8; 16], data: &[u8]) -> ();
+
+    // Delete a blob by UUID.
+    fn delete(id: [u8; 16]) -> ();
+
+    // Retrieve a blob by UUID. None if not found.
+    fn get(id: [u8; 16]) -> Option<Vec<u8>>;
+
+    // List all stored blob UUIDs.
+    fn list() -> Vec<[u8; 16]>;
+
+    // --- Named roots ---
+
+    // Store a blob indexed by name (root blob).
+    // Used by GenericPageStore to persist the BTree root page.
+    fn put_root(name: &str, data: &[u8]) -> ();
+
+    // Retrieve a root blob by name. None if not found.
+    fn get_root(name: &str) -> Option<Vec<u8>>;
+
+    // List all stored root names.
+    fn list_roots() -> Vec<String>;
+
+    // Delete a root blob by name.
+    fn delete_root(name: &str) -> ();
+}

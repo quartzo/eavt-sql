@@ -1,0 +1,152 @@
+// ===========================================================================
+// Query — VM execution engine (single gateway for hosts)
+// ===========================================================================
+//
+// The Query spier is the single entry point for hosts (CLI, gRPC, PyO3).
+// It loads the Transactor internally and adds:
+//   - SQL compilation (SQL -> VM bytecode)
+//   - VM execution (triejoin, leapfrog, scanner, streaming)
+//   - Execution plan introspection (EXPLAIN)
+//
+// Non-query methods are thin delegates to the internal TransactorEngine.
+//
+// Result streaming is pull-based: run_vm_cursor() returns a SessionHandle
+// (resumable), and session_next_batch() pulls up to max_rows per call.
+
+include "shared_types.dspi";
+
+interface Query {
+    // =======================================================================
+    // 1. QUERY — unique value of this spier
+    // =======================================================================
+
+    // Compile SQL into a ProgramHandle (Arc<VMProgram>, refcounted).
+    // Caller owns the refcount; cleanup via Arc + Drop.
+    // sql_params: packed Vec<Value> (query_codec format).
+    // The compiler resolves %1, %2, ... from these values at compile time.
+    fn compile_sql(sql: &str, sql_params: &[u8]) -> ProgramHandle;
+
+    // Execute a VMProgram by handle. Returns serialized rows.
+    // sql_params: packed Vec<Value>.
+    // limit: u64::MAX = unlimited, else at most n rows.
+    // as_of_us: u64::MAX = no temporal filter, else datoms at or before t.
+    // Result format: [u32 ncols][encoded values] flat row-major.
+    fn run_vm(program: ProgramHandle, sql_params: &[u8], limit: u64, as_of_us: u64) -> Vec<u8>;
+
+    // Open a resumable VM execution session (pull-based cursor).
+    // Returns SessionHandle (Arc<RefCell<dyn VMResultStream>>).
+    // Pull rows via session_next_batch.
+    fn run_vm_cursor(program: ProgramHandle, sql_params: &[u8], limit: u64, as_of_us: u64) -> SessionHandle;
+
+    // Pull up to max_rows packed rows from a session.
+    // Wire format: [u32 num_cols][encoded values] repeated per row.
+    // Empty Vec = session done.
+    fn session_next_batch(session: SessionHandle, max_rows: u64) -> Vec<u8>;
+
+    // Return execution plan as human-readable text (EXPLAIN).
+    // Includes plan traces + bytecode disassembly.
+    fn explain(sql: &str, sql_params: &[u8]) -> String;
+
+    // Return ONLY plan traces (join order, cost estimates, index selection).
+    // No bytecode disassembly.
+    fn explain_plan(sql: &str, sql_params: &[u8]) -> String;
+
+    // Compile SQL and return the VM program as JSON (introspection).
+    // Shows opcodes, cursor plans, variable bindings.
+    fn compile_sql_json(sql: &str, sql_params: &[u8]) -> String;
+
+    // Scan all active EAVT datoms (for SELECT * and export_jsonl).
+    // as_of_us: u64::MAX = no temporal filter.
+    // Format: [u32 num_cols][encoded values] per row.
+    // Each row: (e: Int64, a: Int64, attr_name: Text, v: Value, t: Int64).
+    fn scan_datoms(as_of_us: u64) -> Vec<u8>;
+
+    // =======================================================================
+    // 2. SCHEMA — delegates to TransactorEngine
+    // =======================================================================
+
+    // Declare attribute with type and cardinality. Returns attribute ID.
+    fn declare_attr(name: &str, value_type: ValueType, many: bool) -> u32;
+
+    // Declare or update attribute from SQL type name.
+    fn declare_attr_from_sql(attr: &str, type_name: &str, many: bool, unique: bool) -> ();
+
+    // Look up attribute ID by name. None if not found.
+    fn lookup_attr(name: &str) -> Option<u32>;
+
+    // Get attribute name by ID.
+    fn attr_name(aid: u32) -> String;
+
+    // Check if attribute is declared.
+    fn is_declared(aid: u32) -> bool;
+
+    // Get value type for attribute. None if unknown.
+    fn value_type_for(aid: u32) -> Option<ValueType>;
+
+    // Check if attribute has cardinality many.
+    fn is_many(aid: u32) -> bool;
+
+    // Check if named attribute is unique.
+    fn is_unique_attr(name: &str) -> bool;
+
+    // Declare partition. Returns partition ID.
+    fn declare_partition(name: &str) -> u64;
+
+    // Look up partition ID by name. None if not found.
+    fn partition_id_for(name: &str) -> Option<u64>;
+
+    // =======================================================================
+    // 3. WRITES — delegates to TransactorEngine
+    // =======================================================================
+
+    // Save entity-attr-value triple at transaction time t.
+    fn save(e: u64, attr: &str, v: Value, t: u64) -> ();
+
+    // Retract entity-attr-value triple.
+    fn retract(e: u64, attr: &str, v: Value, t: u64) -> ();
+
+    // Allocate entity ID in default user partition.
+    fn allocate_entity_id() -> u64;
+
+    // Allocate transaction t and write txInstant entity.
+    fn allocate_tx() -> u64;
+
+    // Look up entity by unique attribute value. None if not found.
+    fn lookup_entity(attr_name: &str, value: Value) -> Option<u64>;
+
+    // =======================================================================
+    // 4. ADMIN — delegates to TransactorEngine
+    // =======================================================================
+
+    // Flush memtable to page store.
+    fn flush() -> ();
+
+    // Close the engine.
+    fn close() -> ();
+
+    // Database path.
+    fn path() -> String;
+
+    // Total memtable size in bytes (all CFs).
+    fn memtable_size() -> u64;
+
+    // Memtable entry count for a specific CF.
+    fn memtable_count(cf: u32) -> u64;
+
+    // Journal/WAL size in bytes.
+    fn journal_size() -> u64;
+
+    // Column family stats. Packed: [u16 name_len][name][u64 x5].
+    fn cf_stats(cf: u32) -> Vec<u8>;
+
+    // Global database stats. Packed: [u64 total_sst][u64 total_live].
+    fn db_stats() -> Vec<u8>;
+
+    // Full garbage collection. Packed result.
+    fn gc_full(dry_run: bool, nowait: bool) -> Vec<u8>;
+
+    // Operational status of internal structures.
+    // target: "" = summary, "btree" / "btree:avet" = B-tree page store,
+    // "memtable" = memtable state per CF.
+    fn internal_status(target: &str) -> String;
+}

@@ -1,0 +1,133 @@
+// ===========================================================================
+// Transactor — EAVT engine (superset of KVStore + EAVT semantics)
+// ===========================================================================
+//
+// The Transactor is the central spier: it loads spier-kvstore via tower
+// internally and adds EAVT semantics (save/retract/declare_attr) with a
+// schema resolver and eager UNIQUE constraint validation.
+//
+// Single-writer serial: the resolver mutex (global in space, per-datom in
+// time) ensures no pair of save_at_t calls execute concurrently. But long
+// statements (UPDATE/DELETE scans) do not hold the lock between datoms.
+//
+// 4 column families: eavt, aevt, avet, vaet — all key-only, format:
+//   [e:i64][a:i64][v:sorted_bytes][t:i64]
+// ordered by index variation.
+
+include "shared_types.dspi";
+
+interface Transactor {
+    // =======================================================================
+    // KV STORE — delegated to internal KVStore
+    // =======================================================================
+
+    fn put(cf: u32, key: &[u8]) -> ();
+    fn batch_put(cf: u32, keys: &[u8]) -> ();
+    fn batch_write(ops: &[u8]) -> ();
+    fn replay(cf: u32, keys: &[u8]) -> ();
+    fn get(cf: u32, key: &[u8]) -> bool;
+    fn scan(cf: u32, prefix: &[u8]) -> Vec<u8>;
+    fn scan_reverse(cf: u32, prefix: &[u8]) -> Vec<u8>;
+    fn items(cf: u32) -> Vec<u8>;
+
+    // --- Cursors ---
+    fn open_cursor_direct(cf: u32, prefix: &[u8]) -> CursorHandle;
+    fn open_cursor_reverse_direct(cf: u32, prefix: &[u8]) -> CursorHandle;
+    fn cursor_valid(cursor: CursorHandle) -> bool;
+    fn cursor_current_key(cursor: CursorHandle, buf: &mut Vec<u8>) -> bool;
+    fn cursor_step(cursor: CursorHandle) -> ();
+    fn cursor_seek(cursor: CursorHandle, target: &[u8]) -> ();
+    fn cursor_skip_group(cursor: CursorHandle, group_end: u32) -> ();
+    fn cursor_update_end(cursor: CursorHandle, end: &[u8]) -> ();
+
+    // --- Journal delegation ---
+    fn journal_put(key: &[u8], value: &[u8]) -> ();
+    fn journal_scan() -> Vec<u8>;
+    fn journal_size() -> u64;
+    fn memtable_size() -> u64;
+    fn memtable_count(cf: u32) -> u64;
+    fn path() -> String;
+    fn approximate_sizes(cf: u32, start: &[u8], end: &[u8]) -> u64;
+    fn cf_stats(cf: u32) -> Vec<u8>;
+    fn db_stats() -> Vec<u8>;
+    fn gc_full(dry_run: bool, nowait: bool) -> Vec<u8>;
+    fn internal_status(target: &str) -> String;
+    fn flush() -> ();
+    fn close() -> ();
+
+    // =======================================================================
+    // EAVT — entity-attribute-value semantics
+    // =======================================================================
+
+    // Persist a datom (e, attr, v) at transaction time t.
+    // Resolves attr name to aid via resolver, validates type, writes to
+    // all 4 CFs (eavt, aevt, avet, vaet). UNIQUE is validated eagerly and
+    // atomically inside the same lock acquisition as the write.
+    // as_of_us: timestamp in microseconds for txInstant.
+    fn eavt_save(e_id: u64, attr: &str, v: Value, t: u64, as_of_us: u64) -> ();
+
+    // Retract a datom (marks as retracted in the vaet index).
+    // The datom remains visible in historical scans (history = true).
+    fn eavt_retract(e_id: u64, attr: &str, v: Value, current_t: u64, as_of_us: u64) -> ();
+
+    // Declare an attribute in the schema. Returns the assigned attribute ID.
+    // value_type: the value type (String, Ref, Long, etc.).
+    // many: true = cardinality many (multi-valued).
+    fn eavt_declare_attr(name: &str, value_type: ValueType, many: bool, current_t: u64) -> u32;
+
+    // Declare attribute from a SQL type name.
+    // type_name: "STRING", "INTEGER", "BOOLEAN", "TIMESTAMP", etc.
+    // unique: true = UNIQUE constraint.
+    fn eavt_declare_attr_from_sql(attr: &str, type_name: &str, many: bool, unique: bool, current_t: u64) -> ();
+
+    // Declare a partition (e.g. "user", "tx"). Returns the partition ID.
+    // Partitions are ranges of entity IDs: db (0-999), tx (1000-1999), user (2000+).
+    fn eavt_declare_partition(name: &str, current_t: u64) -> u64;
+
+    // Allocate a new transaction ID (t). Writes txInstant entity.
+    fn eavt_allocate_tx() -> u64;
+
+    // =======================================================================
+    // RESOLVER — schema cache (read-only queries)
+    // =======================================================================
+
+    // Look up attribute ID by name. None if not declared.
+    fn lookup_attr(name: &str) -> Option<u32>;
+
+    // Check if an attribute ID is declared.
+    fn is_declared(aid: u32) -> bool;
+
+    // Get attribute name by ID.
+    fn attr_name(aid: u32) -> String;
+
+    // Get value type for attribute. None if unknown.
+    fn value_type_for(aid: u32) -> Option<ValueType>;
+
+    // Check if attribute is multi-valued (cardinality many).
+    fn is_many(aid: u32) -> bool;
+
+    // Check if attribute has UNIQUE constraint.
+    fn is_unique(aid: u32) -> bool;
+
+    // Check if a named attribute is UNIQUE.
+    fn is_unique_attr(name: &str) -> bool;
+
+    // Get the default partition ID for user entities.
+    fn default_user_partition() -> u64;
+
+    // Get partition ID by name. None if not found.
+    fn partition_id_for(name: &str) -> Option<u64>;
+
+    // Look up entity by UNIQUE attribute value.
+    // Returns the entity ID, or None if no entity has this value.
+    fn lookup_entity(attr_name: &str, value: Value) -> Option<u64>;
+
+    // Allocate an entity ID in the default user partition.
+    fn allocate_entity_id() -> u64;
+
+    // Allocate an entity ID in a specific partition.
+    fn allocate_in_partition(partition_id: u64) -> u64;
+
+    // Allocate a transaction ID (without writing txInstant).
+    fn allocate_t() -> u64;
+}

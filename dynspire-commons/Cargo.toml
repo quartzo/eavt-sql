@@ -1,0 +1,17 @@
+[package]
+name = "dynspire-commons"
+version = "0.1.0"
+edition = "2021"
+description = "DynSpire shared protocol — IDL traits, types, and stateless utilities"
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[dependencies]
+dynspire = { git = "https://github.com/quartzo/dynspire" }
+chrono = "0.4"
+serde = { version = "1", features = ["derive"], optional = true }
+
+[build-dependencies]
+dynspire-codegen = { git = "https://github.com/quartzo/dynspire" }

@@ -1,0 +1,7 @@
+// Opaque types shared across the storage-layer IDLs (BlobStore, Journal,
+// MemTable, KVStore).  These are owned by the spier-kvstore crate; the
+// concrete Rust definitions live in dynspire-commons and are imported via
+// `use` statements before the generated code is included.
+
+opaque struct CursorHandle;
+opaque struct MemTableSnapshot;

@@ -1,0 +1,40 @@
+// ===========================================================================
+// Opaque Types — included by interfaces that need opaque struct declarations
+// but NOT the Value/ValueType enums. Only the transactor and query_engine
+// interfaces need Value/ValueType (they include shared_types.dspi instead).
+//
+// Storage-layer opaque types (CursorHandle, MemTableSnapshot) are declared
+// in spier-kvstore/src/idl/storage_opaque.dspi. CursorHandle is also declared
+// here because transactor.dspi and query_engine.dspi reference it.
+// ===========================================================================
+
+// Cursor over a KV store column family. Wraps Arc<RefCell<dyn Cursor>>.
+opaque struct CursorHandle;
+
+// Tower client for the Transactor spier. Passed as a parameter to
+// Compiler and Planner so they can resolve schema at compile time.
+opaque struct DynSpireTransactor;
+
+// Wrapper for RustStmt (enum that can't be opaque directly).
+opaque struct RustStmtSt;
+
+// Wrapper for DatalogIR.
+opaque struct DatalogIRSt;
+
+// Wrapper for DatalogNumIR (attr IDs pre-resolved by compiler).
+opaque struct DatalogNumIRSt;
+
+// Wrapper for QueryPlanResult.
+opaque struct QueryPlanSt;
+
+// Compiled VM program (instructions + registers + var bindings).
+opaque struct VMProgram;
+
+// Compiler output: program + plan traces (for EXPLAIN).
+opaque struct CompileResultSt;
+
+// Arc<VMProgram> — refcounted handle to a compiled program.
+opaque struct ProgramHandle;
+
+// Arc<RefCell<dyn VMResultStream>> — resumable VM execution session.
+opaque struct SessionHandle;

@@ -1,0 +1,22 @@
+[package]
+name = "spier-kvstore"
+version = "0.1.0"
+edition = "2021"
+description = "DynSpire Spier — Pure key-only multi-CF KV store (MemTable + PageStore + flush + tx_delta)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+libc = "0.2"
+uuid = { version = "1", features = ["v4"] }
+zstd = "0.13"
+lru = "0.12"
+dynspire = { git = "https://github.com/quartzo/dynspire" }
+dynspire-commons = { path = "../dynspire-commons" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]
+dynspire-codegen = { git = "https://github.com/quartzo/dynspire" }

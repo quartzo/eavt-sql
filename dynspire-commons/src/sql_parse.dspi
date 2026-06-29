@@ -1,0 +1,21 @@
+// ===========================================================================
+// SqlParse — SQL parser producing AST (RustStmt)
+// ===========================================================================
+//
+// Pure parsing spier. Takes a SQL string and returns a RustStmtSt
+// (abstract AST, no schema resolution). Does not access the Transactor.
+//
+// Supports: SELECT, INSERT/UPSERT, UPDATE, DELETE, DECLARE ATTRIBUTE,
+// DECLARE PARTITION, and inline Datalog queries.
+
+include "opaque_types.dspi";
+
+interface SqlParse {
+    // Parse a SQL string into an AST.
+    // Returns RustStmtSt (boxed pointer wrapper around the RustStmt enum).
+    // Errors on syntactically invalid SQL.
+    fn parse(sql: &str) -> RustStmtSt;
+
+    // Parse and serialize to JSON (for debugging/introspection).
+    fn parse_json(sql: &str) -> String;
+}

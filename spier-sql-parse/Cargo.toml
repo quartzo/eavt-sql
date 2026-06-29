@@ -1,0 +1,16 @@
+[package]
+name = "spier-sql-parse"
+version = "0.1.0"
+edition = "2021"
+description = "DynSpire Spier — SQL lexer + parser (SQL string → AST)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dynspire = { git = "https://github.com/quartzo/dynspire" }
+dynspire-commons = { path = "../dynspire-commons", features = ["serde"] }
+serde_json = "1"
+
+[build-dependencies]
+dynspire-codegen = { git = "https://github.com/quartzo/dynspire" }
