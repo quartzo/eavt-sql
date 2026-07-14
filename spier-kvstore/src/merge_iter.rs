@@ -2,7 +2,6 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::ops::Bound;
 
-use crossbeam_skiplist::SkipMap;
 use spier_memtable::CfMap;
 
 fn prefix_upper_bound(prefix: &[u8]) -> Vec<u8> {
