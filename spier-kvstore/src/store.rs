@@ -93,23 +93,28 @@ impl StoreInner {
             ));
         }
         if let Some(ref snap) = self.flush_snap {
-            if let Some(map) = self.mt.get_cf_map(snap, cf_id as u32) {
-                if !map.is_empty() {
-                    sources.push(SourceKind::MemTable(
-                        crate::merge_iter::LazyMemTableSource::new(map, prefix),
-                    ));
-                }
+            let packed = self
+                .mt
+                .scan_prefix(snap.clone(), cf_id as u32, prefix)
+                .unwrap_or_default();
+            if !packed.is_empty() {
+                let snap_keys = unpack_keys(&packed);
+                sources.push(SourceKind::MemTable(crate::merge_iter::PageStoreIter::new(
+                    snap_keys, prefix,
+                )));
             }
         }
         let live_snap = self.mt.snapshot().unwrap();
-        if let Some(map) = self.mt.get_cf_map(&live_snap, cf_id as u32) {
-            if !map.is_empty() {
-                sources.push(SourceKind::MemTable(
-                    crate::merge_iter::LazyMemTableSource::new(map, prefix),
-                ));
-            }
+        let packed = self
+            .mt
+            .scan_prefix(live_snap, cf_id as u32, prefix)
+            .unwrap_or_default();
+        if !packed.is_empty() {
+            let mt_keys = unpack_keys(&packed);
+            sources.push(SourceKind::MemTable(crate::merge_iter::PageStoreIter::new(
+                mt_keys, prefix,
+            )));
         }
-        drop(live_snap);
         sources
     }
 

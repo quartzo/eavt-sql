@@ -17,7 +17,7 @@ pub trait ScanSource: Send {
 }
 
 pub enum SourceKind {
-    MemTable(LazyMemTableSource),
+    MemTable(PageStoreIter),
     PageStore(PageStoreIter),
 }
 
