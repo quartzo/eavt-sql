@@ -95,19 +95,21 @@ impl StoreInner {
             }
         }
         if let Some(ref snap) = self.flush_snap {
-            let keys = self.mt.scan_prefix_keys(snap, cf_id as u32, prefix);
-            if !keys.is_empty() {
-                sources.push(SourceKind::MemTable(crate::merge_iter::PageStoreIter::new(
-                    keys, prefix,
-                )));
+            if let Some(map) = self.mt.get_cf_map(snap, cf_id as u32) {
+                if !map.is_empty() {
+                    sources.push(SourceKind::MemTable(
+                        crate::merge_iter::ChunkedMemTableSource::new(map, prefix),
+                    ));
+                }
             }
         }
         let live_snap = self.mt.snapshot().unwrap();
-        let keys = self.mt.scan_prefix_keys(&live_snap, cf_id as u32, prefix);
-        if !keys.is_empty() {
-            sources.push(SourceKind::MemTable(crate::merge_iter::PageStoreIter::new(
-                keys, prefix,
-            )));
+        if let Some(map) = self.mt.get_cf_map(&live_snap, cf_id as u32) {
+            if !map.is_empty() {
+                sources.push(SourceKind::MemTable(
+                    crate::merge_iter::ChunkedMemTableSource::new(map, prefix),
+                ));
+            }
         }
         sources
     }

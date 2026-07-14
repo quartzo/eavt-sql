@@ -28,20 +28,24 @@ pub trait ScanSource: Send {
 }
 
 pub enum SourceKind {
-    MemTable(PageStoreIter),
+    MemTable(ChunkedMemTableSource),
     PageStore(PageStoreIter),
 }
 
-/// Lazy cursor over a MemTable snapshot's SkipMap. Instead of materializing
-/// all keys upfront, it uses `lower_bound` (O(log n)) on each advance/seek.
-/// This makes scanner open O(1) instead of O(K).
-pub struct LazyMemTableSource {
+const CHUNK_SIZE: usize = 64;
+
+/// Lazy cursor over a MemTable snapshot's SkipMap. Fetches chunks of
+/// CHUNK_SIZE keys using lower_bound (O(log n)) per chunk + Entry::next()
+/// (O(1)) within each chunk. For 11 advances: O(log n) + 11×O(1).
+pub struct ChunkedMemTableSource {
     map: CfMap,
     upper: Vec<u8>,
     cur_key: Option<Vec<u8>>,
+    cache: Vec<Vec<u8>>,
+    cache_pos: usize,
 }
 
-impl LazyMemTableSource {
+impl ChunkedMemTableSource {
     pub fn new(map: CfMap, prefix: &[u8]) -> Self {
         let upper = if prefix.is_empty() {
             vec![0xFF; 64]
@@ -52,34 +56,40 @@ impl LazyMemTableSource {
             map,
             upper,
             cur_key: None,
+            cache: Vec::new(),
+            cache_pos: 0,
         };
-        src.reposition(Bound::Included(prefix));
+        src.refill(Bound::Included(prefix));
         src
     }
 
-    fn reposition(&mut self, bound: Bound<&[u8]>) {
-        if self.cur_key.as_deref().map_or(true, |k| match bound {
-            Bound::Included(t) => k < t,
-            Bound::Excluded(t) => k <= t,
-            Bound::Unbounded => false,
-        }) {
-            let entry = self.map.lower_bound(bound);
+    fn refill(&mut self, bound: Bound<&[u8]>) {
+        let upper = self.upper.clone();
+        let map = &*self.map;
+
+        let mut cache = Vec::with_capacity(CHUNK_SIZE);
+        let mut entry = map.lower_bound(bound);
+        while cache.len() < CHUNK_SIZE {
             match entry {
                 Some(e) => {
-                    let k = e.key().clone();
-                    if k.as_slice() < self.upper.as_slice() {
-                        self.cur_key = Some(k);
-                    } else {
-                        self.cur_key = None;
+                    let key = e.key().clone();
+                    if key >= upper {
+                        break;
                     }
+                    cache.push(key);
+                    entry = e.next();
                 }
-                None => self.cur_key = None,
+                None => break,
             }
         }
+
+        self.cur_key = cache.first().cloned();
+        self.cache = cache;
+        self.cache_pos = 0;
     }
 }
 
-impl ScanSource for LazyMemTableSource {
+impl ScanSource for ChunkedMemTableSource {
     fn valid(&self) -> bool {
         self.cur_key.is_some()
     }
@@ -93,18 +103,23 @@ impl ScanSource for LazyMemTableSource {
     }
 
     fn advance(&mut self) {
-        if let Some(k) = &self.cur_key {
-            let k = k.clone();
-            self.reposition(Bound::Excluded(&k));
+        self.cache_pos += 1;
+        if self.cache_pos < self.cache.len() {
+            self.cur_key = Some(self.cache[self.cache_pos].clone());
+        } else if let Some(last) = self.cache.last() {
+            let last = last.clone();
+            self.refill(Bound::Excluded(&last));
+        } else {
+            self.cur_key = None;
         }
     }
 
     fn seek(&mut self, target: &[u8]) {
-        self.reposition(Bound::Included(target));
+        self.refill(Bound::Included(target));
     }
 
     fn advance_to(&mut self, target: &[u8]) {
-        self.reposition(Bound::Included(target));
+        self.refill(Bound::Included(target));
     }
 
     fn update_end(&mut self, end: &[u8]) {
@@ -117,11 +132,9 @@ impl ScanSource for LazyMemTableSource {
     }
 
     fn skip_group(&mut self, group: &[u8]) {
-        // Skip all keys that start with `group`
-        while let Some(k) = &self.cur_key {
+        while let Some(ref k) = self.cur_key {
             if k.len() >= group.len() && k[..group.len()] == *group {
-                let k = k.clone();
-                self.reposition(Bound::Excluded(&k));
+                self.advance();
             } else {
                 break;
             }
@@ -656,18 +669,18 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    fn lazy_source(keys: Vec<&[u8]>) -> LazyMemTableSource {
+    fn chunked_source(keys: Vec<&[u8]>) -> ChunkedMemTableSource {
         let map: CfMap = Arc::new(
             keys.into_iter()
                 .map(|k| (k.to_vec(), ()))
                 .collect::<SkipMap<Vec<u8>, ()>>(),
         );
-        LazyMemTableSource::new(map, b"")
+        ChunkedMemTableSource::new(map, b"")
     }
 
     #[test]
     fn test_merge_single_source() {
-        let s1 = lazy_source(vec![b"a", b"b", b"c"]);
+        let s1 = chunked_source(vec![b"a", b"b", b"c"]);
         let sources = vec![SourceKind::MemTable(s1)];
         let result = merge_collect(sources);
         assert_eq!(result.len(), 3);
@@ -677,8 +690,8 @@ mod tests {
 
     #[test]
     fn test_merge_two_sources() {
-        let s1 = lazy_source(vec![b"a", b"c"]);
-        let s2 = lazy_source(vec![b"b", b"d"]);
+        let s1 = chunked_source(vec![b"a", b"c"]);
+        let s2 = chunked_source(vec![b"b", b"d"]);
         let sources = vec![SourceKind::MemTable(s1), SourceKind::MemTable(s2)];
         let result = merge_collect(sources);
         assert_eq!(result.len(), 4);
@@ -688,8 +701,8 @@ mod tests {
 
     #[test]
     fn test_merge_overlapping_last_writer_wins() {
-        let s1 = lazy_source(vec![b"a"]);
-        let s2 = lazy_source(vec![b"a"]);
+        let s1 = chunked_source(vec![b"a"]);
+        let s2 = chunked_source(vec![b"a"]);
         let sources = vec![SourceKind::MemTable(s1), SourceKind::MemTable(s2)];
         let result = merge_collect(sources);
         assert_eq!(result.len(), 1);
@@ -705,7 +718,7 @@ mod tests {
 
     #[test]
     fn test_merged_inner_seek() {
-        let s1 = lazy_source(vec![b"a", b"b", b"c", b"d"]);
+        let s1 = chunked_source(vec![b"a", b"b", b"c", b"d"]);
         let sources = vec![SourceKind::MemTable(s1)];
         let mut merged = MergedInner::new(sources, b"");
         assert!(merged.valid);
@@ -717,7 +730,7 @@ mod tests {
 
     #[test]
     fn test_merged_inner_skip_group() {
-        let s1 = lazy_source(vec![b"aa1", b"aa2", b"aa3", b"bb1"]);
+        let s1 = chunked_source(vec![b"aa1", b"aa2", b"aa3", b"bb1"]);
         let sources = vec![SourceKind::MemTable(s1)];
         let mut merged = MergedInner::new(sources, b"");
         assert_eq!(merged.cur_key, Some(b"aa1".to_vec()));
@@ -780,7 +793,7 @@ mod tests {
                 .map(|k| (k, ()))
                 .collect::<SkipMap<Vec<u8>, ()>>(),
         );
-        let s = LazyMemTableSource::new(map, b"");
+        let s = ChunkedMemTableSource::new(map, b"");
         let sources = vec![SourceKind::MemTable(s)];
         let mut merged = MergedInner::new(sources, b"");
         assert!(merged.valid);
