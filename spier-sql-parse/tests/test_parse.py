@@ -1,7 +1,7 @@
-"""Tests for spier-sql-parse via DynSpire FFI (parse_json).
+"""Tests for spier-sql-parse via PyO3 bindings.
 
 Covers all RustStmt variants, entity_ref types, condition operators,
-literal types, and error handling — all through the Python ctypes FFI.
+literal types, and error handling through spier_sql_parse_py.
 """
 import json
 
@@ -18,16 +18,12 @@ def client():
 
 
 # ---------------------------------------------------------------------------
-# FFI infrastructure
+# Binding infrastructure
 # ---------------------------------------------------------------------------
 
-class TestFFI:
+class TestBinding:
     def test_schema_has_parse_json(self, client):
         client.parse("SELECT d1.eid")  # smoke test
-
-    def test_idl_hash_is_registered(self, client):
-        # The codegen bakes the IDL hash; load() gates it against the .so.
-        assert client._lib.idl_hash() != 0
 
     def test_methods_exposed(self, client):
         assert hasattr(client._handle, "parse_json")

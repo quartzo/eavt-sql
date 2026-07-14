@@ -1,19 +1,24 @@
-use std::collections::HashMap;
+use dynspire_commons::sql_parse::{RustStmtSt, SqlParseEngine};
 
-use dynspire_commons::sql_parse::RustStmtSt;
+pub mod lexer;
+pub mod parser;
 
-include!(concat!(env!("OUT_DIR"), "/sqlparse_spier.rs"));
+/// Pure Rust SQL parser. No dynspire/FFI — just implements [`SqlParseEngine`].
+pub struct SqlParser;
 
-mod lexer;
-mod parser;
-
-struct ParseState;
-
-fn init(_config: &HashMap<String, String>) -> Result<ParseState, String> {
-    Ok(ParseState)
+impl SqlParser {
+    pub fn new() -> Self {
+        Self
+    }
 }
 
-impl SqlParseEngine for ParseState {
+impl Default for SqlParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SqlParseEngine for SqlParser {
     fn parse(&self, sql: &str) -> Result<RustStmtSt, String> {
         Ok(RustStmtSt { stmt: parser::parse(sql)? })
     }
@@ -24,4 +29,28 @@ impl SqlParseEngine for ParseState {
     }
 }
 
-impl_sqlparse_spier!(ParseState, init, "spier_sql_parse");
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynspire_commons::sql_parse::RustStmt;
+
+    #[test]
+    fn parses_simple_select() {
+        let p = SqlParser::new();
+        let stmt = p.parse("SELECT *").unwrap();
+        assert!(matches!(stmt.stmt, RustStmt::Select(_)));
+    }
+
+    #[test]
+    fn parse_json_returns_string() {
+        let p = SqlParser::new();
+        let json = p.parse_json("SELECT *").unwrap();
+        assert!(json.contains("Select"));
+    }
+
+    #[test]
+    fn parse_invalid_sql_errors() {
+        let p = SqlParser::new();
+        assert!(p.parse("NOT SQL").is_err());
+    }
+}

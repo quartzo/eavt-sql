@@ -1,28 +1,39 @@
-use std::collections::HashMap;
-
 mod compiler;
 mod datalog;
 
-use dynspire_commons::compiler::CompileResultSt;
-use dynspire_commons::datalog::{DatalogNumIRSt, FindVar};
-use dynspire_commons::planner::{DynSpirePlanner, PlannerEngine};
+use dynspire_commons::compiler::{CompileResultSt, CompilerEngine};
+use dynspire_commons::datalog::{DatalogNumIRSt};
+use dynspire_commons::planner::{PlannerEngine, QueryPlanSt};
 use dynspire_commons::sql_parse::{RustStmt, RustStmtSt};
 use dynspire_commons::transactor::query_codec::decode_values;
+use spier_planner::Planner;
 
-include!(concat!(env!("OUT_DIR"), "/compiler_spier.rs"));
-
-struct CompilerState {
-    planner: DynSpirePlanner,
+/// Pure Rust SQL compiler. No dynspire/FFI — just implements [`CompilerEngine`].
+pub struct Compiler {
+    planner: Planner,
 }
 
-fn init(config: &HashMap<String, String>) -> Result<CompilerState, String> {
-    let planner = DynSpirePlanner::connect("spier_planner", config)?;
-    Ok(CompilerState { planner })
+impl Compiler {
+    pub fn new() -> Self {
+        Self {
+            planner: Planner::new(),
+        }
+    }
+
+    fn plan(&self, num_ir: DatalogNumIRSt) -> Result<QueryPlanSt, String> {
+        self.planner.plan(num_ir)
+    }
 }
 
-impl CompilerEngine for CompilerState {
+impl Default for Compiler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CompilerEngine for Compiler {
     fn compile_select(&self, num_ir: DatalogNumIRSt) -> Result<CompileResultSt, String> {
-        let plan_st = self.planner.plan(num_ir)?;
+        let plan_st = self.plan(num_ir)?;
         let result = compiler::compile_from_plan(&plan_st.plan)?;
         Ok(CompileResultSt {
             program: result.program,
@@ -37,7 +48,7 @@ impl CompilerEngine for CompilerState {
         sql_params: &[u8],
     ) -> Result<CompileResultSt, String> {
         let params = decode_values(sql_params)?;
-        let plan_st = self.planner.plan(num_ir)?;
+        let plan_st = self.plan(num_ir)?;
         let plan = &plan_st.plan;
 
         if plan.join_patterns.is_empty() && plan.lookups.is_empty() {
@@ -45,7 +56,7 @@ impl CompilerEngine for CompilerState {
         }
 
         let find_vars: Vec<String> = plan.find_vars.iter().map(|fv| match fv {
-            FindVar::Var(name) | FindVar::Const(name, _) => name.clone(),
+            dynspire_commons::datalog::FindVar::Var(name) | dynspire_commons::datalog::FindVar::Const(name, _) => name.clone(),
         }).collect();
 
         match stmt.stmt {
@@ -124,5 +135,3 @@ impl CompilerEngine for CompilerState {
         })
     }
 }
-
-impl_compiler_spier!(CompilerState, init, "spier_compiler");

@@ -6,17 +6,18 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use eavt::eavt_service_server::{EavtService, EavtServiceServer};
-use dynspire_commons::query_engine::{DynSpireQuery, QueryEngine};
+use dynspire_commons::query_engine::QueryEngine;
 use dynspire_commons::transactor::query_codec;
+use spier_eavt_query::QueryState;
 
 pub struct EavtServer {
-    client: Arc<DynSpireQuery>,
+    client: Arc<dyn QueryEngine>,
     writable: bool,
 }
 
 impl EavtServer {
-    pub fn new(client: DynSpireQuery, writable: bool) -> Self {
-        Self { client: Arc::new(client), writable }
+    pub fn new(client: Arc<dyn QueryEngine>, writable: bool) -> Self {
+        Self { client, writable }
     }
 }
 
@@ -60,7 +61,7 @@ fn proto_to_value(v: &eavt::Value) -> dynspire_commons::value::Value {
 const U64_MAX: u64 = u64::MAX;
 
 fn run_sql(
-    client: &DynSpireQuery,
+    client: &dyn QueryEngine,
     query: &str,
     params: &[dynspire_commons::value::Value],
     limit: Option<u32>,
@@ -175,7 +176,7 @@ impl EavtService for EavtServer {
         let params: Vec<dynspire_commons::value::Value> = req.params.iter().map(proto_to_value).collect();
 
         let (num_cols, values) = run_sql(
-            &self.client, &req.query, &params,
+            self.client.as_ref(), &req.query, &params,
             req.limit.map(|v| v as u32), req.as_of_us.map(|v| v as u64),
         ).map_err(Status::internal)?;
 
@@ -360,12 +361,12 @@ fn open_config(db_path: &str) -> std::collections::HashMap<String, String> {
     m
 }
 
-fn open_query(db_path: &str, gc_max_age_secs: Option<u64>) -> Result<DynSpireQuery, String> {
+fn open_query(db_path: &str, gc_max_age_secs: Option<u64>) -> Result<Arc<dyn QueryEngine>, String> {
     let mut config = open_config(db_path);
     if let Some(secs) = gc_max_age_secs {
         config.insert("gc_max_age_secs".into(), secs.to_string());
     }
-    DynSpireQuery::connect("spier_eavt_query", &config)
+    Ok(Arc::new(QueryState::open(&config)?))
 }
 
 #[derive(Parser)]
@@ -420,13 +421,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Gc { db_path, dry_run, max_age_mins } => {
             let gc_secs = max_age_mins.map(|m| m * 60);
             let client = open_query(&db_path, gc_secs)?;
-            run_gc_once(&client, dry_run)?;
+            run_gc_once(client.as_ref(), dry_run)?;
         }
     }
     Ok(())
 }
 
-fn run_gc_once(client: &DynSpireQuery, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn run_gc_once(client: &dyn QueryEngine, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
     let buf = client.gc_full(dry_run, false).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     if buf.len() < 41 {
         eprintln!("gc_full: unexpected response length ({})", buf.len());

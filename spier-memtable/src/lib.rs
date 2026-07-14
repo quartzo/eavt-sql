@@ -1,15 +1,8 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use crossbeam_skiplist::SkipMap;
-
-#[derive(Clone)]
-pub struct MemTableSnapshot {
-    pub data: Arc<dyn std::any::Any + Send + Sync>,
-}
-
-include!(concat!(env!("OUT_DIR"), "/memtable_spier.rs"));
+use dynspire_commons::memtable::{MemTableEngine, MemTableSnapshot};
 
 fn pack_keys(keys: &[Vec<u8>]) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -32,7 +25,7 @@ fn prefix_upper_bound(prefix: &[u8]) -> Vec<u8> {
 }
 
 // Each CF holds an Arc<SkipMap>. Snapshots clone the Arc (O(1)); clear/drain
-// swap in a fresh empty SkipMap (O(1)). Old snapshots keep the previous SkipMap
+// swaps in a fresh empty SkipMap (O(1)). Old snapshots keep the previous SkipMap
 // alive via Arc until they drop — no tombstones, no GC, lock-free reads.
 type CfMap = Arc<SkipMap<Vec<u8>, ()>>;
 
@@ -88,21 +81,20 @@ impl MemTableInner {
 // frozen view while the live MemTable continues mutating a different map.
 type CfSnapshots = Vec<CfMap>;
 
-struct MemTableState {
+/// Pure Rust MemTable. No dynspire/FFI — just implements [`MemTableEngine`].
+pub struct MemTable {
     inner: Mutex<MemTableInner>,
 }
 
-fn init(config: &HashMap<String, String>) -> Result<MemTableState, String> {
-    let num_cf = config
-        .get("num_cf")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(4);
-    Ok(MemTableState {
-        inner: Mutex::new(MemTableInner::new(num_cf)),
-    })
+impl MemTable {
+    pub fn new(num_cf: usize) -> Self {
+        Self {
+            inner: Mutex::new(MemTableInner::new(num_cf)),
+        }
+    }
 }
 
-impl MemTableEngine for MemTableState {
+impl MemTableEngine for MemTable {
     fn put(&self, cf: u32, key: &[u8]) -> Result<u64, String> {
         let mut inner = self.inner.lock().unwrap();
         Ok(inner.put(cf as usize, key) as u64)
@@ -178,5 +170,3 @@ impl MemTableEngine for MemTableState {
         Ok(cfs.get(cf as usize).map(|m| m.contains_key(key)).unwrap_or(false))
     }
 }
-
-impl_memtable_spier!(MemTableState, init, "spier_memtable");

@@ -3,37 +3,52 @@ use std::sync::{Arc, RwLock};
 
 mod engine;
 
-use dynspire_commons::query_engine::SessionHandle;
+use dynspire_commons::query_engine::{QueryEngine, SessionHandle};
 use dynspire_commons::transactor::{TransactorEngine, Value, ValueType};
-use dynspire_commons::compiler::{CompileResultSt, CompilerEngine};
-use dynspire_commons::sql_frontend::{DynSpireSqlFrontend, SqlFrontendEngine};
-use dynspire_commons::datalog::{DatalogNumIRSt, DatalogIR, resolve::resolve_ir};
+use dynspire_commons::compiler::{CompileResultSt, CompilerEngine, CompileStats};
+use dynspire_commons::sql_frontend::SqlFrontendEngine;
+use dynspire_commons::datalog::{DatalogNumIR, DatalogNumIRSt, DatalogIR, resolve::{resolve_ir, compute_plan_stats}};
 use dynspire_commons::sql_parse::RustStmt;
 use dynspire_commons::query_ir::{InstructionData, VMProgram};
-use engine::dynspire_engine::DynSpireEngine;
+use engine::query_engine_inner::QueryEngineInner;
 use engine::vm::VMEngine;
 use engine::opcodes::ProgramHandle;
 use dynspire_commons::transactor::query_codec;
-
-include!(concat!(env!("OUT_DIR"), "/query_spier.rs"));
+use spier_compiler::Compiler;
+use spier_sql_frontend::SqlFrontend;
 
 struct QueryInner {
-    engine: Option<Arc<DynSpireEngine>>,
-    frontend: Option<DynSpireSqlFrontend>,
-    compiler: Option<dynspire_commons::compiler::DynSpireCompiler>,
+    engine: Option<Arc<QueryEngineInner>>,
+    frontend: Option<SqlFrontend>,
+    compiler: Option<Compiler>,
 }
 
-struct QueryState {
+pub struct QueryState {
     inner: RwLock<QueryInner>,
 }
 
-fn open_engine(config: &HashMap<String, String>) -> Result<DynSpireEngine, String> {
+impl QueryState {
+    pub fn open(config: &HashMap<String, String>) -> Result<Self, String> {
+        let engine = open_engine(config)?;
+        let frontend = SqlFrontend::new();
+        let compiler = Compiler::new();
+        Ok(QueryState {
+            inner: RwLock::new(QueryInner{
+                engine: Some(Arc::new(engine)),
+                frontend: Some(frontend),
+                compiler: Some(compiler),
+            }),
+        })
+    }
+}
+
+fn open_engine(config: &HashMap<String, String>) -> Result<QueryEngineInner, String> {
     let backend = config
         .get("backend")
         .map(|s| s.as_str())
         .unwrap_or("memory");
     match backend {
-        "memory" => DynSpireEngine::open_in_memory(config),
+        "memory" => QueryEngineInner::open_in_memory(config),
         "file" => {
             config
                 .get("path")
@@ -43,27 +58,14 @@ fn open_engine(config: &HashMap<String, String>) -> Result<DynSpireEngine, Strin
                 .map(|v| v == "true")
                 .unwrap_or(false);
             if read_only {
-                DynSpireEngine::open_read_only(config)
+                QueryEngineInner::open_read_only(config)
             } else {
-                DynSpireEngine::open(config)
+                QueryEngineInner::open(config)
             }
         }
-        "s3" => DynSpireEngine::open_s3(config),
+        "s3" => QueryEngineInner::open_s3(config),
         other => Err(format!("unknown backend: {other}")),
     }
-}
-
-fn init(config: &HashMap<String, String>) -> Result<QueryState, String> {
-    let engine = open_engine(config)?;
-    let frontend = DynSpireSqlFrontend::connect("spier_sql_frontend", config)?;
-    let compiler = dynspire_commons::compiler::DynSpireCompiler::connect("spier_compiler", config)?;
-    Ok(QueryState {
-        inner: RwLock::new(QueryInner{
-            engine: Some(Arc::new(engine)),
-            frontend: Some(frontend),
-            compiler: Some(compiler),
-        }),
-    })
 }
 
 fn disassemble(program: &VMProgram) -> String {
@@ -94,12 +96,43 @@ fn disassemble(program: &VMProgram) -> String {
     lines.join("\n")
 }
 
+/// Local bridge: TransactorEngine → CompileStats. Keeps every other crate
+/// free of direct transactor references.
+struct TxStats<'a>(&'a dyn TransactorEngine);
+
+impl<'a> CompileStats for TxStats<'a> {
+    fn lookup_attr(&self, name: &str) -> Option<u32> {
+        TransactorEngine::lookup_attr(self.0, name).ok().flatten()
+    }
+
+    fn estimate_index_size(&self, index: &str, bound: &[u64]) -> f64 {
+        CompileStats::estimate_index_size(self.0, index, bound)
+    }
+
+    fn partition_id_for(&self, name: &str) -> Option<u64> {
+        TransactorEngine::partition_id_for(self.0, name).ok().flatten()
+    }
+
+    fn is_ref_attr(&self, name: &str) -> bool {
+        CompileStats::is_ref_attr(self.0, name)
+    }
+}
+
+/// Build a DatalogNumIR from a DatalogIR by resolving attributes and
+/// computing cardinality stats. Kept as one helper because both operations
+/// share the same CompileStats source.
+fn resolve_and_stats(ir: DatalogIR, tx_stats: &TxStats<'_>) -> Result<DatalogNumIR, String> {
+    let ir = resolve_ir(ir, tx_stats)?;
+    let stats = compute_plan_stats(&ir, tx_stats);
+    Ok(DatalogNumIR { ir, stats })
+}
+
 /// Orchestrate two-stage compilation: frontend → resolve → compiler.
-/// Returns (CompileResult, Option<DatalogNumIR>) — the num_ir is for explain_plan.
+/// Returns (CompileResult, Option<DatalogIR>) — the num_ir is for explain_plan.
 fn do_compile(
-    frontend: &DynSpireSqlFrontend,
-    compiler: &dynspire_commons::compiler::DynSpireCompiler,
-    tx: &dynspire_commons::transactor::DynSpireTransactor,
+    frontend: &SqlFrontend,
+    compiler: &Compiler,
+    tx: &dyn TransactorEngine,
     sql: &str,
     sql_params: &[u8],
 ) -> Result<(CompileResultSt, Option<DatalogIR>), String> {
@@ -108,7 +141,8 @@ fn do_compile(
     match &stmt_st.stmt {
         RustStmt::Select(_) | RustStmt::DatalogSelect(_) => {
             let ir = SqlFrontendEngine::build_datalog(frontend, stmt_st, sql_params)?;
-            let num_ir = resolve_ir(ir.ir, tx)?;
+            let tx_stats = TxStats(tx);
+            let num_ir = resolve_and_stats(ir.ir, &tx_stats)?;
             let result = compiler.compile_select(DatalogNumIRSt { num_ir: num_ir.clone() })?;
             Ok((result, Some(num_ir.ir)))
         }
@@ -123,7 +157,8 @@ fn do_compile(
             if needs_scan {
                 let stmt_for_compiler = stmt_st.clone();
                 let ir = SqlFrontendEngine::build_datalog(frontend, stmt_st, sql_params)?;
-                let num_ir = resolve_ir(ir.ir, tx)?;
+                let tx_stats = TxStats(tx);
+                let num_ir = resolve_and_stats(ir.ir, &tx_stats)?;
                 let result = compiler.compile_dml_scan(
                     stmt_for_compiler,
                     DatalogNumIRSt { num_ir: num_ir.clone() },
@@ -154,7 +189,7 @@ impl QueryEngine for QueryState {
         let frontend = inner.frontend.as_ref().ok_or("frontend not loaded")?;
         let compiler = inner.compiler.as_ref().ok_or("compiler not loaded")?;
 
-        let (result, _) = do_compile(frontend, compiler, engine.tx().as_ref(), sql, sql_params)?;
+        let (result, _) = do_compile(frontend, compiler, engine.tx(), sql, sql_params)?;
 
         Ok(ProgramHandle { program: Arc::new(result.program) })
     }
@@ -243,7 +278,7 @@ impl QueryEngine for QueryState {
         let frontend = inner.frontend.as_ref().ok_or("frontend not loaded")?;
         let compiler = inner.compiler.as_ref().ok_or("compiler not loaded")?;
 
-        let (result, _) = do_compile(frontend, compiler, engine.tx().as_ref(), sql, sql_params)?;
+        let (result, _) = do_compile(frontend, compiler, engine.tx(), sql, sql_params)?;
 
         let mut out = String::new();
         for t in &result.traces {
@@ -259,7 +294,7 @@ impl QueryEngine for QueryState {
         let frontend = inner.frontend.as_ref().ok_or("frontend not loaded")?;
         let compiler = inner.compiler.as_ref().ok_or("compiler not loaded")?;
 
-        let (result, num_ir) = do_compile(frontend, compiler, engine.tx().as_ref(), sql, sql_params)?;
+        let (result, num_ir) = do_compile(frontend, compiler, engine.tx(), sql, sql_params)?;
 
         let mut out = String::new();
         if let Some(ir) = num_ir {
@@ -277,7 +312,7 @@ impl QueryEngine for QueryState {
         let frontend = inner.frontend.as_ref().ok_or("frontend not loaded")?;
         let compiler = inner.compiler.as_ref().ok_or("compiler not loaded")?;
 
-        let (result, _) = do_compile(frontend, compiler, engine.tx().as_ref(), sql, sql_params)?;
+        let (result, _) = do_compile(frontend, compiler, engine.tx(), sql, sql_params)?;
         Ok(result.program.to_json())
     }
 
@@ -306,7 +341,7 @@ impl QueryEngine for QueryState {
     }
 
     // ------------------------------------------------------------------
-    // 2. SCHEMA — delegates to TransactorEngine via DynSpireTransactor
+    // 2. SCHEMA — delegates to TransactorEngine
     // ------------------------------------------------------------------
 
     fn declare_attr(&self, name: &str, value_type: ValueType, many: bool) -> Result<u32, String> {
@@ -477,5 +512,3 @@ impl QueryEngine for QueryState {
         engine.tx().internal_status(target)
     }
 }
-
-impl_query_spier!(QueryState, init, "spier_eavt_query");

@@ -4,14 +4,14 @@ import re
 from datetime import datetime, tzinfo
 from typing import Any, Generator
 
-from ._ffi import load_spier
+import spier_eavt_query_py
 from .query_codec import encode_values, decode_values, decode_rows
 
 U64_MAX = 0xFFFFFFFFFFFFFFFF
 
 
 class EAVTEngine:
-    """EAVT engine that talks to spier-eavt-query.so via DynSpire FFI."""
+    """EAVT engine backed by spier-eavt-query-py PyO3 bindings."""
 
     def __init__(
         self,
@@ -24,7 +24,6 @@ class EAVTEngine:
         gc_max_root_count: int | None = None,
     ) -> None:
         self._tz = tz if tz is not None else datetime.now().astimezone().tzinfo
-        self._lib = load_spier("spier_eavt_query")
         self._handle = self._open(db_path, read_only, page_cache_size, flush_threshold, gc_max_root_count)
 
     def _open(
@@ -53,7 +52,7 @@ class EAVTEngine:
             config["flush_threshold"] = str(flush_threshold)
         if gc_max_root_count is not None:
             config["gc_max_root_count"] = str(gc_max_root_count)
-        return self._lib.create_handle(config)
+        return spier_eavt_query_py.Engine(config)
 
     @property
     def _db_path(self) -> str:

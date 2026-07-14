@@ -4,29 +4,30 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-include!(concat!(env!("OUT_DIR"), "/journal_spier.rs"));
+use dynspire_commons::journal::JournalEngine;
 
-struct JournalState {
+/// Pure Rust file-backed journal. No dynspire/FFI — just implements [`JournalEngine`].
+pub struct JournalFile {
     base: Mutex<Option<PathBuf>>,
 }
 
-fn init(config: &HashMap<String, String>) -> Result<JournalState, String> {
-    let base = config.get("path").map(|p| PathBuf::from(format!("{p}/journal")));
-    if let Some(ref path) = base {
-        fs::create_dir_all(path).map_err(|e| e.to_string())?;
+impl JournalFile {
+    pub fn new(config: &HashMap<String, String>) -> Result<Self, String> {
+        let base = config.get("path").map(|p| PathBuf::from(format!("{p}/journal")));
+        if let Some(ref path) = base {
+            fs::create_dir_all(path).map_err(|e| e.to_string())?;
+        }
+        Ok(Self {
+            base: Mutex::new(base),
+        })
     }
-    Ok(JournalState {
-        base: Mutex::new(base),
-    })
-}
 
-impl JournalState {
     fn base(&self) -> Result<PathBuf, String> {
         self.base.lock().unwrap().clone().ok_or_else(|| "no base path configured".into())
     }
 }
 
-impl JournalEngine for JournalState {
+impl JournalEngine for JournalFile {
     fn journal_append(&self, key: &[u8], value: &[u8]) -> Result<(), String> {
         let base = self.base()?;
         let path = base.join("journal");
@@ -84,5 +85,3 @@ impl JournalEngine for JournalState {
         Ok(())
     }
 }
-
-impl_journal_spier!(JournalState, init, "spier_journal_file");

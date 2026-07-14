@@ -16,6 +16,10 @@ pub struct CursorHandle {
     pub cursor: Arc<RefCell<dyn Cursor>>,
 }
 
+// All concrete `Cursor` implementations are thread-local-free; this lets us
+// release the GIL around cursor operations in PyO3 bindings.
+unsafe impl Send for CursorHandle {}
+
 struct InvalidCursor;
 
 impl Cursor for InvalidCursor {

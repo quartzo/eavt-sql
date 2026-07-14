@@ -1,4 +1,4 @@
-// --- EAVT Transactor — loads spier-kvstore as KV dependency ---
+// --- EAVT Transactor — constructs spier-kvstore directly ---
 pub mod eavt;
 pub mod resolver;
 pub mod keys;
@@ -6,31 +6,31 @@ pub mod keys;
 pub use eavt::EavtEngine;
 pub use resolver::Resolver;
 
-// --- Spier FFI layer ---
-
 use std::collections::HashMap;
 
-use dynspire_commons::kvstore::{DynSpireKVStore, KVStoreEngine};
+use dynspire_commons::kvstore::KVStoreEngine;
+use dynspire_commons::transactor::{TransactorEngine, ValueType};
 use dynspire_commons::transactor::cursor::CursorHandle;
-use dynspire_commons::transactor::{Value, ValueType};
+use dynspire_commons::value::Value;
+use spier_kvstore::KVState;
 
-include!(concat!(env!("OUT_DIR"), "/transactor_spier.rs"));
-
-struct TransactorState {
+pub struct TransactorState {
     eavt: EavtEngine,
 }
 
-fn init(config: &HashMap<String, String>) -> Result<TransactorState, String> {
-    let kv = DynSpireKVStore::connect("spier_kvstore", config)?;
-    let eavt = EavtEngine::new(kv);
-    eavt.recover_journal();
-    eavt.bootstrap_resolver();
-    Ok(TransactorState { eavt })
+impl TransactorState {
+    pub fn open(config: &HashMap<String, String>) -> Result<Self, String> {
+        let kv = Box::new(KVState::open(config)?) as Box<dyn KVStoreEngine>;
+        let eavt = EavtEngine::new(kv);
+        eavt.recover_journal();
+        eavt.bootstrap_resolver();
+        Ok(TransactorState { eavt })
+    }
 }
 
 impl TransactorEngine for TransactorState {
     // -----------------------------------------------------------------------
-    // 1-9. KV — delegate to spier-kvstore via tower
+    // 1-9. KV — delegate to underlying KV store
     // -----------------------------------------------------------------------
 
     fn put(&self, cf: u32, key: &[u8]) -> Result<(), String> {
@@ -248,5 +248,3 @@ impl TransactorEngine for TransactorState {
         Ok(self.eavt.allocate_t_locked())
     }
 }
-
-impl_transactor_spier!(TransactorState, init, "spier_transactor");

@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use crate::resolver::{self, Resolver};
 use crate::keys::{self, EncodeMode, RawDatom};
-use dynspire_commons::kvstore::{DynSpireKVStore, KVStoreEngine};
+use dynspire_commons::kvstore::KVStoreEngine;
 use dynspire_commons::value::{self, Value};
 
 fn unpack_keys(buf: &[u8]) -> Vec<Vec<u8>> {
@@ -151,12 +151,12 @@ fn validate_value_size(v: &Value) -> Result<(), String> {
 }
 
 pub struct EavtEngine {
-    pub kv: DynSpireKVStore,
+    pub kv: Box<dyn KVStoreEngine>,
     pub resolver: Mutex<Resolver>,
 }
 
 impl EavtEngine {
-    pub fn new(kv: DynSpireKVStore) -> Self {
+    pub fn new(kv: Box<dyn KVStoreEngine>) -> Self {
         Self {
             kv,
             resolver: Mutex::new(Resolver::new()),

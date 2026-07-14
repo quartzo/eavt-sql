@@ -2,14 +2,8 @@
 name = "spier-compiler"
 version = "0.1.0"
 edition = "2021"
-description = "DynSpire Spier — SQL compiler (SQL→VMProgram, tower over spier-sql-parse)"
-
-[lib]
-crate-type = ["cdylib", "rlib"]
+description = "SQL compiler (SQL → VMProgram)"
 
 [dependencies]
-dynspire = { git = "https://github.com/quartzo/dynspire" }
 dynspire-commons = { path = "../dynspire-commons" }
-
-[build-dependencies]
-dynspire-codegen = { git = "https://github.com/quartzo/dynspire" }
+spier-planner = { path = "../spier-planner" }

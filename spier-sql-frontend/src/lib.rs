@@ -1,24 +1,49 @@
-use std::collections::HashMap;
+use dynspire_commons::datalog::{DatalogEngine, DatalogIRSt};
+use dynspire_commons::sql_parse::ast::{RustFieldRef, RustProjection, RustSelectStmt, RustUpdateStmt, RustDeleteWhereStmt};
+use dynspire_commons::sql_parse::{RustStmt, RustStmtSt, SqlParseEngine};
+use spier_datalog::DatalogBuilder;
+use spier_sql_parse::SqlParser;
 
-use dynspire_commons::sql_parse::{DynSpireSqlParse, RustStmt, RustStmtSt, SqlParseEngine};
-use dynspire_commons::datalog::{DynSpireDatalog, DatalogEngine, DatalogIRSt};
-use dynspire_commons::sql_parse::ast::{RustSelectStmt, RustProjection, RustFieldRef};
-
-include!(concat!(env!("OUT_DIR"), "/sqlfrontend_spier.rs"));
-
-struct FrontendState {
-    parser: DynSpireSqlParse,
-    datalog: DynSpireDatalog,
+/// Pure Rust SQL frontend. Combines parser + datalog builder.
+pub struct SqlFrontend {
+    parser: SqlParser,
+    datalog: DatalogBuilder,
 }
 
-fn init(config: &HashMap<String, String>) -> Result<FrontendState, String> {
-    let parser = DynSpireSqlParse::connect("spier_sql_parse", config)?;
-    let datalog = DynSpireDatalog::connect("spier_datalog", config)?;
-    Ok(FrontendState { parser, datalog })
+impl SqlFrontend {
+    pub fn new() -> Self {
+        Self {
+            parser: SqlParser::new(),
+            datalog: DatalogBuilder::new(),
+        }
+    }
+}
+
+impl Default for SqlFrontend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl dynspire_commons::sql_frontend::SqlFrontendEngine for SqlFrontend {
+    fn parse(&self, sql: &str) -> Result<RustStmtSt, String> {
+        self.parser.parse(sql)
+    }
+
+    fn build_datalog(&self, stmt: RustStmtSt, sql_params: &[u8]) -> Result<DatalogIRSt, String> {
+        let stmt = stmt.stmt;
+        let select_stmt = match &stmt {
+            RustStmt::Select(_) | RustStmt::DatalogSelect(_) => stmt,
+            RustStmt::Update(u) => RustStmt::Select(fake_select_from_update(u)),
+            RustStmt::Delete(d) => RustStmt::Select(fake_select_from_delete(d)),
+            _ => return Err("build_datalog only supports SELECT, UPDATE, DELETE".to_string()),
+        };
+        self.datalog.build(RustStmtSt { stmt: select_stmt }, sql_params)
+    }
 }
 
 /// Build a fake SELECT from UPDATE conditions (projects first alias eid).
-fn fake_select_from_update(stmt: &dynspire_commons::sql_parse::RustUpdateStmt) -> RustSelectStmt {
+fn fake_select_from_update(stmt: &RustUpdateStmt) -> RustSelectStmt {
     let first_alias = stmt.clauses.first()
         .map(|c| c.alias.clone())
         .unwrap_or_else(|| "D1".to_string());
@@ -38,7 +63,7 @@ fn fake_select_from_update(stmt: &dynspire_commons::sql_parse::RustUpdateStmt) -
 }
 
 /// Build a fake SELECT from DELETE conditions (projects first alias eid).
-fn fake_select_from_delete(stmt: &dynspire_commons::sql_parse::RustDeleteWhereStmt) -> RustSelectStmt {
+fn fake_select_from_delete(stmt: &RustDeleteWhereStmt) -> RustSelectStmt {
     let first_alias = stmt.conditions.first()
         .map(|c| c.left.alias.clone())
         .unwrap_or_else(|| "D1".to_string());
@@ -56,22 +81,3 @@ fn fake_select_from_delete(stmt: &dynspire_commons::sql_parse::RustDeleteWhereSt
         history: false,
     }
 }
-
-impl SqlFrontendEngine for FrontendState {
-    fn parse(&self, sql: &str) -> Result<RustStmtSt, String> {
-        SqlParseEngine::parse(&self.parser, sql)
-    }
-
-    fn build_datalog(&self, stmt: RustStmtSt, sql_params: &[u8]) -> Result<DatalogIRSt, String> {
-        let stmt = stmt.stmt;
-        let select_stmt = match &stmt {
-            RustStmt::Select(_) | RustStmt::DatalogSelect(_) => stmt,
-            RustStmt::Update(u) => RustStmt::Select(fake_select_from_update(u)),
-            RustStmt::Delete(d) => RustStmt::Select(fake_select_from_delete(d)),
-            _ => return Err("build_datalog only supports SELECT, UPDATE, DELETE".to_string()),
-        };
-        DatalogEngine::build(&self.datalog, RustStmtSt { stmt: select_stmt }, sql_params)
-    }
-}
-
-impl_sqlfrontend_spier!(FrontendState, init, "spier_sql_frontend");

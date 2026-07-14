@@ -2,14 +2,9 @@
 name = "spier-sql-frontend"
 version = "0.1.0"
 edition = "2021"
-description = "DynSpire Spier — SQL frontend (parse + datalog IR, stage 1 of compilation)"
-
-[lib]
-crate-type = ["cdylib", "rlib"]
+description = "SQL frontend (parse + datalog IR, stage 1 of compilation)"
 
 [dependencies]
-dynspire = { git = "https://github.com/quartzo/dynspire" }
 dynspire-commons = { path = "../dynspire-commons" }
-
-[build-dependencies]
-dynspire-codegen = { git = "https://github.com/quartzo/dynspire" }
+spier-sql-parse = { path = "../spier-sql-parse" }
+spier-datalog = { path = "../spier-datalog" }

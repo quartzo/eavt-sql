@@ -1,0 +1,15 @@
+[package]
+name = "spier-sql-parse-py"
+version = "0.1.0"
+edition = "2021"
+description = "PyO3 bindings for spier-sql-parse (test-only)"
+
+[lib]
+name = "spier_sql_parse_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.25", features = ["extension-module"] }
+spier-sql-parse = { path = "../spier-sql-parse" }
+dynspire-commons = { path = "../dynspire-commons", features = ["serde"] }
+serde_json = "1"

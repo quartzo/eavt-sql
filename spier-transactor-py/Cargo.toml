@@ -1,0 +1,15 @@
+[package]
+name = "spier-transactor-py"
+version = "0.1.0"
+edition = "2021"
+description = "PyO3 bindings for spier-transactor"
+
+[lib]
+name = "spier_transactor_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.25", features = ["extension-module"] }
+spier-transactor = { path = "../spier-transactor" }
+spier-journal-file = { path = "../spier-journal-file" }
+dynspire-commons = { path = "../dynspire-commons" }

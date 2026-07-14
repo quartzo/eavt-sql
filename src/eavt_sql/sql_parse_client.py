@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import json
 
-from ._ffi import SpierLib, load_spier
+import spier_sql_parse_py
 
 
 class SqlParseClient:
-    """Thin Python client for spier-sql-parse via the generated typed client."""
+    """Thin Python client for the SQL parser via PyO3 (test-only binding)."""
 
     def __init__(self) -> None:
-        self._lib: SpierLib = load_spier("spier_sql_parse")
-        self._handle = self._lib.create_handle({})
+        self._handle = spier_sql_parse_py.SqlParser()
 
     def parse(self, sql: str) -> dict:
         """Parse SQL and return AST as a dict."""

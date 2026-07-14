@@ -24,29 +24,18 @@ pub use store::{Transactor, TransactorConfig};
 // outside spier-kvstore needs them.
 
 pub mod blobstore {
-    include!(concat!(env!("OUT_DIR"), "/blobstore_host.rs"));
+    pub use dynspire_commons::blobstore::*;
 }
 
 pub mod journal {
-    include!(concat!(env!("OUT_DIR"), "/journal_host.rs"));
+    pub use dynspire_commons::journal::*;
 }
 
 pub mod memtable {
-    use std::sync::Arc;
-
-    #[derive(Clone)]
-    pub struct MemTableSnapshot {
-        pub data: Arc<dyn std::any::Any + Send + Sync>,
-    }
-
-    include!(concat!(env!("OUT_DIR"), "/memtable_host.rs"));
+    pub use dynspire_commons::memtable::*;
 }
 
-pub use blobstore::{BlobStoreEngine, DynSpireBlobStore};
-pub use journal::{DynSpireJournal as DynSpireJournalStore, JournalEngine};
-pub use memtable::{DynSpireMemTable, MemTableEngine, MemTableSnapshot};
-
-// --- Spier FFI layer ---
+pub use dynspire_commons::kvstore::KVStoreEngine;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -55,21 +44,28 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use dynspire_commons::transactor::cursor::CursorHandle;
+use spier_blobstore_memory::MemoryBlobStore;
+use spier_blobstore_file::FileBlobStore;
+use spier_blobstore_s3::S3BlobStore;
+use spier_journal_file::JournalFile;
+use spier_memtable::MemTable;
 
-include!(concat!(env!("OUT_DIR"), "/kvstore_spier.rs"));
-
-struct KVState {
+/// Pure Rust KV store handle. Owns the [`Transactor`] and a background poller thread.
+pub struct KVState {
     kv: Arc<RwLock<Option<Transactor>>>,
     poll_handle: Mutex<Option<JoinHandle<()>>>,
     poll_shutdown: Mutex<Option<mpsc::Sender<()>>>,
     flush_request: Mutex<Option<mpsc::Sender<()>>>,
 }
 
-fn load_memtable() -> Result<Box<dyn crate::memtable::MemTableEngine>, String> {
-    let mut mt_config = HashMap::new();
-    mt_config.insert("num_cf".to_string(), "4".to_string());
-    let mt = DynSpireMemTable::connect("spier_memtable", &mt_config)?;
-    Ok(Box::new(mt))
+impl KVState {
+    pub fn open(config: &HashMap<String, String>) -> Result<Self, String> {
+        init(config)
+    }
+}
+
+fn load_memtable() -> Result<Box<dyn dynspire_commons::memtable::MemTableEngine>, String> {
+    Ok(Box::new(MemTable::new(4)))
 }
 
 fn make_transactor_config(config: &HashMap<String, String>) -> TransactorConfig {
@@ -103,8 +99,7 @@ fn make_transactor_config(config: &HashMap<String, String>) -> TransactorConfig 
 }
 
 fn open_memory(read_only: bool) -> Result<Transactor, String> {
-    let config = HashMap::new();
-    let blobs = DynSpireBlobStore::connect("spier_blobstore_memory", &config)?;
+    let blobs = MemoryBlobStore::new();
     let mt = load_memtable()?;
     let config = TransactorConfig::default();
     if read_only {
@@ -118,10 +113,9 @@ fn open_file(config: &HashMap<String, String>) -> Result<Transactor, String> {
     let path = config.get("path").map(|s| s.as_str()).ok_or("path required for file backend")?;
     let read_only = config.get("read_only").map(|v| v == "true").unwrap_or(false);
 
-    let blobs = DynSpireBlobStore::connect("spier_blobstore_file", config)?;
-
-    let j = DynSpireJournalStore::connect("spier_journal_file", config)?;
-    let journal = Some(Box::new(j) as Box<dyn crate::journal::JournalEngine + Send + Sync>);
+    let blobs = FileBlobStore::new(config)?;
+    let j = JournalFile::new(config)?;
+    let journal = Some(Box::new(j) as Box<dyn dynspire_commons::journal::JournalEngine + Send + Sync>);
 
     let mt = load_memtable()?;
     let tc = make_transactor_config(config);
@@ -135,7 +129,7 @@ fn open_file(config: &HashMap<String, String>) -> Result<Transactor, String> {
 fn open_s3(config: &HashMap<String, String>) -> Result<Transactor, String> {
     let read_only = config.get("read_only").map(|v| v == "true").unwrap_or(false);
 
-    let blobs = DynSpireBlobStore::connect("spier_blobstore_s3", config)?;
+    let blobs = S3BlobStore::new(config)?;
 
     if config.get("endpoint").is_none() || config.get("bucket_name").is_none() {
         return Err("s3 backend requires endpoint and bucket_name in config".into());
@@ -143,8 +137,8 @@ fn open_s3(config: &HashMap<String, String>) -> Result<Transactor, String> {
 
     let local_path = config.get("path").map(|s| s.as_str()).unwrap_or(".");
 
-    let j = DynSpireJournalStore::connect("spier_journal_file", config)?;
-    let journal = Some(Box::new(j) as Box<dyn crate::journal::JournalEngine + Send + Sync>);
+    let j = JournalFile::new(config)?;
+    let journal = Some(Box::new(j) as Box<dyn dynspire_commons::journal::JournalEngine + Send + Sync>);
 
     let mt = load_memtable()?;
     let tc = make_transactor_config(config);
@@ -545,5 +539,3 @@ impl KVStoreEngine for KVState {
         Ok(())
     }
 }
-
-impl_kvstore_spier!(KVState, init, "spier_kvstore");

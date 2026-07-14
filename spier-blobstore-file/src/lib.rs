@@ -3,13 +3,25 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use dynspire::*;
+use dynspire_commons::blobstore::BlobStoreEngine;
 
-include!(concat!(env!("OUT_DIR"), "/blobstore_spier.rs"));
+fn new_uuid() -> [u8; 16] {
+    *uuid::Uuid::new_v4().as_bytes()
+}
 
-struct FileState {
-    base: Mutex<Option<PathBuf>>,
-    read_only: Mutex<bool>,
+fn uuid_to_hex(id: &[u8; 16]) -> String {
+    id.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn uuid_from_hex(s: &str) -> Option<[u8; 16]> {
+    if s.len() != 32 {
+        return None;
+    }
+    let mut bytes = [0u8; 16];
+    for i in 0..16 {
+        bytes[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(bytes)
 }
 
 fn uuid_path(base: &PathBuf, id: &[u8; 16]) -> PathBuf {
@@ -27,27 +39,33 @@ fn write_file_atomic(path: &PathBuf, data: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn init(config: &HashMap<String, String>) -> Result<FileState, String> {
-    let base = config.get("path").map(|p| PathBuf::from(format!("{p}/blobs")));
-    let read_only = config.get("read_only").map(|v| v == "true").unwrap_or(false);
-    if let Some(ref path) = base {
-        if !read_only {
-            fs::create_dir_all(path).map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(FileState {
-        base: Mutex::new(base),
-        read_only: Mutex::new(read_only),
-    })
+/// Pure Rust file-backed blob store. No dynspire/FFI — just implements [`BlobStoreEngine`].
+pub struct FileBlobStore {
+    base: Mutex<Option<PathBuf>>,
+    read_only: Mutex<bool>,
 }
 
-impl FileState {
+impl FileBlobStore {
+    pub fn new(config: &HashMap<String, String>) -> Result<Self, String> {
+        let base = config.get("path").map(|p| PathBuf::from(format!("{p}/blobs")));
+        let read_only = config.get("read_only").map(|v| v == "true").unwrap_or(false);
+        if let Some(ref path) = base {
+            if !read_only {
+                fs::create_dir_all(path).map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(Self {
+            base: Mutex::new(base),
+            read_only: Mutex::new(read_only),
+        })
+    }
+
     fn base(&self) -> Result<PathBuf, String> {
         self.base.lock().unwrap().clone().ok_or_else(|| "no base path configured".into())
     }
 }
 
-impl BlobStoreEngine for FileState {
+impl BlobStoreEngine for FileBlobStore {
     fn put(&self, data: &[u8]) -> Result<[u8; 16], String> {
         if *self.read_only.lock().unwrap() {
             return Err("read-only".into());
@@ -165,5 +183,3 @@ impl BlobStoreEngine for FileState {
         }
     }
 }
-
-impl_blobstore_spier!(FileState, init, "spier_blobstore_file");

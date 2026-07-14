@@ -1,20 +1,25 @@
-use std::collections::HashMap;
-
-use dynspire_commons::datalog::DatalogIRSt;
+use dynspire_commons::datalog::{DatalogEngine, DatalogIRSt};
 use dynspire_commons::sql_parse::RustStmtSt;
 use dynspire_commons::transactor::query_codec::decode_values;
 
-include!(concat!(env!("OUT_DIR"), "/datalog_spier.rs"));
-
 mod translate;
 
-struct DatalogState;
+/// Pure Rust Datalog IR builder. No dynspire/FFI — just implements [`DatalogEngine`].
+pub struct DatalogBuilder;
 
-fn init(_config: &HashMap<String, String>) -> Result<DatalogState, String> {
-    Ok(DatalogState)
+impl DatalogBuilder {
+    pub fn new() -> Self {
+        Self
+    }
 }
 
-impl DatalogEngine for DatalogState {
+impl Default for DatalogBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DatalogEngine for DatalogBuilder {
     fn build(&self, wrapped: RustStmtSt, params: &[u8]) -> Result<DatalogIRSt, String> {
         let params = decode_values(params)?;
         let ir = translate::build_datalog_ir(wrapped.stmt, &params)?;
@@ -25,5 +30,3 @@ impl DatalogEngine for DatalogState {
         Ok(format!("{}", ir.ir))
     }
 }
-
-impl_datalog_spier!(DatalogState, init, "spier_datalog");

@@ -2,4 +2,4 @@
 name = "dynspire-libs"
 version = "0.1.0"
 edition = "2021"
-description = "DynSpire library discovery and shared constants"
+description = "Shared constants for the EAVT storage stack"

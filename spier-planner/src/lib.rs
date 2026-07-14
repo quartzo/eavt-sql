@@ -1,16 +1,23 @@
 use std::collections::HashMap;
 
 use dynspire_commons::datalog::{BoundValue, DatalogNumIRSt, FindVar};
-use dynspire_commons::planner::{Pattern, PlanValue, QueryPlanSt, RangeBoundsMap};
-
-include!(concat!(env!("OUT_DIR"), "/planner_spier.rs"));
+use dynspire_commons::planner::{Pattern, PlannerEngine, PlanValue, QueryPlanSt, RangeBoundsMap};
 
 mod planner;
 
-struct PlannerState;
+/// Pure Rust query planner. No dynspire/FFI — just implements [`PlannerEngine`].
+pub struct Planner;
 
-fn init(_config: &HashMap<String, String>) -> Result<PlannerState, String> {
-    Ok(PlannerState)
+impl Planner {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for Planner {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 fn convert_range_bounds(
@@ -32,7 +39,7 @@ fn convert_range_bounds(
     result
 }
 
-impl PlannerEngine for PlannerState {
+impl PlannerEngine for Planner {
     fn plan(&self, ir: DatalogNumIRSt) -> Result<QueryPlanSt, String> {
         let datalog = ir.num_ir.ir;
         let stats = ir.num_ir.stats;
@@ -61,4 +68,210 @@ impl PlannerEngine for PlannerState {
     }
 }
 
-impl_planner_spier!(PlannerState, init, "spier_planner");
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, HashSet};
+
+    use dynspire_commons::compiler::CompileStats;
+    use dynspire_commons::datalog::{
+        resolve::{resolve_ir, compute_plan_stats}, BoundValue, DatalogIR, DatalogNumIR,
+        DatalogNumIRSt, DatalogPattern, DatalogSlot, FindVar,
+    };
+    use dynspire_commons::planner::{PlannerEngine, QueryPlanSt};
+
+    use crate::Planner;
+
+    /// A fixed CompileStats implementation for isolated planner tests.
+    /// It does not touch the transactor, storage, or any I/O.
+    struct FixedStats {
+        attrs: HashMap<String, u32>,
+        refs: HashSet<String>,
+        sizes: HashMap<(String, Vec<u64>), f64>,
+    }
+
+    impl FixedStats {
+        fn new() -> Self {
+            let mut attrs = HashMap::new();
+            attrs.insert("user.name".to_string(), 100);
+            attrs.insert("user.age".to_string(), 101);
+            attrs.insert("company.ceo".to_string(), 200);
+
+            let mut refs = HashSet::new();
+            refs.insert("company.ceo".to_string());
+
+            let mut sizes = HashMap::new();
+            // Full table scan is expensive.
+            sizes.insert(("EAVT".to_string(), vec![]), 10_000_000.0);
+            // Knowing the attribute makes AEVT cheap.
+            sizes.insert(("AEVT".to_string(), vec![100]), 100.0);
+            sizes.insert(("AEVT".to_string(), vec![101]), 100.0);
+            sizes.insert(("AEVT".to_string(), vec![200]), 100.0);
+            // With attribute + entity bound, AEVT is very cheap.
+            sizes.insert(("AEVT".to_string(), vec![100, 0]), 10.0);
+            sizes.insert(("AEVT".to_string(), vec![101, 0]), 10.0);
+            sizes.insert(("AEVT".to_string(), vec![200, 0]), 10.0);
+            // AVET on a single attribute is more expensive than AEVT.
+            sizes.insert(("AVET".to_string(), vec![100]), 10_000.0);
+            sizes.insert(("AVET".to_string(), vec![101]), 10_000.0);
+            sizes.insert(("AVET".to_string(), vec![200]), 10_000.0);
+
+            Self { attrs, refs, sizes }
+        }
+    }
+
+    impl CompileStats for FixedStats {
+        fn lookup_attr(&self, name: &str) -> Option<u32> {
+            self.attrs.get(name).copied()
+        }
+
+        fn estimate_index_size(&self, index: &str, bound: &[u64]) -> f64 {
+            self.sizes
+                .get(&(index.to_string(), bound.to_vec()))
+                .copied()
+                .unwrap_or(1_000_000.0)
+        }
+
+        fn partition_id_for(&self, _name: &str) -> Option<u64> {
+            None
+        }
+
+        fn is_ref_attr(&self, name: &str) -> bool {
+            self.refs.contains(name)
+        }
+    }
+
+    fn resolve_and_plan(ir: DatalogIR) -> QueryPlanSt {
+        let stats = FixedStats::new();
+        let resolved = resolve_ir(ir, &stats).expect("resolve_ir should succeed");
+        let plan_stats = compute_plan_stats(&resolved, &stats);
+        let st = DatalogNumIRSt {
+            num_ir: DatalogNumIR { ir: resolved, stats: plan_stats },
+        };
+        Planner::new().plan(st).expect("plan should succeed")
+    }
+
+    #[test]
+    fn test_lookup_only_plan() {
+        let ir = DatalogIR {
+            patterns: vec![DatalogPattern {
+                e: DatalogSlot::Const(BoundValue::Int(7)),
+                a: DatalogSlot::Const(BoundValue::Attr("user.name".to_string())),
+                v: DatalogSlot::Const(BoundValue::Str("Alice".to_string())),
+                t: DatalogSlot::Missing,
+                added: DatalogSlot::Missing,
+            }],
+            find_vars: vec![FindVar::Var("x".to_string())],
+            range_bounds: HashMap::new(),
+            star: false,
+            exists_mode: false,
+            has_conditions: false,
+            history: false,
+        };
+
+        let plan = resolve_and_plan(ir);
+        assert!(
+            plan.plan.iter_plans.is_empty(),
+            "lookup pattern should produce no iter plans"
+        );
+        assert_eq!(plan.plan.lookups.len(), 1, "lookup pattern should produce one lookup");
+        assert_eq!(plan.plan.ordered_vars.len(), 0, "lookup-only plan has no ordered vars");
+        match &plan.plan.lookups[0].a {
+            DatalogSlot::Const(BoundValue::ResolvedAttr(id, name, is_ref)) => {
+                assert_eq!(*id, 100);
+                assert_eq!(name, "user.name");
+                assert!(!is_ref);
+            }
+            other => panic!("expected ResolvedAttr(user.name, id=100, ref=false), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_join_prefers_aevt_when_attribute_is_bound() {
+        let ir = DatalogIR {
+            patterns: vec![
+                DatalogPattern {
+                    e: DatalogSlot::Var("e".to_string()),
+                    a: DatalogSlot::Const(BoundValue::Attr("user.name".to_string())),
+                    v: DatalogSlot::Var("name".to_string()),
+                    t: DatalogSlot::Missing,
+                    added: DatalogSlot::Missing,
+                },
+                DatalogPattern {
+                    e: DatalogSlot::Var("e".to_string()),
+                    a: DatalogSlot::Const(BoundValue::Attr("user.age".to_string())),
+                    v: DatalogSlot::Var("age".to_string()),
+                    t: DatalogSlot::Missing,
+                    added: DatalogSlot::Missing,
+                },
+            ],
+            find_vars: vec![
+                FindVar::Var("e".to_string()),
+                FindVar::Var("name".to_string()),
+                FindVar::Var("age".to_string()),
+            ],
+            range_bounds: HashMap::new(),
+            star: false,
+            exists_mode: false,
+            has_conditions: false,
+            history: false,
+        };
+
+        let plan = resolve_and_plan(ir);
+        assert_eq!(
+            plan.plan.ordered_vars.first().map(String::as_str),
+            Some("e"),
+            "planner should start from the entity variable because AEVT is cheap when the attribute is bound"
+        );
+        assert_eq!(plan.plan.iter_plans.len(), 2);
+        assert!(plan.plan.iter_plans.iter().all(|ip| ip.index_name == "AEVT"),
+            "both patterns should use AEVT when the attribute is known");
+    }
+
+    #[test]
+    fn test_ref_attr_is_resolved() {
+        // company.ceo is marked as a ref attribute in FixedStats.
+        let ir = DatalogIR {
+            patterns: vec![DatalogPattern {
+                e: DatalogSlot::Var("e".to_string()),
+                a: DatalogSlot::Const(BoundValue::Attr("company.ceo".to_string())),
+                v: DatalogSlot::Var("ceo".to_string()),
+                t: DatalogSlot::Missing,
+                added: DatalogSlot::Missing,
+            }],
+            find_vars: vec![FindVar::Var("e".to_string()), FindVar::Var("ceo".to_string())],
+            range_bounds: HashMap::new(),
+            star: false,
+            exists_mode: false,
+            has_conditions: false,
+            history: false,
+        };
+
+        let plan = resolve_and_plan(ir);
+        assert!(
+            plan.plan.lookups.is_empty(),
+            "join pattern should not be a lookup"
+        );
+        assert_eq!(plan.plan.iter_plans.len(), 1);
+        match &plan.plan.join_patterns[0].a {
+            DatalogSlot::Const(BoundValue::ResolvedAttr(id, name, is_ref)) => {
+                assert_eq!(*id, 200);
+                assert_eq!(name, "company.ceo");
+                assert!(is_ref);
+            }
+            other => panic!("expected ResolvedAttr(company.ceo, id=200, ref=true), got {:?}", other),
+        }
+        // The optimizer is free to pick AEVT or VAET; AEVT is cheaper in our
+        // fixed stats, so it wins.
+        assert_eq!(plan.plan.iter_plans[0].index_name, "AEVT");
+    }
+
+    #[test]
+    fn test_compile_stats_trait_boundary() {
+        // This test documents the architectural boundary: resolve_ir requires
+        // CompileStats, not TransactorEngine. The FixedStats type does not
+        // implement any transactor trait.
+        fn compile_only_accepts_compile_stats(_stats: &dyn CompileStats) {}
+        let stats = FixedStats::new();
+        compile_only_accepts_compile_stats(&stats);
+    }
+}

@@ -2,14 +2,8 @@
 name = "spier-blobstore-memory"
 version = "0.1.0"
 edition = "2021"
-description = "DynSpire Spier - in-memory BlobStore backend"
-
-[lib]
-crate-type = ["cdylib"]
+description = "In-memory BlobStore backend"
 
 [dependencies]
-dynspire = { git = "https://github.com/quartzo/dynspire" }
 dynspire-commons = { path = "../dynspire-commons" }
-
-[build-dependencies]
-dynspire-codegen = { git = "https://github.com/quartzo/dynspire" }
+uuid = { version = "1", features = ["v4"] }

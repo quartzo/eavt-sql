@@ -1,0 +1,315 @@
+use std::collections::HashMap;
+
+use pyo3::prelude::*;
+use pyo3::types::PyDict;
+
+use dynspire_commons::query_engine::QueryEngine;
+use dynspire_commons::query_ir::ProgramHandle;
+use dynspire_commons::transactor::ValueType;
+use dynspire_commons::value::Value;
+use spier_eavt_query::QueryState;
+
+fn to_string_err(e: String) -> PyErr {
+    pyo3::exceptions::PyRuntimeError::new_err(e)
+}
+
+fn parse_value_type(name: &str) -> PyResult<ValueType> {
+    match name.to_uppercase().as_str() {
+        "STRING" => Ok(ValueType::String),
+        "REF" => Ok(ValueType::Ref),
+        "LONG" => Ok(ValueType::Long),
+        "KEYWORD" => Ok(ValueType::Keyword),
+        "BOOLEAN" => Ok(ValueType::Boolean),
+        "INSTANT" => Ok(ValueType::Instant),
+        "BYTES" => Ok(ValueType::Bytes),
+        "BLOB" => Ok(ValueType::Blob),
+        "FLOAT" => Ok(ValueType::Float),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown value type: {}",
+            name
+        ))),
+    }
+}
+
+fn py_to_value(v: &Bound<'_, pyo3::types::PyAny>) -> PyResult<Value> {
+    if v.is_instance_of::<pyo3::types::PyBool>() {
+        return Ok(Value::Bool(v.extract::<bool>()? as u8));
+    }
+    if v.is_instance_of::<pyo3::types::PyInt>() {
+        return Ok(Value::Int64(v.extract::<i64>()?));
+    }
+    if v.is_instance_of::<pyo3::types::PyFloat>() {
+        return Ok(Value::Float64(v.extract::<f64>()?));
+    }
+    if v.is_instance_of::<pyo3::types::PyString>() {
+        return Ok(Value::Text(v.extract::<String>()?));
+    }
+    if v.is_instance_of::<pyo3::types::PyBytes>() {
+        return Ok(Value::Bytes(v.extract::<Vec<u8>>()?));
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
+        "unsupported value type: {:?}",
+        v.get_type()
+    )))
+}
+
+/// Opaque handle to a compiled VM program.
+#[pyclass(name = "ProgramHandle", unsendable)]
+pub struct PyProgramHandle {
+    inner: ProgramHandle,
+}
+
+/// Opaque handle to a streaming VM session.
+#[pyclass(name = "SessionHandle", unsendable)]
+pub struct PySessionHandle {
+    inner: dynspire_commons::query_engine::SessionHandle,
+}
+
+/// PyO3 bindings for spier-eavt-query.
+#[pyclass(name = "Engine")]
+pub struct PyEngine {
+    inner: QueryState,
+}
+
+#[pymethods]
+impl PyEngine {
+    #[new]
+    #[pyo3(signature = (config=None))]
+    fn new(py: Python<'_>, config: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let mut cfg: HashMap<String, String> = HashMap::new();
+        if let Some(d) = config {
+            for (k, v) in d.iter() {
+                let key = k.extract::<String>()?;
+                let val = v.str()?.to_string_lossy().into_owned();
+                cfg.insert(key, val);
+            }
+        }
+        let inner = py
+            .allow_threads(|| QueryState::open(&cfg))
+            .map_err(to_string_err)?;
+        Ok(Self { inner })
+    }
+
+    fn compile_sql(&self, py: Python<'_>, sql: &str, params: &[u8]) -> PyResult<PyProgramHandle> {
+        py.allow_threads(|| self.inner.compile_sql(sql, params))
+            .map(|inner| PyProgramHandle { inner })
+            .map_err(to_string_err)
+    }
+
+    #[pyo3(signature = (program, params, limit, as_of_us))]
+    fn run_vm(
+        &self,
+        py: Python<'_>,
+        program: &Bound<'_, PyProgramHandle>,
+        params: &[u8],
+        limit: u64,
+        as_of_us: u64,
+    ) -> PyResult<Vec<u8>> {
+        let prog = program.borrow().inner.clone();
+        py.allow_threads(|| self.inner.run_vm(prog, params, limit, as_of_us))
+            .map_err(to_string_err)
+    }
+
+    #[pyo3(signature = (program, params, limit, as_of_us))]
+    fn run_vm_cursor(
+        &self,
+        py: Python<'_>,
+        program: &Bound<'_, PyProgramHandle>,
+        params: &[u8],
+        limit: u64,
+        as_of_us: u64,
+    ) -> PyResult<PySessionHandle> {
+        let prog = program.borrow().inner.clone();
+        py.allow_threads(|| self.inner.run_vm_cursor(prog, params, limit, as_of_us))
+            .map(|inner| PySessionHandle { inner })
+            .map_err(to_string_err)
+    }
+
+    #[pyo3(signature = (session, max_rows))]
+    fn session_next_batch(
+        &self,
+        py: Python<'_>,
+        session: &Bound<'_, PySessionHandle>,
+        max_rows: u64,
+    ) -> PyResult<Vec<u8>> {
+        let handle = session.borrow().inner.clone();
+        py.allow_threads(|| self.inner.session_next_batch(handle, max_rows))
+            .map_err(to_string_err)
+    }
+
+    fn explain(&self, py: Python<'_>, sql: &str, params: &[u8]) -> PyResult<String> {
+        py.allow_threads(|| self.inner.explain(sql, params))
+            .map_err(to_string_err)
+    }
+
+    fn explain_plan(&self, py: Python<'_>, sql: &str, params: &[u8]) -> PyResult<String> {
+        py.allow_threads(|| self.inner.explain_plan(sql, params))
+            .map_err(to_string_err)
+    }
+
+    fn compile_sql_json(&self, py: Python<'_>, sql: &str, params: &[u8]) -> PyResult<String> {
+        py.allow_threads(|| self.inner.compile_sql_json(sql, params))
+            .map_err(to_string_err)
+    }
+
+    fn scan_datoms(&self, py: Python<'_>, as_of_us: u64) -> PyResult<Vec<u8>> {
+        py.allow_threads(|| self.inner.scan_datoms(as_of_us))
+            .map_err(to_string_err)
+    }
+
+    #[pyo3(signature = (name, value_type, many))]
+    fn declare_attr(&self, py: Python<'_>, name: &str, value_type: &str, many: bool) -> PyResult<u32> {
+        let vt = parse_value_type(value_type)?;
+        py.allow_threads(|| self.inner.declare_attr(name, vt, many))
+            .map_err(to_string_err)
+    }
+
+    #[pyo3(signature = (attr, type_name, many, unique))]
+    fn declare_attr_from_sql(
+        &self,
+        py: Python<'_>,
+        attr: &str,
+        type_name: &str,
+        many: bool,
+        unique: bool,
+    ) -> PyResult<()> {
+        py.allow_threads(|| self.inner.declare_attr_from_sql(attr, type_name, many, unique))
+            .map_err(to_string_err)
+    }
+
+    fn lookup_attr(&self, py: Python<'_>, name: &str) -> PyResult<Option<u32>> {
+        py.allow_threads(|| self.inner.lookup_attr(name))
+            .map_err(to_string_err)
+    }
+
+    fn attr_name(&self, py: Python<'_>, aid: u32) -> PyResult<String> {
+        py.allow_threads(|| self.inner.attr_name(aid))
+            .map_err(to_string_err)
+    }
+
+    fn is_declared(&self, py: Python<'_>, aid: u32) -> PyResult<bool> {
+        py.allow_threads(|| self.inner.is_declared(aid))
+            .map_err(to_string_err)
+    }
+
+    fn value_type_for(&self, py: Python<'_>, aid: u32) -> PyResult<Option<String>> {
+        py.allow_threads(|| self.inner.value_type_for(aid))
+            .map_err(to_string_err)
+            .map(|opt| opt.map(|vt| format!("{:?}", vt)))
+    }
+
+    fn is_many(&self, py: Python<'_>, aid: u32) -> PyResult<bool> {
+        py.allow_threads(|| self.inner.is_many(aid))
+            .map_err(to_string_err)
+    }
+
+    fn is_unique_attr(&self, py: Python<'_>, name: &str) -> PyResult<bool> {
+        py.allow_threads(|| self.inner.is_unique_attr(name))
+            .map_err(to_string_err)
+    }
+
+    fn declare_partition(&self, py: Python<'_>, name: &str) -> PyResult<u64> {
+        py.allow_threads(|| self.inner.declare_partition(name))
+            .map_err(to_string_err)
+    }
+
+    fn partition_id_for(&self, py: Python<'_>, name: &str) -> PyResult<Option<u64>> {
+        py.allow_threads(|| self.inner.partition_id_for(name))
+            .map_err(to_string_err)
+    }
+
+    #[pyo3(signature = (e, attr, v, t))]
+    fn save(&self, py: Python<'_>, e: u64, attr: &str, v: &Bound<'_, pyo3::types::PyAny>, t: u64) -> PyResult<()> {
+        let value = py_to_value(v)?;
+        py.allow_threads(|| self.inner.save(e, attr, value, t))
+            .map_err(to_string_err)
+    }
+
+    #[pyo3(signature = (e, attr, v, t))]
+    fn retract(
+        &self,
+        py: Python<'_>,
+        e: u64,
+        attr: &str,
+        v: &Bound<'_, pyo3::types::PyAny>,
+        t: u64,
+    ) -> PyResult<()> {
+        let value = py_to_value(v)?;
+        py.allow_threads(|| self.inner.retract(e, attr, value, t))
+            .map_err(to_string_err)
+    }
+
+    fn allocate_entity_id(&self, py: Python<'_>) -> PyResult<u64> {
+        py.allow_threads(|| self.inner.allocate_entity_id())
+            .map_err(to_string_err)
+    }
+
+    fn allocate_tx(&self, py: Python<'_>) -> PyResult<u64> {
+        py.allow_threads(|| self.inner.allocate_tx())
+            .map_err(to_string_err)
+    }
+
+    fn lookup_entity(&self, py: Python<'_>, attr_name: &str, value: &Bound<'_, pyo3::types::PyAny>) -> PyResult<Option<u64>> {
+        let v = py_to_value(value)?;
+        py.allow_threads(|| self.inner.lookup_entity(attr_name, v))
+            .map_err(to_string_err)
+    }
+
+    fn flush(&self, py: Python<'_>) -> PyResult<()> {
+        py.allow_threads(|| self.inner.flush())
+            .map_err(to_string_err)
+    }
+
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        py.allow_threads(|| self.inner.close())
+            .map_err(to_string_err)
+    }
+
+    fn path(&self, py: Python<'_>) -> PyResult<String> {
+        py.allow_threads(|| self.inner.path())
+            .map_err(to_string_err)
+    }
+
+    fn memtable_size(&self, py: Python<'_>) -> PyResult<u64> {
+        py.allow_threads(|| self.inner.memtable_size())
+            .map_err(to_string_err)
+    }
+
+    fn memtable_count(&self, py: Python<'_>, cf: u32) -> PyResult<u64> {
+        py.allow_threads(|| self.inner.memtable_count(cf))
+            .map_err(to_string_err)
+    }
+
+    fn journal_size(&self, py: Python<'_>) -> PyResult<u64> {
+        py.allow_threads(|| self.inner.journal_size())
+            .map_err(to_string_err)
+    }
+
+    fn cf_stats(&self, py: Python<'_>, cf: u32) -> PyResult<Vec<u8>> {
+        py.allow_threads(|| self.inner.cf_stats(cf))
+            .map_err(to_string_err)
+    }
+
+    fn db_stats(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
+        py.allow_threads(|| self.inner.db_stats())
+            .map_err(to_string_err)
+    }
+
+    fn gc_full(&self, py: Python<'_>, dry_run: bool, nowait: bool) -> PyResult<Vec<u8>> {
+        py.allow_threads(|| self.inner.gc_full(dry_run, nowait))
+            .map_err(to_string_err)
+    }
+
+    fn internal_status(&self, py: Python<'_>, target: &str) -> PyResult<String> {
+        py.allow_threads(|| self.inner.internal_status(target))
+            .map_err(to_string_err)
+    }
+}
+
+#[pymodule]
+fn spier_eavt_query_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyEngine>()?;
+    m.add_class::<PyProgramHandle>()?;
+    m.add_class::<PySessionHandle>()?;
+    Ok(())
+}

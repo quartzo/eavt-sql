@@ -1,29 +1,40 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
 
-use dynspire::*;
+use dynspire_commons::blobstore::BlobStoreEngine;
 
-include!(concat!(env!("OUT_DIR"), "/blobstore_spier.rs"));
+fn new_uuid() -> [u8; 16] {
+    *uuid::Uuid::new_v4().as_bytes()
+}
 
 struct MemInner {
     blobs: HashMap<[u8; 16], Vec<u8>>,
     roots: BTreeMap<String, Vec<u8>>,
 }
 
-struct MemState {
+/// Pure Rust in-memory blob store. No dynspire/FFI — just implements [`BlobStoreEngine`].
+pub struct MemoryBlobStore {
     inner: RwLock<MemInner>,
 }
 
-fn init(_config: &std::collections::HashMap<String, String>) -> Result<MemState, String> {
-    Ok(MemState {
-        inner: RwLock::new(MemInner {
-            blobs: HashMap::new(),
-            roots: BTreeMap::new(),
-        }),
-    })
+impl MemoryBlobStore {
+    pub fn new() -> Self {
+        Self {
+            inner: RwLock::new(MemInner {
+                blobs: HashMap::new(),
+                roots: BTreeMap::new(),
+            }),
+        }
+    }
 }
 
-impl BlobStoreEngine for MemState {
+impl Default for MemoryBlobStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BlobStoreEngine for MemoryBlobStore {
     fn put(&self, data: &[u8]) -> Result<[u8; 16], String> {
         let id = new_uuid();
         self.inner.write().unwrap().blobs.insert(id, data.to_vec());
@@ -66,5 +77,3 @@ impl BlobStoreEngine for MemState {
         Ok(())
     }
 }
-
-impl_blobstore_spier!(MemState, init, "spier_blobstore_memory");

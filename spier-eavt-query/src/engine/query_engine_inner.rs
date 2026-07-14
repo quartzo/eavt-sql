@@ -4,9 +4,9 @@ use std::sync::{Arc, RwLock};
 use dynspire_commons::transactor::cursor::invalid_cursor_handle;
 use dynspire_commons::transactor::keys::{self, BoundValue, EncodeMode};
 use dynspire_commons::transactor::resolver_consts as resolver;
-use dynspire_commons::transactor::DynSpireTransactor;
 use dynspire_commons::transactor::TransactorEngine;
 use dynspire_commons::value::Value;
+use spier_transactor::TransactorState;
 
 use crate::engine::scanner::ValueScanner;
 use crate::engine::vm::{EngineError, QueryContext, RawDatomView, VMEngine, BoundPart};
@@ -15,20 +15,20 @@ fn cf_name_to_id() -> HashMap<String, usize> {
     dynspire_libs::cf_name_map()
 }
 
-pub struct DynSpireEngine {
-    tx: Arc<DynSpireTransactor>,
+pub struct QueryEngineInner {
+    tx: Arc<dyn TransactorEngine>,
     cf_map: HashMap<String, usize>,
     vt_cache: RwLock<HashMap<u32, Option<u32>>>,
     attr_id_cache: RwLock<HashMap<String, Option<u32>>>,
     path: String,
 }
 
-impl DynSpireEngine {
-    pub fn load(name: &str, config: &HashMap<String, String>) -> Result<Self, String> {
-        let tx = DynSpireTransactor::connect(name, config)?;
+impl QueryEngineInner {
+    pub fn load(_name: &str, config: &HashMap<String, String>) -> Result<Self, String> {
+        let tx: Arc<dyn TransactorEngine> = Arc::new(TransactorState::open(config)?);
         let path = config.get("path").cloned().unwrap_or_default();
         Ok(Self {
-            tx: Arc::new(tx),
+            tx,
             cf_map: cf_name_to_id(),
             vt_cache: RwLock::new(HashMap::new()),
             attr_id_cache: RwLock::new(HashMap::new()),
@@ -97,8 +97,8 @@ impl DynSpireEngine {
         Ok(engine)
     }
 
-    pub fn tx(&self) -> &Arc<DynSpireTransactor> {
-        &self.tx
+    pub fn tx(&self) -> &dyn TransactorEngine {
+        self.tx.as_ref()
     }
 
     fn cf_id(&self, cf: &str) -> usize {
@@ -302,7 +302,7 @@ impl DynSpireEngine {
     }
 }
 
-impl VMEngine for DynSpireEngine {
+impl VMEngine for QueryEngineInner {
     fn resolve_entity(&self, name_or_id: &Value) -> u64 {
         match name_or_id {
             Value::Int64(n) => *n as u64,
@@ -327,7 +327,8 @@ impl VMEngine for DynSpireEngine {
         Ok(h.cursor)
     }
 
-    fn collect_active(&self, cf: &str, prefix: &[u8], ctx: &QueryContext) -> Vec<RawDatomView> {        let cf_id = self.cf_id(cf);
+    fn collect_active(&self, cf: &str, prefix: &[u8], ctx: &QueryContext) -> Vec<RawDatomView> {
+        let cf_id = self.cf_id(cf);
         let prefix = prefix.to_vec();
         let attr_type = self.attr_type_from_prefix(cf, &prefix);
         let cursor = match self.tx.open_cursor_direct(cf_id as u32, &prefix) {

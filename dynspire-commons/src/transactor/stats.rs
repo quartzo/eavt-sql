@@ -1,16 +1,15 @@
-use crate::transactor::{TransactorEngine, DynSpireTransactor};
 use crate::compiler::CompileStats;
-use crate::transactor::resolver_consts::DB_TYPE_REF;
+use crate::transactor::{TransactorEngine, keys, resolver_consts::DB_TYPE_REF};
 
-impl CompileStats for DynSpireTransactor {
+impl CompileStats for dyn TransactorEngine + '_ {
     fn lookup_attr(&self, name: &str) -> Option<u32> {
         TransactorEngine::lookup_attr(self, name).ok().flatten()
     }
 
     fn estimate_index_size(&self, index: &str, bound: &[u64]) -> f64 {
-        let cf = crate::transactor::keys::cf_for_index(index);
-        let cf_id = crate::transactor::keys::cf_name_to_id(cf);
-        let idx_order = crate::transactor::keys::index_order(index);
+        let cf = keys::cf_for_index(index);
+        let cf_id = keys::cf_name_to_id(cf);
+        let idx_order = keys::index_order(index);
         let mut prefix = Vec::new();
         for (i, pos) in idx_order.iter().enumerate() {
             if i >= bound.len() {

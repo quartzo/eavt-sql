@@ -420,27 +420,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynspire"
-version = "0.3.4"
-source = "git+https://github.com/quartzo/dynspire#686640a2aed760a74ac64448a721ad5b15eaaf62"
-dependencies = [
- "form_urlencoded",
- "libloading",
- "uuid",
-]
-
-[[package]]
-name = "dynspire-codegen"
-version = "0.3.4"
-source = "git+https://github.com/quartzo/dynspire#686640a2aed760a74ac64448a721ad5b15eaaf62"
-
-[[package]]
 name = "dynspire-commons"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "dynspire",
- "dynspire-codegen",
  "serde",
 ]
 
@@ -467,9 +450,9 @@ name = "eavt-server"
 version = "0.1.0"
 dependencies = [
  "clap",
- "dynspire",
  "dynspire-commons",
  "prost",
+ "spier-eavt-query",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -956,6 +939,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "indoc"
+version = "2.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79cf5c93f93228cf8efb3ba362535fb11199ac548a09ce117c9b1adc3030d706"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1029,16 +1021,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
-name = "libloading"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
-dependencies = [
- "cfg-if",
- "windows-link",
-]
-
-[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1086,6 +1068,15 @@ name = "memchr"
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
+
+[[package]]
+name = "memoffset"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
+dependencies = [
+ "autocfg",
+]
 
 [[package]]
 name = "mime"
@@ -1325,6 +1316,68 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52c2c1bf36ddb1a1c396b3601a3cec27c2462e45f07c386894ec3ccf5332bd16"
 dependencies = [
  "prost",
+]
+
+[[package]]
+name = "pyo3"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8970a78afe0628a3e3430376fc5fd76b6b45c4d43360ffd6cdd40bdde72b682a"
+dependencies = [
+ "indoc",
+ "libc",
+ "memoffset",
+ "once_cell",
+ "portable-atomic",
+ "pyo3-build-config",
+ "pyo3-ffi",
+ "pyo3-macros",
+ "unindent",
+]
+
+[[package]]
+name = "pyo3-build-config"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "458eb0c55e7ece017adeba38f2248ff3ac615e53660d7c71a238d7d2a01c7598"
+dependencies = [
+ "once_cell",
+ "target-lexicon",
+]
+
+[[package]]
+name = "pyo3-ffi"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7114fe5457c61b276ab77c5055f206295b812608083644a5c5b2640c3102565c"
+dependencies = [
+ "libc",
+ "pyo3-build-config",
+]
+
+[[package]]
+name = "pyo3-macros"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8725c0a622b374d6cb051d11a0983786448f7785336139c3c94f5aa6bef7e50"
+dependencies = [
+ "proc-macro2",
+ "pyo3-macros-backend",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "pyo3-macros-backend"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4109984c22491085343c05b0dbc54ddc405c3cf7b4374fc533f5c3313a572ccc"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "pyo3-build-config",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -1608,47 +1661,41 @@ dependencies = [
 name = "spier-blobstore-file"
 version = "0.1.0"
 dependencies = [
- "dynspire",
- "dynspire-codegen",
  "dynspire-commons",
+ "uuid",
 ]
 
 [[package]]
 name = "spier-blobstore-memory"
 version = "0.1.0"
 dependencies = [
- "dynspire",
- "dynspire-codegen",
  "dynspire-commons",
+ "uuid",
 ]
 
 [[package]]
 name = "spier-blobstore-s3"
 version = "0.1.0"
 dependencies = [
- "dynspire",
- "dynspire-codegen",
  "dynspire-commons",
  "rusty-s3",
  "ureq",
  "url",
+ "uuid",
 ]
 
 [[package]]
 name = "spier-compiler"
 version = "0.1.0"
 dependencies = [
- "dynspire",
- "dynspire-codegen",
  "dynspire-commons",
+ "spier-planner",
 ]
 
 [[package]]
 name = "spier-datalog"
 version = "0.1.0"
 dependencies = [
- "dynspire",
- "dynspire-codegen",
  "dynspire-commons",
 ]
 
@@ -1657,18 +1704,26 @@ name = "spier-eavt-query"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "dynspire",
- "dynspire-codegen",
  "dynspire-commons",
  "dynspire-libs",
+ "spier-compiler",
+ "spier-sql-frontend",
+ "spier-transactor",
+]
+
+[[package]]
+name = "spier-eavt-query-py"
+version = "0.1.0"
+dependencies = [
+ "dynspire-commons",
+ "pyo3",
+ "spier-eavt-query",
 ]
 
 [[package]]
 name = "spier-journal-file"
 version = "0.1.0"
 dependencies = [
- "dynspire",
- "dynspire-codegen",
  "dynspire-commons",
 ]
 
@@ -1676,11 +1731,14 @@ dependencies = [
 name = "spier-kvstore"
 version = "0.1.0"
 dependencies = [
- "dynspire",
- "dynspire-codegen",
  "dynspire-commons",
  "libc",
  "lru",
+ "spier-blobstore-file",
+ "spier-blobstore-memory",
+ "spier-blobstore-s3",
+ "spier-journal-file",
+ "spier-memtable",
  "tempfile",
  "uuid",
  "zstd",
@@ -1691,8 +1749,6 @@ name = "spier-memtable"
 version = "0.1.0"
 dependencies = [
  "crossbeam-skiplist",
- "dynspire",
- "dynspire-codegen",
  "dynspire-commons",
 ]
 
@@ -1700,8 +1756,6 @@ dependencies = [
 name = "spier-planner"
 version = "0.1.0"
 dependencies = [
- "dynspire",
- "dynspire-codegen",
  "dynspire-commons",
 ]
 
@@ -1709,28 +1763,45 @@ dependencies = [
 name = "spier-sql-frontend"
 version = "0.1.0"
 dependencies = [
- "dynspire",
- "dynspire-codegen",
  "dynspire-commons",
+ "spier-datalog",
+ "spier-sql-parse",
 ]
 
 [[package]]
 name = "spier-sql-parse"
 version = "0.1.0"
 dependencies = [
- "dynspire",
- "dynspire-codegen",
  "dynspire-commons",
  "serde_json",
+]
+
+[[package]]
+name = "spier-sql-parse-py"
+version = "0.1.0"
+dependencies = [
+ "dynspire-commons",
+ "pyo3",
+ "serde_json",
+ "spier-sql-parse",
 ]
 
 [[package]]
 name = "spier-transactor"
 version = "0.1.0"
 dependencies = [
- "dynspire",
- "dynspire-codegen",
  "dynspire-commons",
+ "spier-kvstore",
+]
+
+[[package]]
+name = "spier-transactor-py"
+version = "0.1.0"
+dependencies = [
+ "dynspire-commons",
+ "pyo3",
+ "spier-journal-file",
+ "spier-transactor",
 ]
 
 [[package]]
@@ -1780,13 +1851,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "target-lexicon"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -2006,6 +2083,12 @@ name = "unicode-width"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
+
+[[package]]
+name = "unindent"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7264e107f553ccae879d21fbea1d6724ac785e8c3bfc762137959b5802826ef3"
 
 [[package]]
 name = "untrusted"

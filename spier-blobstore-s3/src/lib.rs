@@ -3,9 +3,26 @@ use std::io::Read;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use dynspire::*;
+use dynspire_commons::blobstore::BlobStoreEngine;
 
-include!(concat!(env!("OUT_DIR"), "/blobstore_spier.rs"));
+fn new_uuid() -> [u8; 16] {
+    *uuid::Uuid::new_v4().as_bytes()
+}
+
+fn uuid_to_hex(id: &[u8; 16]) -> String {
+    id.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn uuid_from_hex(s: &str) -> Option<[u8; 16]> {
+    if s.len() != 32 {
+        return None;
+    }
+    let mut bytes = [0u8; 16];
+    for i in 0..16 {
+        bytes[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(bytes)
+}
 
 struct S3Inner {
     bucket: Option<rusty_s3::Bucket>,
@@ -14,12 +31,25 @@ struct S3Inner {
     prefix: String,
 }
 
-struct S3State {
+/// Pure Rust S3-backed blob store. No dynspire/FFI — just implements [`BlobStoreEngine`].
+pub struct S3BlobStore {
     options: Mutex<HashMap<String, String>>,
     inner: Mutex<S3Inner>,
 }
 
-impl S3State {
+impl S3BlobStore {
+    pub fn new(config: &HashMap<String, String>) -> Result<Self, String> {
+        Ok(Self {
+            options: Mutex::new(config.clone()),
+            inner: Mutex::new(S3Inner {
+                bucket: None,
+                credentials: None,
+                agent: None,
+                prefix: String::new(),
+            }),
+        })
+    }
+
     fn ensure_init(&self) -> Result<(), String> {
         let mut inner = self.inner.lock().unwrap();
         if inner.bucket.is_some() {
@@ -172,7 +202,7 @@ impl S3State {
     }
 }
 
-fn s3_collect_list(state: &S3State, prefix: &str) -> Result<Vec<String>, String> {
+fn s3_collect_list(state: &S3BlobStore, prefix: &str) -> Result<Vec<String>, String> {
     let mut items = Vec::new();
     let mut token = None;
     loop {
@@ -191,19 +221,7 @@ fn s3_collect_list(state: &S3State, prefix: &str) -> Result<Vec<String>, String>
     Ok(items)
 }
 
-fn init(config: &HashMap<String, String>) -> Result<S3State, String> {
-    Ok(S3State {
-        options: Mutex::new(config.clone()),
-        inner: Mutex::new(S3Inner {
-            bucket: None,
-            credentials: None,
-            agent: None,
-            prefix: String::new(),
-        }),
-    })
-}
-
-impl BlobStoreEngine for S3State {
+impl BlobStoreEngine for S3BlobStore {
     fn put(&self, data: &[u8]) -> Result<[u8; 16], String> {
         let id = new_uuid();
         self.s3_put(&self.blob_key(&id)?, data)?;
@@ -250,5 +268,3 @@ impl BlobStoreEngine for S3State {
         self.s3_delete(&self.root_key(name)?)
     }
 }
-
-impl_blobstore_spier!(S3State, init, "spier_blobstore_s3");

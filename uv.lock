@@ -321,6 +321,9 @@ dev = [
     { name = "moto", extra = ["s3", "server"] },
     { name = "pytest" },
     { name = "pytest-timeout" },
+    { name = "spier-eavt-query-py" },
+    { name = "spier-sql-parse-py" },
+    { name = "spier-transactor-py" },
 ]
 
 [package.metadata]
@@ -331,6 +334,9 @@ dev = [
     { name = "moto", extras = ["s3", "server"], specifier = ">=5.0" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },
+    { name = "spier-eavt-query-py", directory = "spier-eavt-query-py" },
+    { name = "spier-sql-parse-py", directory = "spier-sql-parse-py" },
+    { name = "spier-transactor-py", directory = "spier-transactor-py" },
 ]
 
 [[package]]
@@ -1211,6 +1217,21 @@ sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
 ]
+
+[[package]]
+name = "spier-eavt-query-py"
+version = "0.1.0"
+source = { directory = "spier-eavt-query-py" }
+
+[[package]]
+name = "spier-sql-parse-py"
+version = "0.1.0"
+source = { directory = "spier-sql-parse-py" }
+
+[[package]]
+name = "spier-transactor-py"
+version = "0.1.0"
+source = { directory = "spier-transactor-py" }
 
 [[package]]
 name = "sympy"

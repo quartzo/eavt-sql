@@ -23,7 +23,15 @@ dev = [
     "pytest>=9.0.3",
     "pytest-timeout>=2.4.0",
     "moto[s3,server]>=5.0",
+    "spier-sql-parse-py",
+    "spier-transactor-py",
+    "spier-eavt-query-py",
 ]
+
+[tool.uv.sources]
+spier-sql-parse-py = { path = "spier-sql-parse-py" }
+spier-transactor-py = { path = "spier-transactor-py" }
+spier-eavt-query-py = { path = "spier-eavt-query-py" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "spier-sql-parse/tests"]
