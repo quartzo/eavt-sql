@@ -9,7 +9,6 @@ crate-type = ["rlib"]
 
 [dependencies]
 dynspire-commons = { path = "../dynspire-commons" }
-dynspire-libs = { path = "../dynspire-libs" }
 spier-sql-frontend = { path = "../spier-sql-frontend" }
 spier-compiler = { path = "../spier-compiler" }
 spier-transactor = { path = "../spier-transactor" }

@@ -1,4 +1,5 @@
 // --- EAVT Transactor — constructs spier-kvstore directly ---
+pub mod constants;
 pub mod eavt;
 pub mod resolver;
 pub mod keys;

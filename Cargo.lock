@@ -428,10 +428,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynspire-libs"
-version = "0.1.0"
-
-[[package]]
 name = "eavt-cli"
 version = "0.1.0"
 dependencies = [
@@ -1705,7 +1701,6 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "dynspire-commons",
- "dynspire-libs",
  "spier-compiler",
  "spier-sql-frontend",
  "spier-transactor",

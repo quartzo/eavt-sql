@@ -12,7 +12,7 @@ use crate::engine::scanner::ValueScanner;
 use crate::engine::vm::{EngineError, QueryContext, RawDatomView, VMEngine, BoundPart};
 
 fn cf_name_to_id() -> HashMap<String, usize> {
-    dynspire_libs::cf_name_map()
+    spier_transactor::constants::cf_name_map()
 }
 
 pub struct QueryEngineInner {
