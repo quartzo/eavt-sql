@@ -9,7 +9,6 @@ from pathlib import Path
 
 _root = Path(__file__).resolve().parent.parent
 _release = _root / "target" / "release"
-os.environ.setdefault("DYNSPIRE_LIB_DIR", str(_release))
 _lp = os.environ.get("LD_LIBRARY_PATH", "")
 if str(_release) not in _lp:
     os.environ["LD_LIBRARY_PATH"] = f"{_release}:{_lp}" if _lp else str(_release)

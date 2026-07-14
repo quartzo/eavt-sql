@@ -15,13 +15,12 @@ import os
 import sys
 from pathlib import Path
 
-# ── Spier path setup (same as tests/conftest.py) ─────────────────────
+# ── Path setup (same as tests/conftest.py) ─────────────────────────
 _root = Path(__file__).resolve().parent.parent
 _release = _root / "target" / "release"
 _debug = _root / "target" / "debug"
 _so_dir = _release if _release.exists() else _debug
 
-os.environ.setdefault("DYNSPIRE_LIB_DIR", str(_so_dir))
 existing = os.environ.get("LD_LIBRARY_PATH", "")
 if str(_so_dir) not in existing:
     os.environ["LD_LIBRARY_PATH"] = (
