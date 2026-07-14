@@ -23,8 +23,12 @@ unsafe impl Send for CursorHandle {}
 struct InvalidCursor;
 
 impl Cursor for InvalidCursor {
-    fn is_valid(&self) -> bool { false }
-    fn current_key(&self) -> Option<&[u8]> { None }
+    fn is_valid(&self) -> bool {
+        false
+    }
+    fn current_key(&self) -> Option<&[u8]> {
+        None
+    }
     fn step(&mut self) {}
     fn skip_group(&mut self, _: usize) {}
     fn seek(&mut self, _: &[u8]) {}

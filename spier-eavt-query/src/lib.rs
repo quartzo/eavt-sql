@@ -1,19 +1,93 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 mod engine;
+pub mod trace;
 
-use dynspire_commons::query_engine::{QueryEngine, SessionHandle};
-use dynspire_commons::transactor::{TransactorEngine, Value, ValueType};
-use dynspire_commons::compiler::{CompileResultSt, CompilerEngine, CompileStats};
-use dynspire_commons::sql_frontend::SqlFrontendEngine;
-use dynspire_commons::datalog::{DatalogNumIR, DatalogNumIRSt, DatalogIR, resolve::{resolve_ir, compute_plan_stats}};
-use dynspire_commons::sql_parse::RustStmt;
-use dynspire_commons::query_ir::{InstructionData, VMProgram};
+pub use spier_query_ir::ProgramHandle;
+pub use spier_storage_traits::CursorHandle;
+
+use spier_compiler::{CompileResultSt, CompilerEngine};
+use spier_datalog::CompileStats;
+use spier_datalog::{
+    resolve::{compute_plan_stats, resolve_ir},
+    DatalogIR, DatalogNumIR, DatalogNumIRSt,
+};
+use spier_query_ir::{InstructionData, VMProgram};
+use spier_sql_frontend::SqlFrontendEngine;
+use spier_sql_parse::RustStmt;
+use spier_transactor::{TransactorEngine, ValueType};
+use spier_value::{query_codec, Value};
+
+pub trait VMResultStream {
+    fn next_batch(&mut self, out: &mut Vec<u8>, max_rows: usize) -> Result<bool, String>;
+}
+
+#[derive(Clone)]
+pub struct SessionHandle {
+    pub session: Arc<RefCell<dyn VMResultStream>>,
+}
+
+// Concrete VMResultStream implementations are thread-local-free; this lets
+// PyO3 bindings release the GIL around streaming operations.
+unsafe impl Send for SessionHandle {}
+
+pub trait QueryEngine: Send + Sync {
+    fn compile_sql(&self, sql: &str, sql_params: &[u8]) -> Result<ProgramHandle, String>;
+    fn run_vm(
+        &self,
+        program: ProgramHandle,
+        sql_params: &[u8],
+        limit: u64,
+        as_of_us: u64,
+    ) -> Result<Vec<u8>, String>;
+    fn run_vm_cursor(
+        &self,
+        program: ProgramHandle,
+        sql_params: &[u8],
+        limit: u64,
+        as_of_us: u64,
+    ) -> Result<SessionHandle, String>;
+    fn session_next_batch(&self, session: SessionHandle, max_rows: u64) -> Result<Vec<u8>, String>;
+    fn explain(&self, sql: &str, sql_params: &[u8]) -> Result<String, String>;
+    fn explain_plan(&self, sql: &str, sql_params: &[u8]) -> Result<String, String>;
+    fn compile_sql_json(&self, sql: &str, sql_params: &[u8]) -> Result<String, String>;
+    fn scan_datoms(&self, as_of_us: u64) -> Result<Vec<u8>, String>;
+    fn declare_attr(&self, name: &str, value_type: ValueType, many: bool) -> Result<u32, String>;
+    fn declare_attr_from_sql(
+        &self,
+        attr: &str,
+        type_name: &str,
+        many: bool,
+        unique: bool,
+    ) -> Result<(), String>;
+    fn lookup_attr(&self, name: &str) -> Result<Option<u32>, String>;
+    fn attr_name(&self, aid: u32) -> Result<String, String>;
+    fn is_declared(&self, aid: u32) -> Result<bool, String>;
+    fn value_type_for(&self, aid: u32) -> Result<Option<ValueType>, String>;
+    fn is_many(&self, aid: u32) -> Result<bool, String>;
+    fn is_unique_attr(&self, name: &str) -> Result<bool, String>;
+    fn declare_partition(&self, name: &str) -> Result<u64, String>;
+    fn partition_id_for(&self, name: &str) -> Result<Option<u64>, String>;
+    fn save(&self, e: u64, attr: &str, v: Value, t: u64) -> Result<(), String>;
+    fn retract(&self, e: u64, attr: &str, v: Value, t: u64) -> Result<(), String>;
+    fn allocate_entity_id(&self) -> Result<u64, String>;
+    fn allocate_tx(&self) -> Result<u64, String>;
+    fn lookup_entity(&self, attr_name: &str, value: Value) -> Result<Option<u64>, String>;
+    fn flush(&self) -> Result<(), String>;
+    fn close(&self) -> Result<(), String>;
+    fn path(&self) -> Result<String, String>;
+    fn memtable_size(&self) -> Result<u64, String>;
+    fn memtable_count(&self, cf: u32) -> Result<u64, String>;
+    fn journal_size(&self) -> Result<u64, String>;
+    fn cf_stats(&self, cf: u32) -> Result<Vec<u8>, String>;
+    fn db_stats(&self) -> Result<Vec<u8>, String>;
+    fn gc_full(&self, dry_run: bool, nowait: bool) -> Result<Vec<u8>, String>;
+    fn internal_status(&self, target: &str) -> Result<String, String>;
+}
 use engine::query_engine_inner::QueryEngineInner;
 use engine::vm::VMEngine;
-use engine::opcodes::ProgramHandle;
-use dynspire_commons::transactor::query_codec;
 use spier_compiler::Compiler;
 use spier_sql_frontend::SqlFrontend;
 
@@ -33,7 +107,7 @@ impl QueryState {
         let frontend = SqlFrontend::new();
         let compiler = Compiler::new();
         Ok(QueryState {
-            inner: RwLock::new(QueryInner{
+            inner: RwLock::new(QueryInner {
                 engine: Some(Arc::new(engine)),
                 frontend: Some(frontend),
                 compiler: Some(compiler),
@@ -50,9 +124,7 @@ fn open_engine(config: &HashMap<String, String>) -> Result<QueryEngineInner, Str
     match backend {
         "memory" => QueryEngineInner::open_in_memory(config),
         "file" => {
-            config
-                .get("path")
-                .ok_or("path required for file backend")?;
+            config.get("path").ok_or("path required for file backend")?;
             let read_only = config
                 .get("read_only")
                 .map(|v| v == "true")
@@ -106,15 +178,49 @@ impl<'a> CompileStats for TxStats<'a> {
     }
 
     fn estimate_index_size(&self, index: &str, bound: &[u64]) -> f64 {
-        CompileStats::estimate_index_size(self.0, index, bound)
+        use spier_transactor::keys;
+        let cf = keys::cf_for_index(index);
+        let cf_id = keys::cf_name_to_id(cf);
+        let idx_order = keys::index_order(index);
+        let mut prefix = Vec::new();
+        for (i, pos) in idx_order.iter().enumerate() {
+            if i >= bound.len() {
+                break;
+            }
+            let val = bound[i];
+            if *pos == "a" {
+                prefix.extend_from_slice(&(val as u32).to_be_bytes());
+            } else {
+                prefix.extend_from_slice(&val.to_be_bytes());
+            }
+        }
+        let end = if prefix.is_empty() {
+            vec![0xFF; 64]
+        } else {
+            let mut e = prefix.clone();
+            e.extend_from_slice(&[0xFF; 32]);
+            e
+        };
+        TransactorEngine::approximate_sizes(self.0, cf_id, &prefix, &end).unwrap_or(0) as f64
     }
 
     fn partition_id_for(&self, name: &str) -> Option<u64> {
-        TransactorEngine::partition_id_for(self.0, name).ok().flatten()
+        TransactorEngine::partition_id_for(self.0, name)
+            .ok()
+            .flatten()
     }
 
     fn is_ref_attr(&self, name: &str) -> bool {
-        CompileStats::is_ref_attr(self.0, name)
+        use spier_transactor::resolver_consts::DB_TYPE_REF;
+        if let Some(aid) = TransactorEngine::lookup_attr(self.0, name).ok().flatten() {
+            TransactorEngine::value_type_for(self.0, aid)
+                .ok()
+                .flatten()
+                .map(|vt| vt as u32 == DB_TYPE_REF)
+                .unwrap_or(false)
+        } else {
+            false
+        }
     }
 }
 
@@ -143,7 +249,9 @@ fn do_compile(
             let ir = SqlFrontendEngine::build_datalog(frontend, stmt_st, sql_params)?;
             let tx_stats = TxStats(tx);
             let num_ir = resolve_and_stats(ir.ir, &tx_stats)?;
-            let result = compiler.compile_select(DatalogNumIRSt { num_ir: num_ir.clone() })?;
+            let result = compiler.compile_select(DatalogNumIRSt {
+                num_ir: num_ir.clone(),
+            })?;
             Ok((result, Some(num_ir.ir)))
         }
         RustStmt::Update(_) | RustStmt::Delete(_) => {
@@ -161,7 +269,9 @@ fn do_compile(
                 let num_ir = resolve_and_stats(ir.ir, &tx_stats)?;
                 let result = compiler.compile_dml_scan(
                     stmt_for_compiler,
-                    DatalogNumIRSt { num_ir: num_ir.clone() },
+                    DatalogNumIRSt {
+                        num_ir: num_ir.clone(),
+                    },
                     sql_params,
                 )?;
                 Ok((result, Some(num_ir.ir)))
@@ -191,7 +301,9 @@ impl QueryEngine for QueryState {
 
         let (result, _) = do_compile(frontend, compiler, engine.tx(), sql, sql_params)?;
 
-        Ok(ProgramHandle { program: Arc::new(result.program) })
+        Ok(ProgramHandle {
+            program: Arc::new(result.program),
+        })
     }
 
     fn run_vm(
@@ -207,8 +319,16 @@ impl QueryEngine for QueryState {
 
         let vm_params = query_codec::decode_values(sql_params)?;
 
-        let limit_opt = if limit == u64::MAX { None } else { Some(limit as usize) };
-        let as_of_opt = if as_of_us == u64::MAX { None } else { Some(as_of_us) };
+        let limit_opt = if limit == u64::MAX {
+            None
+        } else {
+            Some(limit as usize)
+        };
+        let as_of_opt = if as_of_us == u64::MAX {
+            None
+        } else {
+            Some(as_of_us)
+        };
 
         let rows = engine.run_vm(program.program, vm_params, limit_opt, as_of_opt);
         match rows {
@@ -225,9 +345,7 @@ impl QueryEngine for QueryState {
                 }
                 Ok(out)
             }
-            Err(e) => {
-                Err(e.0)
-            }
+            Err(e) => Err(e.0),
         }
     }
 
@@ -242,8 +360,16 @@ impl QueryEngine for QueryState {
         let engine = inner.engine.as_ref().ok_or("engine not open")?;
 
         let vm_params = query_codec::decode_values(sql_params)?;
-        let limit_opt = if limit == u64::MAX { None } else { Some(limit as usize) };
-        let as_of_opt = if as_of_us == u64::MAX { None } else { Some(as_of_us) };
+        let limit_opt = if limit == u64::MAX {
+            None
+        } else {
+            Some(limit as usize)
+        };
+        let as_of_opt = if as_of_us == u64::MAX {
+            None
+        } else {
+            Some(as_of_us)
+        };
 
         let t = engine.allocate_t_and_write_tx();
         crate::engine::opcodes::reset_scanner_stats();
@@ -262,13 +388,12 @@ impl QueryEngine for QueryState {
         })
     }
 
-    fn session_next_batch(
-        &self,
-        session: SessionHandle,
-        max_rows: u64,
-    ) -> Result<Vec<u8>, String> {
+    fn session_next_batch(&self, session: SessionHandle, max_rows: u64) -> Result<Vec<u8>, String> {
         let mut out = Vec::new();
-        session.session.borrow_mut().next_batch(&mut out, max_rows as usize)?;
+        session
+            .session
+            .borrow_mut()
+            .next_batch(&mut out, max_rows as usize)?;
         Ok(out)
     }
 
@@ -320,7 +445,11 @@ impl QueryEngine for QueryState {
         let inner = self.inner.read().unwrap();
         let engine = inner.engine.as_ref().ok_or("engine not open")?;
 
-        let as_of_opt = if as_of_us == u64::MAX { None } else { Some(as_of_us) };
+        let as_of_opt = if as_of_us == u64::MAX {
+            None
+        } else {
+            Some(as_of_us)
+        };
 
         let datoms = engine.collect_active_deduped("eavt", b"", as_of_opt);
 
@@ -347,7 +476,9 @@ impl QueryEngine for QueryState {
     fn declare_attr(&self, name: &str, value_type: ValueType, many: bool) -> Result<u32, String> {
         let inner = self.inner.read().unwrap();
         let engine = inner.engine.as_ref().ok_or("engine not open")?;
-        engine.tx().eavt_declare_attr(name, value_type, many, u64::MAX)
+        engine
+            .tx()
+            .eavt_declare_attr(name, value_type, many, u64::MAX)
     }
 
     fn declare_attr_from_sql(

@@ -1,21 +1,20 @@
-use dynspire_commons::datalog::{DatalogEngine, DatalogIRSt};
-use dynspire_commons::sql_parse::ast::{RustFieldRef, RustProjection, RustSelectStmt, RustUpdateStmt, RustDeleteWhereStmt};
-use dynspire_commons::sql_parse::{RustStmt, RustStmtSt, SqlParseEngine};
-use spier_datalog::DatalogBuilder;
-use spier_sql_parse::SqlParser;
+use spier_datalog::{DatalogEngine, DatalogIRSt};
+use spier_sql_parse::ast::{
+    RustDeleteWhereStmt, RustFieldRef, RustProjection, RustSelectStmt, RustUpdateStmt,
+};
+use spier_sql_parse::{RustStmt, RustStmtSt, SqlParseEngine};
+
+pub trait SqlFrontendEngine: Send + Sync {
+    fn parse(&self, sql: &str) -> Result<RustStmtSt, String>;
+    fn build_datalog(&self, stmt: RustStmtSt, sql_params: &[u8]) -> Result<DatalogIRSt, String>;
+}
 
 /// Pure Rust SQL frontend. Combines parser + datalog builder.
-pub struct SqlFrontend {
-    parser: SqlParser,
-    datalog: DatalogBuilder,
-}
+pub struct SqlFrontend;
 
 impl SqlFrontend {
     pub fn new() -> Self {
-        Self {
-            parser: SqlParser::new(),
-            datalog: DatalogBuilder::new(),
-        }
+        Self
     }
 }
 
@@ -25,9 +24,9 @@ impl Default for SqlFrontend {
     }
 }
 
-impl dynspire_commons::sql_frontend::SqlFrontendEngine for SqlFrontend {
+impl SqlFrontendEngine for SqlFrontend {
     fn parse(&self, sql: &str) -> Result<RustStmtSt, String> {
-        self.parser.parse(sql)
+        spier_sql_parse::SqlParser::new().parse(sql)
     }
 
     fn build_datalog(&self, stmt: RustStmtSt, sql_params: &[u8]) -> Result<DatalogIRSt, String> {
@@ -38,13 +37,15 @@ impl dynspire_commons::sql_frontend::SqlFrontendEngine for SqlFrontend {
             RustStmt::Delete(d) => RustStmt::Select(fake_select_from_delete(d)),
             _ => return Err("build_datalog only supports SELECT, UPDATE, DELETE".to_string()),
         };
-        self.datalog.build(RustStmtSt { stmt: select_stmt }, sql_params)
+        spier_datalog::DatalogBuilder::new().build(RustStmtSt { stmt: select_stmt }, sql_params)
     }
 }
 
 /// Build a fake SELECT from UPDATE conditions (projects first alias eid).
 fn fake_select_from_update(stmt: &RustUpdateStmt) -> RustSelectStmt {
-    let first_alias = stmt.clauses.first()
+    let first_alias = stmt
+        .clauses
+        .first()
         .map(|c| c.alias.clone())
         .unwrap_or_else(|| "D1".to_string());
     RustSelectStmt {
@@ -64,7 +65,9 @@ fn fake_select_from_update(stmt: &RustUpdateStmt) -> RustSelectStmt {
 
 /// Build a fake SELECT from DELETE conditions (projects first alias eid).
 fn fake_select_from_delete(stmt: &RustDeleteWhereStmt) -> RustSelectStmt {
-    let first_alias = stmt.conditions.first()
+    let first_alias = stmt
+        .conditions
+        .first()
         .map(|c| c.left.alias.clone())
         .unwrap_or_else(|| "D1".to_string());
     RustSelectStmt {

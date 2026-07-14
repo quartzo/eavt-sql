@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use dynspire_commons::blobstore::BlobStoreEngine;
+use spier_storage_traits::blobstore::BlobStoreEngine;
 
 fn new_uuid() -> [u8; 16] {
     *uuid::Uuid::new_v4().as_bytes()
@@ -47,8 +47,13 @@ pub struct FileBlobStore {
 
 impl FileBlobStore {
     pub fn new(config: &HashMap<String, String>) -> Result<Self, String> {
-        let base = config.get("path").map(|p| PathBuf::from(format!("{p}/blobs")));
-        let read_only = config.get("read_only").map(|v| v == "true").unwrap_or(false);
+        let base = config
+            .get("path")
+            .map(|p| PathBuf::from(format!("{p}/blobs")));
+        let read_only = config
+            .get("read_only")
+            .map(|v| v == "true")
+            .unwrap_or(false);
         if let Some(ref path) = base {
             if !read_only {
                 fs::create_dir_all(path).map_err(|e| e.to_string())?;
@@ -61,7 +66,11 @@ impl FileBlobStore {
     }
 
     fn base(&self) -> Result<PathBuf, String> {
-        self.base.lock().unwrap().clone().ok_or_else(|| "no base path configured".into())
+        self.base
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "no base path configured".into())
     }
 }
 
@@ -117,11 +126,17 @@ impl BlobStoreEngine for FileBlobStore {
             if !e1.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
             }
-            for e2 in fs::read_dir(e1.path()).map_err(|e| e.to_string())?.flatten() {
+            for e2 in fs::read_dir(e1.path())
+                .map_err(|e| e.to_string())?
+                .flatten()
+            {
                 if !e2.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                     continue;
                 }
-                for e3 in fs::read_dir(e2.path()).map_err(|e| e.to_string())?.flat_map(|e| e) {
+                for e3 in fs::read_dir(e2.path())
+                    .map_err(|e| e.to_string())?
+                    .flat_map(|e| e)
+                {
                     if let Some(name) = e3.file_name().to_str() {
                         if !name.ends_with(".tmp") {
                             if let Some(id) = uuid_from_hex(name) {

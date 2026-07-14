@@ -3,11 +3,11 @@ use std::collections::{BTreeSet, HashSet};
 use std::sync::{Mutex, RwLock};
 
 use crate::blob_store::make_root_name;
+use crate::blobstore::BlobStoreEngine;
 use crate::error::{TransactorError, TransactorResult};
+use crate::journal::JournalEngine;
 use crate::page_store::{CfStatsData, DbStatsData, PageStore};
 use crate::pages;
-use crate::blobstore::BlobStoreEngine;
-use crate::journal::JournalEngine;
 
 const ROOT_MAGIC: &[u8; 4] = b"EVT1";
 const ROOT_VERSION: u16 = 2;
@@ -216,12 +216,8 @@ fn deserialize_root_v2(data: &[u8]) -> TransactorResult<Vec<CfTree>> {
         off += 16;
         let height = data[off];
         off += 1;
-        let num_leaves = u32::from_be_bytes([
-            data[off],
-            data[off + 1],
-            data[off + 2],
-            data[off + 3],
-        ]);
+        let num_leaves =
+            u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
         off += 4;
         trees.push(CfTree {
             root_uuid: uuid,
@@ -232,7 +228,7 @@ fn deserialize_root_v2(data: &[u8]) -> TransactorResult<Vec<CfTree>> {
     Ok(trees)
 }
 
-pub use dynspire_commons::transactor::types::GcFullResult;
+pub use spier_storage_traits::GcFullResult;
 
 fn parse_root_us(name: &str) -> Option<i64> {
     let hex = name.strip_prefix("root_")?;
@@ -383,9 +379,9 @@ impl GenericPageStore {
         page_cache_bytes: usize,
     ) -> TransactorResult<Self> {
         let roots = blobs.list_roots()?;
-        let latest = roots.first().ok_or_else(|| {
-            TransactorError::InvalidArg("database not found".into())
-        })?;
+        let latest = roots
+            .first()
+            .ok_or_else(|| TransactorError::InvalidArg("database not found".into()))?;
         let root_data = blob_get_root(blobs.as_ref(), latest)?
             .ok_or_else(|| TransactorError::Format("root listed but unreadable".into()))?;
         let mut trees = deserialize_root_v2(&root_data)?;
@@ -409,9 +405,9 @@ impl GenericPageStore {
     pub fn reload_root(&self) -> TransactorResult<()> {
         let mut inner = self.inner.write().unwrap();
         let roots = self.blobs.list_roots()?;
-        let latest = roots.first().ok_or_else(|| {
-            TransactorError::Format("no root found during reload".into())
-        })?;
+        let latest = roots
+            .first()
+            .ok_or_else(|| TransactorError::Format("no root found during reload".into()))?;
         let root_data = blob_get_root(self.blobs.as_ref(), latest)?
             .ok_or_else(|| TransactorError::Format("root listed but unreadable".into()))?;
         let trees = deserialize_root_v2(&root_data)?;
@@ -444,7 +440,12 @@ impl GenericPageStore {
         self.gc_full_with_age(dry_run, 12 * 3600, 0)
     }
 
-    pub fn gc_full_with_age(&self, dry_run: bool, max_age_secs: u64, max_root_count: usize) -> TransactorResult<GcFullResult> {
+    pub fn gc_full_with_age(
+        &self,
+        dry_run: bool,
+        max_age_secs: u64,
+        max_root_count: usize,
+    ) -> TransactorResult<GcFullResult> {
         let inner = self.inner.read().unwrap();
         if inner.read_only {
             return Err(TransactorError::ReadOnly);
@@ -550,8 +551,14 @@ impl GenericPageStore {
             let entries = deserialize_index_page(&data)
                 .map_err(|e| TransactorError::Internal(format!("index deserialize: {e}")))?;
             let n = entries.len();
-            let first = entries.first().map(|(k, _)| fmt_hex(k, 16)).unwrap_or_default();
-            let last = entries.last().map(|(k, _)| fmt_hex(k, 16)).unwrap_or_default();
+            let first = entries
+                .first()
+                .map(|(k, _)| fmt_hex(k, 16))
+                .unwrap_or_default();
+            let last = entries
+                .last()
+                .map(|(k, _)| fmt_hex(k, 16))
+                .unwrap_or_default();
             out.push_str(&format!(
                 "{indent}index {} entries={n} range={first}..{last}\n",
                 fmt_uuid(&uuid),
@@ -620,9 +627,8 @@ impl GenericPageStore {
         }
         let data = blob_get(self.blobs.as_ref(), *uuid)?
             .ok_or_else(|| TransactorError::Internal("leaf blob not found".into()))?;
-        let keys = pages::deserialize_page(&data).map_err(|e| {
-            TransactorError::Internal(diagnose_page(&data, uuid, &e))
-        })?;
+        let keys = pages::deserialize_page(&data)
+            .map_err(|e| TransactorError::Internal(diagnose_page(&data, uuid, &e)))?;
         let mut cache = self.page_cache.lock().unwrap();
         cache.put(*uuid, keys.clone());
         Ok(keys)
@@ -639,9 +645,8 @@ impl GenericPageStore {
         }
         let data = blob_get(self.blobs.as_ref(), *uuid)?
             .ok_or_else(|| TransactorError::Internal("leaf blob not found".into()))?;
-        let keys = pages::deserialize_page(&data).map_err(|e| {
-            TransactorError::Internal(diagnose_page(&data, uuid, &e))
-        })?;
+        let keys = pages::deserialize_page(&data)
+            .map_err(|e| TransactorError::Internal(diagnose_page(&data, uuid, &e)))?;
         Ok(keys)
     }
 
@@ -907,10 +912,7 @@ impl GenericPageStore {
         let mut changed = false;
 
         for (i, (boundary, child_uuid)) in entries.iter().enumerate() {
-            let child_range_end = entries
-                .get(i + 1)
-                .map(|(k, _)| k.as_slice())
-                .or(range_end);
+            let child_range_end = entries.get(i + 1).map(|(k, _)| k.as_slice()).or(range_end);
 
             // A key belongs to this child if it's < child_range_end.
             // Keys before the first boundary go to child 0 (leftmost).
@@ -1079,12 +1081,7 @@ impl PageStore for GenericPageStore {
         Ok((existing_keys, boundaries))
     }
 
-    fn page_count_in_range(
-        &self,
-        cf: usize,
-        start: &[u8],
-        end: &[u8],
-    ) -> TransactorResult<usize> {
+    fn page_count_in_range(&self, cf: usize, start: &[u8], end: &[u8]) -> TransactorResult<usize> {
         let inner = self.inner.read().unwrap();
         if cf >= inner.num_cf {
             return Ok(0);
@@ -1254,7 +1251,11 @@ impl PageStore for GenericPageStore {
                 }
                 let num_leaves = entries.len() as u32;
                 let (root, height) = self.build_index_tree(entries, 0)?;
-                CfTree { root_uuid: root, height, num_leaves }
+                CfTree {
+                    root_uuid: root,
+                    height,
+                    num_leaves,
+                }
             } else {
                 // Recursively merge into existing tree
                 let result = self.merge_subtree(
@@ -1363,10 +1364,7 @@ impl PageStore for GenericPageStore {
     fn internal_status(&self, target: &str) -> TransactorResult<String> {
         let inner = self.inner.read().unwrap();
 
-        let do_cf: Vec<usize> = if target.is_empty()
-            || target == "btree"
-            || target == "all"
-        {
+        let do_cf: Vec<usize> = if target.is_empty() || target == "btree" || target == "all" {
             (0..inner.num_cf).collect()
         } else if let Some(rest) = target.strip_prefix("btree:") {
             let cf_id = crate::page_store::cf_id_for_name(rest)
@@ -1392,12 +1390,7 @@ impl PageStore for GenericPageStore {
                 tree.height,
                 tree.num_leaves,
             ));
-            self.dump_tree_node(
-                tree.root_uuid,
-                tree.height,
-                1,
-                &mut out,
-            )?;
+            self.dump_tree_node(tree.root_uuid, tree.height, 1, &mut out)?;
         }
         Ok(out)
     }
@@ -1451,7 +1444,10 @@ mod tests {
             Ok(self.blobs.lock().unwrap().keys().copied().collect())
         }
         fn put_root(&self, name: &str, data: &[u8]) -> Result<(), String> {
-            self.roots.lock().unwrap().insert(name.to_string(), data.to_vec());
+            self.roots
+                .lock()
+                .unwrap()
+                .insert(name.to_string(), data.to_vec());
             Ok(())
         }
         fn get_root(&self, name: &str) -> Result<Option<Vec<u8>>, String> {
@@ -1531,7 +1527,9 @@ mod tests {
         let (b1, d1) = make_page(&[b"k"]);
         let (b2, d2) = make_page(&[b"k"]);
         store.commit(&[(0, b1, d1)], &[], false).unwrap();
-        store.commit(&[(0, b2, d2)], &[(0, b"k".to_vec())], false).unwrap();
+        store
+            .commit(&[(0, b2, d2)], &[(0, b"k".to_vec())], false)
+            .unwrap();
         let keys = store.get_keys_in_prefix(0, b"k").unwrap();
         assert_eq!(keys, vec![b"k".to_vec()]);
         assert_eq!(store.page_count(0).unwrap(), 1);
@@ -1545,9 +1543,7 @@ mod tests {
         store
             .commit(&[(0, b1, d1), (0, b2, d2)], &[], false)
             .unwrap();
-        store
-            .commit(&[], &[(0, b"k1".to_vec())], false)
-            .unwrap();
+        store.commit(&[], &[(0, b"k1".to_vec())], false).unwrap();
         assert!(!store.key_exists(0, b"k1").unwrap());
         assert!(store.key_exists(0, b"k2").unwrap());
     }
@@ -1562,10 +1558,7 @@ mod tests {
             .commit(&[(1, bc, dc), (1, ba, da), (1, bb, db)], &[], false)
             .unwrap();
         let keys = store.get_keys_in_prefix(1, b"").unwrap();
-        assert_eq!(
-            keys,
-            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
-        );
+        assert_eq!(keys, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
     }
 
     #[test]
@@ -1592,7 +1585,9 @@ mod tests {
         let (b2, d2) = make_page(&[b"k"]);
         store.commit(&[(0, b1, d1)], &[], false).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
-        store.commit(&[(0, b2, d2)], &[(0, b"k".to_vec())], false).unwrap();
+        store
+            .commit(&[(0, b2, d2)], &[(0, b"k".to_vec())], false)
+            .unwrap();
 
         // max_age=0: only the latest root is kept, old root's blobs become orphan
         let dry = store.gc_full_with_age(true, 0, 0).unwrap();
@@ -1631,13 +1626,24 @@ mod tests {
         }
 
         let roots_before = store.blobs.list_roots().unwrap();
-        assert!(roots_before.len() > 3, "expected more than 3 roots before GC");
+        assert!(
+            roots_before.len() > 3,
+            "expected more than 3 roots before GC"
+        );
 
         let result = store.gc_full_with_age(false, 365 * 24 * 3600, 3).unwrap();
-        assert_eq!(result.roots_removed, roots_before.len() - 3, "should keep 3 newest roots");
+        assert_eq!(
+            result.roots_removed,
+            roots_before.len() - 3,
+            "should keep 3 newest roots"
+        );
 
         let roots_after = store.blobs.list_roots().unwrap();
-        assert_eq!(roots_after.len(), 3, "expected 3 roots after count-based GC");
+        assert_eq!(
+            roots_after.len(),
+            3,
+            "expected 3 roots after count-based GC"
+        );
 
         for i in 0..5u8 {
             let key = format!("k{i}");
@@ -1717,7 +1723,11 @@ mod tests {
 
         let inner = store.inner.read().unwrap();
         let tree = &inner.trees[0];
-        assert!(tree.height >= 1, "expected height >= 1 after inserts, got {}", tree.height);
+        assert!(
+            tree.height >= 1,
+            "expected height >= 1 after inserts, got {}",
+            tree.height
+        );
 
         drop(inner);
 

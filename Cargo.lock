@@ -420,14 +420,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynspire-commons"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "serde",
-]
-
-[[package]]
 name = "eavt-cli"
 version = "0.1.0"
 dependencies = [
@@ -446,9 +438,10 @@ name = "eavt-server"
 version = "0.1.0"
 dependencies = [
  "clap",
- "dynspire-commons",
  "prost",
  "spier-eavt-query",
+ "spier-storage-traits",
+ "spier-value",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -1657,7 +1650,7 @@ dependencies = [
 name = "spier-blobstore-file"
 version = "0.1.0"
 dependencies = [
- "dynspire-commons",
+ "spier-storage-traits",
  "uuid",
 ]
 
@@ -1665,7 +1658,7 @@ dependencies = [
 name = "spier-blobstore-memory"
 version = "0.1.0"
 dependencies = [
- "dynspire-commons",
+ "spier-storage-traits",
  "uuid",
 ]
 
@@ -1673,8 +1666,8 @@ dependencies = [
 name = "spier-blobstore-s3"
 version = "0.1.0"
 dependencies = [
- "dynspire-commons",
  "rusty-s3",
+ "spier-storage-traits",
  "ureq",
  "url",
  "uuid",
@@ -1684,15 +1677,20 @@ dependencies = [
 name = "spier-compiler"
 version = "0.1.0"
 dependencies = [
- "dynspire-commons",
+ "spier-datalog",
  "spier-planner",
+ "spier-query-ir",
+ "spier-sql-parse",
+ "spier-value",
 ]
 
 [[package]]
 name = "spier-datalog"
 version = "0.1.0"
 dependencies = [
- "dynspire-commons",
+ "serde",
+ "spier-sql-parse",
+ "spier-value",
 ]
 
 [[package]]
@@ -1700,33 +1698,38 @@ name = "spier-eavt-query"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "dynspire-commons",
  "spier-compiler",
+ "spier-datalog",
+ "spier-query-ir",
  "spier-sql-frontend",
+ "spier-sql-parse",
+ "spier-storage-traits",
  "spier-transactor",
+ "spier-value",
 ]
 
 [[package]]
 name = "spier-eavt-query-py"
 version = "0.1.0"
 dependencies = [
- "dynspire-commons",
  "pyo3",
  "spier-eavt-query",
+ "spier-query-ir",
+ "spier-transactor",
+ "spier-value",
 ]
 
 [[package]]
 name = "spier-journal-file"
 version = "0.1.0"
 dependencies = [
- "dynspire-commons",
+ "spier-storage-traits",
 ]
 
 [[package]]
 name = "spier-kvstore"
 version = "0.1.0"
 dependencies = [
- "dynspire-commons",
  "libc",
  "lru",
  "spier-blobstore-file",
@@ -1734,6 +1737,7 @@ dependencies = [
  "spier-blobstore-s3",
  "spier-journal-file",
  "spier-memtable",
+ "spier-storage-traits",
  "tempfile",
  "uuid",
  "zstd",
@@ -1744,21 +1748,29 @@ name = "spier-memtable"
 version = "0.1.0"
 dependencies = [
  "crossbeam-skiplist",
- "dynspire-commons",
+ "spier-storage-traits",
 ]
 
 [[package]]
 name = "spier-planner"
 version = "0.1.0"
 dependencies = [
- "dynspire-commons",
+ "spier-datalog",
+ "spier-query-ir",
+ "spier-value",
+]
+
+[[package]]
+name = "spier-query-ir"
+version = "0.1.0"
+dependencies = [
+ "spier-value",
 ]
 
 [[package]]
 name = "spier-sql-frontend"
 version = "0.1.0"
 dependencies = [
- "dynspire-commons",
  "spier-datalog",
  "spier-sql-parse",
 ]
@@ -1767,7 +1779,7 @@ dependencies = [
 name = "spier-sql-parse"
 version = "0.1.0"
 dependencies = [
- "dynspire-commons",
+ "serde",
  "serde_json",
 ]
 
@@ -1775,28 +1787,39 @@ dependencies = [
 name = "spier-sql-parse-py"
 version = "0.1.0"
 dependencies = [
- "dynspire-commons",
  "pyo3",
- "serde_json",
  "spier-sql-parse",
 ]
+
+[[package]]
+name = "spier-storage-traits"
+version = "0.1.0"
 
 [[package]]
 name = "spier-transactor"
 version = "0.1.0"
 dependencies = [
- "dynspire-commons",
  "spier-kvstore",
+ "spier-storage-traits",
+ "spier-value",
 ]
 
 [[package]]
 name = "spier-transactor-py"
 version = "0.1.0"
 dependencies = [
- "dynspire-commons",
  "pyo3",
  "spier-journal-file",
+ "spier-storage-traits",
  "spier-transactor",
+ "spier-value",
+]
+
+[[package]]
+name = "spier-value"
+version = "0.1.0"
+dependencies = [
+ "chrono",
 ]
 
 [[package]]

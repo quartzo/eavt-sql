@@ -1,12 +1,36 @@
 mod compiler;
 mod datalog;
 
-use dynspire_commons::compiler::{CompileResultSt, CompilerEngine};
-use dynspire_commons::datalog::{DatalogNumIRSt};
-use dynspire_commons::planner::{PlannerEngine, QueryPlanSt};
-use dynspire_commons::sql_parse::{RustStmt, RustStmtSt};
-use dynspire_commons::transactor::query_codec::decode_values;
-use spier_planner::Planner;
+pub use spier_datalog::CompileStats;
+
+use spier_datalog::DatalogNumIRSt;
+use spier_planner::{Planner, PlannerEngine, QueryPlanSt};
+use spier_query_ir::VMProgram;
+use spier_sql_parse::{RustStmt, RustStmtSt};
+use spier_value::query_codec::decode_values;
+
+/// Compiler output — crosses FFI as 1 boxed pointer.
+/// Carries the compiled program and plan traces (for EXPLAIN).
+#[derive(Clone)]
+pub struct CompileResultSt {
+    pub program: VMProgram,
+    pub traces: Vec<spier_planner::PlanTrace>,
+}
+
+pub trait CompilerEngine: Send + Sync {
+    fn compile_select(&self, num_ir: DatalogNumIRSt) -> Result<CompileResultSt, String>;
+    fn compile_dml_scan(
+        &self,
+        stmt: RustStmtSt,
+        num_ir: DatalogNumIRSt,
+        sql_params: &[u8],
+    ) -> Result<CompileResultSt, String>;
+    fn compile_dml_direct(
+        &self,
+        stmt: RustStmtSt,
+        sql_params: &[u8],
+    ) -> Result<CompileResultSt, String>;
+}
 
 /// Pure Rust SQL compiler. No dynspire/FFI — just implements [`CompilerEngine`].
 pub struct Compiler {
@@ -55,18 +79,29 @@ impl CompilerEngine for Compiler {
             return Err("UPDATE/DELETE requires WHERE conditions".to_string());
         }
 
-        let find_vars: Vec<String> = plan.find_vars.iter().map(|fv| match fv {
-            dynspire_commons::datalog::FindVar::Var(name) | dynspire_commons::datalog::FindVar::Const(name, _) => name.clone(),
-        }).collect();
+        let find_vars: Vec<String> = plan
+            .find_vars
+            .iter()
+            .map(|fv| match fv {
+                spier_datalog::FindVar::Var(name) | spier_datalog::FindVar::Const(name, _) => {
+                    name.clone()
+                }
+            })
+            .collect();
 
         match stmt.stmt {
             RustStmt::Update(ref update_stmt) => {
-                let first_alias = update_stmt.clauses.first()
+                let first_alias = update_stmt
+                    .clauses
+                    .first()
                     .map(|c| c.alias.clone())
                     .unwrap_or_else(|| "D1".to_string());
-                let all_set_values: Vec<(String, Vec<dynspire_commons::sql_parse::RustInsertValue>)> = update_stmt.clauses.iter()
-                    .map(|c| (c.alias.clone(), c.values.clone()))
-                    .collect();
+                let all_set_values: Vec<(String, Vec<spier_sql_parse::RustInsertValue>)> =
+                    update_stmt
+                        .clauses
+                        .iter()
+                        .map(|c| (c.alias.clone(), c.values.clone()))
+                        .collect();
                 let target_evar = format!("_e_{}", first_alias.to_lowercase());
 
                 let program = compiler::compile_triejoin_update(
@@ -82,7 +117,9 @@ impl CompilerEngine for Compiler {
                 })
             }
             RustStmt::Delete(ref delete_stmt) => {
-                let first_alias = delete_stmt.conditions.first()
+                let first_alias = delete_stmt
+                    .conditions
+                    .first()
                     .map(|c| c.left.alias.clone())
                     .unwrap_or_else(|| "D1".to_string());
                 let target_evar = format!("_e_{}", first_alias.to_lowercase());
@@ -112,22 +149,21 @@ impl CompilerEngine for Compiler {
     ) -> Result<CompileResultSt, String> {
         let params = decode_values(sql_params)?;
         let program = match &stmt.stmt {
-            RustStmt::Upsert(upsert_stmt) => {
-                compiler::compile_upsert(upsert_stmt, &params)?
-            }
-            RustStmt::Attribute(attr_stmt) => {
-                compiler::compile_rust_attribute(attr_stmt)
-            }
-            RustStmt::Partition(part_stmt) => {
-                compiler::compile_rust_partition(part_stmt)
-            }
+            RustStmt::Upsert(upsert_stmt) => compiler::compile_upsert(upsert_stmt, &params)?,
+            RustStmt::Attribute(attr_stmt) => compiler::compile_rust_attribute(attr_stmt),
+            RustStmt::Partition(part_stmt) => compiler::compile_rust_partition(part_stmt),
             RustStmt::Delete(delete_stmt) => {
                 // Direct DELETE (with eid condition, no scan needed)
                 let pairs = compiler::resolve_delete_pairs(delete_stmt, &params)?;
                 let entity_val = compiler::resolve_delete_entity(delete_stmt, &params)?;
                 compiler::compile_rust_delete_direct(&entity_val, &pairs)?
             }
-            _ => return Err("compile_dml_direct only supports UPSERT/Attribute/Partition/Delete-direct".to_string()),
+            _ => {
+                return Err(
+                    "compile_dml_direct only supports UPSERT/Attribute/Partition/Delete-direct"
+                        .to_string(),
+                )
+            }
         };
         Ok(CompileResultSt {
             program,

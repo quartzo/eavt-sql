@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
+use spier_sql_parse::SqlParseEngine;
 use spier_sql_parse::SqlParser;
-use dynspire_commons::sql_parse::SqlParseEngine;
 
 /// PyO3 bindings for spier-sql-parse.
 #[pyclass(name = "SqlParser")]
@@ -12,12 +12,15 @@ pub struct SqlParserPy {
 impl SqlParserPy {
     #[new]
     fn new() -> Self {
-        Self { inner: SqlParser::new() }
+        Self {
+            inner: SqlParser::new(),
+        }
     }
 
     /// Parse SQL and return the raw JSON AST string.
     fn parse_json(&self, sql: &str) -> PyResult<String> {
-        self.inner.parse_json(sql)
+        self.inner
+            .parse_json(sql)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
     }
 

@@ -11,4 +11,6 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.25", features = ["extension-module"] }
 spier-eavt-query = { path = "../spier-eavt-query" }
-dynspire-commons = { path = "../dynspire-commons" }
+spier-query-ir = { path = "../spier-query-ir" }
+spier-transactor = { path = "../spier-transactor" }
+spier-value = { path = "../spier-value" }

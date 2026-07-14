@@ -5,4 +5,4 @@ edition = "2021"
 description = "File-backed Journal backend"
 
 [dependencies]
-dynspire-commons = { path = "../dynspire-commons" }
+spier-storage-traits = { path = "../spier-storage-traits" }

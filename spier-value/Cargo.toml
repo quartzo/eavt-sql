@@ -1,0 +1,8 @@
+[package]
+name = "spier-value"
+version = "0.1.0"
+edition = "2021"
+description = "Core Value type and query codecs for the EAVT stack"
+
+[dependencies]
+chrono = "0.4"

@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
-use crate::resolver::{self, Resolver};
 use crate::keys::{self, EncodeMode, RawDatom};
-use dynspire_commons::kvstore::KVStoreEngine;
-use dynspire_commons::value::{self, Value};
+use crate::resolver::{self, Resolver};
+use spier_storage_traits::KVStoreEngine;
+use spier_value::{self, Value};
 
 fn unpack_keys(buf: &[u8]) -> Vec<Vec<u8>> {
     let mut keys = Vec::new();
@@ -56,12 +56,12 @@ fn type_id_to_name(vt: u32) -> &'static str {
 
 fn tag_to_type_name(tag: i8) -> &'static str {
     match tag {
-        value::TAG_STR => "STRING",
-        value::TAG_INT64 => "LONG",
-        value::TAG_BOOL => "BOOLEAN",
-        value::TAG_FLOAT64 => "FLOAT",
+        spier_value::TAG_STR => "STRING",
+        spier_value::TAG_INT64 => "LONG",
+        spier_value::TAG_BOOL => "BOOLEAN",
+        spier_value::TAG_FLOAT64 => "FLOAT",
         -1 => "INSTANT",
-        value::TAG_BYTES => "BYTES",
+        spier_value::TAG_BYTES => "BYTES",
         _ => "UNKNOWN",
     }
 }
@@ -84,16 +84,16 @@ fn coerce_value(a_id: u32, v: &Value, resolver: &Resolver) -> Value {
     };
     match expected_vt {
         resolver::DB_TYPE_BOOLEAN => {
-            if v.tag() == value::TAG_INT64 {
+            if v.tag() == spier_value::TAG_INT64 {
                 return Value::Bool(v.raw_int() as u8);
             }
         }
         resolver::DB_TYPE_INSTANT => {
-            if v.tag() == value::TAG_INT64 {
+            if v.tag() == spier_value::TAG_INT64 {
                 return Value::Timestamp(v.raw_int());
             }
             if let Value::Text(s) = v {
-                if let Ok(us) = value::parse_instant_to_us(s.as_str()) {
+                if let Ok(us) = spier_value::parse_instant_to_us(s.as_str()) {
                     return Value::Timestamp(us);
                 }
             }
@@ -110,15 +110,15 @@ fn validate_value_type(a_id: u32, v: &Value, resolver: &Resolver) -> Result<(), 
     };
     let tag = v.tag();
     let ok = match expected_vt {
-        resolver::DB_TYPE_STRING => tag == value::TAG_STR,
-        resolver::DB_TYPE_LONG => tag == value::TAG_INT64,
-        resolver::DB_TYPE_REF => tag == value::TAG_INT64,
-        resolver::DB_TYPE_BOOLEAN => tag == value::TAG_BOOL,
-        resolver::DB_TYPE_FLOAT => tag == value::TAG_FLOAT64,
+        resolver::DB_TYPE_STRING => tag == spier_value::TAG_STR,
+        resolver::DB_TYPE_LONG => tag == spier_value::TAG_INT64,
+        resolver::DB_TYPE_REF => tag == spier_value::TAG_INT64,
+        resolver::DB_TYPE_BOOLEAN => tag == spier_value::TAG_BOOL,
+        resolver::DB_TYPE_FLOAT => tag == spier_value::TAG_FLOAT64,
         resolver::DB_TYPE_INSTANT => tag == -1,
-        resolver::DB_TYPE_BYTES => tag == value::TAG_BYTES,
-        resolver::DB_TYPE_BLOB => tag == value::TAG_BYTES,
-        resolver::DB_TYPE_KEYWORD => tag == value::TAG_STR,
+        resolver::DB_TYPE_BYTES => tag == spier_value::TAG_BYTES,
+        resolver::DB_TYPE_BLOB => tag == spier_value::TAG_BYTES,
+        resolver::DB_TYPE_KEYWORD => tag == spier_value::TAG_STR,
         _ => true,
     };
     if !ok {
@@ -230,8 +230,10 @@ impl EavtEngine {
                     continue;
                 }
                 if let Value::Int64(p) = &raw.v {
-                    let part_name =
-                        ident_map.get(&raw.e).cloned().unwrap_or_else(|| raw.e.to_string());
+                    let part_name = ident_map
+                        .get(&raw.e)
+                        .cloned()
+                        .unwrap_or_else(|| raw.e.to_string());
                     resolver.register_partition(part_name, *p as u64);
                 }
             }
@@ -268,20 +270,36 @@ impl EavtEngine {
         let mut per_cf: [Vec<u8>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
         let mut pos = 0;
         while pos + 4 <= packed.len() {
-            let klen = u32::from_be_bytes([packed[pos], packed[pos + 1], packed[pos + 2], packed[pos + 3]]) as usize;
+            let klen = u32::from_be_bytes([
+                packed[pos],
+                packed[pos + 1],
+                packed[pos + 2],
+                packed[pos + 3],
+            ]) as usize;
             pos += 4;
-            if pos + klen + 4 > packed.len() { break; }
+            if pos + klen + 4 > packed.len() {
+                break;
+            }
             let eavt_key = &packed[pos..pos + klen];
             pos += klen;
-            let vlen = u32::from_be_bytes([packed[pos], packed[pos + 1], packed[pos + 2], packed[pos + 3]]) as usize;
+            let vlen = u32::from_be_bytes([
+                packed[pos],
+                packed[pos + 1],
+                packed[pos + 2],
+                packed[pos + 3],
+            ]) as usize;
             pos += 4;
-            if pos + vlen > packed.len() { break; }
+            if pos + vlen > packed.len() {
+                break;
+            }
             let meta = &packed[pos..pos + vlen];
             pos += vlen;
 
             let is_ref = !meta.is_empty() && meta[0] & 1 != 0;
             let key_len = eavt_key.len();
-            if key_len < 20 { continue; }
+            if key_len < 20 {
+                continue;
+            }
             let suffix = &eavt_key[key_len - 8..];
             let e = &eavt_key[0..8];
             let a = &eavt_key[8..12];
@@ -459,9 +477,9 @@ impl EavtEngine {
         as_of_us: Option<u64>,
     ) -> Result<(), String> {
         let mut resolver = self.resolver.lock().unwrap();
-        let a_id = resolver.lookup_attr(attr).ok_or_else(|| {
-            format!("undeclared attribute '{}'", attr)
-        })?;
+        let a_id = resolver
+            .lookup_attr(attr)
+            .ok_or_else(|| format!("undeclared attribute '{}'", attr))?;
         if !resolver.is_declared(a_id) {
             return Err(format!("attribute '{}' is not declared", attr));
         }
@@ -478,18 +496,28 @@ impl EavtEngine {
             let mode = keys::encode_mode_for(resolver.value_type_for(a_id));
             let entries = keys::build_entries(e_id, a_id, &v, t, false, mode);
             self.write_entries(entries, mode == EncodeMode::Ref);
-        } else if let Some(batch) = self.build_retract_entries(e_id, a_id, &v, t, false, as_of_us, &resolver) {
+        } else if let Some(batch) =
+            self.build_retract_entries(e_id, a_id, &v, t, false, as_of_us, &resolver)
+        {
             let is_ref = batch.iter().any(|(cf_id, _, _)| *cf_id == 3);
-            self.write_entries(keys::IndexEntries {
-                entries: batch.into_iter()
-                    .map(|(cf_id, k, val)| {
-                        let cf_name = match cf_id {
-                            0 => "eavt", 1 => "aevt", 2 => "avet", 3 => "vaet", _ => "eavt"
-                        };
-                        (cf_name, k, val)
-                    })
-                    .collect(),
-            }, is_ref);
+            self.write_entries(
+                keys::IndexEntries {
+                    entries: batch
+                        .into_iter()
+                        .map(|(cf_id, k, val)| {
+                            let cf_name = match cf_id {
+                                0 => "eavt",
+                                1 => "aevt",
+                                2 => "avet",
+                                3 => "vaet",
+                                _ => "eavt",
+                            };
+                            (cf_name, k, val)
+                        })
+                        .collect(),
+                },
+                is_ref,
+            );
         }
         Ok(())
     }
@@ -515,18 +543,28 @@ impl EavtEngine {
             let mode = keys::encode_mode_for(resolver.value_type_for(a_id));
             let entries = keys::build_entries(e_id, a_id, &v, t, true, mode);
             self.write_entries(entries, mode == EncodeMode::Ref);
-        } else if let Some(batch) = self.build_retract_entries(e_id, a_id, &v, t, true, as_of_us, &resolver) {
+        } else if let Some(batch) =
+            self.build_retract_entries(e_id, a_id, &v, t, true, as_of_us, &resolver)
+        {
             let is_ref = batch.iter().any(|(cf_id, _, _)| *cf_id == 3);
-            self.write_entries(keys::IndexEntries {
-                entries: batch.into_iter()
-                    .map(|(cf_id, k, val)| {
-                        let cf_name = match cf_id {
-                            0 => "eavt", 1 => "aevt", 2 => "avet", 3 => "vaet", _ => "eavt"
-                        };
-                        (cf_name, k, val)
-                    })
-                    .collect(),
-            }, is_ref);
+            self.write_entries(
+                keys::IndexEntries {
+                    entries: batch
+                        .into_iter()
+                        .map(|(cf_id, k, val)| {
+                            let cf_name = match cf_id {
+                                0 => "eavt",
+                                1 => "aevt",
+                                2 => "avet",
+                                3 => "vaet",
+                                _ => "eavt",
+                            };
+                            (cf_name, k, val)
+                        })
+                        .collect(),
+                },
+                is_ref,
+            );
         }
     }
 
@@ -540,7 +578,8 @@ impl EavtEngine {
         current_t: Option<u64>,
     ) -> u32 {
         let mut resolver = self.resolver.lock().unwrap();
-        let (aid, is_new) = resolver.declare_attr(name, value_type, many)
+        let (aid, is_new) = resolver
+            .declare_attr(name, value_type, many)
             .expect("declare_attr failed");
         if is_new {
             let t = current_t_or_alloc(current_t, &mut resolver);
@@ -695,11 +734,23 @@ impl EavtEngine {
         let t = current_t_or_alloc(current_t, &mut resolver);
         let ident_v = Value::Text(name.to_string().into());
         let part_id_v = Value::Int64(p as i64);
-        let entries =
-            keys::build_entries(entity_id, resolver::DB_IDENT_AID, &ident_v, t, false, EncodeMode::Variable);
+        let entries = keys::build_entries(
+            entity_id,
+            resolver::DB_IDENT_AID,
+            &ident_v,
+            t,
+            false,
+            EncodeMode::Variable,
+        );
         self.put_schema_entries(entries);
-        let entries =
-            keys::build_entries(entity_id, resolver::DB_PART_ID_AID, &part_id_v, t, false, EncodeMode::Fixed);
+        let entries = keys::build_entries(
+            entity_id,
+            resolver::DB_PART_ID_AID,
+            &part_id_v,
+            t,
+            false,
+            EncodeMode::Fixed,
+        );
         self.put_schema_entries(entries);
         Ok(p)
     }
@@ -710,7 +761,14 @@ impl EavtEngine {
         let tx_eid = resolver::make_entity_id(resolver::PART_TX, t);
         let now_us = now_micros();
         let instant_v = Value::Timestamp(now_us as i64);
-        let entries = keys::build_entries(tx_eid, resolver::DB_TX_INSTANT_AID, &instant_v, t, false, EncodeMode::Fixed);
+        let entries = keys::build_entries(
+            tx_eid,
+            resolver::DB_TX_INSTANT_AID,
+            &instant_v,
+            t,
+            false,
+            EncodeMode::Fixed,
+        );
         self.put_schema_entries(entries);
         t
     }
@@ -746,7 +804,10 @@ impl EavtEngine {
     }
 
     pub fn allocate_in_partition_locked(&self, partition_id: u64) -> u64 {
-        self.resolver.lock().unwrap().allocate_in_partition(partition_id)
+        self.resolver
+            .lock()
+            .unwrap()
+            .allocate_in_partition(partition_id)
     }
 
     pub fn allocate_t_locked(&self) -> u64 {
@@ -769,7 +830,12 @@ impl EavtEngine {
         }
     }
 
-    pub fn lookup_entity_locked(&self, attr_name: &str, value: &Value, as_of_us: Option<u64>) -> Option<u64> {
+    pub fn lookup_entity_locked(
+        &self,
+        attr_name: &str,
+        value: &Value,
+        as_of_us: Option<u64>,
+    ) -> Option<u64> {
         let resolver = self.resolver.lock().unwrap();
         let aid = resolver.lookup_attr(attr_name)?;
         let mode = keys::encode_mode_for(resolver.value_type_for(aid));

@@ -12,40 +12,47 @@
 ## Project Structure
 
 ```
-spier-blobstore-{memory,file,s3}/  # BlobStore backends (pure Rust rlibs)
-spier-journal-file/                # JournalEngine backend (pure Rust rlib)
+spier-storage-traits/              # Storage-layer trait abstractions
+  blobstore.rs                     # BlobStoreEngine
+  journal.rs                       # JournalEngine
+  memtable.rs                      # MemTableEngine + MemTableSnapshot
+  kvstore.rs                       # KVStoreEngine
+  cursor.rs                        # Cursor + CursorHandle
+  types.rs                         # CfStats, DbStats, GcFullResult
+spier-value/                       # Core Value type + query codecs
+  lib.rs                           # Value, ValueType, tag constants
+  query_codec.rs                   # encode_values / decode_values / decode_rows
+spier-query-ir/                    # VM instruction formats
+  opcodes.rs                       # OpCode, Instruction, InstructionData, VMProgram
+  spec_kind.rs                     # SpecKind
+spier-blobstore-{memory,file,s3}/  # BlobStore backends (implement BlobStoreEngine)
+spier-journal-file/                # JournalEngine backend
 spier-memtable/                    # MemTableEngine (crossbeam SkipMap per CF)
 spier-kvstore/src/                 # KVStoreEngine implementation
 spier-transactor/src/              # TransactorEngine implementation (EAVT + resolver)
   eavt.rs                          # EavtEngine { kv: Box<dyn KVStoreEngine>, resolver }
   resolver.rs                      # Schema cache
+  resolver_consts.rs               # Bootstrap / partition constants
   keys.rs                          # EAVT key format helpers
-  lib.rs                           # TransactorState::open(config) -> impl TransactorEngine
-spier-eavt-query/src/              # QueryEngine implementation (SQL compiler + VM)
+  lib.rs                           # TransactorEngine trait + TransactorState::open
+spier-sql-parse/src/               # SQL parser library + SqlParseEngine trait + AST
+spier-datalog/src/                 # DatalogEngine trait + DatalogIR + resolve_ir
+  ast.rs                           # Datalog IR AST types
+  pattern.rs                       # Pattern + INDEX_ORDERS + index_order
+  resolve.rs                       # resolve_ir / compute_plan_stats
+  stats.rs                         # CompileStats trait
+spier-planner/src/                 # PlannerEngine trait + QueryPlanSt
+spier-compiler/src/                # CompilerEngine trait + CompileResultSt
+spier-sql-frontend/src/            # SqlFrontendEngine trait
+spier-eavt-query/src/              # QueryEngine + VMResultStream + SessionHandle
   engine/                          # vm, scanner, triejoin, opcodes, query_engine_inner, session
   lib.rs                           # QueryState::open(config) -> impl QueryEngine
-spier-sql-frontend/src/            # Stage 1: SQL → datalog IR
-spier-compiler/src/                # Stage 2: plan + codegen
-spier-sql-parse/src/               # SQL parser library
 spier-sql-parse-py/                # PyO3 bindings for spier-sql-parse
 spier-transactor-py/               # PyO3 bindings for spier-transactor
 spier-eavt-query-py/               # PyO3 bindings for spier-eavt-query
-spier-datalog/                     # Datalog IR library
-spier-planner/                     # Query planner library
-dynspire-commons/src/              # Hand-written shared traits and types
-  lib.rs                           # BlobStoreEngine, JournalEngine, MemTableEngine,
-                                   # KVStoreEngine, TransactorEngine, QueryEngine, etc.
-  transactor/                      # cursor, keys, query_codec, resolver_consts, types
-  query_ir/                        # OpCode, Instruction, VMProgram, to_json
-  compiler/                        # CompilerEngine trait, CompileResultSt, CompileStats
-  datalog/                         # AST types + resolve_ir
-  sql_frontend/                    # SqlFrontendEngine trait
-  sql_parse/                       # AST types
-  value.rs                         # Value type + tag constants
 eavt-cli/src/                      # REPL client (gRPC binary: eavt-repl)
 eavt-server/                       # gRPC server (tonic, binary: eavt-server)
-dynspire-libs/src/                 # Shared constants (CF names, flush threshold)
-src/eavt_sql/                      # Legacy Python package (ctypes FFI, to be replaced by PyO3 per layer)
+src/eavt_sql/                      # Legacy Python package (ctypes FFI replaced by PyO3 per layer)
 tests/                             # Python tests (flat)
 ```
 
@@ -67,12 +74,13 @@ All backends implement the hand-written `BlobStoreEngine` trait. Journal impleme
 
 ### CompileStats Boundary
 
-`dynspire-commons::compiler::CompileStats` is the small schema/cardinality abstraction used
-by `dynspire-commons::datalog::resolve_ir`. It is implemented for `dyn TransactorEngine` (in
-`dynspire-commons/src/transactor/stats.rs`) so the query engine can pass a transactor, but the
-datalog and planner crates must not depend on `TransactorEngine` directly. Isolated planner
-tests use a fixed `CompileStats` mock in `spier-planner/src/lib.rs` to exercise index choice
-without touching storage or the transactor.
+`spier_datalog::CompileStats` is the small schema/cardinality abstraction used by
+`spier_datalog::resolve_ir` and `spier_datalog::compute_plan_stats`. The query engine
+implements it via the local `TxStats` adapter (`spier-eavt-query/src/lib.rs`) over
+`dyn TransactorEngine`, so `spier-datalog` and `spier-planner` never depend on storage or
+transactor crates directly. Isolated planner tests use a fixed `CompileStats` mock in
+`spier-planner/src/lib.rs` to exercise index choice without touching storage or the
+transactor.
 
 ### Storage Layers
 
@@ -91,10 +99,13 @@ BlobStore (Memory / File / S3)
 
 ### Trait-Based Boundaries
 
-`dynspire-commons` defines the shared traits that used to be generated from `.dspi` files.
-They are now plain Rust traits (`KVStoreEngine`, `TransactorEngine`, `QueryEngine`,
-`BlobStoreEngine`, `JournalEngine`, `MemTableEngine`, `SqlParseEngine`, `SqlFrontendEngine`,
-`DatalogEngine`, `PlannerEngine`, `CompilerEngine`).
+Traits now live in their natural crates: storage abstractions are in
+`spier-storage-traits`; `TransactorEngine` is in `spier-transactor`; `QueryEngine` is in
+`spier-eavt-query`; `SqlParseEngine` is in `spier-sql-parse`; `DatalogEngine` is in
+`spier-datalog`; `PlannerEngine` is in `spier-planner`; `CompilerEngine` is in
+`spier-compiler`; `SqlFrontendEngine` is in `spier-sql-frontend`. The only shared
+abstraction crate is `spier-storage-traits`, because BlobStore, Journal, MemTable and
+KVStore each have multiple implementations.
 
 Crates depend on each other directly through `Cargo.toml` paths. There is no runtime
 `dlopen`, no C ABI slot buffer, and no code generation step.

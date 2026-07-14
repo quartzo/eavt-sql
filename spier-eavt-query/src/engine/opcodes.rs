@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-pub use dynspire_commons::query_ir::{InstructionData, OpCode, ProgramHandle, VMProgram};
+pub use spier_query_ir::{InstructionData, OpCode, VMProgram};
 
 static DEBUG_TIMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -93,11 +93,23 @@ impl TimingStats {
                 continue;
             }
             let ms = tc.nanos as f64 / 1_000_000.0;
-            let pct = if total_ns > 0 { tc.nanos as f64 / total_ns as f64 * 100.0 } else { 0.0 };
-            let avg_us = if tc.count > 0 { tc.nanos as f64 / tc.count as f64 / 1_000.0 } else { 0.0 };
+            let pct = if total_ns > 0 {
+                tc.nanos as f64 / total_ns as f64 * 100.0
+            } else {
+                0.0
+            };
+            let avg_us = if tc.count > 0 {
+                tc.nanos as f64 / tc.count as f64 / 1_000.0
+            } else {
+                0.0
+            };
             eprintln!(
                 "  {:20} {:8.3}s ({:5.1}%) {:>6} calls  avg={:.1}us",
-                name, ms / 1000.0, pct, tc.count, avg_us,
+                name,
+                ms / 1000.0,
+                pct,
+                tc.count,
+                avg_us,
             );
         }
 
@@ -125,5 +137,3 @@ impl TimingStats {
         eprintln!("  TOTAL: {:.3}s", total_s);
     }
 }
-
-

@@ -12,7 +12,7 @@ libc = "0.2"
 uuid = { version = "1", features = ["v4"] }
 zstd = "0.13"
 lru = "0.12"
-dynspire-commons = { path = "../dynspire-commons" }
+spier-storage-traits = { path = "../spier-storage-traits" }
 spier-blobstore-memory = { path = "../spier-blobstore-memory" }
 spier-blobstore-file = { path = "../spier-blobstore-file" }
 spier-blobstore-s3 = { path = "../spier-blobstore-s3" }

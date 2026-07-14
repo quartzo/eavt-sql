@@ -17,12 +17,7 @@ pub trait PageStore: Send + Sync {
     ) -> TransactorResult<(Vec<Vec<u8>>, Vec<Vec<u8>>)>;
 
     /// Approximate number of leaf pages overlapping [start, end) range.
-    fn page_count_in_range(
-        &self,
-        cf: usize,
-        start: &[u8],
-        end: &[u8],
-    ) -> TransactorResult<usize>;
+    fn page_count_in_range(&self, cf: usize, start: &[u8], end: &[u8]) -> TransactorResult<usize>;
 
     /// Total number of leaf pages in a CF.
     fn page_count(&self, cf: usize) -> TransactorResult<usize>;

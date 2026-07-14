@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
 
-use dynspire_commons::blobstore::BlobStoreEngine;
+use spier_storage_traits::blobstore::BlobStoreEngine;
 
 fn new_uuid() -> [u8; 16] {
     *uuid::Uuid::new_v4().as_bytes()
@@ -60,7 +60,11 @@ impl BlobStoreEngine for MemoryBlobStore {
     }
 
     fn put_root(&self, name: &str, data: &[u8]) -> Result<(), String> {
-        self.inner.write().unwrap().roots.insert(name.to_string(), data.to_vec());
+        self.inner
+            .write()
+            .unwrap()
+            .roots
+            .insert(name.to_string(), data.to_vec());
         Ok(())
     }
 

@@ -1,7 +1,18 @@
-use dynspire_commons::sql_parse::{RustStmtSt, SqlParseEngine};
-
+pub mod ast;
 pub mod lexer;
 pub mod parser;
+
+pub use ast::*;
+
+#[derive(Clone)]
+pub struct RustStmtSt {
+    pub stmt: RustStmt,
+}
+
+pub trait SqlParseEngine: Send + Sync {
+    fn parse(&self, sql: &str) -> Result<RustStmtSt, String>;
+    fn parse_json(&self, sql: &str) -> Result<String, String>;
+}
 
 /// Pure Rust SQL parser. No dynspire/FFI — just implements [`SqlParseEngine`].
 pub struct SqlParser;
@@ -20,7 +31,9 @@ impl Default for SqlParser {
 
 impl SqlParseEngine for SqlParser {
     fn parse(&self, sql: &str) -> Result<RustStmtSt, String> {
-        Ok(RustStmtSt { stmt: parser::parse(sql)? })
+        Ok(RustStmtSt {
+            stmt: parser::parse(sql)?,
+        })
     }
 
     fn parse_json(&self, sql: &str) -> Result<String, String> {
@@ -32,7 +45,6 @@ impl SqlParseEngine for SqlParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynspire_commons::sql_parse::RustStmt;
 
     #[test]
     fn parses_simple_select() {

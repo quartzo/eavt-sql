@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use dynspire_commons::query_engine::VMResultStream;
-use dynspire_commons::transactor::query_codec;
-use dynspire_commons::value::Value;
+use crate::VMResultStream;
+use spier_value::query_codec;
+use spier_value::Value;
 
-use crate::engine::vm::{VM, VMEngine, EngineError};
 use crate::engine::opcodes::VMProgram;
+use crate::engine::vm::{EngineError, VMEngine, VM};
 
 pub struct VMSession {
     vm: VM,

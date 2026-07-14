@@ -5,5 +5,5 @@ edition = "2021"
 description = "File-backed BlobStore backend"
 
 [dependencies]
-dynspire-commons = { path = "../dynspire-commons" }
+spier-storage-traits = { path = "../spier-storage-traits" }
 uuid = { version = "1", features = ["v4"] }

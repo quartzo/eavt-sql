@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use crossbeam_skiplist::SkipMap;
-use dynspire_commons::memtable::{MemTableEngine, MemTableSnapshot};
+use spier_storage_traits::memtable::{MemTableEngine, MemTableSnapshot};
 
 fn pack_keys(keys: &[Vec<u8>]) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -105,7 +105,8 @@ impl MemTableEngine for MemTable {
         let mut pos = 0;
         while pos + 5 <= ops.len() {
             let cf = ops[pos] as usize;
-            let klen = u32::from_be_bytes([ops[pos + 1], ops[pos + 2], ops[pos + 3], ops[pos + 4]]) as usize;
+            let klen = u32::from_be_bytes([ops[pos + 1], ops[pos + 2], ops[pos + 3], ops[pos + 4]])
+                as usize;
             if pos + 5 + klen > ops.len() {
                 break;
             }
@@ -124,11 +125,20 @@ impl MemTableEngine for MemTable {
     fn snapshot(&self) -> Result<MemTableSnapshot, String> {
         let inner = self.inner.lock().unwrap();
         let cfs: CfSnapshots = inner.cfs.iter().map(|c| c.map.clone()).collect();
-        Ok(MemTableSnapshot { data: Arc::new(cfs) })
+        Ok(MemTableSnapshot {
+            data: Arc::new(cfs),
+        })
     }
 
-    fn scan_prefix(&self, snap: MemTableSnapshot, cf: u32, prefix: &[u8]) -> Result<Vec<u8>, String> {
-        let cfs = snap.data.downcast_ref::<CfSnapshots>()
+    fn scan_prefix(
+        &self,
+        snap: MemTableSnapshot,
+        cf: u32,
+        prefix: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let cfs = snap
+            .data
+            .downcast_ref::<CfSnapshots>()
             .ok_or("invalid snapshot type")?;
         let map = match cfs.get(cf as usize) {
             Some(m) => m,
@@ -145,8 +155,15 @@ impl MemTableEngine for MemTable {
         Ok(pack_keys(&keys))
     }
 
-    fn scan_prefix_reverse(&self, snap: MemTableSnapshot, cf: u32, prefix: &[u8]) -> Result<Vec<u8>, String> {
-        let cfs = snap.data.downcast_ref::<CfSnapshots>()
+    fn scan_prefix_reverse(
+        &self,
+        snap: MemTableSnapshot,
+        cf: u32,
+        prefix: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let cfs = snap
+            .data
+            .downcast_ref::<CfSnapshots>()
             .ok_or("invalid snapshot type")?;
         let map = match cfs.get(cf as usize) {
             Some(m) => m,
@@ -165,8 +182,13 @@ impl MemTableEngine for MemTable {
     }
 
     fn contains(&self, snap: MemTableSnapshot, cf: u32, key: &[u8]) -> Result<bool, String> {
-        let cfs = snap.data.downcast_ref::<CfSnapshots>()
+        let cfs = snap
+            .data
+            .downcast_ref::<CfSnapshots>()
             .ok_or("invalid snapshot type")?;
-        Ok(cfs.get(cf as usize).map(|m| m.contains_key(key)).unwrap_or(false))
+        Ok(cfs
+            .get(cf as usize)
+            .map(|m| m.contains_key(key))
+            .unwrap_or(false))
     }
 }

@@ -68,7 +68,12 @@ pub fn deserialize_page(data: &[u8]) -> Result<Vec<Vec<u8>>, String> {
         offset = next;
         let end = match offset.checked_add(slen) {
             Some(e) if e <= data.len() => e,
-            _ => return Err(format!("truncated key: offset={offset} slen={slen} data_len={}", data.len())),
+            _ => {
+                return Err(format!(
+                    "truncated key: offset={offset} slen={slen} data_len={}",
+                    data.len()
+                ))
+            }
         };
         let plen = plen_raw.min(prev.len());
         let mut key = Vec::with_capacity(plen + slen);
@@ -135,7 +140,9 @@ mod tests {
 
     #[test]
     fn test_varint_encoding_boundaries() {
-        let cases = [0usize, 1, 127, 128, 255, 256, 16383, 16384, 65535, 65536, 1_000_000];
+        let cases = [
+            0usize, 1, 127, 128, 255, 256, 16383, 16384, 65535, 65536, 1_000_000,
+        ];
         let mut buf = Vec::new();
         for &v in &cases {
             write_varint(&mut buf, v);
@@ -199,15 +206,19 @@ mod tests {
             keys.push(key);
         }
         assert!(keys[0].len() > 70_000, "key should exceed 70KB");
-        assert!(keys.iter().map(|k| k.len()).sum::<usize>() > MAX_RAW_SIZE,
-            "total raw size should trigger page split");
+        assert!(
+            keys.iter().map(|k| k.len()).sum::<usize>() > MAX_RAW_SIZE,
+            "total raw size should trigger page split"
+        );
         let pages = build_pages(&keys);
         assert!(pages.len() > 1, "70KB keys should produce multiple pages");
         let mut all = Vec::new();
         for (_, data) in &pages {
             let decoded = deserialize_page(data).unwrap();
-            assert!(decoded.iter().all(|k| k.len() > 70_000),
-                "every decoded key should exceed 70KB");
+            assert!(
+                decoded.iter().all(|k| k.len() > 70_000),
+                "every decoded key should exceed 70KB"
+            );
             all.extend(decoded);
         }
         assert_eq!(all, keys);
@@ -235,7 +246,11 @@ mod tests {
         let total_raw: usize = keys.iter().map(|k| k.len()).sum();
         assert!(total_raw > MAX_RAW_SIZE, "need more keys to trigger split");
         let pages = build_pages(&keys);
-        assert!(pages.len() > 1, "expected split but got {} pages", pages.len());
+        assert!(
+            pages.len() > 1,
+            "expected split but got {} pages",
+            pages.len()
+        );
         let mut all = Vec::new();
         for (_, data) in &pages {
             all.extend(deserialize_page(data).unwrap());
@@ -243,7 +258,7 @@ mod tests {
         assert_eq!(all, keys);
         for (i, (_, data)) in pages.iter().enumerate() {
             let deserialized = deserialize_page(data).unwrap();
-            let expected = &keys[keys.len() * i / pages.len() .. keys.len() * (i + 1) / pages.len()];
+            let expected = &keys[keys.len() * i / pages.len()..keys.len() * (i + 1) / pages.len()];
             assert_eq!(deserialized.last().unwrap(), expected.last().unwrap());
         }
     }

@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use dynspire_commons::journal::JournalEngine;
+use spier_storage_traits::journal::JournalEngine;
 
 /// Pure Rust file-backed journal. No dynspire/FFI — just implements [`JournalEngine`].
 pub struct JournalFile {
@@ -13,7 +13,9 @@ pub struct JournalFile {
 
 impl JournalFile {
     pub fn new(config: &HashMap<String, String>) -> Result<Self, String> {
-        let base = config.get("path").map(|p| PathBuf::from(format!("{p}/journal")));
+        let base = config
+            .get("path")
+            .map(|p| PathBuf::from(format!("{p}/journal")));
         if let Some(ref path) = base {
             fs::create_dir_all(path).map_err(|e| e.to_string())?;
         }
@@ -23,7 +25,11 @@ impl JournalFile {
     }
 
     fn base(&self) -> Result<PathBuf, String> {
-        self.base.lock().unwrap().clone().ok_or_else(|| "no base path configured".into())
+        self.base
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "no base path configured".into())
     }
 }
 
@@ -54,14 +60,16 @@ impl JournalEngine for JournalFile {
         let mut out = Vec::new();
         let mut off = 0usize;
         while off + 8 <= data.len() {
-            let klen = u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]) as usize;
+            let klen = u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
+                as usize;
             off += 4;
             if off + klen + 4 > data.len() {
                 break;
             }
             let jkey = &data[off..off + klen];
             off += klen;
-            let vlen = u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]) as usize;
+            let vlen = u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
+                as usize;
             off += 4;
             if off + vlen > data.len() {
                 break;

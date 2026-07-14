@@ -1,0 +1,8 @@
+[package]
+name = "spier-query-ir"
+version = "0.1.0"
+edition = "2021"
+description = "VM opcodes, instruction formats, and program handles"
+
+[dependencies]
+spier-value = { path = "../spier-value" }

@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
+use spier_value::Value;
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub enum BoundValue {
     Int(i64),
     Float(f64),
@@ -20,7 +21,9 @@ impl std::fmt::Display for BoundValue {
             BoundValue::Float(fl) => write!(f, "{}", fl),
             BoundValue::Str(s) => write!(f, "\"{}\"", s),
             BoundValue::Attr(s) => write!(f, "Attr({})", s),
-            BoundValue::ResolvedAttr(id, name, is_ref) => write!(f, "Attr({}, id={}, ref={})", name, id, is_ref),
+            BoundValue::ResolvedAttr(id, name, is_ref) => {
+                write!(f, "Attr({}, id={}, ref={})", name, id, is_ref)
+            }
             BoundValue::Var(s) => write!(f, "?{}", s),
             BoundValue::Missing(_) => write!(f, "_"),
             BoundValue::Param(n) => write!(f, "%{}", n),
@@ -29,8 +32,7 @@ impl std::fmt::Display for BoundValue {
 }
 
 impl BoundValue {
-    pub fn to_value(&self) -> Option<crate::value::Value> {
-        use crate::value::Value;
+    pub fn to_value(&self) -> Option<Value> {
         match self {
             BoundValue::Int(n) => Some(Value::Int64(*n)),
             BoundValue::Float(f) => Some(Value::Float64(*f)),
@@ -41,8 +43,7 @@ impl BoundValue {
     }
 }
 
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub enum DatalogSlot {
     Var(String),
     Const(BoundValue),
@@ -65,8 +66,7 @@ impl DatalogSlot {
     }
 }
 
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub enum FindVar {
     Var(String),
     Const(String, BoundValue),
@@ -81,8 +81,7 @@ impl std::fmt::Display for FindVar {
     }
 }
 
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct DatalogPattern {
     pub e: DatalogSlot,
     pub a: DatalogSlot,
@@ -93,12 +92,15 @@ pub struct DatalogPattern {
 
 impl std::fmt::Display for DatalogPattern {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "[{}, {}, {}, {}, {}]", self.e, self.a, self.v, self.t, self.added)
+        write!(
+            f,
+            "[{}, {}, {}, {}, {}]",
+            self.e, self.a, self.v, self.t, self.added
+        )
     }
 }
 
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct DatalogIR {
     pub patterns: Vec<DatalogPattern>,
     pub find_vars: Vec<FindVar>,
@@ -120,7 +122,10 @@ impl std::fmt::Display for DatalogIR {
             writeln!(f, "  Range:")?;
             for (var, branches) in &self.range_bounds {
                 for branch in branches {
-                    let conds: Vec<String> = branch.iter().map(|(op, bv)| format!("{} {}", op, bv)).collect();
+                    let conds: Vec<String> = branch
+                        .iter()
+                        .map(|(op, bv)| format!("{} {}", op, bv))
+                        .collect();
                     writeln!(f, "    {} {}", var, conds.join(" AND "))?;
                 }
             }

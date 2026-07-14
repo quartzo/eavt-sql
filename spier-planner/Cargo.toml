@@ -5,4 +5,6 @@ edition = "2021"
 description = "Query planner (Datalog IR → Query Plan, cost-based join ordering)"
 
 [dependencies]
-dynspire-commons = { path = "../dynspire-commons" }
+spier-datalog = { path = "../spier-datalog" }
+spier-query-ir = { path = "../spier-query-ir" }
+spier-value = { path = "../spier-value" }

@@ -1,4 +1,4 @@
-use crate::value::Value;
+use spier_value::Value;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SpecKind {

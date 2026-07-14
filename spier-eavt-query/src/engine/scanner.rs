@@ -1,19 +1,29 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use dynspire_commons::transactor::keys::{decode_suffix, decode_float64, decode_int64, decode_fixed, decode_variable, decode_variable_unordered, encode_fixed, encode_variable, encode_variable_unordered};
-use dynspire_commons::transactor::cursor::Cursor;
-use dynspire_commons::transactor::resolver_consts::{DB_TYPE_BOOLEAN, DB_TYPE_BYTES, DB_TYPE_BLOB, DB_TYPE_FLOAT, DB_TYPE_INSTANT, DB_TYPE_REF, DB_TYPE_STRING};
-use dynspire_commons::value::{Value, TAG_BYTES, TAG_INT64, TAG_STR};
+use spier_storage_traits::Cursor;
+use spier_transactor::keys::{
+    decode_fixed, decode_float64, decode_int64, decode_suffix, decode_variable,
+    decode_variable_unordered, encode_fixed, encode_variable, encode_variable_unordered,
+};
+use spier_transactor::resolver_consts::{
+    DB_TYPE_BLOB, DB_TYPE_BOOLEAN, DB_TYPE_BYTES, DB_TYPE_FLOAT, DB_TYPE_INSTANT, DB_TYPE_REF,
+    DB_TYPE_STRING,
+};
+use spier_value::{Value, TAG_BYTES, TAG_INT64, TAG_STR};
 
 #[derive(Debug, Clone)]
 pub struct TimestampInfo;
 
 pub struct InvalidCursor;
 
-impl dynspire_commons::transactor::cursor::Cursor for InvalidCursor {
-    fn is_valid(&self) -> bool { false }
-    fn current_key(&self) -> Option<&[u8]> { None }
+impl spier_storage_traits::Cursor for InvalidCursor {
+    fn is_valid(&self) -> bool {
+        false
+    }
+    fn current_key(&self) -> Option<&[u8]> {
+        None
+    }
     fn step(&mut self) {}
     fn skip_group(&mut self, _group_end: usize) {}
     fn seek(&mut self, _target: &[u8]) {}
@@ -111,8 +121,12 @@ impl V2Scanner {
     }
 
     pub fn push_prefix_at(&mut self, pos_in_idx: usize, val: &Value) {
-        let pos_name = self.idx_order.get(pos_in_idx)
-            .map(|s| s.as_str()).unwrap_or("v").to_string();
+        let pos_name = self
+            .idx_order
+            .get(pos_in_idx)
+            .map(|s| s.as_str())
+            .unwrap_or("v")
+            .to_string();
         self.prefix_values.push((pos_name, val.clone()));
         self.positions_filled += 1;
     }
@@ -200,7 +214,9 @@ impl V2Scanner {
     #[allow(dead_code)]
     pub fn current_timestamp(&self) -> Option<u64> {
         let key = self.current_active_key.as_ref()?;
-        if key.len() < 8 { return None; }
+        if key.len() < 8 {
+            return None;
+        }
         let suffix = Self::extract_suffix(key);
         let (t, _) = decode_suffix(suffix);
         Some(t)
@@ -209,7 +225,9 @@ impl V2Scanner {
     #[allow(dead_code)]
     pub fn current_added(&self) -> Option<bool> {
         let key = self.current_active_key.as_ref()?;
-        if key.len() < 8 { return None; }
+        if key.len() < 8 {
+            return None;
+        }
         let suffix = Self::extract_suffix(key);
         let (_, retracted) = decode_suffix(suffix);
         Some(!retracted)
@@ -247,11 +265,17 @@ impl V2Scanner {
         if pos_idx >= self.idx_order.len() {
             return "t";
         }
-        self.idx_order.get(pos_idx).map(|s| s.as_str()).unwrap_or("v")
+        self.idx_order
+            .get(pos_idx)
+            .map(|s| s.as_str())
+            .unwrap_or("v")
     }
 
     fn is_variable_value(&self, key_len: usize) -> bool {
-        if matches!(self.value_attr_type, Some(DB_TYPE_STRING) | Some(DB_TYPE_BYTES) | Some(DB_TYPE_BLOB)) {
+        if matches!(
+            self.value_attr_type,
+            Some(DB_TYPE_STRING) | Some(DB_TYPE_BYTES) | Some(DB_TYPE_BLOB)
+        ) {
             return true;
         }
         key_len != 28
@@ -267,8 +291,16 @@ impl V2Scanner {
             return key.len() - 8;
         }
         match self.index_name.as_str() {
-            "EAVT" => match pos_idx { 0 => 0, 1 => 8, _ => 12 },
-            "AEVT" => match pos_idx { 0 => 0, 1 => 4, _ => 12 },
+            "EAVT" => match pos_idx {
+                0 => 0,
+                1 => 8,
+                _ => 12,
+            },
+            "AEVT" => match pos_idx {
+                0 => 0,
+                1 => 4,
+                _ => 12,
+            },
             "AVET" => match pos_idx {
                 0 => 0,
                 1 => 4,
@@ -281,7 +313,11 @@ impl V2Scanner {
                     }
                 }
             },
-            "VAET" => match pos_idx { 0 => 0, 1 => 8, _ => 12 },
+            "VAET" => match pos_idx {
+                0 => 0,
+                1 => 8,
+                _ => 12,
+            },
             _ => 12,
         }
     }
@@ -321,9 +357,9 @@ impl V2Scanner {
         let start = self.value_start(key, pos_idx);
         let end = self.value_end(key, pos_idx);
         match pos_name {
-            "a" => Extracted::Int(u32::from_be_bytes(
-                key[start..start + 4].try_into().unwrap(),
-            ) as u64),
+            "a" => {
+                Extracted::Int(u32::from_be_bytes(key[start..start + 4].try_into().unwrap()) as u64)
+            }
             "e" => Extracted::Int(u64::from_be_bytes(
                 key[start..start + 8].try_into().unwrap(),
             )),
@@ -345,24 +381,36 @@ impl V2Scanner {
         let pos_name = self.pos_name(pos_idx);
         Some(match pos_name {
             "e" => {
-                if let Extracted::Int(n) = raw { Value::entity_id(n) }
-                else { Value::Int64(0) }
+                if let Extracted::Int(n) = raw {
+                    Value::entity_id(n)
+                } else {
+                    Value::Int64(0)
+                }
             }
             "a" => {
-                if let Extracted::Int(n) = raw { Value::Int64(n as i64) }
-                else { Value::Int64(0) }
+                if let Extracted::Int(n) = raw {
+                    Value::Int64(n as i64)
+                } else {
+                    Value::Int64(0)
+                }
             }
             "t" => {
                 if let Extracted::Int(n) = raw {
-                    let tx_eid = dynspire_commons::transactor::resolver_consts::make_entity_id(
-                        dynspire_commons::transactor::resolver_consts::PART_TX, n,
+                    let tx_eid = spier_transactor::resolver_consts::make_entity_id(
+                        spier_transactor::resolver_consts::PART_TX,
+                        n,
                     );
                     Value::Int64(tx_eid as i64)
-                } else { Value::Int64(0) }
+                } else {
+                    Value::Int64(0)
+                }
             }
             "added" => {
-                if let Extracted::Int(n) = raw { Value::Bool(n as u8) }
-                else { Value::Bool(0) }
+                if let Extracted::Int(n) = raw {
+                    Value::Bool(n as u8)
+                } else {
+                    Value::Bool(0)
+                }
             }
             _ => self.decode_v(&raw, key),
         })
@@ -543,7 +591,10 @@ impl V2Scanner {
         let pos_name = self.pos_name(pos_idx);
         let key = match self.current_active_key.as_ref() {
             Some(k) => k.clone(),
-            None => { self.cursor.borrow_mut().invalidate(); return; }
+            None => {
+                self.cursor.borrow_mut().invalidate();
+                return;
+            }
         };
         let vs = self.value_start(&key, pos_idx);
 
@@ -564,12 +615,16 @@ impl V2Scanner {
             Extracted::Int(n) => {
                 if pos_name == "a" {
                     let cur = *n as u32;
-                    if cur == u32::MAX { true } else {
+                    if cur == u32::MAX {
+                        true
+                    } else {
                         target.extend_from_slice(&(cur + 1).to_be_bytes());
                         false
                     }
                 } else {
-                    if *n == u64::MAX { true } else {
+                    if *n == u64::MAX {
+                        true
+                    } else {
                         target.extend_from_slice(&(*n + 1).to_be_bytes());
                         false
                     }
@@ -588,7 +643,9 @@ impl V2Scanner {
                         }
                     }
                 }
-                if carry { true } else {
+                if carry {
+                    true
+                } else {
                     target.extend_from_slice(&inc);
                     false
                 }
@@ -605,7 +662,10 @@ impl V2Scanner {
         let pos_name = self.pos_name(pos_idx);
         let key = match self.current_active_key.as_ref() {
             Some(k) => k.clone(),
-            None => { self.cursor.borrow_mut().invalidate(); return; }
+            None => {
+                self.cursor.borrow_mut().invalidate();
+                return;
+            }
         };
         let vs = self.value_start(&key, pos_idx);
         let mut target = key[..vs].to_vec();
@@ -677,8 +737,16 @@ impl ValueScanner {
 
     fn extract_suffix(key: &[u8]) -> u64 {
         let start = key.len() - 8;
-        u64::from_be_bytes([key[start], key[start + 1], key[start + 2], key[start + 3],
-                           key[start + 4], key[start + 5], key[start + 6], key[start + 7]])
+        u64::from_be_bytes([
+            key[start],
+            key[start + 1],
+            key[start + 2],
+            key[start + 3],
+            key[start + 4],
+            key[start + 5],
+            key[start + 6],
+            key[start + 7],
+        ])
     }
 
     fn a_offset(index_name: &str) -> usize {
@@ -698,7 +766,10 @@ impl ValueScanner {
     }
 
     fn is_variable_value(&self, key_len: usize) -> bool {
-        if matches!(self.value_attr_type, Some(DB_TYPE_STRING) | Some(DB_TYPE_BYTES) | Some(DB_TYPE_BLOB)) {
+        if matches!(
+            self.value_attr_type,
+            Some(DB_TYPE_STRING) | Some(DB_TYPE_BYTES) | Some(DB_TYPE_BLOB)
+        ) {
             return true;
         }
         key_len != 28
@@ -714,7 +785,12 @@ impl ValueScanner {
 
         if vp == "a" {
             let off = Self::a_offset(idx);
-            return Extracted::Int(u32::from_be_bytes([key[off], key[off + 1], key[off + 2], key[off + 3]]) as u64);
+            return Extracted::Int(u32::from_be_bytes([
+                key[off],
+                key[off + 1],
+                key[off + 2],
+                key[off + 3],
+            ]) as u64);
         }
 
         if vp == "e" {
@@ -725,9 +801,13 @@ impl ValueScanner {
                     let v_start = 4usize;
                     if self.is_variable_value(key.len()) {
                         let v_end = find_v_end(key, v_start, self.is_unordered());
-                        Extracted::Int(u64::from_be_bytes(key[v_end..v_end + 8].try_into().unwrap()))
+                        Extracted::Int(u64::from_be_bytes(
+                            key[v_end..v_end + 8].try_into().unwrap(),
+                        ))
                     } else {
-                        Extracted::Int(u64::from_be_bytes(key[v_start + 8..v_start + 16].try_into().unwrap()))
+                        Extracted::Int(u64::from_be_bytes(
+                            key[v_start + 8..v_start + 16].try_into().unwrap(),
+                        ))
                     }
                 }
                 "VAET" => Extracted::Int(u64::from_be_bytes(key[12..20].try_into().unwrap())),
@@ -744,7 +824,9 @@ impl ValueScanner {
             let v_end = find_v_end(key, v_start, self.is_unordered());
             Extracted::Bytes(key[v_start..v_end].to_vec())
         } else {
-            Extracted::Int(u64::from_be_bytes(key[v_start..v_start + 8].try_into().unwrap()))
+            Extracted::Int(u64::from_be_bytes(
+                key[v_start..v_start + 8].try_into().unwrap(),
+            ))
         }
     }
 
@@ -753,7 +835,12 @@ impl ValueScanner {
 
         if pos == "a" {
             let off = Self::a_offset(&idx);
-            return Extracted::Int(u32::from_be_bytes([key[off], key[off + 1], key[off + 2], key[off + 3]]) as u64);
+            return Extracted::Int(u32::from_be_bytes([
+                key[off],
+                key[off + 1],
+                key[off + 2],
+                key[off + 3],
+            ]) as u64);
         }
 
         if pos == "e" {
@@ -764,9 +851,13 @@ impl ValueScanner {
                     let v_start = 4usize;
                     if self.is_variable_value(key.len()) {
                         let v_end = find_v_end(key, v_start, self.is_unordered());
-                        Extracted::Int(u64::from_be_bytes(key[v_end..v_end + 8].try_into().unwrap()))
+                        Extracted::Int(u64::from_be_bytes(
+                            key[v_end..v_end + 8].try_into().unwrap(),
+                        ))
                     } else {
-                        Extracted::Int(u64::from_be_bytes(key[v_start + 8..v_start + 16].try_into().unwrap()))
+                        Extracted::Int(u64::from_be_bytes(
+                            key[v_start + 8..v_start + 16].try_into().unwrap(),
+                        ))
                     }
                 }
                 "VAET" => Extracted::Int(u64::from_be_bytes(key[12..20].try_into().unwrap())),
@@ -783,7 +874,9 @@ impl ValueScanner {
             let v_end = find_v_end(key, v_start, self.is_unordered());
             Extracted::Bytes(key[v_start..v_end].to_vec())
         } else {
-            Extracted::Int(u64::from_be_bytes(key[v_start..v_start + 8].try_into().unwrap()))
+            Extracted::Int(u64::from_be_bytes(
+                key[v_start..v_start + 8].try_into().unwrap(),
+            ))
         }
     }
 
@@ -919,16 +1012,23 @@ impl ValueScanner {
 
             while self.inner.borrow().is_valid() {
                 let key = self.inner.borrow().current_key().unwrap().to_vec();
-                if key.len() < 8 { self.inner.borrow_mut().step(); continue; }
+                if key.len() < 8 {
+                    self.inner.borrow_mut().step();
+                    continue;
+                }
 
                 let group_changed = key[..group_end] != cur_group[..];
                 if group_changed {
-                    if found_key.is_some() { break; }
+                    if found_key.is_some() {
+                        break;
+                    }
                     cur_group = key[..group_end].to_vec();
                 }
 
                 let val = self.extract_value(&key);
-                if val != first_value { break; }
+                if val != first_value {
+                    break;
+                }
 
                 let suffix = Self::extract_suffix(&key);
                 let (t, retracted) = decode_suffix(suffix);
@@ -945,7 +1045,9 @@ impl ValueScanner {
 
                 self.inner.borrow_mut().skip_group(group_end);
 
-                if found_key.is_some() { break; }
+                if found_key.is_some() {
+                    break;
+                }
             }
 
             if let Some(bk) = found_key {
@@ -959,7 +1061,9 @@ impl ValueScanner {
                 } else {
                     while self.inner.borrow().is_valid() {
                         let key = self.inner.borrow().current_key().unwrap().to_vec();
-                        if self.extract_value(&key) != first_value { break; }
+                        if self.extract_value(&key) != first_value {
+                            break;
+                        }
                         self.inner.borrow_mut().skip_group(group_end);
                     }
                 }
@@ -1024,7 +1128,9 @@ impl ValueScanner {
     }
 
     pub fn extract_position_raw_from_current(&self, pos: &str) -> Option<Extracted> {
-        self.current_key.as_ref().map(|k| self.extract_position_raw(k, pos))
+        self.current_key
+            .as_ref()
+            .map(|k| self.extract_position_raw(k, pos))
     }
 
     pub fn current_key(&self) -> Option<&[u8]> {
@@ -1044,7 +1150,7 @@ mod tests {
 
     #[test]
     fn test_extract_suffix() {
-        let suffix = dynspire_commons::transactor::keys::encode_suffix(1000, false);
+        let suffix = spier_transactor::keys::encode_suffix(1000, false);
         let mut key = vec![0u8; 20];
         key[12..20].copy_from_slice(&suffix.to_be_bytes());
         let extracted = ValueScanner::extract_suffix(&key);
@@ -1070,7 +1176,10 @@ mod tests {
     #[test]
     fn test_extracted_eq() {
         assert_eq!(Extracted::Int(42), Extracted::Int(42));
-        assert_eq!(Extracted::Bytes(b"hello".to_vec()), Extracted::Bytes(b"hello".to_vec()));
+        assert_eq!(
+            Extracted::Bytes(b"hello".to_vec()),
+            Extracted::Bytes(b"hello".to_vec())
+        );
         assert!(Extracted::Int(42) != Extracted::Int(43));
     }
 }
@@ -1088,16 +1197,24 @@ mod v2_tests {
 
     impl MockCursor {
         fn new(keys: Vec<Vec<u8>>) -> Self {
-            Self { keys, pos: 0, end_prefix: None }
+            Self {
+                keys,
+                pos: 0,
+                end_prefix: None,
+            }
         }
     }
 
     impl Cursor for MockCursor {
         fn is_valid(&self) -> bool {
-            if self.pos >= self.keys.len() { return false; }
+            if self.pos >= self.keys.len() {
+                return false;
+            }
             if let Some(ref end) = self.end_prefix {
                 let k = &self.keys[self.pos];
-                if k.starts_with(end) { return false; }
+                if k.starts_with(end) {
+                    return false;
+                }
             }
             true
         }
@@ -1111,7 +1228,9 @@ mod v2_tests {
         }
 
         fn skip_group(&mut self, group_end: usize) {
-            if self.pos >= self.keys.len() { return; }
+            if self.pos >= self.keys.len() {
+                return;
+            }
             let cur = &self.keys[self.pos][..group_end];
             while self.pos < self.keys.len() && self.keys[self.pos][..group_end] == *cur {
                 self.pos += 1;
@@ -1132,10 +1251,10 @@ mod v2_tests {
     }
 
     fn build_avet_key(a: u32, v: i64, e: u64, t: u64, retracted: bool) -> Vec<u8> {
-        let suffix = dynspire_commons::transactor::keys::encode_suffix(t, retracted);
+        let suffix = spier_transactor::keys::encode_suffix(t, retracted);
         let mut buf = Vec::new();
         buf.extend_from_slice(&a.to_be_bytes());
-        buf.extend_from_slice(&dynspire_commons::transactor::keys::encode_int64(v).to_be_bytes());
+        buf.extend_from_slice(&spier_transactor::keys::encode_int64(v).to_be_bytes());
         buf.extend_from_slice(&e.to_be_bytes());
         buf.extend_from_slice(&suffix.to_be_bytes());
         buf
@@ -1151,10 +1270,8 @@ mod v2_tests {
         ];
         keys.sort();
         let cursor = Arc::new(RefCell::new(MockCursor::new(keys)));
-        let mut scanner = V2Scanner::new(
-            "AVET", vec!["a".into(), "v".into(), "e".into()],
-            None, None,
-        );
+        let mut scanner =
+            V2Scanner::new("AVET", vec!["a".into(), "v".into(), "e".into()], None, None);
         scanner.set_cursor(cursor);
 
         scanner.advance_to_active_at(1);
@@ -1179,15 +1296,11 @@ mod v2_tests {
     #[test]
     fn test_v2_scanner_extract_e_from_same_key() {
         let t1 = 1000u64;
-        let mut keys = vec![
-            build_avet_key(10, 42, 777, t1, false),
-        ];
+        let mut keys = vec![build_avet_key(10, 42, 777, t1, false)];
         keys.sort();
         let cursor = Arc::new(RefCell::new(MockCursor::new(keys)));
-        let mut scanner = V2Scanner::new(
-            "AVET", vec!["a".into(), "v".into(), "e".into()],
-            None, None,
-        );
+        let mut scanner =
+            V2Scanner::new("AVET", vec!["a".into(), "v".into(), "e".into()], None, None);
         scanner.set_cursor(cursor);
 
         scanner.advance_to_active_at(1);
@@ -1210,10 +1323,8 @@ mod v2_tests {
         ];
         keys.sort();
         let cursor = Arc::new(RefCell::new(MockCursor::new(keys)));
-        let mut scanner = V2Scanner::new(
-            "AVET", vec!["a".into(), "v".into(), "e".into()],
-            None, None,
-        );
+        let mut scanner =
+            V2Scanner::new("AVET", vec!["a".into(), "v".into(), "e".into()], None, None);
         scanner.set_cursor(cursor);
 
         scanner.advance_to_active_at(1);

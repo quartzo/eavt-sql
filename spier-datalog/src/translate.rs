@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use dynspire_commons::datalog::*;
-use dynspire_commons::sql_parse::*;
-use dynspire_commons::value::Value;
+use spier_sql_parse::*;
+use spier_value::Value;
+
+use crate::ast::*;
 
 // ── Alias state ─────────────────────────────────────────────────────
 
@@ -45,43 +46,68 @@ impl AliasState {
         format!("_v_{}_{}", self.alias, safe_attr_name(attr))
     }
 
-    fn a_var(&self) -> String { format!("_a_{}", self.alias) }
-    fn val_var(&self) -> String { format!("_vv_{}", self.alias) }
-    fn added_var(&self) -> String { format!("_added_{}", self.alias) }
+    fn a_var(&self) -> String {
+        format!("_a_{}", self.alias)
+    }
+    fn val_var(&self) -> String {
+        format!("_vv_{}", self.alias)
+    }
+    fn added_var(&self) -> String {
+        format!("_added_{}", self.alias)
+    }
 }
 
 fn safe_attr_name(attr: &str) -> String {
-    attr.replace('.', "_").replace(':', "_c_").replace('/', "_s_").replace('-', "_h_")
+    attr.replace('.', "_")
+        .replace(':', "_c_")
+        .replace('/', "_s_")
+        .replace('-', "_h_")
 }
 
 fn ensure_alias(aliases: &mut HashMap<String, AliasState>, name: &str) {
-    aliases.entry(name.to_string()).or_insert_with(|| AliasState::new(name.to_string()));
+    aliases
+        .entry(name.to_string())
+        .or_insert_with(|| AliasState::new(name.to_string()));
 }
 
-fn slot_var(n: &str) -> DatalogSlot { DatalogSlot::Var(n.to_string()) }
-fn slot_const(bv: BoundValue) -> DatalogSlot { DatalogSlot::Const(bv) }
-fn slot_missing() -> DatalogSlot { DatalogSlot::Missing }
+fn slot_var(n: &str) -> DatalogSlot {
+    DatalogSlot::Var(n.to_string())
+}
+fn slot_const(bv: BoundValue) -> DatalogSlot {
+    DatalogSlot::Const(bv)
+}
+fn slot_missing() -> DatalogSlot {
+    DatalogSlot::Missing
+}
 
 // ── Constant propagation ────────────────────────────────────────────
 
 fn propagate_constants(aliases: &mut HashMap<String, AliasState>) {
-    let bindings: Vec<(String, BoundValue)> = aliases.iter()
+    let bindings: Vec<(String, BoundValue)> = aliases
+        .iter()
         .filter_map(|(_, st)| {
             if let Some(ref bv) = st.e_bound_value {
-                if !matches!(bv, BoundValue::Var(_)) { return Some((st.e_var.clone(), bv.clone())); }
+                if !matches!(bv, BoundValue::Var(_)) {
+                    return Some((st.e_var.clone(), bv.clone()));
+                }
             }
             None
-        }).collect();
+        })
+        .collect();
     for (e_var, const_val) in &bindings {
         for (_, st) in aliases.iter_mut() {
             for val in st.attr_values.values_mut() {
                 if let BoundValue::Var(ref name) = val {
-                    if name == e_var { *val = const_val.clone(); }
+                    if name == e_var {
+                        *val = const_val.clone();
+                    }
                 }
             }
             if let Some(ref mut bv) = st.e_bound_value {
                 if let BoundValue::Var(ref name) = bv {
-                    if name == e_var { *bv = const_val.clone(); }
+                    if name == e_var {
+                        *bv = const_val.clone();
+                    }
                 }
             }
         }
@@ -112,8 +138,18 @@ fn wildcard_pattern(st: &AliasState, t_slot: &DatalogSlot) -> DatalogPattern {
         None if st.has_val_wild => slot_var(&st.val_var()),
         None => slot_missing(),
     };
-    let added = if st.added_requested { slot_var(&st.added_var()) } else { slot_missing() };
-    DatalogPattern { e, a, v, t: t_slot.clone(), added }
+    let added = if st.added_requested {
+        slot_var(&st.added_var())
+    } else {
+        slot_missing()
+    };
+    DatalogPattern {
+        e,
+        a,
+        v,
+        t: t_slot.clone(),
+        added,
+    }
 }
 
 fn attr_pattern(st: &AliasState, attr: &str, t_slot: &DatalogSlot) -> DatalogPattern {
@@ -124,23 +160,45 @@ fn attr_pattern(st: &AliasState, attr: &str, t_slot: &DatalogSlot) -> DatalogPat
         Some(bv) => slot_const(bv.clone()),
         None => slot_var(&st.v_var(attr)),
     };
-    let added = if st.added_requested { slot_var(&st.added_var()) } else { slot_missing() };
-    DatalogPattern { e, a, v, t: t_slot.clone(), added }
+    let added = if st.added_requested {
+        slot_var(&st.added_var())
+    } else {
+        slot_missing()
+    };
+    DatalogPattern {
+        e,
+        a,
+        v,
+        t: t_slot.clone(),
+        added,
+    }
 }
 
-fn build_where_patterns(aliases: &HashMap<String, AliasState>, star: bool, has_conditions: bool) -> Vec<DatalogPattern> {
+fn build_where_patterns(
+    aliases: &HashMap<String, AliasState>,
+    star: bool,
+    has_conditions: bool,
+) -> Vec<DatalogPattern> {
     let mut patterns = Vec::new();
-    if star && !has_conditions { return patterns; }
+    if star && !has_conditions {
+        return patterns;
+    }
     let mut sorted_keys: Vec<&String> = aliases.keys().collect();
     sorted_keys.sort();
 
     for alias_name in &sorted_keys {
         let st = aliases.get(*alias_name).unwrap();
-        let t_slot = if st.tx_requested { slot_var(&st.tx_var) } else { slot_missing() };
+        let t_slot = if st.tx_requested {
+            slot_var(&st.tx_var)
+        } else {
+            slot_missing()
+        };
 
         if !has_conditions {
             if !st.attrs.is_empty() {
-                for attr in &st.attrs { patterns.push(attr_pattern(st, attr, &t_slot)); }
+                for attr in &st.attrs {
+                    patterns.push(attr_pattern(st, attr, &t_slot));
+                }
             } else {
                 patterns.push(wildcard_pattern(st, &t_slot));
             }
@@ -148,13 +206,21 @@ fn build_where_patterns(aliases: &HashMap<String, AliasState>, star: bool, has_c
         }
         if star {
             patterns.push(wildcard_pattern(st, &t_slot));
-            for attr in &st.attrs { patterns.push(attr_pattern(st, attr, &t_slot)); }
+            for attr in &st.attrs {
+                patterns.push(attr_pattern(st, attr, &t_slot));
+            }
         } else {
-            let has_wild = st.has_attr_wild || st.has_val_wild
-                || st.attr_bound_value.is_some() || st.val_bound_value.is_some()
+            let has_wild = st.has_attr_wild
+                || st.has_val_wild
+                || st.attr_bound_value.is_some()
+                || st.val_bound_value.is_some()
                 || (st.e_bound_value.is_some() && st.attrs.is_empty());
-            if has_wild { patterns.push(wildcard_pattern(st, &t_slot)); }
-            for attr in &st.attrs { patterns.push(attr_pattern(st, attr, &t_slot)); }
+            if has_wild {
+                patterns.push(wildcard_pattern(st, &t_slot));
+            }
+            for attr in &st.attrs {
+                patterns.push(attr_pattern(st, attr, &t_slot));
+            }
         }
     }
     patterns
@@ -170,7 +236,13 @@ fn extract_literal(lit: &RustLiteral) -> BoundValue {
     match lit {
         RustLiteral::Int(n) => BoundValue::Int(*n),
         RustLiteral::Float(f) => BoundValue::Float(*f),
-        RustLiteral::Str(s) => if s.contains('.') { BoundValue::Attr(s.clone()) } else { BoundValue::Str(s.clone()) },
+        RustLiteral::Str(s) => {
+            if s.contains('.') {
+                BoundValue::Attr(s.clone())
+            } else {
+                BoundValue::Str(s.clone())
+            }
+        }
         RustLiteral::Bool(b) => BoundValue::Int(if *b { 1 } else { 0 }),
         RustLiteral::Bytes(b) => BoundValue::Str(format!("{:?}", b)),
     }
@@ -181,12 +253,19 @@ fn extract_right(right: &RustConditionRight, params: &[Value]) -> BoundValue {
         RustConditionRight::Param(idx) => resolve_param(params, *idx),
         RustConditionRight::Literal(lit) => extract_literal(lit),
         RustConditionRight::Field(fr) => {
-            if fr.field == "eid" { BoundValue::Var(format!("_e_{}", fr.alias)) }
-            else if fr.field == "val" { BoundValue::Var(format!("_vv_{}", fr.alias)) }
-            else if fr.field == "attr" { BoundValue::Var(format!("_a_{}", fr.alias)) }
-            else { BoundValue::Var(format!("_v_{}_{}", fr.alias, safe_attr_name(&fr.field))) }
+            if fr.field == "eid" {
+                BoundValue::Var(format!("_e_{}", fr.alias))
+            } else if fr.field == "val" {
+                BoundValue::Var(format!("_vv_{}", fr.alias))
+            } else if fr.field == "attr" {
+                BoundValue::Var(format!("_a_{}", fr.alias))
+            } else {
+                BoundValue::Var(format!("_v_{}_{}", fr.alias, safe_attr_name(&fr.field)))
+            }
         }
-        RustConditionRight::In(_) | RustConditionRight::Or(_) => BoundValue::Missing("compound".into()),
+        RustConditionRight::In(_) | RustConditionRight::Or(_) => {
+            BoundValue::Missing("compound".into())
+        }
     }
 }
 
@@ -207,14 +286,24 @@ fn build_plan_ir(stmt: &RustSelectStmt, params: &[Value]) -> Result<PlanIR, Stri
 
     collect_aliases(stmt, &mut aliases, &mut where_aliases);
     let has_conditions = !stmt.conditions.is_empty();
-    if has_conditions { process_conditions(stmt, params, &mut aliases)?; }
+    if has_conditions {
+        process_conditions(stmt, params, &mut aliases)?;
+    }
 
     for st in aliases.values() {
-        if let Some(BoundValue::Missing(name)) = &st.e_bound_value { return Err(format!("missing parameter: {}", name)); }
-        if let Some(BoundValue::Missing(name)) = &st.attr_bound_value { return Err(format!("missing parameter: {}", name)); }
-        if let Some(BoundValue::Missing(name)) = &st.val_bound_value { return Err(format!("missing parameter: {}", name)); }
+        if let Some(BoundValue::Missing(name)) = &st.e_bound_value {
+            return Err(format!("missing parameter: {}", name));
+        }
+        if let Some(BoundValue::Missing(name)) = &st.attr_bound_value {
+            return Err(format!("missing parameter: {}", name));
+        }
+        if let Some(BoundValue::Missing(name)) = &st.val_bound_value {
+            return Err(format!("missing parameter: {}", name));
+        }
         for bv in st.attr_values.values() {
-            if let BoundValue::Missing(name) = bv { return Err(format!("missing parameter: {}", name)); }
+            if let BoundValue::Missing(name) = bv {
+                return Err(format!("missing parameter: {}", name));
+            }
         }
     }
 
@@ -240,10 +329,21 @@ fn build_plan_ir(stmt: &RustSelectStmt, params: &[Value]) -> Result<PlanIR, Stri
         }
     }
 
-    Ok(PlanIR { aliases, find_vars, star: stmt.star, exists_mode: stmt.exists_mode, has_conditions, history: stmt.history })
+    Ok(PlanIR {
+        aliases,
+        find_vars,
+        star: stmt.star,
+        exists_mode: stmt.exists_mode,
+        has_conditions,
+        history: stmt.history,
+    })
 }
 
-fn collect_aliases(stmt: &RustSelectStmt, aliases: &mut HashMap<String, AliasState>, where_aliases: &mut HashSet<String>) {
+fn collect_aliases(
+    stmt: &RustSelectStmt,
+    aliases: &mut HashMap<String, AliasState>,
+    where_aliases: &mut HashSet<String>,
+) {
     for cond in &stmt.conditions {
         match &cond.right {
             RustConditionRight::Or(branches) => {
@@ -276,12 +376,18 @@ fn collect_aliases(stmt: &RustSelectStmt, aliases: &mut HashMap<String, AliasSta
     }
     if stmt.conditions.is_empty() {
         for proj in &stmt.projections {
-            if let Some(ref fr) = proj.field { ensure_alias(aliases, &fr.alias); }
+            if let Some(ref fr) = proj.field {
+                ensure_alias(aliases, &fr.alias);
+            }
         }
     }
 }
 
-fn process_conditions(stmt: &RustSelectStmt, params: &[Value], aliases: &mut HashMap<String, AliasState>) -> Result<(), String> {
+fn process_conditions(
+    stmt: &RustSelectStmt,
+    params: &[Value],
+    aliases: &mut HashMap<String, AliasState>,
+) -> Result<(), String> {
     for cond in &stmt.conditions {
         match &cond.right {
             RustConditionRight::Or(branches) => process_or(&cond.left, branches, params, aliases)?,
@@ -290,7 +396,9 @@ fn process_conditions(stmt: &RustSelectStmt, params: &[Value], aliases: &mut Has
                 let (la, lf) = (cond.left.alias.as_str(), cond.left.field.as_str());
                 match cond.op.as_str() {
                     "=" => process_eq(la, lf, &cond.right, params, aliases)?,
-                    ">" | "<" | ">=" | "<=" | "!=" => process_range(la, lf, &cond.op, &cond.right, params, aliases)?,
+                    ">" | "<" | ">=" | "<=" | "!=" => {
+                        process_range(la, lf, &cond.op, &cond.right, params, aliases)?
+                    }
                     _ => {}
                 }
             }
@@ -299,34 +407,64 @@ fn process_conditions(stmt: &RustSelectStmt, params: &[Value], aliases: &mut Has
     Ok(())
 }
 
-fn process_eq(la: &str, lf: &str, right: &RustConditionRight, params: &[Value], aliases: &mut HashMap<String, AliasState>) -> Result<(), String> {
+fn process_eq(
+    la: &str,
+    lf: &str,
+    right: &RustConditionRight,
+    params: &[Value],
+    aliases: &mut HashMap<String, AliasState>,
+) -> Result<(), String> {
     match lf {
         "eid" => match right {
-            RustConditionRight::Param(idx) => { ensure_alias(aliases, la); aliases.get_mut(la).unwrap().e_bound_value = Some(resolve_param(params, *idx)); }
-            RustConditionRight::Literal(lit) => { ensure_alias(aliases, la); aliases.get_mut(la).unwrap().e_bound_value = Some(extract_literal(lit)); }
+            RustConditionRight::Param(idx) => {
+                ensure_alias(aliases, la);
+                aliases.get_mut(la).unwrap().e_bound_value = Some(resolve_param(params, *idx));
+            }
+            RustConditionRight::Literal(lit) => {
+                ensure_alias(aliases, la);
+                aliases.get_mut(la).unwrap().e_bound_value = Some(extract_literal(lit));
+            }
             RustConditionRight::Field(fr) => {
                 let (ra, rf) = (fr.alias.clone(), fr.field.clone());
                 if rf == "eid" {
-                    ensure_alias(aliases, la); ensure_alias(aliases, &ra);
+                    ensure_alias(aliases, la);
+                    ensure_alias(aliases, &ra);
                     let right_evar = aliases.get(&ra).unwrap().e_var.clone();
                     aliases.get_mut(la).unwrap().e_var = right_evar;
                 } else {
-                    ensure_alias(aliases, la); ensure_alias(aliases, &ra);
-                    if !aliases.get(&ra).unwrap().attrs.contains(&rf) { aliases.get_mut(&ra).unwrap().attrs.push(rf.clone()); }
+                    ensure_alias(aliases, la);
+                    ensure_alias(aliases, &ra);
+                    if !aliases.get(&ra).unwrap().attrs.contains(&rf) {
+                        aliases.get_mut(&ra).unwrap().attrs.push(rf.clone());
+                    }
                     let rv = aliases.get(&ra).unwrap().v_var(&rf);
                     aliases.get_mut(la).unwrap().e_bound_value = Some(BoundValue::Var(rv));
                 }
             }
             _ => {}
         },
-        "attr" => { ensure_alias(aliases, la); match right {
-            RustConditionRight::Literal(lit) => { aliases.get_mut(la).unwrap().attr_bound_value = Some(extract_literal(lit)); }
-            _ => { aliases.get_mut(la).unwrap().has_attr_wild = true; }
-        }},
-        "val" => { ensure_alias(aliases, la); match right {
-            RustConditionRight::Literal(lit) => { aliases.get_mut(la).unwrap().val_bound_value = Some(extract_literal(lit)); }
-            _ => { aliases.get_mut(la).unwrap().has_val_wild = true; }
-        }},
+        "attr" => {
+            ensure_alias(aliases, la);
+            match right {
+                RustConditionRight::Literal(lit) => {
+                    aliases.get_mut(la).unwrap().attr_bound_value = Some(extract_literal(lit));
+                }
+                _ => {
+                    aliases.get_mut(la).unwrap().has_attr_wild = true;
+                }
+            }
+        }
+        "val" => {
+            ensure_alias(aliases, la);
+            match right {
+                RustConditionRight::Literal(lit) => {
+                    aliases.get_mut(la).unwrap().val_bound_value = Some(extract_literal(lit));
+                }
+                _ => {
+                    aliases.get_mut(la).unwrap().has_val_wild = true;
+                }
+            }
+        }
         "tx" => {
             ensure_alias(aliases, la);
             aliases.get_mut(la).unwrap().tx_requested = true;
@@ -345,29 +483,76 @@ fn process_eq(la: &str, lf: &str, right: &RustConditionRight, params: &[Value], 
                     aliases.get_mut(&ra).unwrap().tx_var = new_var;
                 }
             }
-        },
+        }
         "added" => {
             ensure_alias(aliases, la);
             aliases.get_mut(la).unwrap().added_requested = true;
-        },
+        }
         _ => {
             validate_attr_name(lf)?;
             ensure_alias(aliases, la);
             let field_str = lf.to_string();
-            if !aliases.get(la).unwrap().attrs.contains(&field_str) { aliases.get_mut(la).unwrap().attrs.push(field_str.clone()); }
+            if !aliases.get(la).unwrap().attrs.contains(&field_str) {
+                aliases.get_mut(la).unwrap().attrs.push(field_str.clone());
+            }
             match right {
                 RustConditionRight::Field(fr) => {
                     let (ra, rf) = (fr.alias.clone(), fr.field.clone());
                     ensure_alias(aliases, &ra);
                     match rf.as_str() {
-                        "eid" => { let ev = aliases.get(&ra).unwrap().e_var.clone(); aliases.get_mut(la).unwrap().attr_values.insert(field_str, BoundValue::Var(ev)); }
-                        "val" => { let vv = aliases.get(&ra).unwrap().val_var(); aliases.get_mut(la).unwrap().attr_values.insert(field_str, BoundValue::Var(vv)); aliases.get_mut(la).unwrap().has_val_wild = true; }
-                        "attr" => { let av = aliases.get(&ra).unwrap().a_var(); aliases.get_mut(la).unwrap().attr_values.insert(field_str, BoundValue::Var(av)); aliases.get_mut(&ra).unwrap().has_attr_wild = true; }
-                        _ => { if !aliases.get(&ra).unwrap().attrs.contains(&rf) { aliases.get_mut(&ra).unwrap().attrs.push(rf.clone()); } let rv = aliases.get(&ra).unwrap().v_var(&rf); aliases.get_mut(la).unwrap().attr_values.insert(field_str, BoundValue::Var(rv)); }
+                        "eid" => {
+                            let ev = aliases.get(&ra).unwrap().e_var.clone();
+                            aliases
+                                .get_mut(la)
+                                .unwrap()
+                                .attr_values
+                                .insert(field_str, BoundValue::Var(ev));
+                        }
+                        "val" => {
+                            let vv = aliases.get(&ra).unwrap().val_var();
+                            aliases
+                                .get_mut(la)
+                                .unwrap()
+                                .attr_values
+                                .insert(field_str, BoundValue::Var(vv));
+                            aliases.get_mut(la).unwrap().has_val_wild = true;
+                        }
+                        "attr" => {
+                            let av = aliases.get(&ra).unwrap().a_var();
+                            aliases
+                                .get_mut(la)
+                                .unwrap()
+                                .attr_values
+                                .insert(field_str, BoundValue::Var(av));
+                            aliases.get_mut(&ra).unwrap().has_attr_wild = true;
+                        }
+                        _ => {
+                            if !aliases.get(&ra).unwrap().attrs.contains(&rf) {
+                                aliases.get_mut(&ra).unwrap().attrs.push(rf.clone());
+                            }
+                            let rv = aliases.get(&ra).unwrap().v_var(&rf);
+                            aliases
+                                .get_mut(la)
+                                .unwrap()
+                                .attr_values
+                                .insert(field_str, BoundValue::Var(rv));
+                        }
                     }
                 }
-                RustConditionRight::Param(idx) => { aliases.get_mut(la).unwrap().attr_values.insert(field_str, resolve_param(params, *idx)); }
-                RustConditionRight::Literal(lit) => { aliases.get_mut(la).unwrap().attr_values.insert(field_str, extract_literal(lit)); }
+                RustConditionRight::Param(idx) => {
+                    aliases
+                        .get_mut(la)
+                        .unwrap()
+                        .attr_values
+                        .insert(field_str, resolve_param(params, *idx));
+                }
+                RustConditionRight::Literal(lit) => {
+                    aliases
+                        .get_mut(la)
+                        .unwrap()
+                        .attr_values
+                        .insert(field_str, extract_literal(lit));
+                }
                 _ => {}
             }
         }
@@ -375,13 +560,27 @@ fn process_eq(la: &str, lf: &str, right: &RustConditionRight, params: &[Value], 
     Ok(())
 }
 
-fn process_range(la: &str, lf: &str, op: &str, right: &RustConditionRight, params: &[Value], aliases: &mut HashMap<String, AliasState>) -> Result<(), String> {
-    if matches!(lf, "attr" | "val" | "tx") { return Ok(()); }
+fn process_range(
+    la: &str,
+    lf: &str,
+    op: &str,
+    right: &RustConditionRight,
+    params: &[Value],
+    aliases: &mut HashMap<String, AliasState>,
+) -> Result<(), String> {
+    if matches!(lf, "attr" | "val" | "tx") {
+        return Ok(());
+    }
     ensure_alias(aliases, la);
     if lf == "eid" {
         let evar = aliases.get(la).unwrap().e_var.clone();
         let bv = extract_right(right, params);
-        let entry = aliases.get_mut(la).unwrap().range_conds.entry(evar).or_default();
+        let entry = aliases
+            .get_mut(la)
+            .unwrap()
+            .range_conds
+            .entry(evar)
+            .or_default();
         if entry.is_empty() {
             entry.push(vec![(op.to_string(), bv)]);
         } else {
@@ -391,9 +590,16 @@ fn process_range(la: &str, lf: &str, op: &str, right: &RustConditionRight, param
     }
     validate_attr_name(lf)?;
     let field_str = lf.to_string();
-    if !aliases.get(la).unwrap().attrs.contains(&field_str) { aliases.get_mut(la).unwrap().attrs.push(field_str.clone()); }
+    if !aliases.get(la).unwrap().attrs.contains(&field_str) {
+        aliases.get_mut(la).unwrap().attrs.push(field_str.clone());
+    }
     let bv = extract_right(right, params);
-    let entry = aliases.get_mut(la).unwrap().range_conds.entry(field_str).or_default();
+    let entry = aliases
+        .get_mut(la)
+        .unwrap()
+        .range_conds
+        .entry(field_str)
+        .or_default();
     if entry.is_empty() {
         entry.push(vec![(op.to_string(), bv)]);
     } else {
@@ -402,32 +608,65 @@ fn process_range(la: &str, lf: &str, op: &str, right: &RustConditionRight, param
     Ok(())
 }
 
-fn process_in(left: &RustFieldRef, values: &[RustConditionRight], params: &[Value], aliases: &mut HashMap<String, AliasState>) -> Result<(), String> {
+fn process_in(
+    left: &RustFieldRef,
+    values: &[RustConditionRight],
+    params: &[Value],
+    aliases: &mut HashMap<String, AliasState>,
+) -> Result<(), String> {
     let (la, lf) = (left.alias.as_str(), left.field.as_str());
-    if matches!(lf, "attr" | "val" | "tx") { return Ok(()); }
+    if matches!(lf, "attr" | "val" | "tx") {
+        return Ok(());
+    }
     ensure_alias(aliases, la);
     let target = if lf == "eid" {
         aliases.get(la).unwrap().e_var.clone()
     } else {
         validate_attr_name(lf)?;
         let field_str = lf.to_string();
-        if !aliases.get(la).unwrap().attrs.contains(&field_str) { aliases.get_mut(la).unwrap().attrs.push(field_str.clone()); }
+        if !aliases.get(la).unwrap().attrs.contains(&field_str) {
+            aliases.get_mut(la).unwrap().attrs.push(field_str.clone());
+        }
         field_str
     };
-    let conds: Vec<(String, BoundValue)> = values.iter().map(|v| ("in".to_string(), extract_right(v, params))).collect();
-    aliases.get_mut(la).unwrap().range_conds.entry(target).or_default().push(conds);
+    let conds: Vec<(String, BoundValue)> = values
+        .iter()
+        .map(|v| ("in".to_string(), extract_right(v, params)))
+        .collect();
+    aliases
+        .get_mut(la)
+        .unwrap()
+        .range_conds
+        .entry(target)
+        .or_default()
+        .push(conds);
     Ok(())
 }
 
-fn process_or(left: &RustFieldRef, branches: &[Vec<RustOrBranchItem>], params: &[Value], aliases: &mut HashMap<String, AliasState>) -> Result<(), String> {
+fn process_or(
+    left: &RustFieldRef,
+    branches: &[Vec<RustOrBranchItem>],
+    params: &[Value],
+    aliases: &mut HashMap<String, AliasState>,
+) -> Result<(), String> {
     let (alias, field) = (left.alias.clone(), left.field.clone());
-    if matches!(field.as_str(), "attr" | "val" | "tx") { return Err(format!("OR not supported on {}", field)); }
+    if matches!(field.as_str(), "attr" | "val" | "tx") {
+        return Err(format!("OR not supported on {}", field));
+    }
     ensure_alias(aliases, &alias);
-    let target = if field == "eid" { aliases.get(&alias).unwrap().e_var.clone() } else { validate_attr_name(&field)?; field.clone() };
+    let target = if field == "eid" {
+        aliases.get(&alias).unwrap().e_var.clone()
+    } else {
+        validate_attr_name(&field)?;
+        field.clone()
+    };
     for branch in branches {
         for inner in branch {
             if inner.left.alias != alias || inner.left.field != field {
-                return Err(format!("OR requires same (alias, field), got {}.{} vs {}.{}", inner.left.alias, inner.left.field, alias, field));
+                return Err(format!(
+                    "OR requires same (alias, field), got {}.{} vs {}.{}",
+                    inner.left.alias, inner.left.field, alias, field
+                ));
             }
             if let RustConditionRight::Field(_) = &inner.value {
                 return Err("OR with join conditions (= other.field) is not supported".into());
@@ -435,18 +674,40 @@ fn process_or(left: &RustFieldRef, branches: &[Vec<RustOrBranchItem>], params: &
         }
     }
     if field != "eid" {
-        if !aliases.get(&alias).unwrap().attrs.contains(&field) { aliases.get_mut(&alias).unwrap().attrs.push(field.clone()); }
+        if !aliases.get(&alias).unwrap().attrs.contains(&field) {
+            aliases.get_mut(&alias).unwrap().attrs.push(field.clone());
+        }
     }
     for branch in branches {
         let mut conds = Vec::new();
         for inner in branch {
             match &inner.value {
-                RustConditionRight::In(values) => { for v in values { conds.push(("in".to_string(), extract_right(v, params))); } }
-                RustConditionRight::Field(_) => { return Err("OR with join conditions (= other.field) is not supported".into()); }
-                other => { let bv = extract_right(other, params); let op = if inner.op == "=" { "in".to_string() } else { inner.op.clone() }; conds.push((op, bv)); }
+                RustConditionRight::In(values) => {
+                    for v in values {
+                        conds.push(("in".to_string(), extract_right(v, params)));
+                    }
+                }
+                RustConditionRight::Field(_) => {
+                    return Err("OR with join conditions (= other.field) is not supported".into());
+                }
+                other => {
+                    let bv = extract_right(other, params);
+                    let op = if inner.op == "=" {
+                        "in".to_string()
+                    } else {
+                        inner.op.clone()
+                    };
+                    conds.push((op, bv));
+                }
             }
         }
-        aliases.get_mut(&alias).unwrap().range_conds.entry(target.clone()).or_default().push(conds);
+        aliases
+            .get_mut(&alias)
+            .unwrap()
+            .range_conds
+            .entry(target.clone())
+            .or_default()
+            .push(conds);
     }
     Ok(())
 }
@@ -461,9 +722,14 @@ fn validate_attr_name(field: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn process_projections(stmt: &RustSelectStmt, aliases: &mut HashMap<String, AliasState>) -> Result<Vec<Option<(String, String)>>, String> {
+fn process_projections(
+    stmt: &RustSelectStmt,
+    aliases: &mut HashMap<String, AliasState>,
+) -> Result<Vec<Option<(String, String)>>, String> {
     let mut projections = Vec::new();
-    if stmt.star { return Ok(projections); }
+    if stmt.star {
+        return Ok(projections);
+    }
     for proj in &stmt.projections {
         if let Some(ref fr) = proj.field {
             ensure_alias(aliases, &fr.alias);
@@ -474,15 +740,27 @@ fn process_projections(stmt: &RustSelectStmt, aliases: &mut HashMap<String, Alia
                 "tx" => st.tx_requested = true,
                 "added" => st.added_requested = true,
                 "eid" => {}
-                _ => { validate_attr_name(&fr.field)?; if !st.attrs.contains(&fr.field) { st.attrs.push(fr.field.clone()); } }
+                _ => {
+                    validate_attr_name(&fr.field)?;
+                    if !st.attrs.contains(&fr.field) {
+                        st.attrs.push(fr.field.clone());
+                    }
+                }
             }
             projections.push(Some((fr.alias.clone(), fr.field.clone())));
-        } else { projections.push(None); }
+        } else {
+            projections.push(None);
+        }
     }
     Ok(projections)
 }
 
-fn build_find_vars(stmt: &RustSelectStmt, aliases: &HashMap<String, AliasState>, alias_e_vars: &HashMap<String, String>, projections: &[Option<(String, String)>]) -> Vec<FindVar> {
+fn build_find_vars(
+    stmt: &RustSelectStmt,
+    aliases: &HashMap<String, AliasState>,
+    alias_e_vars: &HashMap<String, String>,
+    projections: &[Option<(String, String)>],
+) -> Vec<FindVar> {
     if stmt.star {
         if let Some(first_alias) = aliases.keys().min() {
             let st = aliases.get(first_alias).unwrap();
@@ -578,7 +856,9 @@ fn build_find_vars(stmt: &RustSelectStmt, aliases: &HashMap<String, AliasState>,
                 }
             }
         } else {
-            let bv = stmt.projections.get(i)
+            let bv = stmt
+                .projections
+                .get(i)
                 .and_then(|p| p.literal.as_ref())
                 .map(|lit| match lit {
                     RustLiteral::Int(n) => BoundValue::Int(*n),
@@ -608,17 +888,65 @@ fn expand_star(mut sel: RustSelectStmt) -> RustSelectStmt {
 
     if sel.history {
         sel.projections = vec![
-            RustProjection { field: Some(RustFieldRef { alias: alias.clone(), field: "eid".to_string() }), literal: None },
-            RustProjection { field: Some(RustFieldRef { alias: alias.clone(), field: "attr".to_string() }), literal: None },
-            RustProjection { field: Some(RustFieldRef { alias: alias.clone(), field: "val".to_string() }), literal: None },
-            RustProjection { field: Some(RustFieldRef { alias: alias.clone(), field: "tx".to_string() }), literal: None },
-            RustProjection { field: Some(RustFieldRef { alias, field: "added".to_string() }), literal: None },
+            RustProjection {
+                field: Some(RustFieldRef {
+                    alias: alias.clone(),
+                    field: "eid".to_string(),
+                }),
+                literal: None,
+            },
+            RustProjection {
+                field: Some(RustFieldRef {
+                    alias: alias.clone(),
+                    field: "attr".to_string(),
+                }),
+                literal: None,
+            },
+            RustProjection {
+                field: Some(RustFieldRef {
+                    alias: alias.clone(),
+                    field: "val".to_string(),
+                }),
+                literal: None,
+            },
+            RustProjection {
+                field: Some(RustFieldRef {
+                    alias: alias.clone(),
+                    field: "tx".to_string(),
+                }),
+                literal: None,
+            },
+            RustProjection {
+                field: Some(RustFieldRef {
+                    alias,
+                    field: "added".to_string(),
+                }),
+                literal: None,
+            },
         ];
     } else {
         sel.projections = vec![
-            RustProjection { field: Some(RustFieldRef { alias: alias.clone(), field: "eid".to_string() }), literal: None },
-            RustProjection { field: Some(RustFieldRef { alias: alias.clone(), field: "attr".to_string() }), literal: None },
-            RustProjection { field: Some(RustFieldRef { alias, field: "val".to_string() }), literal: None },
+            RustProjection {
+                field: Some(RustFieldRef {
+                    alias: alias.clone(),
+                    field: "eid".to_string(),
+                }),
+                literal: None,
+            },
+            RustProjection {
+                field: Some(RustFieldRef {
+                    alias: alias.clone(),
+                    field: "attr".to_string(),
+                }),
+                literal: None,
+            },
+            RustProjection {
+                field: Some(RustFieldRef {
+                    alias,
+                    field: "val".to_string(),
+                }),
+                literal: None,
+            },
         ];
     }
     sel.star = false;
@@ -658,7 +986,8 @@ fn eliminate_dead_e_vars(
     for p in patterns.iter_mut() {
         let dead = match &p.e {
             DatalogSlot::Var(name) => {
-                let has_other_var = p.a.is_var() || p.v.is_var() || p.t.is_var() || p.added.is_var();
+                let has_other_var =
+                    p.a.is_var() || p.v.is_var() || p.t.is_var() || p.added.is_var();
                 e_count.get(name).copied().unwrap_or(0) == 1
                     && other_count.get(name).copied().unwrap_or(0) == 0
                     && has_other_var
@@ -684,7 +1013,11 @@ pub fn build_datalog_ir(stmt: RustStmt, params: &[Value]) -> Result<DatalogIR, S
     let mut range_bounds: HashMap<String, Vec<Vec<(String, BoundValue)>>> = HashMap::new();
     for (_, st) in &ir.aliases {
         for (attr, branches) in &st.range_conds {
-            let var_name = if *attr == st.e_var { st.e_var.clone() } else { st.v_var(attr) };
+            let var_name = if *attr == st.e_var {
+                st.e_var.clone()
+            } else {
+                st.v_var(attr)
+            };
             range_bounds.insert(var_name, branches.clone());
         }
     }

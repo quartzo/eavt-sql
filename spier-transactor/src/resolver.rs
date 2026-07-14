@@ -1,16 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
-// Re-export constants and pure functions from dynspire-commons
-pub use dynspire_commons::transactor::resolver_consts::{
-    BOOTSTRAP_FIRST_USER_ID,
-    DB_IDENT_AID, DB_CARDINALITY_AID, DB_VALUE_TYPE_AID,
-    DB_TYPE_STRING, DB_TYPE_REF, DB_TYPE_LONG, DB_TYPE_KEYWORD,
-    DB_TYPE_BOOLEAN, DB_TYPE_INSTANT, DB_TYPE_BYTES, DB_TYPE_BLOB, DB_TYPE_FLOAT,
-    DB_CARDINALITY_ONE, DB_CARDINALITY_MANY,
-    DB_UNIQUE_AID, DB_UNIQUE_VALUE,
-    DB_PART_ID_AID, DB_TX_INSTANT_AID,
-    PART_DB, PART_TX, PART_USER,
-    partition_of, seq_of, make_entity_id, normalize_attr,
+// Re-export constants and pure functions from resolver_consts
+pub use crate::resolver_consts::{
+    make_entity_id, normalize_attr, partition_of, seq_of, BOOTSTRAP_FIRST_USER_ID,
+    DB_CARDINALITY_AID, DB_CARDINALITY_MANY, DB_CARDINALITY_ONE, DB_IDENT_AID, DB_PART_ID_AID,
+    DB_TX_INSTANT_AID, DB_TYPE_BLOB, DB_TYPE_BOOLEAN, DB_TYPE_BYTES, DB_TYPE_FLOAT,
+    DB_TYPE_INSTANT, DB_TYPE_KEYWORD, DB_TYPE_LONG, DB_TYPE_REF, DB_TYPE_STRING, DB_UNIQUE_AID,
+    DB_UNIQUE_VALUE, DB_VALUE_TYPE_AID, PART_DB, PART_TX, PART_USER,
 };
 
 const FIRST_CUSTOM_PARTITION: u64 = 64;
@@ -91,11 +87,18 @@ impl Resolver {
         r.value_types.insert(DB_PART_ID_AID, DB_TYPE_LONG);
         r.value_types.insert(DB_TX_INSTANT_AID, DB_TYPE_INSTANT);
 
-        r.partitions.insert(PART_DB, PartitionCounter { next_seq: BOOTSTRAP_FIRST_USER_ID });
+        r.partitions.insert(
+            PART_DB,
+            PartitionCounter {
+                next_seq: BOOTSTRAP_FIRST_USER_ID,
+            },
+        );
         r.partition_names.insert("db.part/db".into(), PART_DB);
-        r.partitions.insert(PART_TX, PartitionCounter { next_seq: 1 });
+        r.partitions
+            .insert(PART_TX, PartitionCounter { next_seq: 1 });
         r.partition_names.insert("db.part/tx".into(), PART_TX);
-        r.partitions.insert(PART_USER, PartitionCounter { next_seq: 1 });
+        r.partitions
+            .insert(PART_USER, PartitionCounter { next_seq: 1 });
         r.partition_names.insert("db.part/user".into(), PART_USER);
 
         r
@@ -130,7 +133,12 @@ impl Resolver {
         Ok(aid)
     }
 
-    pub fn declare_attr(&mut self, name: &str, value_type: u32, many: bool) -> Result<(u32, bool), String> {
+    pub fn declare_attr(
+        &mut self,
+        name: &str,
+        value_type: u32,
+        many: bool,
+    ) -> Result<(u32, bool), String> {
         let normalized = normalize_attr(name)?;
         if let Some(&aid) = self.attrs.get(&normalized) {
             if self.declared.contains(&aid) {
@@ -155,13 +163,18 @@ impl Resolver {
     }
 
     pub fn attr_name(&self, aid: u32) -> String {
-        self.attrs_rev.get(&aid).cloned().unwrap_or_else(|| aid.to_string())
+        self.attrs_rev
+            .get(&aid)
+            .cloned()
+            .unwrap_or_else(|| aid.to_string())
     }
 
     pub fn load_attrs(&mut self, store_items: impl Iterator<Item = (Vec<u8>, Vec<u8>)>) {
         for (k, v) in store_items {
             let name = String::from_utf8(k).unwrap();
-            if v.len() < 4 { continue; }
+            if v.len() < 4 {
+                continue;
+            }
             let aid = u32::from_be_bytes([v[0], v[1], v[2], v[3]]);
             self.attrs.insert(name.clone(), aid);
             self.attrs_rev.insert(aid, name);
@@ -195,25 +208,25 @@ impl Resolver {
 
         for (k, _) in sstable_keys {
             if k.len() >= 8 {
-                let eid = u64::from_be_bytes([
-                    k[0], k[1], k[2], k[3],
-                    k[4], k[5], k[6], k[7],
-                ]);
+                let eid = u64::from_be_bytes([k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7]]);
                 let p = partition_of(eid);
                 let s = seq_of(eid);
-                max_per_partition.entry(p).and_modify(|m| *m = (*m).max(s)).or_insert(s);
+                max_per_partition
+                    .entry(p)
+                    .and_modify(|m| *m = (*m).max(s))
+                    .or_insert(s);
             }
         }
 
         for (k, _) in memtable_items {
             if k.len() >= 8 {
-                let eid = u64::from_be_bytes([
-                    k[0], k[1], k[2], k[3],
-                    k[4], k[5], k[6], k[7],
-                ]);
+                let eid = u64::from_be_bytes([k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7]]);
                 let p = partition_of(eid);
                 let s = seq_of(eid);
-                max_per_partition.entry(p).and_modify(|m| *m = (*m).max(s)).or_insert(s);
+                max_per_partition
+                    .entry(p)
+                    .and_modify(|m| *m = (*m).max(s))
+                    .or_insert(s);
             }
         }
 
@@ -251,7 +264,10 @@ impl Resolver {
     }
 
     pub fn next_ent_id(&self) -> u64 {
-        self.partitions.get(&PART_DB).map(|c| c.next_seq).unwrap_or(BOOTSTRAP_FIRST_USER_ID)
+        self.partitions
+            .get(&PART_DB)
+            .map(|c| c.next_seq)
+            .unwrap_or(BOOTSTRAP_FIRST_USER_ID)
     }
 
     pub fn advance_past(&mut self, eid: u64) {
@@ -285,7 +301,9 @@ impl Resolver {
     }
 
     pub fn allocate_in_partition(&mut self, partition_id: u64) -> u64 {
-        let counter = self.partitions.get_mut(&partition_id)
+        let counter = self
+            .partitions
+            .get_mut(&partition_id)
             .unwrap_or_else(|| panic!("unknown partition: {}", partition_id));
         let seq = counter.next_seq;
         counter.next_seq += 1;
@@ -316,7 +334,8 @@ impl Resolver {
             return;
         }
         if !self.partitions.contains_key(&partition_id) {
-            self.partitions.insert(partition_id, PartitionCounter { next_seq: 1 });
+            self.partitions
+                .insert(partition_id, PartitionCounter { next_seq: 1 });
         }
         self.partition_names.insert(name, partition_id);
         if partition_id >= FIRST_CUSTOM_PARTITION && partition_id >= self.next_custom_partition {
@@ -332,7 +351,14 @@ impl Resolver {
         }
     }
 
-    pub fn load_user_attr(&mut self, name: String, eid: u64, value_type: u32, many: bool, unique: bool) {
+    pub fn load_user_attr(
+        &mut self,
+        name: String,
+        eid: u64,
+        value_type: u32,
+        many: bool,
+        unique: bool,
+    ) {
         let aid = eid as u32;
         self.attrs.insert(name.clone(), aid);
         self.attrs_rev.insert(aid, name);
@@ -365,15 +391,21 @@ pub enum EntityInput {
 }
 
 impl From<u64> for EntityInput {
-    fn from(v: u64) -> Self { EntityInput::Int(v) }
+    fn from(v: u64) -> Self {
+        EntityInput::Int(v)
+    }
 }
 
 impl From<&str> for EntityInput {
-    fn from(v: &str) -> Self { EntityInput::Str(v.to_string()) }
+    fn from(v: &str) -> Self {
+        EntityInput::Str(v.to_string())
+    }
 }
 
 impl From<String> for EntityInput {
-    fn from(v: String) -> Self { EntityInput::Str(v) }
+    fn from(v: String) -> Self {
+        EntityInput::Str(v)
+    }
 }
 
 #[cfg(test)]

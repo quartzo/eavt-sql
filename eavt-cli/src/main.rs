@@ -7,7 +7,10 @@ mod proto {
 use proto::eavt_service_client::EavtServiceClient;
 
 #[derive(Parser)]
-#[command(name = "eavt-repl", about = "Interactive SQL REPL for EAVT databases (gRPC client)")]
+#[command(
+    name = "eavt-repl",
+    about = "Interactive SQL REPL for EAVT databases (gRPC client)"
+)]
 struct Cli {
     /// gRPC server address (e.g. localhost:50051)
     server: String,
@@ -34,14 +37,17 @@ fn run(addr: &str) -> Result<(), String> {
     println!();
 
     let hist_file = dirs_home().join(".eavt_sql_history");
-    let mut rl = rustyline::DefaultEditor::new()
-        .map_err(|e| format!("readline error: {}", e))?;
+    let mut rl = rustyline::DefaultEditor::new().map_err(|e| format!("readline error: {}", e))?;
     let _ = rl.load_history(&hist_file);
 
     let mut client = client;
     let mut accumulated = String::new();
     loop {
-        let prompt = if accumulated.is_empty() { "eavt-sql> " } else { "       -> " };
+        let prompt = if accumulated.is_empty() {
+            "eavt-sql> "
+        } else {
+            "       -> "
+        };
         match rl.readline(prompt) {
             Ok(line) => {
                 let stripped = line.trim();
@@ -114,9 +120,13 @@ fn execute_dot_command(
             match rt.block_on(client.flush(req)) {
                 Ok(resp) => {
                     let r = resp.into_inner();
-                    println!("Flushed: MemTable {} -> {}, WAL {} -> {}",
-                        fmt_size(r.memtable_before), fmt_size(r.memtable_after),
-                        fmt_size(r.wal_before), fmt_size(r.wal_after));
+                    println!(
+                        "Flushed: MemTable {} -> {}, WAL {} -> {}",
+                        fmt_size(r.memtable_before),
+                        fmt_size(r.memtable_after),
+                        fmt_size(r.wal_before),
+                        fmt_size(r.wal_after)
+                    );
                 }
                 Err(e) => eprintln!("Error: {}", e.message()),
             }
@@ -158,7 +168,11 @@ fn execute_dot_command(
             match rt.block_on(client.memtable(req)) {
                 Ok(resp) => {
                     let r = resp.into_inner();
-                    println!("MemTable: {}   WAL: {}", fmt_size(r.memtable_size), fmt_size(r.wal_size));
+                    println!(
+                        "MemTable: {}   WAL: {}",
+                        fmt_size(r.memtable_size),
+                        fmt_size(r.wal_size)
+                    );
                     println!();
                     println!("{:<8} {:>10}", "CF", "Count");
                     println!("{}", "-".repeat(20));
@@ -170,7 +184,10 @@ fn execute_dot_command(
             }
         }
         ".dump" => {
-            let index = args.first().map(|s| s.to_uppercase()).unwrap_or_else(|| "EAVT".into());
+            let index = args
+                .first()
+                .map(|s| s.to_uppercase())
+                .unwrap_or_else(|| "EAVT".into());
             let valid = ["EAVT", "AEVT", "AVET", "VAET"];
             if !valid.contains(&index.as_str()) {
                 eprintln!("Error: index must be one of {}", valid.join(", "));
@@ -179,7 +196,10 @@ fn execute_dot_command(
             let req = proto::DumpRequest { index };
             let stream = match rt.block_on(client.dump(req)) {
                 Ok(s) => s.into_inner(),
-                Err(e) => { eprintln!("Error: {}", e.message()); return false; }
+                Err(e) => {
+                    eprintln!("Error: {}", e.message());
+                    return false;
+                }
             };
             use tokio_stream::StreamExt;
             let mut stream = std::pin::pin!(stream);
@@ -188,7 +208,11 @@ fn execute_dot_command(
                 while let Some(row) = stream.next().await {
                     match row {
                         Ok(d) => {
-                            let v_str = d.value.as_ref().map(proto_value_to_string).unwrap_or_else(|| "null".to_string());
+                            let v_str = d
+                                .value
+                                .as_ref()
+                                .map(proto_value_to_string)
+                                .unwrap_or_else(|| "null".to_string());
                             println!("{}\t{}\t{}\t{}", d.e, d.attr, v_str, d.t);
                             count += 1;
                         }
@@ -217,7 +241,10 @@ fn execute_sql(
 
     let stream = match rt.block_on(client.sql(request)) {
         Ok(s) => s.into_inner(),
-        Err(e) => { eprintln!("Error: {}", e.message()); return; }
+        Err(e) => {
+            eprintln!("Error: {}", e.message());
+            return;
+        }
     };
 
     use tokio_stream::StreamExt;

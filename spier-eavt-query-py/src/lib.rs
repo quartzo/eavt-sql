@@ -3,11 +3,11 @@ use std::collections::HashMap;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use dynspire_commons::query_engine::QueryEngine;
-use dynspire_commons::query_ir::ProgramHandle;
-use dynspire_commons::transactor::ValueType;
-use dynspire_commons::value::Value;
+use spier_eavt_query::QueryEngine;
 use spier_eavt_query::QueryState;
+use spier_query_ir::ProgramHandle;
+use spier_transactor::ValueType;
+use spier_value::Value;
 
 fn to_string_err(e: String) -> PyErr {
     pyo3::exceptions::PyRuntimeError::new_err(e)
@@ -62,7 +62,7 @@ pub struct PyProgramHandle {
 /// Opaque handle to a streaming VM session.
 #[pyclass(name = "SessionHandle", unsendable)]
 pub struct PySessionHandle {
-    inner: dynspire_commons::query_engine::SessionHandle,
+    inner: spier_eavt_query::SessionHandle,
 }
 
 /// PyO3 bindings for spier-eavt-query.
@@ -158,7 +158,13 @@ impl PyEngine {
     }
 
     #[pyo3(signature = (name, value_type, many))]
-    fn declare_attr(&self, py: Python<'_>, name: &str, value_type: &str, many: bool) -> PyResult<u32> {
+    fn declare_attr(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        value_type: &str,
+        many: bool,
+    ) -> PyResult<u32> {
         let vt = parse_value_type(value_type)?;
         py.allow_threads(|| self.inner.declare_attr(name, vt, many))
             .map_err(to_string_err)
@@ -173,8 +179,11 @@ impl PyEngine {
         many: bool,
         unique: bool,
     ) -> PyResult<()> {
-        py.allow_threads(|| self.inner.declare_attr_from_sql(attr, type_name, many, unique))
-            .map_err(to_string_err)
+        py.allow_threads(|| {
+            self.inner
+                .declare_attr_from_sql(attr, type_name, many, unique)
+        })
+        .map_err(to_string_err)
     }
 
     fn lookup_attr(&self, py: Python<'_>, name: &str) -> PyResult<Option<u32>> {
@@ -219,7 +228,14 @@ impl PyEngine {
     }
 
     #[pyo3(signature = (e, attr, v, t))]
-    fn save(&self, py: Python<'_>, e: u64, attr: &str, v: &Bound<'_, pyo3::types::PyAny>, t: u64) -> PyResult<()> {
+    fn save(
+        &self,
+        py: Python<'_>,
+        e: u64,
+        attr: &str,
+        v: &Bound<'_, pyo3::types::PyAny>,
+        t: u64,
+    ) -> PyResult<()> {
         let value = py_to_value(v)?;
         py.allow_threads(|| self.inner.save(e, attr, value, t))
             .map_err(to_string_err)
@@ -249,7 +265,12 @@ impl PyEngine {
             .map_err(to_string_err)
     }
 
-    fn lookup_entity(&self, py: Python<'_>, attr_name: &str, value: &Bound<'_, pyo3::types::PyAny>) -> PyResult<Option<u64>> {
+    fn lookup_entity(
+        &self,
+        py: Python<'_>,
+        attr_name: &str,
+        value: &Bound<'_, pyo3::types::PyAny>,
+    ) -> PyResult<Option<u64>> {
         let v = py_to_value(value)?;
         py.allow_threads(|| self.inner.lookup_entity(attr_name, v))
             .map_err(to_string_err)

@@ -5,7 +5,7 @@ edition = "2021"
 description = "S3-backed BlobStore backend"
 
 [dependencies]
-dynspire-commons = { path = "../dynspire-commons" }
+spier-storage-traits = { path = "../spier-storage-traits" }
 rusty-s3 = "0.9"
 ureq = { version = "2", features = ["tls"] }
 url = "2"

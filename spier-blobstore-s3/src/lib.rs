@@ -3,7 +3,7 @@ use std::io::Read;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use dynspire_commons::blobstore::BlobStoreEngine;
+use spier_storage_traits::blobstore::BlobStoreEngine;
 
 fn new_uuid() -> [u8; 16] {
     *uuid::Uuid::new_v4().as_bytes()
@@ -58,13 +58,17 @@ impl S3BlobStore {
         let opts = self.options.lock().unwrap();
         let endpoint_str = opts.get("endpoint").ok_or("missing endpoint")?;
         let path_style_val = opts.get("path_style").map(|v| v == "true").unwrap_or(false);
-        let bucket_name = opts.get("bucket_name").ok_or("missing bucket_name")?.to_string();
+        let bucket_name = opts
+            .get("bucket_name")
+            .ok_or("missing bucket_name")?
+            .to_string();
         let region = opts.get("region").ok_or("missing region")?.to_string();
         let access_key = opts.get("access_key").ok_or("missing access_key")?;
         let secret_key = opts.get("secret_key").ok_or("missing secret_key")?;
         let prefix = opts.get("prefix").cloned().unwrap_or_default();
 
-        let endpoint = url::Url::parse(endpoint_str).map_err(|e| format!("invalid endpoint: {e}"))?;
+        let endpoint =
+            url::Url::parse(endpoint_str).map_err(|e| format!("invalid endpoint: {e}"))?;
         let url_style = if !path_style_val {
             rusty_s3::UrlStyle::Path
         } else {
@@ -86,17 +90,32 @@ impl S3BlobStore {
 
     fn bucket(&self) -> Result<rusty_s3::Bucket, String> {
         self.ensure_init()?;
-        self.inner.lock().unwrap().bucket.clone().ok_or("not initialized".into())
+        self.inner
+            .lock()
+            .unwrap()
+            .bucket
+            .clone()
+            .ok_or("not initialized".into())
     }
 
     fn credentials(&self) -> Result<rusty_s3::Credentials, String> {
         self.ensure_init()?;
-        self.inner.lock().unwrap().credentials.clone().ok_or("not initialized".into())
+        self.inner
+            .lock()
+            .unwrap()
+            .credentials
+            .clone()
+            .ok_or("not initialized".into())
     }
 
     fn agent(&self) -> Result<ureq::Agent, String> {
         self.ensure_init()?;
-        self.inner.lock().unwrap().agent.clone().ok_or("not initialized".into())
+        self.inner
+            .lock()
+            .unwrap()
+            .agent
+            .clone()
+            .ok_or("not initialized".into())
     }
 
     fn prefix(&self) -> Result<String, String> {
@@ -127,8 +146,7 @@ impl S3BlobStore {
         let bucket = self.bucket()?;
         let credentials = self.credentials()?;
         let agent = self.agent()?;
-        let action =
-            rusty_s3::actions::PutObject::new(&bucket, Some(&credentials), key);
+        let action = rusty_s3::actions::PutObject::new(&bucket, Some(&credentials), key);
         let url = action.sign(Duration::from_secs(300));
         agent
             .put(url.as_str())
@@ -143,8 +161,7 @@ impl S3BlobStore {
         let bucket = self.bucket()?;
         let credentials = self.credentials()?;
         let agent = self.agent()?;
-        let action =
-            rusty_s3::actions::GetObject::new(&bucket, Some(&credentials), key);
+        let action = rusty_s3::actions::GetObject::new(&bucket, Some(&credentials), key);
         let url = action.sign(Duration::from_secs(300));
         match agent.get(url.as_str()).call() {
             Ok(resp) => {
@@ -164,8 +181,7 @@ impl S3BlobStore {
         let bucket = self.bucket()?;
         let credentials = self.credentials()?;
         let agent = self.agent()?;
-        let action =
-            rusty_s3::actions::DeleteObject::new(&bucket, Some(&credentials), key);
+        let action = rusty_s3::actions::DeleteObject::new(&bucket, Some(&credentials), key);
         let url = action.sign(Duration::from_secs(300));
         match agent.delete(url.as_str()).call() {
             Ok(_) => Ok(()),
@@ -183,8 +199,7 @@ impl S3BlobStore {
         let bucket = self.bucket()?;
         let credentials = self.credentials()?;
         let agent = self.agent()?;
-        let mut action =
-            rusty_s3::actions::ListObjectsV2::new(&bucket, Some(&credentials));
+        let mut action = rusty_s3::actions::ListObjectsV2::new(&bucket, Some(&credentials));
         action.with_prefix(prefix);
         if let Some(t) = token {
             action.with_continuation_token(t);
@@ -259,7 +274,10 @@ impl BlobStoreEngine for S3BlobStore {
     fn list_roots(&self) -> Result<Vec<String>, String> {
         let prefix = self.prefixed("roots/")?;
         let names = s3_collect_list(self, &prefix)?;
-        let mut roots: Vec<String> = names.into_iter().filter(|n| n.starts_with("root_")).collect();
+        let mut roots: Vec<String> = names
+            .into_iter()
+            .filter(|n| n.starts_with("root_"))
+            .collect();
         roots.sort();
         Ok(roots)
     }

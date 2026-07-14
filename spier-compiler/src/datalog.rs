@@ -1,2 +1,2 @@
-pub use dynspire_commons::datalog::{BoundValue, DatalogSlot as Slot};
-pub use dynspire_commons::planner::{PlanValue, RangeBoundsMap};
+pub use spier_datalog::{BoundValue, DatalogSlot as Slot};
+pub use spier_planner::{PlanValue, RangeBoundsMap};

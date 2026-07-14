@@ -5,4 +5,6 @@ edition = "2021"
 description = "Datalog IR builder (SQL AST → Datalog patterns)"
 
 [dependencies]
-dynspire-commons = { path = "../dynspire-commons", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+spier-sql-parse = { path = "../spier-sql-parse" }
+spier-value = { path = "../spier-value" }

@@ -2,19 +2,17 @@
 pub mod blob_store;
 pub mod error;
 pub mod generic_page_store;
-pub mod keys;
 pub mod merge_iter;
 pub mod page_store;
 pub mod pages;
 pub mod store;
 
+pub use blob_store::make_root_name;
 pub use error::{TransactorError, TransactorResult};
 pub use generic_page_store::GenericPageStore;
-pub use blob_store::make_root_name;
 pub use merge_iter::{
-    Cursor, ScanSource, ReverseScanSource, SourceKind, ReverseSourceKind,
-    PageStoreIter, ReversePageStoreIter,
-    MergedInner, ReverseMergedInner, merge_collect,
+    merge_collect, Cursor, MergedInner, PageStoreIter, ReverseMergedInner, ReversePageStoreIter,
+    ReverseScanSource, ReverseSourceKind, ScanSource, SourceKind,
 };
 pub use page_store::PageStore;
 pub use store::{Transactor, TransactorConfig};
@@ -24,31 +22,31 @@ pub use store::{Transactor, TransactorConfig};
 // outside spier-kvstore needs them.
 
 pub mod blobstore {
-    pub use dynspire_commons::blobstore::*;
+    pub use spier_storage_traits::blobstore::*;
 }
 
 pub mod journal {
-    pub use dynspire_commons::journal::*;
+    pub use spier_storage_traits::journal::*;
 }
 
 pub mod memtable {
-    pub use dynspire_commons::memtable::*;
+    pub use spier_storage_traits::memtable::*;
 }
 
-pub use dynspire_commons::kvstore::KVStoreEngine;
+pub use spier_storage_traits::KVStoreEngine;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use dynspire_commons::transactor::cursor::CursorHandle;
-use spier_blobstore_memory::MemoryBlobStore;
 use spier_blobstore_file::FileBlobStore;
+use spier_blobstore_memory::MemoryBlobStore;
 use spier_blobstore_s3::S3BlobStore;
 use spier_journal_file::JournalFile;
 use spier_memtable::MemTable;
+use spier_storage_traits::CursorHandle;
 
 /// Pure Rust KV store handle. Owns the [`Transactor`] and a background poller thread.
 pub struct KVState {
@@ -64,7 +62,7 @@ impl KVState {
     }
 }
 
-fn load_memtable() -> Result<Box<dyn dynspire_commons::memtable::MemTableEngine>, String> {
+fn load_memtable() -> Result<Box<dyn spier_storage_traits::memtable::MemTableEngine>, String> {
     Ok(Box::new(MemTable::new(4)))
 }
 
@@ -106,16 +104,27 @@ fn open_memory(read_only: bool) -> Result<Transactor, String> {
         Transactor::open_read_only(Box::new(blobs), None, mt, ":memory:", config)
     } else {
         Transactor::open(Box::new(blobs), None, mt, ":memory:", config)
-    }.map_err(|e| format!("open memory: {e}"))
+    }
+    .map_err(|e| format!("open memory: {e}"))
 }
 
 fn open_file(config: &HashMap<String, String>) -> Result<Transactor, String> {
-    let path = config.get("path").map(|s| s.as_str()).ok_or("path required for file backend")?;
-    let read_only = config.get("read_only").map(|v| v == "true").unwrap_or(false);
+    let path = config
+        .get("path")
+        .map(|s| s.as_str())
+        .ok_or("path required for file backend")?;
+    let read_only = config
+        .get("read_only")
+        .map(|v| v == "true")
+        .unwrap_or(false);
 
     let blobs = FileBlobStore::new(config)?;
     let j = JournalFile::new(config)?;
-    let journal = Some(Box::new(j) as Box<dyn dynspire_commons::journal::JournalEngine + Send + Sync>);
+    let journal =
+        Some(Box::new(j)
+            as Box<
+                dyn spier_storage_traits::journal::JournalEngine + Send + Sync,
+            >);
 
     let mt = load_memtable()?;
     let tc = make_transactor_config(config);
@@ -123,11 +132,15 @@ fn open_file(config: &HashMap<String, String>) -> Result<Transactor, String> {
         Transactor::open_read_only(Box::new(blobs), journal, mt, path, tc)
     } else {
         Transactor::open(Box::new(blobs), journal, mt, path, tc)
-    }.map_err(|e| format!("open file: {e}"))
+    }
+    .map_err(|e| format!("open file: {e}"))
 }
 
 fn open_s3(config: &HashMap<String, String>) -> Result<Transactor, String> {
-    let read_only = config.get("read_only").map(|v| v == "true").unwrap_or(false);
+    let read_only = config
+        .get("read_only")
+        .map(|v| v == "true")
+        .unwrap_or(false);
 
     let blobs = S3BlobStore::new(config)?;
 
@@ -138,7 +151,11 @@ fn open_s3(config: &HashMap<String, String>) -> Result<Transactor, String> {
     let local_path = config.get("path").map(|s| s.as_str()).unwrap_or(".");
 
     let j = JournalFile::new(config)?;
-    let journal = Some(Box::new(j) as Box<dyn dynspire_commons::journal::JournalEngine + Send + Sync>);
+    let journal =
+        Some(Box::new(j)
+            as Box<
+                dyn spier_storage_traits::journal::JournalEngine + Send + Sync,
+            >);
 
     let mt = load_memtable()?;
     let tc = make_transactor_config(config);
@@ -146,9 +163,9 @@ fn open_s3(config: &HashMap<String, String>) -> Result<Transactor, String> {
         Transactor::open_read_only(Box::new(blobs), journal, mt, local_path, tc)
     } else {
         Transactor::open(Box::new(blobs), journal, mt, local_path, tc)
-    }.map_err(|e| format!("open s3: {e}"))
+    }
+    .map_err(|e| format!("open s3: {e}"))
 }
-
 
 fn poller_loop(
     kv: Arc<RwLock<Option<Transactor>>>,
@@ -189,10 +206,15 @@ fn poller_loop(
     }
 }
 
-
 fn init(config: &HashMap<String, String>) -> Result<KVState, String> {
-    let backend = config.get("backend").map(|s| s.as_str()).unwrap_or("memory");
-    let read_only = config.get("read_only").map(|v| v == "true").unwrap_or(false);
+    let backend = config
+        .get("backend")
+        .map(|s| s.as_str())
+        .unwrap_or("memory");
+    let read_only = config
+        .get("read_only")
+        .map(|v| v == "true")
+        .unwrap_or(false);
 
     let kv = match backend {
         "memory" => open_memory(read_only)?,
@@ -254,7 +276,9 @@ impl KVStoreEngine for KVState {
 
     fn put(&self, cf: u32, key: &[u8]) -> Result<(), String> {
         let kv_guard = self.kv.read().unwrap();
-        let kv = kv_guard.as_ref().ok_or_else(|| "kvstore not open".to_string())?;
+        let kv = kv_guard
+            .as_ref()
+            .ok_or_else(|| "kvstore not open".to_string())?;
         kv.put(cf as usize, key).map_err(|e| e.to_string())?;
         self.signal_flush_if_needed(kv);
         Ok(())
@@ -262,11 +286,14 @@ impl KVStoreEngine for KVState {
 
     fn batch_put(&self, cf: u32, keys: &[u8]) -> Result<(), String> {
         let kv_guard = self.kv.read().unwrap();
-        let kv = kv_guard.as_ref().ok_or_else(|| "kvstore not open".to_string())?;
+        let kv = kv_guard
+            .as_ref()
+            .ok_or_else(|| "kvstore not open".to_string())?;
         let mut buf = Vec::new();
         let mut pos = 0;
         while pos + 4 <= keys.len() {
-            let klen = u32::from_be_bytes([keys[pos], keys[pos + 1], keys[pos + 2], keys[pos + 3]]) as usize;
+            let klen = u32::from_be_bytes([keys[pos], keys[pos + 1], keys[pos + 2], keys[pos + 3]])
+                as usize;
             if pos + 4 + klen > keys.len() {
                 break;
             }
@@ -281,7 +308,9 @@ impl KVStoreEngine for KVState {
 
     fn batch_write(&self, ops: &[u8]) -> Result<(), String> {
         let kv_guard = self.kv.read().unwrap();
-        let kv = kv_guard.as_ref().ok_or_else(|| "kvstore not open".to_string())?;
+        let kv = kv_guard
+            .as_ref()
+            .ok_or_else(|| "kvstore not open".to_string())?;
         kv.batch_write_raw(ops).map_err(|e| e.to_string())?;
         self.signal_flush_if_needed(kv);
         Ok(())
@@ -289,11 +318,14 @@ impl KVStoreEngine for KVState {
 
     fn replay(&self, cf: u32, keys: &[u8]) -> Result<(), String> {
         let kv_guard = self.kv.read().unwrap();
-        let kv = kv_guard.as_ref().ok_or_else(|| "transactor not open".to_string())?;
+        let kv = kv_guard
+            .as_ref()
+            .ok_or_else(|| "transactor not open".to_string())?;
         let mut buf = Vec::new();
         let mut pos = 0;
         while pos + 4 <= keys.len() {
-            let klen = u32::from_be_bytes([keys[pos], keys[pos + 1], keys[pos + 2], keys[pos + 3]]) as usize;
+            let klen = u32::from_be_bytes([keys[pos], keys[pos + 1], keys[pos + 2], keys[pos + 3]])
+                as usize;
             if pos + 4 + klen > keys.len() {
                 break;
             }
@@ -311,8 +343,13 @@ impl KVStoreEngine for KVState {
 
     fn get(&self, cf: u32, key: &[u8]) -> Result<bool, String> {
         let kv_guard = self.kv.read().unwrap();
-        let kv = kv_guard.as_ref().ok_or_else(|| "transactor not open".to_string())?;
-        Ok(kv.get(cf as usize, key).map_err(|e| e.to_string())?.is_some())
+        let kv = kv_guard
+            .as_ref()
+            .ok_or_else(|| "transactor not open".to_string())?;
+        Ok(kv
+            .get(cf as usize, key)
+            .map_err(|e| e.to_string())?
+            .is_some())
     }
 
     // ------------------------------------------------------------------
@@ -321,7 +358,9 @@ impl KVStoreEngine for KVState {
 
     fn scan(&self, cf: u32, prefix: &[u8]) -> Result<Vec<u8>, String> {
         let kv_guard = self.kv.read().unwrap();
-        let kv = kv_guard.as_ref().ok_or_else(|| "transactor not open".to_string())?;
+        let kv = kv_guard
+            .as_ref()
+            .ok_or_else(|| "transactor not open".to_string())?;
         let pairs = kv.scan(cf as usize, prefix).map_err(|e| e.to_string())?;
         let mut buf = Vec::new();
         for (k, _) in pairs {
@@ -333,8 +372,12 @@ impl KVStoreEngine for KVState {
 
     fn scan_reverse(&self, cf: u32, prefix: &[u8]) -> Result<Vec<u8>, String> {
         let kv_guard = self.kv.read().unwrap();
-        let kv = kv_guard.as_ref().ok_or_else(|| "transactor not open".to_string())?;
-        let pairs = kv.scan_reverse(cf as usize, prefix).map_err(|e| e.to_string())?;
+        let kv = kv_guard
+            .as_ref()
+            .ok_or_else(|| "transactor not open".to_string())?;
+        let pairs = kv
+            .scan_reverse(cf as usize, prefix)
+            .map_err(|e| e.to_string())?;
         let mut buf = Vec::new();
         for (k, _) in pairs {
             buf.extend_from_slice(&(k.len() as u32).to_be_bytes());
@@ -345,7 +388,9 @@ impl KVStoreEngine for KVState {
 
     fn items(&self, cf: u32) -> Result<Vec<u8>, String> {
         let kv_guard = self.kv.read().unwrap();
-        let kv = kv_guard.as_ref().ok_or_else(|| "transactor not open".to_string())?;
+        let kv = kv_guard
+            .as_ref()
+            .ok_or_else(|| "transactor not open".to_string())?;
         let pairs = kv.items(cf as usize).map_err(|e| e.to_string())?;
         let mut buf = Vec::new();
         for (k, _) in pairs {
@@ -361,7 +406,9 @@ impl KVStoreEngine for KVState {
 
     fn open_cursor_direct(&self, cf: u32, prefix: &[u8]) -> Result<CursorHandle, String> {
         let kv_guard = self.kv.read().unwrap();
-        let kv = kv_guard.as_ref().ok_or_else(|| "transactor not open".to_string())?;
+        let kv = kv_guard
+            .as_ref()
+            .ok_or_else(|| "transactor not open".to_string())?;
         let sources = kv.scan_sources(cf as usize, prefix);
         let merged = MergedInner::new(sources, prefix);
         Ok(CursorHandle {
@@ -371,7 +418,9 @@ impl KVStoreEngine for KVState {
 
     fn open_cursor_reverse_direct(&self, cf: u32, prefix: &[u8]) -> Result<CursorHandle, String> {
         let kv_guard = self.kv.read().unwrap();
-        let kv = kv_guard.as_ref().ok_or_else(|| "transactor not open".to_string())?;
+        let kv = kv_guard
+            .as_ref()
+            .ok_or_else(|| "transactor not open".to_string())?;
         let sources = kv.scan_reverse_sources(cf as usize, prefix);
         let merged = ReverseMergedInner::new(sources, prefix);
         Ok(CursorHandle {
@@ -423,19 +472,25 @@ impl KVStoreEngine for KVState {
 
     fn journal_put(&self, key: &[u8], value: &[u8]) -> Result<(), String> {
         let kv_guard = self.kv.read().unwrap();
-        let kv = kv_guard.as_ref().ok_or_else(|| "transactor not open".to_string())?;
+        let kv = kv_guard
+            .as_ref()
+            .ok_or_else(|| "transactor not open".to_string())?;
         kv.journal_put(key, value).map_err(|e| e.to_string())
     }
 
     fn journal_scan(&self) -> Result<Vec<u8>, String> {
         let kv_guard = self.kv.read().unwrap();
-        let kv = kv_guard.as_ref().ok_or_else(|| "transactor not open".to_string())?;
+        let kv = kv_guard
+            .as_ref()
+            .ok_or_else(|| "transactor not open".to_string())?;
         kv.journal_scan().map_err(|e| e.to_string())
     }
 
     fn journal_size(&self) -> Result<u64, String> {
         let kv_guard = self.kv.read().unwrap();
-        let kv = kv_guard.as_ref().ok_or_else(|| "transactor not open".to_string())?;
+        let kv = kv_guard
+            .as_ref()
+            .ok_or_else(|| "transactor not open".to_string())?;
         Ok(kv.journal_size())
     }
 
@@ -445,31 +500,43 @@ impl KVStoreEngine for KVState {
 
     fn memtable_size(&self) -> Result<u64, String> {
         let kv_guard = self.kv.read().unwrap();
-        let kv = kv_guard.as_ref().ok_or_else(|| "transactor not open".to_string())?;
+        let kv = kv_guard
+            .as_ref()
+            .ok_or_else(|| "transactor not open".to_string())?;
         Ok(kv.memtable_size() as u64)
     }
 
     fn memtable_count(&self, cf: u32) -> Result<u64, String> {
         let kv_guard = self.kv.read().unwrap();
-        let kv = kv_guard.as_ref().ok_or_else(|| "transactor not open".to_string())?;
+        let kv = kv_guard
+            .as_ref()
+            .ok_or_else(|| "transactor not open".to_string())?;
         Ok(kv.memtable_count(cf as usize) as u64)
     }
 
     fn path(&self) -> Result<String, String> {
         let kv_guard = self.kv.read().unwrap();
-        let kv = kv_guard.as_ref().ok_or_else(|| "transactor not open".to_string())?;
+        let kv = kv_guard
+            .as_ref()
+            .ok_or_else(|| "transactor not open".to_string())?;
         Ok(kv.path())
     }
 
     fn approximate_sizes(&self, cf: u32, start: &[u8], end: &[u8]) -> Result<u64, String> {
         let kv_guard = self.kv.read().unwrap();
-        let kv = kv_guard.as_ref().ok_or_else(|| "transactor not open".to_string())?;
-        Ok(kv.approximate_sizes(cf as usize, start, end).map_err(|e| e.to_string())? as u64)
+        let kv = kv_guard
+            .as_ref()
+            .ok_or_else(|| "transactor not open".to_string())?;
+        Ok(kv
+            .approximate_sizes(cf as usize, start, end)
+            .map_err(|e| e.to_string())? as u64)
     }
 
     fn cf_stats(&self, cf: u32) -> Result<Vec<u8>, String> {
         let kv_guard = self.kv.read().unwrap();
-        let kv = kv_guard.as_ref().ok_or_else(|| "transactor not open".to_string())?;
+        let kv = kv_guard
+            .as_ref()
+            .ok_or_else(|| "transactor not open".to_string())?;
         let stats = kv.cf_stats(cf as usize).map_err(|e| e.to_string())?;
         let name_bytes = stats.name.as_bytes();
         let mut buf = Vec::new();
@@ -485,7 +552,9 @@ impl KVStoreEngine for KVState {
 
     fn db_stats(&self) -> Result<Vec<u8>, String> {
         let kv_guard = self.kv.read().unwrap();
-        let kv = kv_guard.as_ref().ok_or_else(|| "transactor not open".to_string())?;
+        let kv = kv_guard
+            .as_ref()
+            .ok_or_else(|| "transactor not open".to_string())?;
         let stats = kv.db_stats().map_err(|e| e.to_string())?;
         let mut buf = Vec::new();
         buf.extend_from_slice(&stats.total_sst_size.to_le_bytes());
@@ -495,7 +564,9 @@ impl KVStoreEngine for KVState {
 
     fn gc_full(&self, dry_run: bool, nowait: bool) -> Result<Vec<u8>, String> {
         let kv_guard = self.kv.read().unwrap();
-        let kv = kv_guard.as_ref().ok_or_else(|| "transactor not open".to_string())?;
+        let kv = kv_guard
+            .as_ref()
+            .ok_or_else(|| "transactor not open".to_string())?;
         let result = kv.gc_full(dry_run, nowait).map_err(|e| e.to_string())?;
         let mut buf = Vec::new();
         buf.extend_from_slice(&(result.roots_scanned as u64).to_le_bytes());
@@ -509,7 +580,9 @@ impl KVStoreEngine for KVState {
 
     fn internal_status(&self, target: &str) -> Result<String, String> {
         let kv_guard = self.kv.read().unwrap();
-        let kv = kv_guard.as_ref().ok_or_else(|| "transactor not open".to_string())?;
+        let kv = kv_guard
+            .as_ref()
+            .ok_or_else(|| "transactor not open".to_string())?;
         kv.internal_status(target).map_err(|e| e.to_string())
     }
 
@@ -519,7 +592,9 @@ impl KVStoreEngine for KVState {
 
     fn flush(&self) -> Result<(), String> {
         let kv_guard = self.kv.read().unwrap();
-        let kv = kv_guard.as_ref().ok_or_else(|| "transactor not open".to_string())?;
+        let kv = kv_guard
+            .as_ref()
+            .ok_or_else(|| "transactor not open".to_string())?;
         kv.flush().map_err(|e| e.to_string())
     }
 

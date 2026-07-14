@@ -1,11 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use dynspire_commons::datalog::{BoundValue, DatalogSlot as Slot, PlanStats};
-use dynspire_commons::planner::{
-    IterPlanData, Pattern, PlanValue, QueryPlanResult, INDEX_ORDERS,
-};
-use dynspire_commons::query_ir::SpecKind;
-use dynspire_commons::value::Value;
+use crate::ast::{IterPlanData, PlanValue, QueryPlanResult};
+use spier_datalog::{BoundValue, DatalogSlot as Slot, Pattern, PlanStats, INDEX_ORDERS};
+use spier_query_ir::SpecKind;
+use spier_value::Value;
 
 fn is_slot_bound(slot: &Slot, bound_vars: &HashSet<String>) -> bool {
     match slot {
@@ -30,9 +28,9 @@ fn find_best_index(
     bound_vars: &HashSet<String>,
     _ref_attrs: &HashSet<String>,
 ) -> Option<(String, usize, usize)> {
-    let target_pos = ["e", "a", "v", "t", "added"].iter().find(|&&pos| {
-        matches!(pattern.slot(pos), Slot::Var(n) if n == var_name)
-    })?;
+    let target_pos = ["e", "a", "v", "t", "added"]
+        .iter()
+        .find(|&&pos| matches!(pattern.slot(pos), Slot::Var(n) if n == var_name))?;
 
     let attr_is_ref = match &pattern.a {
         Slot::Const(BoundValue::ResolvedAttr(_, _, is_ref)) => *is_ref,
@@ -62,11 +60,13 @@ fn find_best_index(
             continue;
         }
 
-        let prefix_len = idx_order[..pos_in_idx].iter()
+        let prefix_len = idx_order[..pos_in_idx]
+            .iter()
             .take_while(|&&pos| is_slot_bound(pattern.slot(pos), bound_vars))
             .count();
 
-        let gap_count = idx_order[..pos_in_idx].iter()
+        let gap_count = idx_order[..pos_in_idx]
+            .iter()
             .filter(|&&pos| matches!(pattern.slot(pos), Slot::Missing))
             .count();
 
@@ -87,9 +87,10 @@ fn is_var_reachable_in_index(
     index_name: &str,
     bound_vars: &HashSet<String>,
 ) -> bool {
-    let target_pos = match ["e", "a", "v", "t", "added"].iter().find(|&&pos| {
-        matches!(pattern.slot(pos), Slot::Var(n) if n == var_name)
-    }) {
+    let target_pos = match ["e", "a", "v", "t", "added"]
+        .iter()
+        .find(|&&pos| matches!(pattern.slot(pos), Slot::Var(n) if n == var_name))
+    {
         Some(p) => p,
         None => return false,
     };
@@ -125,7 +126,7 @@ fn estimate_cardinality(
         .unwrap_or(f64::MAX)
 }
 
-use dynspire_commons::planner::{DepthTrace, PlanTrace};
+use crate::ast::{DepthTrace, PlanTrace};
 
 struct SearchState {
     best_ordering: Option<Vec<String>>,
@@ -219,11 +220,14 @@ fn explore_ordering_depth(
             if let Some(ref assigned_idx) = clause_index_map[ci] {
                 if is_var_reachable_in_index(clause, &current_var, assigned_idx, bound_vars) {
                     active_clauses.push((ci, assigned_idx.clone()));
-                    let sz = estimate_cardinality(join_indices[ci], assigned_idx, &current_var, stats);
+                    let sz =
+                        estimate_cardinality(join_indices[ci], assigned_idx, &current_var, stats);
                     clause_sizes.push(sz);
                 }
             } else {
-                if let Some((idx_name, _, gap_count)) = find_best_index(clause, &current_var, bound_vars, ref_attrs) {
+                if let Some((idx_name, _, gap_count)) =
+                    find_best_index(clause, &current_var, bound_vars, ref_attrs)
+                {
                     active_clauses.push((ci, idx_name.clone()));
                     new_clause_indexes[ci] = Some(idx_name.clone());
                     let sz = estimate_cardinality(join_indices[ci], &idx_name, &current_var, stats);
@@ -235,7 +239,11 @@ fn explore_ordering_depth(
 
         let is_blind = active_clauses.is_empty();
 
-        let range_sel = if range_vars.contains(&current_var) { 0.1 } else { 1.0 };
+        let range_sel = if range_vars.contains(&current_var) {
+            0.1
+        } else {
+            1.0
+        };
 
         let (level_elements, step_cost) = if is_blind {
             let el = total_records * range_sel;
@@ -276,7 +284,8 @@ fn explore_ordering_depth(
 
         let mut new_bound = bound_vars.clone();
         new_bound.insert(current_var.clone());
-        let new_remaining: Vec<String> = remaining_vars.iter()
+        let new_remaining: Vec<String> = remaining_vars
+            .iter()
             .filter(|v| *v != &current_var)
             .cloned()
             .collect();
@@ -313,7 +322,13 @@ fn build_iter_plan(
     let idx_entry = INDEX_ORDERS.iter().find(|(n, _)| *n == idx_name).unwrap();
     let idx_order: [String; 5] = idx_entry.1.map(|s| s.to_string());
 
-    let slots = [&pattern.e, &pattern.a, &pattern.v, &pattern.t, &pattern.added];
+    let slots = [
+        &pattern.e,
+        &pattern.a,
+        &pattern.v,
+        &pattern.t,
+        &pattern.added,
+    ];
     let specs: [SpecKind; 5] = slots.map(|s| match s {
         Slot::Missing => SpecKind::Bound(0),
         Slot::Var(name) => SpecKind::Var(name.clone()),
@@ -337,7 +352,12 @@ fn build_iter_plan(
 
     for pos in &idx_order {
         let spec_idx = match pos.as_str() {
-            "e" => 0, "a" => 1, "v" => 2, "t" => 3, "added" => 4, _ => continue,
+            "e" => 0,
+            "a" => 1,
+            "v" => 2,
+            "t" => 3,
+            "added" => 4,
+            _ => continue,
         };
         let slot = pattern.slot(pos);
         match slot {
@@ -347,7 +367,10 @@ fn build_iter_plan(
                         var_depths.push((depth, pos.clone()));
                         active_depths_set.insert(depth);
                     } else {
-                        same_var_constraints.entry(depth).or_default().push(pos.clone());
+                        same_var_constraints
+                            .entry(depth)
+                            .or_default()
+                            .push(pos.clone());
                     }
                 }
             }
@@ -373,7 +396,8 @@ fn build_iter_plan(
     let mut trailing_bindings: Vec<(String, PlanValue)> = Vec::new();
 
     if let Some(&max_depth) = active_depths.last() {
-        let last_var_pos = var_depths.iter()
+        let last_var_pos = var_depths
+            .iter()
             .find(|(d, _)| *d == max_depth)
             .map(|(_, pos)| pos.clone());
         if let Some(ref lvp) = last_var_pos {
@@ -381,7 +405,10 @@ fn build_iter_plan(
                 for pos_idx in (last_idx + 1)..idx_order.len() {
                     let pos = idx_order[pos_idx].as_str();
                     let spec_idx = match pos {
-                        "e" => 0, "a" => 1, "v" => 2, _ => continue,
+                        "e" => 0,
+                        "a" => 1,
+                        "v" => 2,
+                        _ => continue,
                     };
                     let pv = match &specs[spec_idx] {
                         SpecKind::BoundValue(ref val) => Some(PlanValue::Value(val.clone())),
@@ -422,12 +449,22 @@ pub fn build_query_plan(
     range_vars: &HashSet<String>,
     stats: &PlanStats,
 ) -> Result<QueryPlanResult, String> {
-    let lookups: Vec<Pattern> = where_patterns.iter().filter(|p| p.is_lookup()).cloned().collect();
-    let join_indices: Vec<usize> = where_patterns.iter().enumerate()
+    let lookups: Vec<Pattern> = where_patterns
+        .iter()
+        .filter(|p| p.is_lookup())
+        .cloned()
+        .collect();
+    let join_indices: Vec<usize> = where_patterns
+        .iter()
+        .enumerate()
         .filter(|(_, p)| !p.is_lookup())
         .map(|(i, _)| i)
         .collect();
-    let join_patterns: Vec<Pattern> = where_patterns.iter().filter(|p| !p.is_lookup()).cloned().collect();
+    let join_patterns: Vec<Pattern> = where_patterns
+        .iter()
+        .filter(|p| !p.is_lookup())
+        .cloned()
+        .collect();
 
     if join_patterns.is_empty() {
         let mut t_lookup_vars: Vec<String> = Vec::new();
@@ -459,7 +496,13 @@ pub fn build_query_plan(
     let mut var_order: Vec<String> = Vec::new();
     let mut all_vars: Vec<String> = Vec::new();
     for pattern in &join_patterns {
-        for slot in [&pattern.e, &pattern.a, &pattern.v, &pattern.t, &pattern.added] {
+        for slot in [
+            &pattern.e,
+            &pattern.a,
+            &pattern.v,
+            &pattern.t,
+            &pattern.added,
+        ] {
             if let Slot::Var(name) = slot {
                 if !seen.contains(name) {
                     seen.insert(name.clone());
@@ -473,14 +516,19 @@ pub fn build_query_plan(
     let mut e_vars: HashSet<String> = HashSet::new();
     let mut attr_vars: HashSet<String> = HashSet::new();
     for pattern in &join_patterns {
-        if let Slot::Var(name) = &pattern.e { e_vars.insert(name.clone()); }
-        if let Slot::Var(name) = &pattern.a { attr_vars.insert(name.clone()); }
+        if let Slot::Var(name) = &pattern.e {
+            e_vars.insert(name.clone());
+        }
+        if let Slot::Var(name) = &pattern.a {
+            attr_vars.insert(name.clone());
+        }
     }
 
     let find_set: HashSet<String> = find_vars.iter().cloned().collect();
     let total_records = stats.total_eavt;
 
-    let ref_attrs: HashSet<String> = join_patterns.iter()
+    let ref_attrs: HashSet<String> = join_patterns
+        .iter()
         .filter_map(|p| match &p.a {
             Slot::Const(BoundValue::ResolvedAttr(_, name, true)) => Some(name.clone()),
             _ => None,
@@ -519,7 +567,9 @@ pub fn build_query_plan(
 
     let best_ordering_orig = state.best_ordering.clone();
     let mut ordered_vars = state.best_ordering.unwrap_or_else(|| all_vars.clone());
-    let clause_indexes = state.best_clause_indexes.unwrap_or_else(|| clause_index_map);
+    let clause_indexes = state
+        .best_clause_indexes
+        .unwrap_or_else(|| clause_index_map);
 
     // Pre-compute skip vars for Missing gaps so all iter_plans share consistent depth numbering
     for (pat_idx, pattern) in join_patterns.iter().enumerate() {
@@ -530,9 +580,9 @@ pub fn build_query_plan(
         let idx_entry = INDEX_ORDERS.iter().find(|(n, _)| *n == idx_name).unwrap();
         let idx_order = idx_entry.1;
 
-        let first_var_pos = idx_order.iter().position(|pos| {
-            matches!(pattern.slot(pos), Slot::Var(_))
-        });
+        let first_var_pos = idx_order
+            .iter()
+            .position(|pos| matches!(pattern.slot(pos), Slot::Var(_)));
         if let Some(fvp) = first_var_pos {
             let target_var = if let Slot::Var(name) = pattern.slot(idx_order[fvp]) {
                 name.clone()
@@ -566,38 +616,68 @@ pub fn build_query_plan(
             let mut bound_ints: HashMap<String, PlanValue> = HashMap::new();
             if let Slot::Const(bv) = &pattern.e {
                 match bv {
-                    BoundValue::Int(n) => { bound_ints.insert("e".to_string(), PlanValue::Value(Value::Int64(*n))); }
-                    BoundValue::Str(s) | BoundValue::Attr(s) => {
-                        bound_ints.insert("e".to_string(), PlanValue::Value(Value::Text(s.clone().into())));
+                    BoundValue::Int(n) => {
+                        bound_ints.insert("e".to_string(), PlanValue::Value(Value::Int64(*n)));
                     }
-                    BoundValue::Param(idx) => { bound_ints.insert("e".to_string(), PlanValue::Param(*idx)); }
+                    BoundValue::Str(s) | BoundValue::Attr(s) => {
+                        bound_ints.insert(
+                            "e".to_string(),
+                            PlanValue::Value(Value::Text(s.clone().into())),
+                        );
+                    }
+                    BoundValue::Param(idx) => {
+                        bound_ints.insert("e".to_string(), PlanValue::Param(*idx));
+                    }
                     _ => {}
                 }
             }
             if let Slot::Const(bv) = &pattern.a {
                 match bv {
                     BoundValue::ResolvedAttr(id, _, _) => {
-                        bound_ints.insert("a".to_string(), PlanValue::Value(Value::Int64(*id as i64)));
+                        bound_ints
+                            .insert("a".to_string(), PlanValue::Value(Value::Int64(*id as i64)));
                     }
                     BoundValue::Str(s) | BoundValue::Attr(s) => {
-                        bound_ints.insert("a".to_string(), PlanValue::Value(Value::Text(s.clone().into())));
+                        bound_ints.insert(
+                            "a".to_string(),
+                            PlanValue::Value(Value::Text(s.clone().into())),
+                        );
                     }
-                    BoundValue::Param(idx) => { bound_ints.insert("a".to_string(), PlanValue::Param(*idx)); }
+                    BoundValue::Param(idx) => {
+                        bound_ints.insert("a".to_string(), PlanValue::Param(*idx));
+                    }
                     _ => {}
                 }
             }
             if let Slot::Const(bv) = &pattern.v {
                 match bv {
-                    BoundValue::Int(n) => { bound_ints.insert("v".to_string(), PlanValue::Value(Value::Int64(*n))); }
-                    BoundValue::Float(f) => { bound_ints.insert("v".to_string(), PlanValue::Value(Value::Float64(*f))); }
-                    BoundValue::Str(s) => { bound_ints.insert("v".to_string(), PlanValue::Value(Value::text(s.clone()))); }
-                    BoundValue::Attr(s) => { bound_ints.insert("v".to_string(), PlanValue::Value(Value::text(s.clone()))); }
-                    BoundValue::Param(idx) => { bound_ints.insert("v".to_string(), PlanValue::Param(*idx)); }
+                    BoundValue::Int(n) => {
+                        bound_ints.insert("v".to_string(), PlanValue::Value(Value::Int64(*n)));
+                    }
+                    BoundValue::Float(f) => {
+                        bound_ints.insert("v".to_string(), PlanValue::Value(Value::Float64(*f)));
+                    }
+                    BoundValue::Str(s) => {
+                        bound_ints
+                            .insert("v".to_string(), PlanValue::Value(Value::text(s.clone())));
+                    }
+                    BoundValue::Attr(s) => {
+                        bound_ints
+                            .insert("v".to_string(), PlanValue::Value(Value::text(s.clone())));
+                    }
+                    BoundValue::Param(idx) => {
+                        bound_ints.insert("v".to_string(), PlanValue::Param(*idx));
+                    }
                     _ => {}
                 }
             }
 
-            iter_plans.push(build_iter_plan(pattern, &idx_name, bound_ints, &ordered_vars));
+            iter_plans.push(build_iter_plan(
+                pattern,
+                &idx_name,
+                bound_ints,
+                &ordered_vars,
+            ));
         }
     }
 
@@ -612,7 +692,9 @@ pub fn build_query_plan(
 
     let mut plan_traces = state.traces;
     for trace in &mut plan_traces {
-        if trace.pruned { continue; }
+        if trace.pruned {
+            continue;
+        }
         // Only reformat the winning trace to include synthetic vars;
         // all other traces keep their real ordering and depths
         if best_ordering_orig.as_deref() == Some(trace.ordering.as_slice()) {

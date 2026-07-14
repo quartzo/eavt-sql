@@ -2,16 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-pub use crate::engine::opcodes::{
-    debug_timing_enabled,
-    OpCode, InstructionData, VMProgram,
-};
 use crate::engine::opcodes::TimingStats;
-use dynspire_commons::query_ir::{
-    RANGE_OP_EQ, RANGE_OP_NEQ, RANGE_OP_GT, RANGE_OP_GTE,
-    RANGE_OP_LT, RANGE_OP_LTE, RANGE_OP_IN,
+pub use crate::engine::opcodes::{debug_timing_enabled, InstructionData, OpCode, VMProgram};
+use spier_query_ir::{
+    RANGE_OP_EQ, RANGE_OP_GT, RANGE_OP_GTE, RANGE_OP_IN, RANGE_OP_LT, RANGE_OP_LTE, RANGE_OP_NEQ,
 };
-use dynspire_commons::value::Value;
+use spier_value::Value;
 
 #[derive(Debug)]
 pub struct EngineError(pub String);
@@ -37,15 +33,33 @@ pub trait VMEngine: Send + Sync {
         &self,
         cf_id: u32,
         prefix: &[u8],
-    ) -> Result<std::sync::Arc<std::cell::RefCell<dyn dynspire_commons::transactor::cursor::Cursor>>, String>;
+    ) -> Result<std::sync::Arc<std::cell::RefCell<dyn spier_storage_traits::Cursor>>, String>;
     fn collect_active(&self, cf: &str, prefix: &[u8], ctx: &QueryContext) -> Vec<RawDatomView>;
-    fn probe_collect(&self, index: &str, bound: &[BoundPart], ctx: &QueryContext) -> Vec<RawDatomView>;
-    fn save_with_t(&self, e: &Value, attr: &str, v: &Value, ctx: &QueryContext) -> Result<(), EngineError>;
+    fn probe_collect(
+        &self,
+        index: &str,
+        bound: &[BoundPart],
+        ctx: &QueryContext,
+    ) -> Vec<RawDatomView>;
+    fn save_with_t(
+        &self,
+        e: &Value,
+        attr: &str,
+        v: &Value,
+        ctx: &QueryContext,
+    ) -> Result<(), EngineError>;
     fn retract(&self, e: &Value, attr: &str, v: &Value, ctx: &QueryContext);
     fn allocate_in_partition(&self, partition_id: u64) -> u64;
     fn default_user_partition(&self) -> u64;
     fn declare_partition(&self, name: &str, ctx: &QueryContext) -> Result<u64, EngineError>;
-    fn declare_attr_from_sql(&self, attr: &str, type_name: &str, many: bool, unique: bool, ctx: &QueryContext) -> Result<(), EngineError>;
+    fn declare_attr_from_sql(
+        &self,
+        attr: &str,
+        type_name: &str,
+        many: bool,
+        unique: bool,
+        ctx: &QueryContext,
+    ) -> Result<(), EngineError>;
     fn is_unique_attr(&self, attr_name: &str) -> bool;
     fn value_type_for(&self, aid: u32) -> Option<u32>;
     fn lookup_entity(&self, attr_name: &str, value: &Value, ctx: &QueryContext) -> Option<u64>;
@@ -130,16 +144,24 @@ fn merge_intervals(
                 (None, Some(h)) => Some(h.clone()),
                 (Some(_), None) => None,
                 (Some(ph), Some(h)) => {
-                    if h > ph { Some(h.clone()) } else { Some(ph.clone()) }
+                    if h > ph {
+                        Some(h.clone())
+                    } else {
+                        Some(ph.clone())
+                    }
                 }
             };
             let new_hi_open = match (&prev_hi, &hi) {
                 (None, _) => flags & RANGE_HI_OPEN != 0,
                 (_, None) => false,
                 (Some(ph), Some(h)) => {
-                    if h > ph { flags & RANGE_HI_OPEN != 0 }
-                    else if h < ph { prev_flags & RANGE_HI_OPEN != 0 }
-                    else { prev_flags & RANGE_HI_OPEN != 0 && flags & RANGE_HI_OPEN != 0 }
+                    if h > ph {
+                        flags & RANGE_HI_OPEN != 0
+                    } else if h < ph {
+                        prev_flags & RANGE_HI_OPEN != 0
+                    } else {
+                        prev_flags & RANGE_HI_OPEN != 0 && flags & RANGE_HI_OPEN != 0
+                    }
                 }
             };
             merged.last_mut().unwrap().1 = new_hi;
@@ -215,8 +237,12 @@ fn ops_to_intervals(ops: &[(i32, Value)]) -> Vec<(Option<Value>, Option<Value>, 
     }
 
     let mut flags = 0;
-    if lo_open { flags |= RANGE_LO_OPEN; }
-    if hi_open { flags |= RANGE_HI_OPEN; }
+    if lo_open {
+        flags |= RANGE_LO_OPEN;
+    }
+    if hi_open {
+        flags |= RANGE_HI_OPEN;
+    }
 
     let mut intervals: Vec<(Option<Value>, Option<Value>, i32)> = vec![(lo, hi, flags)];
 
@@ -227,12 +253,28 @@ fn ops_to_intervals(ops: &[(i32, Value)]) -> Vec<(Option<Value>, Option<Value>, 
                 let mut ok = true;
                 if let Some(ref lo) = iv_lo {
                     let lo_open_i = iv_flags & RANGE_LO_OPEN != 0;
-                    if lo_open_i { if &nv <= lo { ok = false; } } else { if &nv < lo { ok = false; } }
+                    if lo_open_i {
+                        if &nv <= lo {
+                            ok = false;
+                        }
+                    } else {
+                        if &nv < lo {
+                            ok = false;
+                        }
+                    }
                 }
                 if ok {
                     if let Some(ref hi) = iv_hi {
                         let hi_open_i = iv_flags & RANGE_HI_OPEN != 0;
-                        if hi_open_i { if &nv >= hi { ok = false; } } else { if &nv > hi { ok = false; } }
+                        if hi_open_i {
+                            if &nv >= hi {
+                                ok = false;
+                            }
+                        } else {
+                            if &nv > hi {
+                                ok = false;
+                            }
+                        }
                     }
                 }
                 ok
@@ -262,9 +304,7 @@ pub enum BoundPart {
 
 fn probe_value_matches(dv: &Value, pv: &Value) -> bool {
     match pv {
-        Value::Int64(_) | Value::Bool(_) | Value::Timestamp(_) => {
-            dv.raw_int() == pv.raw_int()
-        }
+        Value::Int64(_) | Value::Bool(_) | Value::Timestamp(_) => dv.raw_int() == pv.raw_int(),
         Value::Float64(_) => dv.raw_float() == pv.raw_float(),
         _ => dv == pv,
     }
@@ -318,7 +358,10 @@ impl VM {
             vars: vec![None; program.num_vars],
             prog: program,
             engine,
-            ctx: QueryContext { as_of_us, current_t },
+            ctx: QueryContext {
+                as_of_us,
+                current_t,
+            },
             params,
             limit,
             pc: 0,
@@ -346,18 +389,16 @@ impl VM {
                 if let Some(scanner) = self.v2_scanners.get(&sid) {
                     let pos = scanner.depth_position(depth);
                     match scanner.extract_value(pos) {
-                        Some(v) => {
-                            match &max_val {
-                                None => max_val = Some(v),
-                                Some(mv) if v != *mv => {
-                                    all_equal = false;
-                                    if v > *mv {
-                                        max_val = Some(v);
-                                    }
+                        Some(v) => match &max_val {
+                            None => max_val = Some(v),
+                            Some(mv) if v != *mv => {
+                                all_equal = false;
+                                if v > *mv {
+                                    max_val = Some(v);
                                 }
-                                _ => {}
                             }
-                        }
+                            _ => {}
+                        },
                         None => return false,
                     }
                 } else {
@@ -513,7 +554,9 @@ impl VM {
                                 if let Some(scanner) = self.v2_scanners.get(&sids[0]) {
                                     let pos = scanner.depth_position(depth);
                                     scanner.extract_value(pos).map_or(false, |v| &v == lo)
-                                } else { false }
+                                } else {
+                                    false
+                                }
                             };
                             if at_lo {
                                 for &sid in sids {
@@ -564,7 +607,7 @@ impl VM {
         let wall_start = Instant::now();
         let mut timing = TimingStats::new();
 
-        let trace_vm = dynspire_commons::trace_vm();
+        let trace_vm = crate::trace::trace_vm();
 
         while self.pc < num_instructions {
             let inst = self.prog.instructions[self.pc].clone();
@@ -619,7 +662,8 @@ impl VM {
                 }
 
                 OpCode::ConstBool => {
-                    self.regs[inst.p1 as usize] = Some(Value::Bool(if inst.p2 != 0 { 1 } else { 0 }));
+                    self.regs[inst.p1 as usize] =
+                        Some(Value::Bool(if inst.p2 != 0 { 1 } else { 0 }));
                 }
 
                 OpCode::InternA => {
@@ -627,8 +671,9 @@ impl VM {
                         InstructionData::Str(s) => s.clone(),
                         _ => String::new(),
                     };
-                    let aid = self.engine.lookup_attr(&attr_name)
-                        .ok_or_else(|| EngineError(format!("INTERN_A: undeclared attribute '{}'", attr_name)))?;
+                    let aid = self.engine.lookup_attr(&attr_name).ok_or_else(|| {
+                        EngineError(format!("INTERN_A: undeclared attribute '{}'", attr_name))
+                    })?;
                     self.regs[inst.p1 as usize] = Some(Value::int64(aid as i64));
                 }
 
@@ -641,16 +686,26 @@ impl VM {
                 }
 
                 OpCode::ResolveVal => {
-                    let t0 = if do_timing { Some(Instant::now()) } else { None };
+                    let t0 = if do_timing {
+                        Some(Instant::now())
+                    } else {
+                        None
+                    };
                     let r = inst.p1 as usize;
                     if let Some(v) = self.regs[r].take() {
                         self.regs[r] = Some(v);
                     }
-                    if let Some(t0) = t0 { timing.resolve_val.add(t0.elapsed()); }
+                    if let Some(t0) = t0 {
+                        timing.resolve_val.add(t0.elapsed());
+                    }
                 }
 
                 OpCode::DepthUp => {
-                    let t0 = if do_timing { Some(Instant::now()) } else { None };
+                    let t0 = if do_timing {
+                        Some(Instant::now())
+                    } else {
+                        None
+                    };
                     let depth = inst.p1 as usize;
                     let cid = inst.p2 as usize;
 
@@ -663,21 +718,25 @@ impl VM {
                             self.depth_cursors.remove(&depth);
                         }
                     }
-                    if let Some(t0) = t0 { timing.depth_up.add(t0.elapsed()); }
+                    if let Some(t0) = t0 {
+                        timing.depth_up.add(t0.elapsed());
+                    }
                 }
 
                 OpCode::LeapInit => {
-                    let t0 = if do_timing { Some(Instant::now()) } else { None };
+                    let t0 = if do_timing {
+                        Some(Instant::now())
+                    } else {
+                        None
+                    };
                     let depth = inst.p1 as usize;
                     let fail_addr = inst.p2 as usize;
-                    let cursor_ids = self
-                        .depth_cursors
-                        .get(&depth)
-                        .cloned()
-                        .unwrap_or_default();
+                    let cursor_ids = self.depth_cursors.get(&depth).cloned().unwrap_or_default();
 
                     if !self.v2_leap_init_full(depth, &cursor_ids) {
-                        if let Some(t0) = t0 { timing.leap_init.add(t0.elapsed()); }
+                        if let Some(t0) = t0 {
+                            timing.leap_init.add(t0.elapsed());
+                        }
                         self.pc = fail_addr;
                         continue;
                     }
@@ -691,18 +750,20 @@ impl VM {
                             }
                         }
                     }
-                    if let Some(t0) = t0 { timing.leap_init.add(t0.elapsed()); }
+                    if let Some(t0) = t0 {
+                        timing.leap_init.add(t0.elapsed());
+                    }
                 }
 
                 OpCode::LeapNext => {
-                    let t0 = if do_timing { Some(Instant::now()) } else { None };
+                    let t0 = if do_timing {
+                        Some(Instant::now())
+                    } else {
+                        None
+                    };
                     let depth = inst.p1 as usize;
                     let fail_addr = inst.p2 as usize;
-                    let cursor_ids = self
-                        .depth_cursors
-                        .get(&depth)
-                        .cloned()
-                        .unwrap_or_default();
+                    let cursor_ids = self.depth_cursors.get(&depth).cloned().unwrap_or_default();
 
                     if cursor_ids.is_empty() {
                         self.pc = fail_addr;
@@ -715,10 +776,16 @@ impl VM {
                             let pos = scanner.depth_position(depth);
                             let val = scanner.extract_value(pos);
                             match &min_val {
-                                None => { min_val = val.clone(); min_sid = sid; }
+                                None => {
+                                    min_val = val.clone();
+                                    min_sid = sid;
+                                }
                                 Some(mv) => {
                                     if let Some(ref v) = val {
-                                        if v < mv { min_val = Some(v.clone()); min_sid = sid; }
+                                        if v < mv {
+                                            min_val = Some(v.clone());
+                                            min_sid = sid;
+                                        }
                                     }
                                 }
                             }
@@ -728,18 +795,24 @@ impl VM {
                         let pos = scanner.depth_position(depth);
                         scanner.leap_next_at(pos);
                         if scanner.at_end() {
-                            if let Some(t0) = t0 { timing.leap_next.add(t0.elapsed()); }
+                            if let Some(t0) = t0 {
+                                timing.leap_next.add(t0.elapsed());
+                            }
                             self.pc = fail_addr;
                             continue;
                         }
                         if depth > 0 {
                             if let Some(&ppos) = scanner.depth_positions.get(&(depth - 1)) {
                                 let parent_val = scanner.extract_value(ppos);
-                                let bound_val = self.depth_var.get(&(depth - 1))
+                                let bound_val = self
+                                    .depth_var
+                                    .get(&(depth - 1))
                                     .and_then(|&vid| self.vars.get(vid).cloned())
                                     .flatten();
                                 if parent_val != bound_val {
-                                    if let Some(t0) = t0 { timing.leap_next.add(t0.elapsed()); }
+                                    if let Some(t0) = t0 {
+                                        timing.leap_next.add(t0.elapsed());
+                                    }
                                     self.pc = fail_addr;
                                     continue;
                                 }
@@ -747,7 +820,9 @@ impl VM {
                         }
                     }
                     if !self.v2_leap_init_full(depth, &cursor_ids) {
-                        if let Some(t0) = t0 { timing.leap_next.add(t0.elapsed()); }
+                        if let Some(t0) = t0 {
+                            timing.leap_next.add(t0.elapsed());
+                        }
                         self.pc = fail_addr;
                         continue;
                     }
@@ -759,13 +834,21 @@ impl VM {
                             }
                         }
                     }
-                    if let Some(t0) = t0 { timing.leap_next.add(t0.elapsed()); }
+                    if let Some(t0) = t0 {
+                        timing.leap_next.add(t0.elapsed());
+                    }
                 }
 
                 OpCode::BindGet => {
-                    let t0 = if do_timing { Some(Instant::now()) } else { None };
+                    let t0 = if do_timing {
+                        Some(Instant::now())
+                    } else {
+                        None
+                    };
                     self.regs[inst.p1 as usize] = self.vars[inst.p2 as usize].clone();
-                    if let Some(t0) = t0 { timing.bind_get.add(t0.elapsed()); }
+                    if let Some(t0) = t0 {
+                        timing.bind_get.add(t0.elapsed());
+                    }
                 }
 
                 OpCode::BindSet => {
@@ -792,7 +875,11 @@ impl VM {
                 }
 
                 OpCode::ResultRow => {
-                    let t0 = if do_timing { Some(Instant::now()) } else { None };
+                    let t0 = if do_timing {
+                        Some(Instant::now())
+                    } else {
+                        None
+                    };
                     let start = inst.p1 as usize;
                     let ncols = inst.p2 as usize;
                     if ncols == 0 {
@@ -800,15 +887,23 @@ impl VM {
                         self.count += 1;
                         if let Some(limit) = self.limit {
                             if self.count >= limit {
-                                if let Some(t0) = t0 { timing.result_row.add(t0.elapsed()); }
-                                if do_timing { timing.print(wall_start.elapsed()); }
+                                if let Some(t0) = t0 {
+                                    timing.result_row.add(t0.elapsed());
+                                }
+                                if do_timing {
+                                    timing.print(wall_start.elapsed());
+                                }
                                 return Ok(false);
                             }
                         }
                         self.pc += 1;
-                        if let Some(t0) = t0 { timing.result_row.add(t0.elapsed()); }
+                        if let Some(t0) = t0 {
+                            timing.result_row.add(t0.elapsed());
+                        }
                         if out.len() >= max_rows {
-                            if do_timing { timing.print(wall_start.elapsed()); }
+                            if do_timing {
+                                timing.print(wall_start.elapsed());
+                            }
                             return Ok(true);
                         }
                         continue;
@@ -829,16 +924,24 @@ impl VM {
                         self.count += 1;
                         if let Some(limit) = self.limit {
                             if self.count >= limit {
-                                if let Some(t0) = t0 { timing.result_row.add(t0.elapsed()); }
-                                if do_timing { timing.print(wall_start.elapsed()); }
+                                if let Some(t0) = t0 {
+                                    timing.result_row.add(t0.elapsed());
+                                }
+                                if do_timing {
+                                    timing.print(wall_start.elapsed());
+                                }
                                 return Ok(false);
                             }
                         }
                     }
-                    if let Some(t0) = t0 { timing.result_row.add(t0.elapsed()); }
+                    if let Some(t0) = t0 {
+                        timing.result_row.add(t0.elapsed());
+                    }
                     if out.len() >= max_rows {
                         self.pc += 1;
-                        if do_timing { timing.print(wall_start.elapsed()); }
+                        if do_timing {
+                            timing.print(wall_start.elapsed());
+                        }
                         return Ok(true);
                     }
                 }
@@ -858,13 +961,17 @@ impl VM {
                     self.count += 1;
                     if let Some(limit) = self.limit {
                         if self.count >= limit {
-                            if do_timing { timing.print(wall_start.elapsed()); }
+                            if do_timing {
+                                timing.print(wall_start.elapsed());
+                            }
                             return Ok(false);
                         }
                     }
                     if out.len() >= max_rows {
                         self.pc += 1;
-                        if do_timing { timing.print(wall_start.elapsed()); }
+                        if do_timing {
+                            timing.print(wall_start.elapsed());
+                        }
                         return Ok(true);
                     }
                 }
@@ -928,8 +1035,9 @@ impl VM {
 
                 OpCode::ProbeGetT => {
                     if let Some(t) = self.probe_found_t {
-                        let tx_eid = dynspire_commons::transactor::resolver_consts::make_entity_id(
-                            dynspire_commons::transactor::resolver_consts::PART_TX, t,
+                        let tx_eid = spier_transactor::resolver_consts::make_entity_id(
+                            spier_transactor::resolver_consts::PART_TX,
+                            t,
                         );
                         self.regs[inst.p1 as usize] = Some(Value::int64(tx_eid as i64));
                     } else {
@@ -970,9 +1078,9 @@ impl VM {
                 }
 
                 OpCode::LoadTxEnt => {
-                    let tx_eid = dynspire_commons::transactor::resolver_consts::make_entity_id(
-                        dynspire_commons::transactor::resolver_consts::PART_TX,
-                    self.ctx.current_t,
+                    let tx_eid = spier_transactor::resolver_consts::make_entity_id(
+                        spier_transactor::resolver_consts::PART_TX,
+                        self.ctx.current_t,
                     );
                     self.regs[inst.p1 as usize] = Some(Value::Int64(tx_eid as i64));
                 }
@@ -1003,7 +1111,8 @@ impl VM {
                         Value::Text(s) => s.as_str().to_string(),
                         _ => attr_val.raw_int().to_string(),
                     };
-                    self.engine.save_with_t(&entity_val, &attr, &value_val, &self.ctx)?;
+                    self.engine
+                        .save_with_t(&entity_val, &attr, &value_val, &self.ctx)?;
                 }
 
                 OpCode::ExecRetract => {
@@ -1032,7 +1141,8 @@ impl VM {
                         Value::Text(s) => s.as_str().to_string(),
                         _ => attr_val.raw_int().to_string(),
                     };
-                    self.engine.retract(&entity_val, &attr, &value_val, &self.ctx);
+                    self.engine
+                        .retract(&entity_val, &attr, &value_val, &self.ctx);
                 }
 
                 OpCode::ExecAttribute => {
@@ -1051,7 +1161,13 @@ impl VM {
                         Some(Value::Text(s)) => s.as_str().to_string(),
                         _ => "STRING".to_string(),
                     };
-                    self.engine.declare_attr_from_sql(&attr, &vt_name, inst.p2 & 1 != 0, inst.p2 & 2 != 0, &self.ctx)?;
+                    self.engine.declare_attr_from_sql(
+                        &attr,
+                        &vt_name,
+                        inst.p2 & 1 != 0,
+                        inst.p2 & 2 != 0,
+                        &self.ctx,
+                    )?;
                 }
 
                 OpCode::LookupEntity => {
@@ -1124,9 +1240,11 @@ impl VM {
                         3 => ("VAET", &["v", "a", "e"]),
                         _ => ("EAVT", &["e", "a", "v"]),
                     };
-                    let idx_order: Vec<String> = base_order.iter()
+                    let idx_order: Vec<String> = base_order
+                        .iter()
                         .chain(["t", "added"].iter())
-                        .map(|s| s.to_string()).collect();
+                        .map(|s| s.to_string())
+                        .collect();
                     let mut scanner = crate::engine::scanner::V2Scanner::new(
                         index_name,
                         idx_order,
@@ -1163,13 +1281,17 @@ impl VM {
                             }
                             scanner.build_prefix_bytes();
                             let cf_id = match scanner.index_name() {
-                                "EAVT" => 0u32, "AEVT" => 1, "AVET" => 2, "VAET" => 3, _ => 0,
+                                "EAVT" => 0u32,
+                                "AEVT" => 1,
+                                "AVET" => 2,
+                                "VAET" => 3,
+                                _ => 0,
                             };
                             let prefix = scanner.prefix_bytes().to_vec();
                             let cursor = match self.engine.open_raw_cursor(cf_id, &prefix) {
                                 Ok(c) => c,
                                 Err(_) => std::sync::Arc::new(std::cell::RefCell::new(
-                                    crate::engine::scanner::InvalidCursor
+                                    crate::engine::scanner::InvalidCursor,
                                 )),
                             };
                             scanner.set_cursor(cursor);
@@ -1180,7 +1302,13 @@ impl VM {
                                     scanner.set_value_attr_type(vt);
                                 }
                             }
-                        } else if scanner.depth_positions.keys().min().map(|md| *md >= depth).unwrap_or(true) {
+                        } else if scanner
+                            .depth_positions
+                            .keys()
+                            .min()
+                            .map(|md| *md >= depth)
+                            .unwrap_or(true)
+                        {
                             scanner.seek_to_prefix_start();
                             scanner.advance_to_active_at(pos_idx);
                         }
@@ -1199,7 +1327,8 @@ impl VM {
 
                     if let Some(&var_id) = self.depth_var.get(&depth) {
                         if let Some(scanner) = self.v2_scanners.get(&sid) {
-                            if let Some(val) = scanner.extract_value(scanner.depth_position(depth)) {
+                            if let Some(val) = scanner.extract_value(scanner.depth_position(depth))
+                            {
                                 self.vars[var_id] = Some(val);
                             }
                         }
@@ -1211,7 +1340,11 @@ impl VM {
                     self.v2_scanners.remove(&sid);
                 }
 
-                OpCode::CursorDeclare | OpCode::CursorBind | OpCode::CursorClose | OpCode::DepthOpen | OpCode::RangeAdd => {
+                OpCode::CursorDeclare
+                | OpCode::CursorBind
+                | OpCode::CursorClose
+                | OpCode::DepthOpen
+                | OpCode::RangeAdd => {
                     // v1 opcodes — replaced by RangeOp / v2 scanner system
                 }
             }
@@ -1219,7 +1352,9 @@ impl VM {
             self.pc += 1;
         }
 
-        if do_timing { timing.print(wall_start.elapsed()); }
+        if do_timing {
+            timing.print(wall_start.elapsed());
+        }
         Ok(false)
     }
 }
@@ -1228,10 +1363,7 @@ impl VM {
 mod tests {
     use super::*;
 
-    fn merge_bindings(
-        a: &[(usize, Value)],
-        b: &[(usize, Value)],
-    ) -> Option<Vec<(usize, Value)>> {
+    fn merge_bindings(a: &[(usize, Value)], b: &[(usize, Value)]) -> Option<Vec<(usize, Value)>> {
         let mut result: HashMap<usize, Value> = HashMap::new();
         for (k, v) in a.iter().chain(b.iter()) {
             if let Some(existing) = result.get(k) {
@@ -1344,9 +1476,9 @@ mod tests {
 mod v2_vm_tests {
     use super::*;
     use crate::engine::scanner::InvalidCursor;
-    use dynspire_commons::transactor::cursor::Cursor;
-    use dynspire_commons::transactor::keys as eavt_keys;
-    use dynspire_commons::query_ir::Instruction;
+    use spier_query_ir::Instruction;
+    use spier_storage_traits::Cursor;
+    use spier_transactor::keys as eavt_keys;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
 
@@ -1362,11 +1494,19 @@ mod v2_vm_tests {
     }
 
     impl Cursor for MockCursor2 {
-        fn is_valid(&self) -> bool { self.pos < self.keys.len() }
-        fn current_key(&self) -> Option<&[u8]> { self.keys.get(self.pos).map(|k| k.as_slice()) }
-        fn step(&mut self) { self.pos += 1; }
+        fn is_valid(&self) -> bool {
+            self.pos < self.keys.len()
+        }
+        fn current_key(&self) -> Option<&[u8]> {
+            self.keys.get(self.pos).map(|k| k.as_slice())
+        }
+        fn step(&mut self) {
+            self.pos += 1;
+        }
         fn skip_group(&mut self, group_end: usize) {
-            if self.pos >= self.keys.len() { return; }
+            if self.pos >= self.keys.len() {
+                return;
+            }
             let cur = &self.keys[self.pos][..group_end];
             while self.pos < self.keys.len() && self.keys[self.pos][..group_end] == *cur {
                 self.pos += 1;
@@ -1376,7 +1516,9 @@ mod v2_vm_tests {
             self.pos = self.keys.partition_point(|k| k.as_slice() < target);
         }
         fn update_end(&mut self, _end: &[u8]) {}
-        fn invalidate(&mut self) { self.pos = self.keys.len(); }
+        fn invalidate(&mut self) {
+            self.pos = self.keys.len();
+        }
     }
 
     struct MockEngine {
@@ -1417,38 +1559,106 @@ mod v2_vm_tests {
     }
 
     impl VMEngine for MockEngine {
-        fn resolve_entity(&self, name_or_id: &Value) -> u64 { name_or_id.raw_int() as u64 }
-        fn lookup_attr(&self, name: &str) -> Option<u32> { self.attrs.get(name).copied() }
-        fn attr_name(&self, aid: u32) -> String { self.attr_names.get(&aid).cloned().unwrap_or_default() }
+        fn resolve_entity(&self, name_or_id: &Value) -> u64 {
+            name_or_id.raw_int() as u64
+        }
+        fn lookup_attr(&self, name: &str) -> Option<u32> {
+            self.attrs.get(name).copied()
+        }
+        fn attr_name(&self, aid: u32) -> String {
+            self.attr_names.get(&aid).cloned().unwrap_or_default()
+        }
         fn open_raw_cursor(
-            &self, cf_id: u32, prefix: &[u8],
+            &self,
+            cf_id: u32,
+            prefix: &[u8],
         ) -> Result<std::sync::Arc<std::cell::RefCell<dyn Cursor>>, String> {
             let all_keys = self.cf_keys.get(&cf_id).cloned().unwrap_or_default();
-            let filtered: Vec<Vec<u8>> = all_keys.into_iter()
+            let filtered: Vec<Vec<u8>> = all_keys
+                .into_iter()
                 .filter(|k| k.starts_with(prefix))
                 .collect();
             if filtered.is_empty() {
                 Ok(std::sync::Arc::new(RefCell::new(InvalidCursor)))
             } else {
-                Ok(std::sync::Arc::new(RefCell::new(MockCursor2::new(filtered))))
+                Ok(std::sync::Arc::new(RefCell::new(MockCursor2::new(
+                    filtered,
+                ))))
             }
         }
-        fn collect_active(&self, _cf: &str, _prefix: &[u8], _ctx: &QueryContext) -> Vec<RawDatomView> { vec![] }
-        fn probe_collect(&self, _index: &str, _bound: &[BoundPart], _ctx: &QueryContext) -> Vec<RawDatomView> { vec![] }
-        fn save_with_t(&self, _e: &Value, _attr: &str, _v: &Value, _ctx: &QueryContext) -> Result<(), EngineError> { Ok(()) }
+        fn collect_active(
+            &self,
+            _cf: &str,
+            _prefix: &[u8],
+            _ctx: &QueryContext,
+        ) -> Vec<RawDatomView> {
+            vec![]
+        }
+        fn probe_collect(
+            &self,
+            _index: &str,
+            _bound: &[BoundPart],
+            _ctx: &QueryContext,
+        ) -> Vec<RawDatomView> {
+            vec![]
+        }
+        fn save_with_t(
+            &self,
+            _e: &Value,
+            _attr: &str,
+            _v: &Value,
+            _ctx: &QueryContext,
+        ) -> Result<(), EngineError> {
+            Ok(())
+        }
         fn retract(&self, _e: &Value, _attr: &str, _v: &Value, _ctx: &QueryContext) {}
-        fn allocate_in_partition(&self, _partition_id: u64) -> u64 { 0 }
-        fn default_user_partition(&self) -> u64 { 100 }
-        fn declare_partition(&self, _name: &str, _ctx: &QueryContext) -> Result<u64, EngineError> { Ok(0) }
-        fn declare_attr_from_sql(&self, _attr: &str, _type_name: &str, _many: bool, _unique: bool, _ctx: &QueryContext) -> Result<(), EngineError> { Ok(()) }
-        fn is_unique_attr(&self, _attr_name: &str) -> bool { false }
-        fn value_type_for(&self, _aid: u32) -> Option<u32> { None }
-        fn lookup_entity(&self, _attr_name: &str, _value: &Value, _ctx: &QueryContext) -> Option<u64> { None }
-        fn lookup_value(&self, _eid: u64, _attr_name: &str, _ctx: &QueryContext) -> Option<Value> { None }
-        fn allocate_t_and_write_tx(&self) -> u64 { 1 }
+        fn allocate_in_partition(&self, _partition_id: u64) -> u64 {
+            0
+        }
+        fn default_user_partition(&self) -> u64 {
+            100
+        }
+        fn declare_partition(&self, _name: &str, _ctx: &QueryContext) -> Result<u64, EngineError> {
+            Ok(0)
+        }
+        fn declare_attr_from_sql(
+            &self,
+            _attr: &str,
+            _type_name: &str,
+            _many: bool,
+            _unique: bool,
+            _ctx: &QueryContext,
+        ) -> Result<(), EngineError> {
+            Ok(())
+        }
+        fn is_unique_attr(&self, _attr_name: &str) -> bool {
+            false
+        }
+        fn value_type_for(&self, _aid: u32) -> Option<u32> {
+            None
+        }
+        fn lookup_entity(
+            &self,
+            _attr_name: &str,
+            _value: &Value,
+            _ctx: &QueryContext,
+        ) -> Option<u64> {
+            None
+        }
+        fn lookup_value(&self, _eid: u64, _attr_name: &str, _ctx: &QueryContext) -> Option<Value> {
+            None
+        }
+        fn allocate_t_and_write_tx(&self) -> u64 {
+            1
+        }
     }
 
-    fn make_program(instructions: Vec<Instruction>, num_registers: usize, num_vars: usize, depth_var: Vec<(usize, usize)>) -> VMProgram {
+    fn make_program(
+        instructions: Vec<Instruction>,
+        num_registers: usize,
+        num_vars: usize,
+        depth_var: Vec<(usize, usize)>,
+    ) -> VMProgram {
         VMProgram {
             instructions,
             num_registers,
@@ -1472,29 +1682,146 @@ mod v2_vm_tests {
         engine.build();
 
         let instructions = vec![
-            Instruction { op: OpCode::ConstInt, p1: 0, p2: 0, p3: 0, p4: InstructionData::Int(2) },
-            Instruction { op: OpCode::ConstInt, p1: 1, p2: 0, p3: 0, p4: InstructionData::Int(4) },
-            Instruction { op: OpCode::RangeOp, p1: 0, p2: RANGE_OP_GTE, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::RangeOp, p1: 0, p2: RANGE_OP_LT, p3: 1, p4: InstructionData::None },
-            Instruction { op: OpCode::InternA, p1: 2, p2: 0, p3: 0, p4: InstructionData::Str("bench.name".into()) },
-            Instruction { op: OpCode::ScannerOpen, p1: 0, p2: 2, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::PrefixPush, p1: 0, p2: 2, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::DepthEnter, p1: 0, p2: 0, p3: 1, p4: InstructionData::None },
-            Instruction { op: OpCode::LeapInit, p1: 0, p2: 17, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::BindGet, p1: 3, p2: 0, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::ResolveVal, p1: 3, p2: 0, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::ResultRow, p1: 3, p2: 1, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::LeapNext, p1: 0, p2: 17, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::BindGet, p1: 3, p2: 0, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::ResolveVal, p1: 3, p2: 0, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::ResultRow, p1: 3, p2: 1, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::Goto, p1: 12, p2: 0, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::ScannerClose, p1: 0, p2: 0, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::Halt, p1: 0, p2: 0, p3: 0, p4: InstructionData::None },
+            Instruction {
+                op: OpCode::ConstInt,
+                p1: 0,
+                p2: 0,
+                p3: 0,
+                p4: InstructionData::Int(2),
+            },
+            Instruction {
+                op: OpCode::ConstInt,
+                p1: 1,
+                p2: 0,
+                p3: 0,
+                p4: InstructionData::Int(4),
+            },
+            Instruction {
+                op: OpCode::RangeOp,
+                p1: 0,
+                p2: RANGE_OP_GTE,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::RangeOp,
+                p1: 0,
+                p2: RANGE_OP_LT,
+                p3: 1,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::InternA,
+                p1: 2,
+                p2: 0,
+                p3: 0,
+                p4: InstructionData::Str("bench.name".into()),
+            },
+            Instruction {
+                op: OpCode::ScannerOpen,
+                p1: 0,
+                p2: 2,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::PrefixPush,
+                p1: 0,
+                p2: 2,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::DepthEnter,
+                p1: 0,
+                p2: 0,
+                p3: 1,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::LeapInit,
+                p1: 0,
+                p2: 17,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::BindGet,
+                p1: 3,
+                p2: 0,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::ResolveVal,
+                p1: 3,
+                p2: 0,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::ResultRow,
+                p1: 3,
+                p2: 1,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::LeapNext,
+                p1: 0,
+                p2: 17,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::BindGet,
+                p1: 3,
+                p2: 0,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::ResolveVal,
+                p1: 3,
+                p2: 0,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::ResultRow,
+                p1: 3,
+                p2: 1,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::Goto,
+                p1: 12,
+                p2: 0,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::ScannerClose,
+                p1: 0,
+                p2: 0,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::Halt,
+                p1: 0,
+                p2: 0,
+                p3: 0,
+                p4: InstructionData::None,
+            },
         ];
 
         let program = make_program(instructions, 4, 1, vec![(0, 0)]);
-        let _ctx = QueryContext { as_of_us: None, current_t: 1 };
+        let _ctx = QueryContext {
+            as_of_us: None,
+            current_t: 1,
+        };
         let mut vm = VM::new(Arc::new(program), Arc::new(engine), vec![], None, 1, None);
         let results = vm.run().unwrap();
 
@@ -1512,21 +1839,111 @@ mod v2_vm_tests {
         engine.build();
 
         let instructions = vec![
-            Instruction { op: OpCode::InternA, p1: 0, p2: 0, p3: 0, p4: InstructionData::Str("bench.name".into()) },
-            Instruction { op: OpCode::ScannerOpen, p1: 0, p2: 2, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::PrefixPush, p1: 0, p2: 0, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::DepthEnter, p1: 0, p2: 0, p3: 1, p4: InstructionData::None },
-            Instruction { op: OpCode::LeapInit, p1: 0, p2: 13, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::BindGet, p1: 1, p2: 0, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::ResolveVal, p1: 1, p2: 0, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::ResultRow, p1: 1, p2: 1, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::LeapNext, p1: 0, p2: 13, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::BindGet, p1: 1, p2: 0, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::ResolveVal, p1: 1, p2: 0, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::ResultRow, p1: 1, p2: 1, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::Goto, p1: 8, p2: 0, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::ScannerClose, p1: 0, p2: 0, p3: 0, p4: InstructionData::None },
-            Instruction { op: OpCode::Halt, p1: 0, p2: 0, p3: 0, p4: InstructionData::None },
+            Instruction {
+                op: OpCode::InternA,
+                p1: 0,
+                p2: 0,
+                p3: 0,
+                p4: InstructionData::Str("bench.name".into()),
+            },
+            Instruction {
+                op: OpCode::ScannerOpen,
+                p1: 0,
+                p2: 2,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::PrefixPush,
+                p1: 0,
+                p2: 0,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::DepthEnter,
+                p1: 0,
+                p2: 0,
+                p3: 1,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::LeapInit,
+                p1: 0,
+                p2: 13,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::BindGet,
+                p1: 1,
+                p2: 0,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::ResolveVal,
+                p1: 1,
+                p2: 0,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::ResultRow,
+                p1: 1,
+                p2: 1,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::LeapNext,
+                p1: 0,
+                p2: 13,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::BindGet,
+                p1: 1,
+                p2: 0,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::ResolveVal,
+                p1: 1,
+                p2: 0,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::ResultRow,
+                p1: 1,
+                p2: 1,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::Goto,
+                p1: 8,
+                p2: 0,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::ScannerClose,
+                p1: 0,
+                p2: 0,
+                p3: 0,
+                p4: InstructionData::None,
+            },
+            Instruction {
+                op: OpCode::Halt,
+                p1: 0,
+                p2: 0,
+                p3: 0,
+                p4: InstructionData::None,
+            },
         ];
 
         let program = make_program(instructions, 2, 1, vec![(0, 0)]);

@@ -43,12 +43,45 @@ pub enum TT {
 }
 
 pub static TT_NAMES: &[&str] = &[
-    "SELECT", "WHERE", "AND", "OR", "IN", "UPSERT", "AS", "SET",
-    "DELETE", "UPDATE", "FROM",
-    "ATTRIBUTE", "MANY", "ONE", "REF", "BYTES", "EXPLAIN", "DATALOG", "UNIQUE", "PARTITION",
+    "SELECT",
+    "WHERE",
+    "AND",
+    "OR",
+    "IN",
+    "UPSERT",
+    "AS",
+    "SET",
+    "DELETE",
+    "UPDATE",
+    "FROM",
+    "ATTRIBUTE",
+    "MANY",
+    "ONE",
+    "REF",
+    "BYTES",
+    "EXPLAIN",
+    "DATALOG",
+    "UNIQUE",
+    "PARTITION",
     "HISTORY",
-    "STAR", "DOT", "COMMA", "LPAREN", "RPAREN", "EQ", "GT", "LT", "GTE", "LTE", "NEQ",
-    "INTEGER", "FLOAT", "STRING", "ALIAS", "IDENT", "PARAM", "EOF",
+    "STAR",
+    "DOT",
+    "COMMA",
+    "LPAREN",
+    "RPAREN",
+    "EQ",
+    "GT",
+    "LT",
+    "GTE",
+    "LTE",
+    "NEQ",
+    "INTEGER",
+    "FLOAT",
+    "STRING",
+    "ALIAS",
+    "IDENT",
+    "PARAM",
+    "EOF",
 ];
 
 fn keyword_tt(word: &str) -> Option<TT> {
@@ -393,27 +426,43 @@ mod tests {
     #[test]
     fn simple_select() {
         let types = ttypes("SELECT d1.eid WHERE d1.eid = %1");
-        assert_eq!(&types[..types.len()-1], &[
-            TT::SELECT,
-            TT::ALIAS, TT::DOT, TT::IDENT,
-            TT::WHERE,
-            TT::ALIAS, TT::DOT, TT::IDENT,
-            TT::EQ,
-            TT::PARAM,
-        ]);
+        assert_eq!(
+            &types[..types.len() - 1],
+            &[
+                TT::SELECT,
+                TT::ALIAS,
+                TT::DOT,
+                TT::IDENT,
+                TT::WHERE,
+                TT::ALIAS,
+                TT::DOT,
+                TT::IDENT,
+                TT::EQ,
+                TT::PARAM,
+            ]
+        );
     }
 
     #[test]
     fn multiple_aliases() {
         let types = ttypes("SELECT d2.name WHERE d1.partner = d2.eid");
-        assert_eq!(&types[..types.len()-1], &[
-            TT::SELECT,
-            TT::ALIAS, TT::DOT, TT::IDENT,
-            TT::WHERE,
-            TT::ALIAS, TT::DOT, TT::IDENT,
-            TT::EQ,
-            TT::ALIAS, TT::DOT, TT::IDENT,
-        ]);
+        assert_eq!(
+            &types[..types.len() - 1],
+            &[
+                TT::SELECT,
+                TT::ALIAS,
+                TT::DOT,
+                TT::IDENT,
+                TT::WHERE,
+                TT::ALIAS,
+                TT::DOT,
+                TT::IDENT,
+                TT::EQ,
+                TT::ALIAS,
+                TT::DOT,
+                TT::IDENT,
+            ]
+        );
     }
 
     #[test]
@@ -528,15 +577,16 @@ mod tests {
     #[test]
     fn delete_keyword() {
         let types = ttypes("DELETE WHERE");
-        assert_eq!(&types[..types.len()-1], &[TT::DELETE, TT::WHERE]);
+        assert_eq!(&types[..types.len() - 1], &[TT::DELETE, TT::WHERE]);
     }
 
     #[test]
     fn parentheses() {
         let types = ttypes("ref(%1)");
-        assert_eq!(&types[..types.len()-1], &[
-            TT::REF, TT::LPAREN, TT::PARAM, TT::RPAREN,
-        ]);
+        assert_eq!(
+            &types[..types.len() - 1],
+            &[TT::REF, TT::LPAREN, TT::PARAM, TT::RPAREN,]
+        );
     }
 
     #[test]

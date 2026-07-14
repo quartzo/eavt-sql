@@ -5,5 +5,5 @@ edition = "2021"
 description = "SQL lexer + parser (SQL string → Rust AST)"
 
 [dependencies]
-dynspire-commons = { path = "../dynspire-commons", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"

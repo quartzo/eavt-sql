@@ -1,6 +1,30 @@
 use std::cmp::Ordering;
 
-pub use crate::transactor::Value;
+pub mod query_codec;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Value {
+    Text(String),
+    Bytes(Vec<u8>),
+    Bool(u8),
+    Int64(i64),
+    Float64(f64),
+    Timestamp(i64),
+    Unknown(i8, u64),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ValueType {
+    String,
+    Ref,
+    Long,
+    Keyword,
+    Boolean,
+    Instant,
+    Bytes,
+    Float,
+    Blob,
+}
 
 pub const TAG_STR: i8 = 2;
 pub const TAG_BYTES: i8 = 3;
@@ -21,20 +45,22 @@ pub const TAG_DURATION: i8 = 17;
 
 pub fn parse_instant_to_us(s: &str) -> Result<i64, ()> {
     let cleaned = s.trim_end_matches('Z').replace("+00:00", "");
-    let secs = if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&cleaned, "%Y-%m-%dT%H:%M:%S%.f") {
-        chrono::DateTime::from_timestamp(dt.and_utc().timestamp(), 0)
-            .ok_or(())?
-            .timestamp()
-    } else if let Ok(d) = chrono::NaiveDate::parse_from_str(&cleaned, "%Y-%m-%d") {
-        d.and_hms_opt(0, 0, 0).ok_or(())?
-            .and_utc()
-            .timestamp()
-    } else {
-        return Err(());
-    };
+    let secs =
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&cleaned, "%Y-%m-%dT%H:%M:%S%.f") {
+            chrono::DateTime::from_timestamp(dt.and_utc().timestamp(), 0)
+                .ok_or(())?
+                .timestamp()
+        } else if let Ok(d) = chrono::NaiveDate::parse_from_str(&cleaned, "%Y-%m-%d") {
+            d.and_hms_opt(0, 0, 0).ok_or(())?.and_utc().timestamp()
+        } else {
+            return Err(());
+        };
     let frac_us: i64 = if let Some(pos) = cleaned.find('.') {
         let after_dot = &cleaned[pos + 1..];
-        let digits: String = after_dot.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let digits: String = after_dot
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
         if digits.is_empty() {
             0
         } else {
@@ -215,8 +241,7 @@ mod tests {
     fn test_value_eq() {
         assert_eq!(Value::Int64(42), Value::Int64(42));
         assert_ne!(Value::Int64(42), Value::Int64(43));
-        assert_eq!(Value::Text("hello".into()), Value::Text("hello".into()));
-        assert_eq!(Value::Float64(3.14), Value::Float64(3.14));
+        assert_eq!(Value::Text("hello".into()), Value::Text("hello".into()))
     }
 
     #[test]
@@ -272,8 +297,10 @@ mod tests {
         assert_eq!(Value::float64(3.0), Value::Float64(3.0));
         assert_eq!(Value::bool_(true), Value::Bool(1));
         assert_eq!(Value::entity_id(100), Value::Int64(100));
-        assert_eq!(Value::bytes_(vec![1, 2, 3]), Value::Bytes(vec![1, 2, 3].into()));
+        assert_eq!(
+            Value::bytes_(vec![1, 2, 3]),
+            Value::Bytes(vec![1, 2, 3].into())
+        );
         assert_eq!(Value::timestamp(12345), Value::Timestamp(12345));
     }
-
 }

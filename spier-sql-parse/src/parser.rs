@@ -1,4 +1,4 @@
-use dynspire_commons::sql_parse::*;
+use crate::ast::*;
 use crate::lexer::{tokenize, LexToken, TT, TT_NAMES};
 
 pub fn parse(source: &str) -> Result<RustStmt, String> {
@@ -32,10 +32,7 @@ impl Parser {
         if tok.tt != tt {
             return Err(format!(
                 "expected {} at position {} (got {} {:?})",
-                TT_NAMES[tt as usize],
-                tok.pos,
-                TT_NAMES[tok.tt as usize],
-                tok.value,
+                TT_NAMES[tt as usize], tok.pos, TT_NAMES[tok.tt as usize], tok.value,
             ));
         }
         Ok(self.advance())
@@ -92,7 +89,9 @@ impl Parser {
             TT::UPDATE => self.parse_update_stmt(),
             TT::DELETE => self.parse_delete(),
             TT::ATTRIBUTE => self.parse_attribute(),
-            _ => Err(String::from("expected SELECT, UPSERT, UPDATE, DELETE, or ATTRIBUTE after EXPLAIN")),
+            _ => Err(String::from(
+                "expected SELECT, UPSERT, UPDATE, DELETE, or ATTRIBUTE after EXPLAIN",
+            )),
         }
     }
 
@@ -131,11 +130,18 @@ impl Parser {
             self.expect(TT::EOF)?;
         }
 
-        let exists_mode = !star && !history
-            && projections.iter().all(|p| p.field.is_none() && p.literal.is_some());
+        let exists_mode = !star
+            && !history
+            && projections
+                .iter()
+                .all(|p| p.field.is_none() && p.literal.is_some());
 
         Ok(RustStmt::Select(RustSelectStmt {
-            projections, conditions, exists_mode, star, history,
+            projections,
+            conditions,
+            exists_mode,
+            star,
+            history,
         }))
     }
 
@@ -153,7 +159,10 @@ impl Parser {
         match tt {
             TT::INTEGER => {
                 let tok = self.advance();
-                let val: i64 = tok.value.parse::<i64>().map_err(|e: std::num::ParseIntError| e.to_string())?;
+                let val: i64 = tok
+                    .value
+                    .parse::<i64>()
+                    .map_err(|e: std::num::ParseIntError| e.to_string())?;
                 Ok(RustProjection {
                     field: None,
                     literal: Some(RustLiteral::Int(val)),
@@ -161,7 +170,10 @@ impl Parser {
             }
             TT::FLOAT => {
                 let tok = self.advance();
-                let val: f64 = tok.value.parse::<f64>().map_err(|e: std::num::ParseFloatError| e.to_string())?;
+                let val: f64 = tok
+                    .value
+                    .parse::<f64>()
+                    .map_err(|e: std::num::ParseFloatError| e.to_string())?;
                 Ok(RustProjection {
                     field: None,
                     literal: Some(RustLiteral::Float(val)),
@@ -181,7 +193,10 @@ impl Parser {
                     literal: None,
                 })
             }
-            _ => Err(format!("expected field reference or literal in SELECT at {}", self.peek().pos))
+            _ => Err(format!(
+                "expected field reference or literal in SELECT at {}",
+                self.peek().pos
+            )),
         }
     }
 
@@ -195,12 +210,22 @@ impl Parser {
             if self.peek().tt == TT::SET {
                 self.advance();
                 let values = self.parse_set_value_list()?;
-                clauses.push(RustUpsertClause { alias, entity_ref, values });
+                clauses.push(RustUpsertClause {
+                    alias,
+                    entity_ref,
+                    values,
+                });
             } else {
-                clauses.push(RustUpsertClause { alias, entity_ref, values: Vec::new() });
+                clauses.push(RustUpsertClause {
+                    alias,
+                    entity_ref,
+                    values: Vec::new(),
+                });
             }
 
-            if self.peek().tt != TT::COMMA { break; }
+            if self.peek().tt != TT::COMMA {
+                break;
+            }
             self.advance();
         }
 
@@ -238,10 +263,13 @@ impl Parser {
                 let value = self.parse_literal_or_param()?;
                 self.expect(TT::RPAREN)?;
 
-                return Ok((Some(alias_name), UpsertEntityRef::Lookup {
-                    attr: Box::new(attr),
-                    value: Box::new(value),
-                }));
+                return Ok((
+                    Some(alias_name),
+                    UpsertEntityRef::Lookup {
+                        attr: Box::new(attr),
+                        value: Box::new(value),
+                    },
+                ));
             }
 
             // AS D1 = %N  (explicit eid)
@@ -258,7 +286,10 @@ impl Parser {
         let mut clauses: Vec<RustUpdateClause> = Vec::new();
 
         let (first_alias, first_values) = self.parse_update_clause()?;
-        clauses.push(RustUpdateClause { alias: first_alias, values: first_values });
+        clauses.push(RustUpdateClause {
+            alias: first_alias,
+            values: first_values,
+        });
 
         while self.peek().tt == TT::COMMA {
             let save = self.pos;
@@ -276,7 +307,10 @@ impl Parser {
         let conditions = self.parse_condition_list()?;
 
         self.expect(TT::EOF)?;
-        Ok(RustStmt::Update(RustUpdateStmt { clauses, conditions }))
+        Ok(RustStmt::Update(RustUpdateStmt {
+            clauses,
+            conditions,
+        }))
     }
 
     fn parse_update_clause(&mut self) -> Result<(String, Vec<RustInsertValue>), String> {
@@ -324,7 +358,10 @@ impl Parser {
             TT::ALIAS => {
                 let alias_val = self.advance().value.clone();
                 if self.peek().tt == TT::DOT {
-                    return Err(format!("dotted alias not allowed in value position at {}", self.peek().pos));
+                    return Err(format!(
+                        "dotted alias not allowed in value position at {}",
+                        self.peek().pos
+                    ));
                 }
                 Ok(RustValue::AliasRef(alias_val.to_uppercase()))
             }
@@ -335,16 +372,28 @@ impl Parser {
             }
             TT::INTEGER => {
                 let tok = self.advance();
-                let val: i64 = tok.value.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
+                let val: i64 = tok
+                    .value
+                    .parse()
+                    .map_err(|e: std::num::ParseIntError| e.to_string())?;
                 Ok(RustValue::Literal(RustLiteral::Int(val)))
             }
             TT::FLOAT => {
                 let tok = self.advance();
-                let val: f64 = tok.value.parse().map_err(|e: std::num::ParseFloatError| e.to_string())?;
+                let val: f64 = tok
+                    .value
+                    .parse()
+                    .map_err(|e: std::num::ParseFloatError| e.to_string())?;
                 Ok(RustValue::Literal(RustLiteral::Float(val)))
             }
-            TT::IDENT if self.peek().value == "true" => { self.advance(); Ok(RustValue::Literal(RustLiteral::Bool(true))) }
-            TT::IDENT if self.peek().value == "false" => { self.advance(); Ok(RustValue::Literal(RustLiteral::Bool(false))) }
+            TT::IDENT if self.peek().value == "true" => {
+                self.advance();
+                Ok(RustValue::Literal(RustLiteral::Bool(true)))
+            }
+            TT::IDENT if self.peek().value == "false" => {
+                self.advance();
+                Ok(RustValue::Literal(RustLiteral::Bool(false)))
+            }
             TT::IDENT if self.peek().value.eq_ignore_ascii_case("eid") => {
                 self.advance();
                 self.expect(TT::LPAREN)?;
@@ -369,7 +418,10 @@ impl Parser {
                     attr: Box::new(attr),
                 })
             }
-            _ => Err(format!("expected value after = at position {}", self.peek().pos)),
+            _ => Err(format!(
+                "expected value after = at position {}",
+                self.peek().pos
+            )),
         }
     }
 
@@ -385,7 +437,10 @@ impl Parser {
                 let attr = self.parse_attr_ref()?;
                 Ok(RustValue::Literal(RustLiteral::Str(attr)))
             }
-            _ => Err(format!("expected attribute name (quoted or dotted) at position {}", self.peek().pos)),
+            _ => Err(format!(
+                "expected attribute name (quoted or dotted) at position {}",
+                self.peek().pos
+            )),
         }
     }
 
@@ -399,15 +454,24 @@ impl Parser {
             }
             TT::INTEGER => {
                 let tok = self.advance();
-                let val: i64 = tok.value.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
+                let val: i64 = tok
+                    .value
+                    .parse()
+                    .map_err(|e: std::num::ParseIntError| e.to_string())?;
                 Ok(RustValue::Literal(RustLiteral::Int(val)))
             }
             TT::FLOAT => {
                 let tok = self.advance();
-                let val: f64 = tok.value.parse().map_err(|e: std::num::ParseFloatError| e.to_string())?;
+                let val: f64 = tok
+                    .value
+                    .parse()
+                    .map_err(|e: std::num::ParseFloatError| e.to_string())?;
                 Ok(RustValue::Literal(RustLiteral::Float(val)))
             }
-            _ => Err(format!("expected literal or parameter at position {}", self.peek().pos)),
+            _ => Err(format!(
+                "expected literal or parameter at position {}",
+                self.peek().pos
+            )),
         }
     }
 
@@ -422,7 +486,9 @@ impl Parser {
     fn parse_attribute(&mut self) -> Result<RustStmt, String> {
         self.expect(TT::ATTRIBUTE)?;
         let attr = self.parse_attr_ref()?;
-        let type_names = ["STRING", "LONG", "REF", "BOOLEAN", "INSTANT", "BYTES", "BLOB", "KEYWORD", "FLOAT"];
+        let type_names = [
+            "STRING", "LONG", "REF", "BOOLEAN", "INSTANT", "BYTES", "BLOB", "KEYWORD", "FLOAT",
+        ];
         let tt = self.peek().tt;
         let upper = self.peek().value.to_uppercase();
         if matches!(tt, TT::IDENT | TT::REF | TT::BYTES) && type_names.contains(&upper.as_str()) {
@@ -430,13 +496,25 @@ impl Parser {
         } else {
             return Err(format!("expected type name at {}", self.peek().pos));
         }
-        let many = if self.peek().tt == TT::MANY { self.advance(); true }
-                    else if self.peek().tt == TT::ONE { self.advance(); false }
-                    else { false };
-        let unique = self.peek().tt == TT::UNIQUE && { self.advance(); true };
+        let many = if self.peek().tt == TT::MANY {
+            self.advance();
+            true
+        } else if self.peek().tt == TT::ONE {
+            self.advance();
+            false
+        } else {
+            false
+        };
+        let unique = self.peek().tt == TT::UNIQUE && {
+            self.advance();
+            true
+        };
         self.expect(TT::EOF)?;
         Ok(RustStmt::Attribute(RustAttributeStmt {
-            attr, value_type: upper, many, unique,
+            attr,
+            value_type: upper,
+            many,
+            unique,
         }))
     }
 
@@ -469,7 +547,9 @@ impl Parser {
 
     fn parse_param(&mut self) -> Result<u32, String> {
         let tok = self.expect(TT::PARAM)?;
-        let n: u32 = tok.value[1..].parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
+        let n: u32 = tok.value[1..]
+            .parse()
+            .map_err(|e: std::num::ParseIntError| e.to_string())?;
         Ok(n)
     }
 
@@ -484,11 +564,29 @@ impl Parser {
         }
         let mut branches: Vec<Vec<RustOrBranchItem>> = Vec::new();
         let left = first_and[0].left.clone();
-        branches.push(first_and.into_iter().map(|c| RustOrBranchItem { left: c.left.clone(), op: c.op, value: c.right }).collect());
+        branches.push(
+            first_and
+                .into_iter()
+                .map(|c| RustOrBranchItem {
+                    left: c.left.clone(),
+                    op: c.op,
+                    value: c.right,
+                })
+                .collect(),
+        );
         while self.peek().tt == TT::OR {
             self.advance();
             let group = self.parse_and_group()?;
-            branches.push(group.into_iter().map(|c| RustOrBranchItem { left: c.left.clone(), op: c.op, value: c.right }).collect());
+            branches.push(
+                group
+                    .into_iter()
+                    .map(|c| RustOrBranchItem {
+                        left: c.left.clone(),
+                        op: c.op,
+                        value: c.right,
+                    })
+                    .collect(),
+            );
         }
         Ok(vec![RustCondition {
             left,
@@ -555,20 +653,32 @@ impl Parser {
             TT::PARAM => RustConditionRight::Param(self.parse_param()?),
             TT::INTEGER => {
                 let tok = self.advance();
-                let val: i64 = tok.value.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
+                let val: i64 = tok
+                    .value
+                    .parse()
+                    .map_err(|e: std::num::ParseIntError| e.to_string())?;
                 RustConditionRight::Literal(RustLiteral::Int(val))
             }
             TT::FLOAT => {
                 let tok = self.advance();
-                let val: f64 = tok.value.parse().map_err(|e: std::num::ParseFloatError| e.to_string())?;
+                let val: f64 = tok
+                    .value
+                    .parse()
+                    .map_err(|e: std::num::ParseFloatError| e.to_string())?;
                 RustConditionRight::Literal(RustLiteral::Float(val))
             }
             TT::STRING => {
                 let tok = self.advance();
                 RustConditionRight::Literal(RustLiteral::Str(tok.value.clone()))
             }
-            TT::IDENT if self.peek().value == "true" => { self.advance(); RustConditionRight::Literal(RustLiteral::Bool(true)) }
-            TT::IDENT if self.peek().value == "false" => { self.advance(); RustConditionRight::Literal(RustLiteral::Bool(false)) }
+            TT::IDENT if self.peek().value == "true" => {
+                self.advance();
+                RustConditionRight::Literal(RustLiteral::Bool(true))
+            }
+            TT::IDENT if self.peek().value == "false" => {
+                self.advance();
+                RustConditionRight::Literal(RustLiteral::Bool(false))
+            }
             TT::LPAREN => {
                 self.advance();
                 if self.peek().tt == TT::SELECT {
@@ -585,7 +695,12 @@ impl Parser {
                     RustConditionRight::In(vals)
                 }
             }
-            _ => return Err(format!("expected value in condition at {}", self.peek().pos)),
+            _ => {
+                return Err(format!(
+                    "expected value in condition at {}",
+                    self.peek().pos
+                ))
+            }
         };
         Ok(RustCondition { left, op, right })
     }
@@ -596,12 +711,17 @@ impl Parser {
             TT::PARAM => Ok(RustConditionRight::Param(self.parse_param()?)),
             TT::INTEGER => {
                 let tok = self.advance();
-                let val: i64 = tok.value.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
+                let val: i64 = tok
+                    .value
+                    .parse()
+                    .map_err(|e: std::num::ParseIntError| e.to_string())?;
                 Ok(RustConditionRight::Literal(RustLiteral::Int(val)))
             }
             TT::STRING => {
                 let tok = self.advance();
-                Ok(RustConditionRight::Literal(RustLiteral::Str(tok.value.clone())))
+                Ok(RustConditionRight::Literal(RustLiteral::Str(
+                    tok.value.clone(),
+                )))
             }
             _ => Err(format!("expected value in IN list at {}", self.peek().pos)),
         }
@@ -610,13 +730,34 @@ impl Parser {
     fn parse_op(&mut self) -> Result<String, String> {
         let tt = self.peek().tt;
         match tt {
-            TT::EQ => { self.advance(); Ok("=".to_string()) }
-            TT::GT => { self.advance(); Ok(">".to_string()) }
-            TT::LT => { self.advance(); Ok("<".to_string()) }
-            TT::GTE => { self.advance(); Ok(">=".to_string()) }
-            TT::LTE => { self.advance(); Ok("<=".to_string()) }
-            TT::NEQ => { self.advance(); Ok("!=".to_string()) }
-            _ => Err(format!("expected comparison operator at {}", self.peek().pos)),
+            TT::EQ => {
+                self.advance();
+                Ok("=".to_string())
+            }
+            TT::GT => {
+                self.advance();
+                Ok(">".to_string())
+            }
+            TT::LT => {
+                self.advance();
+                Ok("<".to_string())
+            }
+            TT::GTE => {
+                self.advance();
+                Ok(">=".to_string())
+            }
+            TT::LTE => {
+                self.advance();
+                Ok("<=".to_string())
+            }
+            TT::NEQ => {
+                self.advance();
+                Ok("!=".to_string())
+            }
+            _ => Err(format!(
+                "expected comparison operator at {}",
+                self.peek().pos
+            )),
         }
     }
 }
@@ -637,7 +778,10 @@ mod tests {
                 assert_eq!(s.conditions[0].left.alias, "d1");
                 assert_eq!(s.conditions[0].left.field, "eid");
                 assert_eq!(s.conditions[0].op, "=");
-                assert!(matches!(s.conditions[0].right, RustConditionRight::Param(1)));
+                assert!(matches!(
+                    s.conditions[0].right,
+                    RustConditionRight::Param(1)
+                ));
             }
             _ => panic!("expected Select"),
         }
@@ -704,12 +848,10 @@ mod tests {
     fn string_literal_in_where() {
         let stmt = parse("SELECT 1 WHERE d1.name = 'hello'").unwrap();
         match stmt {
-            RustStmt::Select(s) => {
-                match &s.conditions[0].right {
-                    RustConditionRight::Literal(RustLiteral::Str(v)) => assert_eq!(v, "hello"),
-                    _ => panic!("expected string literal"),
-                }
-            }
+            RustStmt::Select(s) => match &s.conditions[0].right {
+                RustConditionRight::Literal(RustLiteral::Str(v)) => assert_eq!(v, "hello"),
+                _ => panic!("expected string literal"),
+            },
             _ => panic!("expected Select"),
         }
     }
@@ -718,12 +860,10 @@ mod tests {
     fn integer_literal_in_where() {
         let stmt = parse("SELECT 1 WHERE d1.price > 1000").unwrap();
         match stmt {
-            RustStmt::Select(s) => {
-                match &s.conditions[0].right {
-                    RustConditionRight::Literal(RustLiteral::Int(v)) => assert_eq!(*v, 1000),
-                    _ => panic!("expected int literal"),
-                }
-            }
+            RustStmt::Select(s) => match &s.conditions[0].right {
+                RustConditionRight::Literal(RustLiteral::Int(v)) => assert_eq!(*v, 1000),
+                _ => panic!("expected int literal"),
+            },
             _ => panic!("expected Select"),
         }
     }
@@ -732,12 +872,12 @@ mod tests {
     fn float_literal_in_where() {
         let stmt = parse("SELECT 1 WHERE d1.price > 3.14").unwrap();
         match stmt {
-            RustStmt::Select(s) => {
-                match &s.conditions[0].right {
-                    RustConditionRight::Literal(RustLiteral::Float(v)) => assert!((v - 3.14).abs() < f64::EPSILON),
-                    _ => panic!("expected float literal"),
+            RustStmt::Select(s) => match &s.conditions[0].right {
+                RustConditionRight::Literal(RustLiteral::Float(v)) => {
+                    assert!((v - 3.14).abs() < f64::EPSILON)
                 }
-            }
+                _ => panic!("expected float literal"),
+            },
             _ => panic!("expected Select"),
         }
     }
@@ -747,7 +887,10 @@ mod tests {
         let stmt = parse("SELECT d1.company.name WHERE d1.company.hq = %1").unwrap();
         match stmt {
             RustStmt::Select(s) => {
-                assert_eq!(s.projections[0].field.as_ref().unwrap().field, "company.name");
+                assert_eq!(
+                    s.projections[0].field.as_ref().unwrap().field,
+                    "company.name"
+                );
                 assert_eq!(s.conditions[0].left.field, "company.hq");
             }
             _ => panic!("expected Select"),
@@ -762,10 +905,15 @@ mod tests {
             match stmt {
                 RustStmt::Select(s) => {
                     let op_str = op.trim();
-                    let expected = if op_str == ">" { ">" }
-                        else if op_str == "<" { "<" }
-                        else if op_str == ">=" { ">=" }
-                        else { "<=" };
+                    let expected = if op_str == ">" {
+                        ">"
+                    } else if op_str == "<" {
+                        "<"
+                    } else if op_str == ">=" {
+                        ">="
+                    } else {
+                        "<="
+                    };
                     assert_eq!(s.conditions[0].op, expected);
                 }
                 _ => panic!("expected Select"),
@@ -893,7 +1041,10 @@ mod tests {
         let stmt = parse("DELETE WHERE d1.eid = %1 AND d1.ns.attr = %2").unwrap();
         match stmt {
             RustStmt::Delete(d) => {
-                assert!(matches!(d.conditions[0].right, RustConditionRight::Param(1)));
+                assert!(matches!(
+                    d.conditions[0].right,
+                    RustConditionRight::Param(1)
+                ));
             }
             _ => panic!("expected Delete"),
         }
@@ -949,12 +1100,10 @@ mod tests {
     fn neq_angle_bracket() {
         let stmt = parse("SELECT d1.ns.attr WHERE d1.ns.val <> %1").unwrap();
         match stmt {
-            RustStmt::Select(s) => {
-                match &s.conditions[0].right {
-                    RustConditionRight::Param(1) => {}
-                    _ => panic!("expected Param(1)"),
-                }
-            }
+            RustStmt::Select(s) => match &s.conditions[0].right {
+                RustConditionRight::Param(1) => {}
+                _ => panic!("expected Param(1)"),
+            },
             _ => panic!("expected Select"),
         }
     }
@@ -963,17 +1112,15 @@ mod tests {
     fn in_condition_params() {
         let stmt = parse("SELECT d1.ns.attr WHERE d1.ns.val IN (%1, %2, %3)").unwrap();
         match stmt {
-            RustStmt::Select(s) => {
-                match &s.conditions[0].right {
-                    RustConditionRight::In(vals) => {
-                        assert_eq!(vals.len(), 3);
-                        assert!(matches!(vals[0], RustConditionRight::Param(1)));
-                        assert!(matches!(vals[1], RustConditionRight::Param(2)));
-                        assert!(matches!(vals[2], RustConditionRight::Param(3)));
-                    }
-                    _ => panic!("expected In"),
+            RustStmt::Select(s) => match &s.conditions[0].right {
+                RustConditionRight::In(vals) => {
+                    assert_eq!(vals.len(), 3);
+                    assert!(matches!(vals[0], RustConditionRight::Param(1)));
+                    assert!(matches!(vals[1], RustConditionRight::Param(2)));
+                    assert!(matches!(vals[2], RustConditionRight::Param(3)));
                 }
-            }
+                _ => panic!("expected In"),
+            },
             _ => panic!("expected Select"),
         }
     }
@@ -982,14 +1129,12 @@ mod tests {
     fn in_condition_literals() {
         let stmt = parse("SELECT d1.ns.attr WHERE d1.ns.val IN (10, 20, 30)").unwrap();
         match stmt {
-            RustStmt::Select(s) => {
-                match &s.conditions[0].right {
-                    RustConditionRight::In(vals) => {
-                        assert_eq!(vals.len(), 3);
-                    }
-                    _ => panic!("expected In"),
+            RustStmt::Select(s) => match &s.conditions[0].right {
+                RustConditionRight::In(vals) => {
+                    assert_eq!(vals.len(), 3);
                 }
-            }
+                _ => panic!("expected In"),
+            },
             _ => panic!("expected Select"),
         }
     }
@@ -998,17 +1143,21 @@ mod tests {
     fn in_condition_mixed() {
         let stmt = parse("SELECT d1.ns.attr WHERE d1.ns.val IN (10, %1, 'hello')").unwrap();
         match stmt {
-            RustStmt::Select(s) => {
-                match &s.conditions[0].right {
-                    RustConditionRight::In(vals) => {
-                        assert_eq!(vals.len(), 3);
-                        assert!(matches!(vals[0], RustConditionRight::Literal(RustLiteral::Int(10))));
-                        assert!(matches!(vals[1], RustConditionRight::Param(1)));
-                        assert!(matches!(vals[2], RustConditionRight::Literal(RustLiteral::Str(_))));
-                    }
-                    _ => panic!("expected In"),
+            RustStmt::Select(s) => match &s.conditions[0].right {
+                RustConditionRight::In(vals) => {
+                    assert_eq!(vals.len(), 3);
+                    assert!(matches!(
+                        vals[0],
+                        RustConditionRight::Literal(RustLiteral::Int(10))
+                    ));
+                    assert!(matches!(vals[1], RustConditionRight::Param(1)));
+                    assert!(matches!(
+                        vals[2],
+                        RustConditionRight::Literal(RustLiteral::Str(_))
+                    ));
                 }
-            }
+                _ => panic!("expected In"),
+            },
             _ => panic!("expected Select"),
         }
     }

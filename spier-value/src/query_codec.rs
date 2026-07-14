@@ -45,7 +45,8 @@ pub fn decode_rows(buf: &[u8]) -> Result<Vec<Vec<Value>>, String> {
         if pos + 4 > buf.len() {
             return Err("decode_rows: truncated ncols".into());
         }
-        let ncols = u32::from_be_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]) as usize;
+        let ncols =
+            u32::from_be_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]) as usize;
         pos += 4;
         let mut row = Vec::with_capacity(ncols);
         for _ in 0..ncols {

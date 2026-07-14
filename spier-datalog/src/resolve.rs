@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use crate::compiler::CompileStats;
-use crate::datalog::{BoundValue, DatalogIR, DatalogSlot, PlanStats};
-use crate::planner::{Pattern, INDEX_ORDERS};
+use crate::ast::{BoundValue, DatalogIR, DatalogSlot, PlanStats};
+use crate::pattern::{Pattern, INDEX_ORDERS};
+use crate::stats::CompileStats;
 
 /// Resolve attribute names to numeric IDs in a DatalogIR.
 ///
@@ -15,11 +15,14 @@ pub fn resolve_ir(ir: DatalogIR, stats: &dyn CompileStats) -> Result<DatalogIR, 
     // Resolve attr names in pattern "a" positions
     for pattern in &mut ir.patterns {
         let name = match &pattern.a {
-            DatalogSlot::Const(BoundValue::Attr(n)) | DatalogSlot::Const(BoundValue::Str(n)) => Some(n.clone()),
+            DatalogSlot::Const(BoundValue::Attr(n)) | DatalogSlot::Const(BoundValue::Str(n)) => {
+                Some(n.clone())
+            }
             _ => None,
         };
         if let Some(name) = name {
-            let id = stats.lookup_attr(&name)
+            let id = stats
+                .lookup_attr(&name)
                 .ok_or_else(|| format!("unknown attribute: {}", name))?;
             let is_ref = stats.is_ref_attr(&name);
             pattern.a = DatalogSlot::Const(BoundValue::ResolvedAttr(id, name, is_ref));
@@ -35,7 +38,8 @@ pub fn resolve_ir(ir: DatalogIR, stats: &dyn CompileStats) -> Result<DatalogIR, 
                     _ => None,
                 };
                 if let Some(name) = name {
-                    let id = stats.lookup_attr(&name)
+                    let id = stats
+                        .lookup_attr(&name)
                         .ok_or_else(|| format!("unknown attribute: {}", name))?;
                     let is_ref = stats.is_ref_attr(&name);
                     *bv = BoundValue::ResolvedAttr(id, name, is_ref);
@@ -89,5 +93,8 @@ pub fn compute_plan_stats(ir: &DatalogIR, stats: &dyn CompileStats) -> PlanStats
         }
     }
 
-    PlanStats { total_eavt, estimates }
+    PlanStats {
+        total_eavt,
+        estimates,
+    }
 }

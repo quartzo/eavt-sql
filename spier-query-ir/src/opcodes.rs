@@ -117,15 +117,15 @@ fn json_escape(s: &str) -> String {
 fn spec_kind_json(spec: &SpecKind) -> String {
     match spec {
         SpecKind::Var(name) => format!("{{\"kind\":\"var\",\"name\":\"{}\"}}", json_escape(name)),
-        SpecKind::Bound(v) => format!("{{\"kind\":\"bound\",\"value\":{}}}", v),
+        SpecKind::Bound(n) => format!("{{\"kind\":\"bound\",\"value\":{}}}", n),
         SpecKind::BoundAttr(aid) => format!("{{\"kind\":\"bound_attr\",\"aid\":{}}}", aid),
         SpecKind::BoundParam(idx) => format!("{{\"kind\":\"bound_param\",\"idx\":{}}}", idx),
         SpecKind::BoundValue(v) => {
             let val = match v {
-                crate::value::Value::Int64(n) => format!("{}", n),
-                crate::value::Value::Float64(f) => format!("{}", f),
-                crate::value::Value::Text(s) => format!("\"{}\"", json_escape(s.as_str())),
-                crate::value::Value::Bool(b) => format!("{}", *b != 0),
+                spier_value::Value::Int64(n) => format!("{}", n),
+                spier_value::Value::Float64(f) => format!("{}", f),
+                spier_value::Value::Text(s) => format!("\"{}\"", json_escape(s.as_str())),
+                spier_value::Value::Bool(b) => format!("{}", *b != 0),
                 other => format!("\"{}\"", json_escape(&format!("{:?}", other))),
             };
             format!("{{\"kind\":\"bound_value\",\"value\":{}}}", val)
@@ -142,14 +142,20 @@ fn instruction_data_json(data: &InstructionData) -> String {
         InstructionData::RangeFlags(f) => format!("{}", f),
         InstructionData::CursorPlan(cp) => {
             let specs: Vec<String> = cp.specs.iter().map(spec_kind_json).collect();
-            let var_depths: Vec<String> = cp.var_depths.iter()
+            let var_depths: Vec<String> = cp
+                .var_depths
+                .iter()
                 .map(|(d, n)| format!("[{},\"{}\"]", d, json_escape(n)))
                 .collect();
             let active: Vec<String> = cp.active_depths.iter().map(|d| format!("{}", d)).collect();
-            let var_order: Vec<String> = cp.global_var_order.iter()
+            let var_order: Vec<String> = cp
+                .global_var_order
+                .iter()
                 .map(|n| format!("\"{}\"", json_escape(n)))
                 .collect();
-            let idx_order: Vec<String> = cp.idx_order.iter()
+            let idx_order: Vec<String> = cp
+                .idx_order
+                .iter()
                 .map(|n| format!("\"{}\"", json_escape(n)))
                 .collect();
             format!(
@@ -167,18 +173,29 @@ fn instruction_data_json(data: &InstructionData) -> String {
 
 impl VMProgram {
     pub fn to_json(&self) -> String {
-        let insts: Vec<String> = self.instructions.iter().map(|inst| {
-            format!(
-                "{{\"op\":\"{:?}\",\"p1\":{},\"p2\":{},\"p3\":{},\"p4\":{}}}",
-                inst.op, inst.p1, inst.p2, inst.p3,
-                instruction_data_json(&inst.p4)
-            )
-        }).collect();
+        let insts: Vec<String> = self
+            .instructions
+            .iter()
+            .map(|inst| {
+                format!(
+                    "{{\"op\":\"{:?}\",\"p1\":{},\"p2\":{},\"p3\":{},\"p4\":{}}}",
+                    inst.op,
+                    inst.p1,
+                    inst.p2,
+                    inst.p3,
+                    instruction_data_json(&inst.p4)
+                )
+            })
+            .collect();
 
-        let var_names: Vec<String> = self.var_names.iter()
+        let var_names: Vec<String> = self
+            .var_names
+            .iter()
             .map(|n| format!("\"{}\"", json_escape(n)))
             .collect();
-        let depth_var: Vec<String> = self.depth_var.iter()
+        let depth_var: Vec<String> = self
+            .depth_var
+            .iter()
             .map(|(a, b)| format!("[{},{}]", a, b))
             .collect();
 

@@ -1,9 +1,17 @@
 use std::collections::HashMap;
 
-use dynspire_commons::datalog::{BoundValue, DatalogNumIRSt, FindVar};
-use dynspire_commons::planner::{Pattern, PlannerEngine, PlanValue, QueryPlanSt, RangeBoundsMap};
+use spier_datalog::{BoundValue, DatalogNumIRSt, FindVar};
 
-mod planner;
+pub mod ast;
+pub mod planner;
+
+pub use ast::*;
+pub use spier_datalog::{index_order, Pattern, PlanStats, INDEX_ORDERS};
+
+pub trait PlannerEngine: Send + Sync {
+    fn plan(&self, ir: DatalogNumIRSt) -> Result<QueryPlanSt, String>;
+    fn to_string(&self, plan: QueryPlanSt) -> Result<String, String>;
+}
 
 /// Pure Rust query planner. No dynspire/FFI — just implements [`PlannerEngine`].
 pub struct Planner;
@@ -30,7 +38,9 @@ fn convert_range_bounds(
             .map(|branch| {
                 branch
                     .iter()
-                    .filter_map(|(op, bv)| PlanValue::from_bound_value(bv).map(|pv| (op.clone(), pv)))
+                    .filter_map(|(op, bv)| {
+                        PlanValue::from_bound_value(bv).map(|pv| (op.clone(), pv))
+                    })
                     .collect()
             })
             .collect();
@@ -44,17 +54,24 @@ impl PlannerEngine for Planner {
         let datalog = ir.num_ir.ir;
         let stats = ir.num_ir.stats;
 
-        let where_patterns: Vec<Pattern> = datalog.patterns.into_iter().map(Pattern::from).collect();
-        let find_vars: Vec<String> = datalog.find_vars.iter().map(|fv| match fv {
-            FindVar::Var(name) | FindVar::Const(name, _) => name.clone(),
-        }).collect();
+        let where_patterns: Vec<Pattern> =
+            datalog.patterns.into_iter().map(Pattern::from).collect();
+        let find_vars: Vec<String> = datalog
+            .find_vars
+            .iter()
+            .map(|fv| match fv {
+                FindVar::Var(name) | FindVar::Const(name, _) => name.clone(),
+            })
+            .collect();
         let history = datalog.history;
         let exists_mode = datalog.exists_mode;
         let plan_find_vars = datalog.find_vars.clone();
         let range_bounds = convert_range_bounds(&datalog.range_bounds);
-        let range_vars: std::collections::HashSet<String> = datalog.range_bounds.keys().cloned().collect();
+        let range_vars: std::collections::HashSet<String> =
+            datalog.range_bounds.keys().cloned().collect();
 
-        let mut result = planner::build_query_plan(where_patterns, &find_vars, &range_vars, &stats)?;
+        let mut result =
+            planner::build_query_plan(where_patterns, &find_vars, &range_vars, &stats)?;
         result.history = history;
         result.exists_mode = exists_mode;
         result.find_vars = plan_find_vars;
@@ -72,14 +89,13 @@ impl PlannerEngine for Planner {
 mod tests {
     use std::collections::{HashMap, HashSet};
 
-    use dynspire_commons::compiler::CompileStats;
-    use dynspire_commons::datalog::{
-        resolve::{resolve_ir, compute_plan_stats}, BoundValue, DatalogIR, DatalogNumIR,
-        DatalogNumIRSt, DatalogPattern, DatalogSlot, FindVar,
+    use spier_datalog::{
+        resolve::{compute_plan_stats, resolve_ir},
+        BoundValue, CompileStats, DatalogIR, DatalogNumIR, DatalogNumIRSt, DatalogPattern,
+        DatalogSlot, FindVar, Pattern,
     };
-    use dynspire_commons::planner::{PlannerEngine, QueryPlanSt};
 
-    use crate::Planner;
+    use crate::{Planner, PlannerEngine, QueryPlanSt};
 
     /// A fixed CompileStats implementation for isolated planner tests.
     /// It does not touch the transactor, storage, or any I/O.
@@ -145,7 +161,10 @@ mod tests {
         let resolved = resolve_ir(ir, &stats).expect("resolve_ir should succeed");
         let plan_stats = compute_plan_stats(&resolved, &stats);
         let st = DatalogNumIRSt {
-            num_ir: DatalogNumIR { ir: resolved, stats: plan_stats },
+            num_ir: DatalogNumIR {
+                ir: resolved,
+                stats: plan_stats,
+            },
         };
         Planner::new().plan(st).expect("plan should succeed")
     }
@@ -173,15 +192,26 @@ mod tests {
             plan.plan.iter_plans.is_empty(),
             "lookup pattern should produce no iter plans"
         );
-        assert_eq!(plan.plan.lookups.len(), 1, "lookup pattern should produce one lookup");
-        assert_eq!(plan.plan.ordered_vars.len(), 0, "lookup-only plan has no ordered vars");
+        assert_eq!(
+            plan.plan.lookups.len(),
+            1,
+            "lookup pattern should produce one lookup"
+        );
+        assert_eq!(
+            plan.plan.ordered_vars.len(),
+            0,
+            "lookup-only plan has no ordered vars"
+        );
         match &plan.plan.lookups[0].a {
             DatalogSlot::Const(BoundValue::ResolvedAttr(id, name, is_ref)) => {
                 assert_eq!(*id, 100);
                 assert_eq!(name, "user.name");
                 assert!(!is_ref);
             }
-            other => panic!("expected ResolvedAttr(user.name, id=100, ref=false), got {:?}", other),
+            other => panic!(
+                "expected ResolvedAttr(user.name, id=100, ref=false), got {:?}",
+                other
+            ),
         }
     }
 
@@ -223,8 +253,13 @@ mod tests {
             "planner should start from the entity variable because AEVT is cheap when the attribute is bound"
         );
         assert_eq!(plan.plan.iter_plans.len(), 2);
-        assert!(plan.plan.iter_plans.iter().all(|ip| ip.index_name == "AEVT"),
-            "both patterns should use AEVT when the attribute is known");
+        assert!(
+            plan.plan
+                .iter_plans
+                .iter()
+                .all(|ip| ip.index_name == "AEVT"),
+            "both patterns should use AEVT when the attribute is known"
+        );
     }
 
     #[test]
@@ -238,7 +273,10 @@ mod tests {
                 t: DatalogSlot::Missing,
                 added: DatalogSlot::Missing,
             }],
-            find_vars: vec![FindVar::Var("e".to_string()), FindVar::Var("ceo".to_string())],
+            find_vars: vec![
+                FindVar::Var("e".to_string()),
+                FindVar::Var("ceo".to_string()),
+            ],
             range_bounds: HashMap::new(),
             star: false,
             exists_mode: false,
@@ -258,7 +296,10 @@ mod tests {
                 assert_eq!(name, "company.ceo");
                 assert!(is_ref);
             }
-            other => panic!("expected ResolvedAttr(company.ceo, id=200, ref=true), got {:?}", other),
+            other => panic!(
+                "expected ResolvedAttr(company.ceo, id=200, ref=true), got {:?}",
+                other
+            ),
         }
         // The optimizer is free to pick AEVT or VAET; AEVT is cheaper in our
         // fixed stats, so it wins.

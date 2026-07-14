@@ -1,11 +1,11 @@
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::blobstore::BlobStoreEngine;
+use crate::error::{TransactorError, TransactorResult};
+use crate::generic_page_store::{GcFullResult, GenericPageStore};
 use crate::journal::JournalEngine;
 use crate::memtable::{MemTableEngine, MemTableSnapshot};
-use crate::error::{TransactorError, TransactorResult};
-use crate::generic_page_store::{GenericPageStore, GcFullResult};
-use crate::merge_iter::{SourceKind, ReverseSourceKind};
+use crate::merge_iter::{ReverseSourceKind, SourceKind};
 use crate::page_store::{self, PageStore}; // PageStore trait used for load_page_keys helper
 
 fn unpack_keys(buf: &[u8]) -> Vec<Vec<u8>> {
@@ -25,11 +25,13 @@ pub(crate) fn unpack_kv(buf: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut entries = Vec::new();
     let mut pos = 0;
     while pos + 4 <= buf.len() {
-        let klen = u32::from_be_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]) as usize;
+        let klen =
+            u32::from_be_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]) as usize;
         pos += 4;
         let key = buf[pos..pos + klen].to_vec();
         pos += klen;
-        let vlen = u32::from_be_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]) as usize;
+        let vlen =
+            u32::from_be_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]) as usize;
         pos += 4;
         let val = buf[pos..pos + vlen].to_vec();
         pos += vlen;
@@ -48,7 +50,7 @@ pub struct TransactorConfig {
     pub page_cache_size: usize,
 }
 
-pub use dynspire_commons::transactor::types::{CfStats, DbStats};
+pub use spier_storage_traits::{CfStats, DbStats};
 
 impl Default for TransactorConfig {
     fn default() -> Self {
@@ -91,18 +93,24 @@ impl StoreInner {
             ));
         }
         if let Some(ref snap) = self.flush_snap {
-            let packed = self.mt.scan_prefix(snap.clone(), cf_id as u32, prefix).unwrap_or_default();
+            let packed = self
+                .mt
+                .scan_prefix(snap.clone(), cf_id as u32, prefix)
+                .unwrap_or_default();
             let snap_keys = unpack_keys(&packed);
-            sources.push(SourceKind::MemTable(
-                crate::merge_iter::PageStoreIter::new(snap_keys, prefix),
-            ));
+            sources.push(SourceKind::MemTable(crate::merge_iter::PageStoreIter::new(
+                snap_keys, prefix,
+            )));
         }
         let live_snap = self.mt.snapshot().unwrap();
-        let packed = self.mt.scan_prefix(live_snap, cf_id as u32, prefix).unwrap_or_default();
+        let packed = self
+            .mt
+            .scan_prefix(live_snap, cf_id as u32, prefix)
+            .unwrap_or_default();
         let mt_keys = unpack_keys(&packed);
-        sources.push(SourceKind::MemTable(
-            crate::merge_iter::PageStoreIter::new(mt_keys, prefix),
-        ));
+        sources.push(SourceKind::MemTable(crate::merge_iter::PageStoreIter::new(
+            mt_keys, prefix,
+        )));
         sources
     }
 
@@ -116,14 +124,20 @@ impl StoreInner {
             ));
         }
         if let Some(ref snap) = self.flush_snap {
-            let packed = self.mt.scan_prefix_reverse(snap.clone(), cf_id as u32, prefix).unwrap_or_default();
+            let packed = self
+                .mt
+                .scan_prefix_reverse(snap.clone(), cf_id as u32, prefix)
+                .unwrap_or_default();
             let snap_keys = unpack_keys(&packed);
             sources.push(ReverseSourceKind::MemTable(
                 crate::merge_iter::ReversePageStoreIter::new(snap_keys, prefix),
             ));
         }
         let live_snap = self.mt.snapshot().unwrap();
-        let packed = self.mt.scan_prefix_reverse(live_snap, cf_id as u32, prefix).unwrap_or_default();
+        let packed = self
+            .mt
+            .scan_prefix_reverse(live_snap, cf_id as u32, prefix)
+            .unwrap_or_default();
         let mt_keys = unpack_keys(&packed);
         sources.push(ReverseSourceKind::MemTable(
             crate::merge_iter::ReversePageStoreIter::new(mt_keys, prefix),
@@ -140,7 +154,8 @@ impl StoreInner {
         let mut keys_by_cf: Vec<(usize, Vec<Vec<u8>>)> = Vec::new();
 
         for cf_id in 0..num_cf {
-            let packed = mt.scan_prefix(snap.clone(), cf_id as u32, b"")
+            let packed = mt
+                .scan_prefix(snap.clone(), cf_id as u32, b"")
                 .map_err(|e| TransactorError::Internal(format!("snapshot scan_prefix: {e}")))?;
             let new_keys = unpack_keys(&packed);
             if new_keys.is_empty() {
@@ -190,7 +205,12 @@ impl Transactor {
         path: &str,
         config: TransactorConfig,
     ) -> TransactorResult<Self> {
-        let store = GenericPageStore::open_read_only(blobs, journal, config.num_cf, config.page_cache_size)?;
+        let store = GenericPageStore::open_read_only(
+            blobs,
+            journal,
+            config.num_cf,
+            config.page_cache_size,
+        )?;
         let inner = StoreInner {
             store: Some(Arc::new(store)),
             mt: Arc::from(mt),
@@ -219,14 +239,18 @@ impl Transactor {
     pub fn put(&self, cf_id: usize, key: &[u8]) -> TransactorResult<()> {
         if key.len() > u32::MAX as usize {
             return Err(TransactorError::InvalidArg(format!(
-                "key too large: {} bytes (max {})", key.len(), u32::MAX
+                "key too large: {} bytes (max {})",
+                key.len(),
+                u32::MAX
             )));
         }
         let mut inner = self.inner.write().unwrap();
         if inner.read_only {
             return Err(TransactorError::ReadOnly);
         }
-        let total = inner.mt.put(cf_id as u32, key)
+        let total = inner
+            .mt
+            .put(cf_id as u32, key)
             .map_err(|e| TransactorError::Internal(format!("memtable put: {e}")))?;
         inner.mt_size = total;
         Ok(())
@@ -237,7 +261,9 @@ impl Transactor {
         if inner.read_only {
             return Err(TransactorError::ReadOnly);
         }
-        let total = inner.mt.batch_write(ops)
+        let total = inner
+            .mt
+            .batch_write(ops)
             .map_err(|e| TransactorError::Internal(format!("memtable batch_write: {e}")))?;
         inner.mt_size = total;
         Ok(())
@@ -250,15 +276,21 @@ impl Transactor {
 
     pub fn get(&self, cf_id: usize, key: &[u8]) -> TransactorResult<Option<Vec<u8>>> {
         let inner = self.inner.read().unwrap();
-        let live_snap = inner.mt.snapshot()
+        let live_snap = inner
+            .mt
+            .snapshot()
             .map_err(|e| TransactorError::Internal(format!("memtable snapshot: {e}")))?;
-        let exists = inner.mt.contains(live_snap, cf_id as u32, key)
+        let exists = inner
+            .mt
+            .contains(live_snap, cf_id as u32, key)
             .map_err(|e| TransactorError::Internal(format!("memtable contains: {e}")))?;
         if exists {
             return Ok(Some(vec![]));
         }
         if let Some(ref snap) = inner.flush_snap {
-            let exists = inner.mt.contains(snap.clone(), cf_id as u32, key)
+            let exists = inner
+                .mt
+                .contains(snap.clone(), cf_id as u32, key)
                 .map_err(|e| TransactorError::Internal(format!("snapshot contains: {e}")))?;
             if exists {
                 return Ok(Some(vec![]));
@@ -282,11 +314,7 @@ impl Transactor {
         inner.scan_sources(cf_id, prefix)
     }
 
-    pub fn scan_reverse_sources(
-        &self,
-        cf_id: usize,
-        prefix: &[u8],
-    ) -> Vec<ReverseSourceKind> {
+    pub fn scan_reverse_sources(&self, cf_id: usize, prefix: &[u8]) -> Vec<ReverseSourceKind> {
         let inner = self.inner.read().unwrap();
         inner.scan_reverse_sources(cf_id, prefix)
     }
@@ -312,7 +340,10 @@ impl Transactor {
     }
 
     pub fn flush(&self) -> TransactorResult<()> {
-        let _guard = self.flush_lock.try_lock().map_err(|_| TransactorError::Busy)?;
+        let _guard = self
+            .flush_lock
+            .try_lock()
+            .map_err(|_| TransactorError::Busy)?;
         self.flush_unlocked()
     }
 
@@ -328,7 +359,7 @@ impl Transactor {
             self.swap_memtable();
             let inner = self.inner.write().unwrap();
             let snap = inner.flush_snap.clone().ok_or(TransactorError::Internal(
-                "flush called without flush snapshot".into()
+                "flush called without flush snapshot".into(),
             ))?;
             let store = inner.store.clone().ok_or(TransactorError::Closed)?;
             let mt = Arc::clone(&inner.mt);
@@ -336,12 +367,7 @@ impl Transactor {
             (snap, store, mt, num_cf)
         };
 
-        let result = StoreInner::flush_snapshot(
-            store.as_ref(),
-            mt.as_ref(),
-            &snap,
-            num_cf,
-        );
+        let result = StoreInner::flush_snapshot(store.as_ref(), mt.as_ref(), &snap, num_cf);
 
         if result.is_ok() {
             let mut inner = self.inner.write().unwrap();
@@ -370,11 +396,17 @@ impl Transactor {
             total += (inner.mt_size as usize) / 40;
         } else {
             if let Some(ref snap) = inner.flush_snap {
-                let packed = inner.mt.scan_prefix(snap.clone(), cf_id as u32, start).unwrap_or_default();
+                let packed = inner
+                    .mt
+                    .scan_prefix(snap.clone(), cf_id as u32, start)
+                    .unwrap_or_default();
                 total += unpack_keys(&packed).len();
             }
             let live_snap = inner.mt.snapshot().unwrap();
-            let packed = inner.mt.scan_prefix(live_snap, cf_id as u32, start).unwrap_or_default();
+            let packed = inner
+                .mt
+                .scan_prefix(live_snap, cf_id as u32, start)
+                .unwrap_or_default();
             total += unpack_keys(&packed).len();
         }
 
@@ -419,7 +451,10 @@ impl Transactor {
             Ok(s) => s,
             Err(_) => return 0,
         };
-        let packed = inner.mt.scan_prefix(snap, cf_id as u32, b"").unwrap_or_default();
+        let packed = inner
+            .mt
+            .scan_prefix(snap, cf_id as u32, b"")
+            .unwrap_or_default();
         unpack_keys(&packed).len() as u64
     }
 
@@ -460,7 +495,14 @@ impl Transactor {
             let mut out = String::new();
             out.push_str(&format!("path: {}\n", inner.path));
             out.push_str(&format!("memtable_size: {} bytes\n", inner.mt_size));
-            out.push_str(&format!("flush_snap: {}\n", if inner.flush_snap.is_some() { "active" } else { "none" }));
+            out.push_str(&format!(
+                "flush_snap: {}\n",
+                if inner.flush_snap.is_some() {
+                    "active"
+                } else {
+                    "none"
+                }
+            ));
             for cf in 0..inner.config.num_cf {
                 let name = page_store::cf_name_for(cf);
                 let mt_count = {
@@ -468,7 +510,10 @@ impl Transactor {
                         Ok(s) => s,
                         Err(_) => continue,
                     };
-                    let packed = inner.mt.scan_prefix(snap, cf as u32, b"").unwrap_or_default();
+                    let packed = inner
+                        .mt
+                        .scan_prefix(snap, cf as u32, b"")
+                        .unwrap_or_default();
                     unpack_keys(&packed).len()
                 };
                 out.push_str(&format!("CF {cf} ({name}): mt_keys={mt_count}\n"));
@@ -486,20 +531,35 @@ impl Transactor {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
-                let packed = inner.mt.scan_prefix(snap, cf as u32, b"").unwrap_or_default();
+                let packed = inner
+                    .mt
+                    .scan_prefix(snap, cf as u32, b"")
+                    .unwrap_or_default();
                 let keys = unpack_keys(&packed);
                 let n = keys.len();
-                let first = keys.first().map(|k| {
-                    let mut s = String::new();
-                    for &b in k.iter().take(16) { s.push_str(&format!("{:02x}", b)); }
-                    s
-                }).unwrap_or_default();
-                let last = keys.last().map(|k| {
-                    let mut s = String::new();
-                    for &b in k.iter().take(16) { s.push_str(&format!("{:02x}", b)); }
-                    s
-                }).unwrap_or_default();
-                out.push_str(&format!("CF {cf} ({name}): keys={n} range={first}..{last}\n"));
+                let first = keys
+                    .first()
+                    .map(|k| {
+                        let mut s = String::new();
+                        for &b in k.iter().take(16) {
+                            s.push_str(&format!("{:02x}", b));
+                        }
+                        s
+                    })
+                    .unwrap_or_default();
+                let last = keys
+                    .last()
+                    .map(|k| {
+                        let mut s = String::new();
+                        for &b in k.iter().take(16) {
+                            s.push_str(&format!("{:02x}", b));
+                        }
+                        s
+                    })
+                    .unwrap_or_default();
+                out.push_str(&format!(
+                    "CF {cf} ({name}): keys={n} range={first}..{last}\n"
+                ));
             }
             return Ok(out);
         }
@@ -508,11 +568,16 @@ impl Transactor {
             return store.internal_status(target);
         }
 
-        Err(TransactorError::InvalidArg(format!("unknown target: {target}")))
+        Err(TransactorError::InvalidArg(format!(
+            "unknown target: {target}"
+        )))
     }
 
     pub fn close(&self) -> TransactorResult<()> {
-        let _guard = self.flush_lock.try_lock().map_err(|_| TransactorError::Busy)?;
+        let _guard = self
+            .flush_lock
+            .try_lock()
+            .map_err(|_| TransactorError::Busy)?;
         let needs_flush = {
             let inner = self.inner.read().unwrap();
             !inner.read_only
@@ -528,11 +593,18 @@ impl Transactor {
     }
 
     pub fn gc_full(&self, dry_run: bool, _nowait: bool) -> TransactorResult<GcFullResult> {
-        let _guard = self.flush_lock.try_lock().map_err(|_| TransactorError::Busy)?;
+        let _guard = self
+            .flush_lock
+            .try_lock()
+            .map_err(|_| TransactorError::Busy)?;
         let (store, max_age_secs, max_root_count) = {
             let inner = self.inner.read().unwrap();
             let store = inner.store.clone().ok_or(TransactorError::Closed)?;
-            (store, inner.config.gc_max_age_secs, inner.config.gc_max_root_count)
+            (
+                store,
+                inner.config.gc_max_age_secs,
+                inner.config.gc_max_root_count,
+            )
         }; // read lock released — GC runs without blocking reads or writes
 
         let store_ref = store.as_ref();
@@ -566,7 +638,8 @@ impl Transactor {
         let inner = self.inner.read().unwrap();
         if let Some(ref store) = inner.store {
             if let Some(gps) = store.as_any().downcast_ref::<GenericPageStore>() {
-                return gps.has_old_roots(inner.config.gc_max_age_secs, inner.config.gc_max_root_count);
+                return gps
+                    .has_old_roots(inner.config.gc_max_age_secs, inner.config.gc_max_root_count);
             }
         }
         false
@@ -590,7 +663,9 @@ mod tests {
 
     impl LocalMemTable {
         fn new(num_cf: usize) -> Self {
-            Self { cfs: (0..num_cf).map(|_| Mutex::new(BTreeSet::new())).collect() }
+            Self {
+                cfs: (0..num_cf).map(|_| Mutex::new(BTreeSet::new())).collect(),
+            }
         }
     }
 
@@ -609,9 +684,16 @@ mod tests {
             let mut pos = 0;
             while pos + 5 <= ops.len() {
                 let cf = ops[pos] as usize;
-                let klen = u32::from_be_bytes([ops[pos + 1], ops[pos + 2], ops[pos + 3], ops[pos + 4]]) as usize;
-                if pos + 5 + klen > ops.len() { break; }
-                self.cfs[cf].lock().unwrap().insert(ops[pos + 5..pos + 5 + klen].to_vec());
+                let klen =
+                    u32::from_be_bytes([ops[pos + 1], ops[pos + 2], ops[pos + 3], ops[pos + 4]])
+                        as usize;
+                if pos + 5 + klen > ops.len() {
+                    break;
+                }
+                self.cfs[cf]
+                    .lock()
+                    .unwrap()
+                    .insert(ops[pos + 5..pos + 5 + klen].to_vec());
                 pos += 5 + klen;
             }
             let mut total = 0u64;
@@ -629,21 +711,31 @@ mod tests {
             Ok(())
         }
         fn snapshot(&self) -> Result<crate::memtable::MemTableSnapshot, String> {
-            let cfs: Vec<std::collections::BTreeSet<Vec<u8>>> = self.cfs.iter()
-                .map(|c| c.lock().unwrap().clone())
-                .collect();
+            let cfs: Vec<std::collections::BTreeSet<Vec<u8>>> =
+                self.cfs.iter().map(|c| c.lock().unwrap().clone()).collect();
             Ok(crate::memtable::MemTableSnapshot {
                 data: std::sync::Arc::new(cfs),
             })
         }
-        fn scan_prefix(&self, snap: crate::memtable::MemTableSnapshot, cf: u32, prefix: &[u8]) -> Result<Vec<u8>, String> {
-            let cfs = snap.data.downcast_ref::<Vec<std::collections::BTreeSet<Vec<u8>>>>()
+        fn scan_prefix(
+            &self,
+            snap: crate::memtable::MemTableSnapshot,
+            cf: u32,
+            prefix: &[u8],
+        ) -> Result<Vec<u8>, String> {
+            let cfs = snap
+                .data
+                .downcast_ref::<Vec<std::collections::BTreeSet<Vec<u8>>>>()
                 .ok_or("invalid snapshot type")?;
             let set = match cfs.get(cf as usize) {
                 Some(s) => s,
                 None => return Ok(Vec::new()),
             };
-            let keys: Vec<Vec<u8>> = set.range::<[u8], _>((std::ops::Bound::Included(prefix), std::ops::Bound::Unbounded))
+            let keys: Vec<Vec<u8>> = set
+                .range::<[u8], _>((
+                    std::ops::Bound::Included(prefix),
+                    std::ops::Bound::Unbounded,
+                ))
                 .filter(|k| k.starts_with(prefix))
                 .cloned()
                 .collect();
@@ -654,7 +746,12 @@ mod tests {
             }
             Ok(buf)
         }
-        fn scan_prefix_reverse(&self, snap: crate::memtable::MemTableSnapshot, cf: u32, prefix: &[u8]) -> Result<Vec<u8>, String> {
+        fn scan_prefix_reverse(
+            &self,
+            snap: crate::memtable::MemTableSnapshot,
+            cf: u32,
+            prefix: &[u8],
+        ) -> Result<Vec<u8>, String> {
             let buf = self.scan_prefix(snap, cf, prefix)?;
             let keys = unpack_keys(&buf);
             let mut packed = Vec::new();
@@ -664,10 +761,20 @@ mod tests {
             }
             Ok(packed)
         }
-        fn contains(&self, snap: crate::memtable::MemTableSnapshot, cf: u32, key: &[u8]) -> Result<bool, String> {
-            let cfs = snap.data.downcast_ref::<Vec<std::collections::BTreeSet<Vec<u8>>>>()
+        fn contains(
+            &self,
+            snap: crate::memtable::MemTableSnapshot,
+            cf: u32,
+            key: &[u8],
+        ) -> Result<bool, String> {
+            let cfs = snap
+                .data
+                .downcast_ref::<Vec<std::collections::BTreeSet<Vec<u8>>>>()
                 .ok_or("invalid snapshot type")?;
-            Ok(cfs.get(cf as usize).map(|s| s.contains(key)).unwrap_or(false))
+            Ok(cfs
+                .get(cf as usize)
+                .map(|s| s.contains(key))
+                .unwrap_or(false))
         }
     }
 
@@ -710,7 +817,10 @@ mod tests {
             Ok(self.blobs.lock().unwrap().keys().copied().collect())
         }
         fn put_root(&self, name: &str, data: &[u8]) -> Result<(), String> {
-            self.roots.lock().unwrap().insert(name.to_string(), data.to_vec());
+            self.roots
+                .lock()
+                .unwrap()
+                .insert(name.to_string(), data.to_vec());
             Ok(())
         }
         fn get_root(&self, name: &str) -> Result<Option<Vec<u8>>, String> {
@@ -731,13 +841,18 @@ mod tests {
 
     impl TestJournalStore {
         fn new() -> Self {
-            Self { journal: Mutex::new(Vec::new()) }
+            Self {
+                journal: Mutex::new(Vec::new()),
+            }
         }
     }
 
     impl JournalEngine for TestJournalStore {
         fn journal_append(&self, key: &[u8], value: &[u8]) -> Result<(), String> {
-            self.journal.lock().unwrap().push((key.to_vec(), value.to_vec()));
+            self.journal
+                .lock()
+                .unwrap()
+                .push((key.to_vec(), value.to_vec()));
             Ok(())
         }
         fn journal_read(&self) -> Result<Vec<u8>, String> {
@@ -761,8 +876,16 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test").to_str().unwrap().to_string();
         let config = TransactorConfig::default();
-        let journal: Option<Box<dyn JournalEngine + Send + Sync>> = Some(Box::new(TestJournalStore::new()));
-        let db = Transactor::open(Box::new(TestBlobStore::new()), journal, make_mt(), &path, config).unwrap();
+        let journal: Option<Box<dyn JournalEngine + Send + Sync>> =
+            Some(Box::new(TestJournalStore::new()));
+        let db = Transactor::open(
+            Box::new(TestBlobStore::new()),
+            journal,
+            make_mt(),
+            &path,
+            config,
+        )
+        .unwrap();
         (dir, db)
     }
 
@@ -784,7 +907,14 @@ mod tests {
             flush_threshold: usize::MAX,
             ..Default::default()
         };
-        let db = Transactor::open(Box::new(TestBlobStore::new()), None, make_mt(), ":memory:", config).unwrap();
+        let db = Transactor::open(
+            Box::new(TestBlobStore::new()),
+            None,
+            make_mt(),
+            ":memory:",
+            config,
+        )
+        .unwrap();
         db.put(0, b"key1").unwrap();
         assert!(db.get(0, b"key1").unwrap().is_some());
     }
@@ -792,8 +922,17 @@ mod tests {
     #[test]
     fn open_read_only_requires_data() {
         let config = TransactorConfig::default();
-        let result = Transactor::open_read_only(Box::new(TestBlobStore::new()), None, make_mt(), "test", config);
-        assert!(result.is_err(), "open_read_only should fail with empty blob store");
+        let result = Transactor::open_read_only(
+            Box::new(TestBlobStore::new()),
+            None,
+            make_mt(),
+            "test",
+            config,
+        );
+        assert!(
+            result.is_err(),
+            "open_read_only should fail with empty blob store"
+        );
     }
 
     #[test]
@@ -802,7 +941,14 @@ mod tests {
             flush_threshold: 4 << 20,
             ..Default::default()
         };
-        let db = Transactor::open(Box::new(TestBlobStore::new()), None, make_mt(), "test", config).unwrap();
+        let db = Transactor::open(
+            Box::new(TestBlobStore::new()),
+            None,
+            make_mt(),
+            "test",
+            config,
+        )
+        .unwrap();
 
         let mut expected_keys = Vec::new();
 
@@ -831,8 +977,10 @@ mod tests {
         let mut result_keys: Vec<Vec<u8>> = results.into_iter().map(|(k, _)| k).collect();
         result_keys.sort();
 
-        assert_eq!(result_keys, expected_keys,
-            "gap key must be merged into existing pages, not lost");
+        assert_eq!(
+            result_keys, expected_keys,
+            "gap key must be merged into existing pages, not lost"
+        );
 
         db.close().unwrap();
     }
@@ -843,7 +991,14 @@ mod tests {
             flush_threshold: 4 << 20,
             ..Default::default()
         };
-        let db = Transactor::open(Box::new(TestBlobStore::new()), None, make_mt(), "test", config).unwrap();
+        let db = Transactor::open(
+            Box::new(TestBlobStore::new()),
+            None,
+            make_mt(),
+            "test",
+            config,
+        )
+        .unwrap();
 
         for i in 100..150u32 {
             let k = make_key("a", i);
@@ -866,7 +1021,14 @@ mod tests {
             flush_threshold: 4 << 20,
             ..Default::default()
         };
-        let db = Transactor::open(Box::new(TestBlobStore::new()), None, make_mt(), "test", config).unwrap();
+        let db = Transactor::open(
+            Box::new(TestBlobStore::new()),
+            None,
+            make_mt(),
+            "test",
+            config,
+        )
+        .unwrap();
 
         for i in 0..50u32 {
             let k = make_key("a", i);
@@ -879,7 +1041,11 @@ mod tests {
         db.flush().unwrap();
 
         let results = db.items(0).unwrap();
-        assert_eq!(results.len(), 51, "key after all pages must merge into last page");
+        assert_eq!(
+            results.len(),
+            51,
+            "key after all pages must merge into last page"
+        );
         db.close().unwrap();
     }
 
@@ -894,7 +1060,10 @@ mod tests {
         let keys: Vec<&[u8]> = entries.iter().map(|(k, _)| k.as_slice()).collect();
         assert!(keys.contains(&b"key1"[..].into()));
         assert!(keys.contains(&b"key2"[..].into()));
-        assert_eq!(entries.iter().find(|(k, _)| k == b"key2").unwrap().1, b"\x01");
+        assert_eq!(
+            entries.iter().find(|(k, _)| k == b"key2").unwrap().1,
+            b"\x01"
+        );
         db.close().unwrap();
     }
 
@@ -906,7 +1075,11 @@ mod tests {
 
         assert_eq!(unpack_kv(&db.journal_scan().unwrap()).len(), 1);
         db.flush().unwrap();
-        assert_eq!(unpack_kv(&db.journal_scan().unwrap()).len(), 0, "journal must be empty after flush");
+        assert_eq!(
+            unpack_kv(&db.journal_scan().unwrap()).len(),
+            0,
+            "journal must be empty after flush"
+        );
         db.close().unwrap();
     }
 
@@ -943,12 +1116,12 @@ mod tests {
             let mut v_encoded = Vec::new();
             let full = raw.len() / 8;
             for j in 0..full {
-                v_encoded.extend_from_slice(&raw[j*8..j*8+8]);
+                v_encoded.extend_from_slice(&raw[j * 8..j * 8 + 8]);
                 v_encoded.push(0xFF);
             }
             let rem = raw.len() % 8;
             let mut block = [0u8; 8];
-            block[..rem].copy_from_slice(&raw[full*8..]);
+            block[..rem].copy_from_slice(&raw[full * 8..]);
             v_encoded.extend_from_slice(&block);
             v_encoded.push(rem as u8);
 
@@ -1013,7 +1186,6 @@ mod tests {
         )
         .unwrap();
 
-
         let name_aid: u32 = 100;
         let rev_aid: u32 = 101;
         let pname_aid: u32 = 200;
@@ -1038,17 +1210,32 @@ mod tests {
             ] {
                 let a_bytes = aid.to_be_bytes();
                 // CF0 (EAVT): [e(8), a(4), v(variable), suffix(8)]
-                let k0: Vec<u8> = e_bytes.iter().chain(a_bytes.iter())
-                    .chain(val_bytes.iter()).chain(sfx.iter()).copied().collect();
+                let k0: Vec<u8> = e_bytes
+                    .iter()
+                    .chain(a_bytes.iter())
+                    .chain(val_bytes.iter())
+                    .chain(sfx.iter())
+                    .copied()
+                    .collect();
                 db.put(0, &k0).unwrap();
                 expected_cf0.insert(k0);
                 // CF1 (AEVT): [a(4), e(8), v(variable), suffix(8)]
-                let k1: Vec<u8> = a_bytes.iter().chain(e_bytes.iter())
-                    .chain(val_bytes.iter()).chain(sfx.iter()).copied().collect();
+                let k1: Vec<u8> = a_bytes
+                    .iter()
+                    .chain(e_bytes.iter())
+                    .chain(val_bytes.iter())
+                    .chain(sfx.iter())
+                    .copied()
+                    .collect();
                 db.put(1, &k1).unwrap();
                 // CF2 (AVET): [a(4), v(variable), e(8), suffix(8)]
-                let k2: Vec<u8> = a_bytes.iter().chain(val_bytes.iter())
-                    .chain(e_bytes.iter()).chain(sfx.iter()).copied().collect();
+                let k2: Vec<u8> = a_bytes
+                    .iter()
+                    .chain(val_bytes.iter())
+                    .chain(e_bytes.iter())
+                    .chain(sfx.iter())
+                    .copied()
+                    .collect();
                 db.put(2, &k2).unwrap();
             }
 
@@ -1074,15 +1261,30 @@ mod tests {
                 }),
             ] {
                 let a_bytes = aid.to_be_bytes();
-                let k0: Vec<u8> = e_bytes.iter().chain(a_bytes.iter())
-                    .chain(val_bytes.iter()).chain(sfx.iter()).copied().collect();
+                let k0: Vec<u8> = e_bytes
+                    .iter()
+                    .chain(a_bytes.iter())
+                    .chain(val_bytes.iter())
+                    .chain(sfx.iter())
+                    .copied()
+                    .collect();
                 db.put(0, &k0).unwrap();
                 expected_cf0.insert(k0);
-                let k1: Vec<u8> = a_bytes.iter().chain(e_bytes.iter())
-                    .chain(val_bytes.iter()).chain(sfx.iter()).copied().collect();
+                let k1: Vec<u8> = a_bytes
+                    .iter()
+                    .chain(e_bytes.iter())
+                    .chain(val_bytes.iter())
+                    .chain(sfx.iter())
+                    .copied()
+                    .collect();
                 db.put(1, &k1).unwrap();
-                let k2: Vec<u8> = a_bytes.iter().chain(val_bytes.iter())
-                    .chain(e_bytes.iter()).chain(sfx.iter()).copied().collect();
+                let k2: Vec<u8> = a_bytes
+                    .iter()
+                    .chain(val_bytes.iter())
+                    .chain(e_bytes.iter())
+                    .chain(sfx.iter())
+                    .copied()
+                    .collect();
                 db.put(2, &k2).unwrap();
             }
 
@@ -1101,21 +1303,31 @@ mod tests {
         let expected_count = expected_cf0.len();
         let result_count = result_keys.len();
 
-        assert_eq!(result_count, expected_count,
+        assert_eq!(
+            result_count,
+            expected_count,
             "CF0 data loss: expected {} keys, got {} (missing {})",
-            expected_count, result_count, expected_count - result_count);
+            expected_count,
+            result_count,
+            expected_count - result_count
+        );
 
         // Also test CF2 (AVET) prefix scan — this is what the query engine uses
         // AVET keys: [attr_id(4), value(variable), entity_id(8), suffix(8)]
         // Prefix scan by attr_id should return all keys for that attr
         let name_aid_bytes = name_aid.to_be_bytes();
         let cf2_all = db.items(2).unwrap();
-        let cf2_name_keys: Vec<_> = cf2_all.iter()
+        let cf2_name_keys: Vec<_> = cf2_all
+            .iter()
             .filter(|(k, _)| k.starts_with(&name_aid_bytes[..]))
             .map(|(k, _)| k.clone())
             .collect();
-        assert_eq!(cf2_name_keys.len(), 20000,
-            "CF2 prefix scan: expected 20000 company.name keys, got {}", cf2_name_keys.len());
+        assert_eq!(
+            cf2_name_keys.len(),
+            20000,
+            "CF2 prefix scan: expected 20000 company.name keys, got {}",
+            cf2_name_keys.len()
+        );
 
         // Also test via cursor (prefix scan like the query engine does)
         let prefix = name_aid_bytes.to_vec();
@@ -1127,8 +1339,11 @@ mod tests {
             cursor_count += 1;
             cursor.borrow_mut().step();
         }
-        assert_eq!(cursor_count, 20000,
-            "CF2 cursor prefix scan: expected 20000, got {}", cursor_count);
+        assert_eq!(
+            cursor_count, 20000,
+            "CF2 cursor prefix scan: expected 20000, got {}",
+            cursor_count
+        );
 
         db.close().unwrap();
     }
@@ -1139,18 +1354,38 @@ mod tests {
             flush_threshold: 4 << 20,
             ..Default::default()
         };
-        let db = Transactor::open(Box::new(TestBlobStore::new()), None, make_mt(), "test", config).unwrap();
+        let db = Transactor::open(
+            Box::new(TestBlobStore::new()),
+            None,
+            make_mt(),
+            "test",
+            config,
+        )
+        .unwrap();
         for i in 0..5u8 {
             let k = format!("key_{:04}", i);
             db.put(0, k.as_bytes()).unwrap();
         }
         db.flush().unwrap();
         let fwd: Vec<Vec<u8>> = db.items(0).unwrap().into_iter().map(|(k, _)| k).collect();
-        let rev: Vec<Vec<u8>> = db.scan_reverse(0, b"").unwrap().into_iter().map(|(k, _)| k).collect();
+        let rev: Vec<Vec<u8>> = db
+            .scan_reverse(0, b"")
+            .unwrap()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
         assert_eq!(fwd.len(), 5);
         assert_eq!(rev.len(), 5);
-        assert_eq!(rev[0], *b"key_0004", "reverse scan first should be largest, got {:?}", rev);
-        assert_eq!(&fwd, &rev.iter().rev().cloned().collect::<Vec<_>>(), "reverse of reverse must equal forward");
+        assert_eq!(
+            rev[0], *b"key_0004",
+            "reverse scan first should be largest, got {:?}",
+            rev
+        );
+        assert_eq!(
+            &fwd,
+            &rev.iter().rev().cloned().collect::<Vec<_>>(),
+            "reverse of reverse must equal forward"
+        );
         db.close().unwrap();
     }
 }

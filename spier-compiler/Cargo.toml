@@ -5,5 +5,8 @@ edition = "2021"
 description = "SQL compiler (SQL → VMProgram)"
 
 [dependencies]
-dynspire-commons = { path = "../dynspire-commons" }
+spier-datalog = { path = "../spier-datalog" }
 spier-planner = { path = "../spier-planner" }
+spier-query-ir = { path = "../spier-query-ir" }
+spier-sql-parse = { path = "../spier-sql-parse" }
+spier-value = { path = "../spier-value" }

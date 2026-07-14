@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.25", features = ["extension-module"] }
-spier-transactor = { path = "../spier-transactor" }
 spier-journal-file = { path = "../spier-journal-file" }
-dynspire-commons = { path = "../dynspire-commons" }
+spier-storage-traits = { path = "../spier-storage-traits" }
+spier-transactor = { path = "../spier-transactor" }
+spier-value = { path = "../spier-value" }

@@ -1,22 +1,21 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::datalog::{BoundValue, PlanValue, RangeBoundsMap, Slot};
-use dynspire_commons::datalog::FindVar;
-use dynspire_commons::planner::{Pattern, QueryPlanResult, IterPlanData, PlanTrace};
-use dynspire_commons::value::Value;
-use dynspire_commons::query_ir::{
-    Instruction, InstructionData, OpCode, SpecKind, VMProgram,
-    RANGE_OP_EQ, RANGE_OP_NEQ, RANGE_OP_GT, RANGE_OP_GTE,
-    RANGE_OP_LT, RANGE_OP_LTE, RANGE_OP_IN,
+use spier_datalog::FindVar;
+use spier_planner::{IterPlanData, Pattern, PlanTrace, QueryPlanResult};
+use spier_query_ir::{
+    Instruction, InstructionData, OpCode, SpecKind, VMProgram, RANGE_OP_EQ, RANGE_OP_GT,
+    RANGE_OP_GTE, RANGE_OP_IN, RANGE_OP_LT, RANGE_OP_LTE, RANGE_OP_NEQ,
 };
+use spier_value::Value;
 
 /// Resolve retract pairs from DELETE conditions (non-eid conditions).
 /// Each pair is (attr_name, resolved_value).
 pub fn resolve_delete_pairs(
-    stmt: &dynspire_commons::sql_parse::RustDeleteWhereStmt,
+    stmt: &spier_sql_parse::RustDeleteWhereStmt,
     params: &[Value],
 ) -> Result<Vec<(String, Value)>, String> {
-    use dynspire_commons::sql_parse::{RustConditionRight, RustLiteral};
+    use spier_sql_parse::{RustConditionRight, RustLiteral};
     let resolve_right = |right: &RustConditionRight, params: &[Value]| -> Result<Value, String> {
         match right {
             RustConditionRight::Param(idx) => {
@@ -30,7 +29,9 @@ pub fn resolve_delete_pairs(
             RustConditionRight::Literal(RustLiteral::Float(f)) => Ok(Value::Float64(*f)),
             RustConditionRight::Literal(RustLiteral::Str(s)) => Ok(Value::text(s.clone())),
             RustConditionRight::Literal(RustLiteral::Bool(b)) => Ok(Value::Bool(*b as u8)),
-            RustConditionRight::Literal(RustLiteral::Bytes(b)) => Ok(Value::Bytes(b.clone().into())),
+            RustConditionRight::Literal(RustLiteral::Bytes(b)) => {
+                Ok(Value::Bytes(b.clone().into()))
+            }
             _ => Err("unsupported condition right in delete".to_string()),
         }
     };
@@ -47,10 +48,10 @@ pub fn resolve_delete_pairs(
 
 /// Resolve entity value from DELETE eid condition.
 pub fn resolve_delete_entity(
-    stmt: &dynspire_commons::sql_parse::RustDeleteWhereStmt,
+    stmt: &spier_sql_parse::RustDeleteWhereStmt,
     params: &[Value],
 ) -> Result<Value, String> {
-    use dynspire_commons::sql_parse::{RustConditionRight, RustLiteral};
+    use spier_sql_parse::{RustConditionRight, RustLiteral};
     for cond in &stmt.conditions {
         if cond.left.field == "eid" {
             return match &cond.right {
@@ -68,7 +69,6 @@ pub fn resolve_delete_entity(
     }
     Err("DELETE direct requires eid condition".to_string())
 }
-
 
 struct Compiler {
     insts: Vec<Instruction>,
@@ -100,22 +100,26 @@ impl Compiler {
     }
 
     fn emit_goto(&mut self, label: &str) {
-        self.pending_labels.push((self.insts.len(), label.to_string(), false));
+        self.pending_labels
+            .push((self.insts.len(), label.to_string(), false));
         self.emit(OpCode::Goto, 0, 0, 0, InstructionData::None);
     }
 
     fn emit_leap_init(&mut self, depth: i32, label: &str) {
-        self.pending_labels.push((self.insts.len(), label.to_string(), true));
+        self.pending_labels
+            .push((self.insts.len(), label.to_string(), true));
         self.emit(OpCode::LeapInit, depth, 0, 0, InstructionData::None);
     }
 
     fn emit_leap_next(&mut self, depth: i32, label: &str) {
-        self.pending_labels.push((self.insts.len(), label.to_string(), true));
+        self.pending_labels
+            .push((self.insts.len(), label.to_string(), true));
         self.emit(OpCode::LeapNext, depth, 0, 0, InstructionData::None);
     }
 
     fn emit_probe_begin(&mut self, label: &str) {
-        self.pending_labels.push((self.insts.len(), label.to_string(), false));
+        self.pending_labels
+            .push((self.insts.len(), label.to_string(), false));
         self.emit(OpCode::ProbeBegin, 0, 0, 0, InstructionData::None);
     }
 
@@ -131,11 +135,7 @@ impl Compiler {
         c as i32
     }
 
-    fn build(
-        mut self,
-        var_names: Vec<String>,
-        depth_var: Vec<(usize, usize)>,
-    ) -> VMProgram {
+    fn build(mut self, var_names: Vec<String>, depth_var: Vec<(usize, usize)>) -> VMProgram {
         for (inst_idx, label, is_leap) in &self.pending_labels {
             if let Some(&target) = self.labels.get(label) {
                 let inst = &mut self.insts[*inst_idx];
@@ -186,14 +186,13 @@ impl Compiler {
 }
 
 fn find_v2_compatible_index(ip: &IterPlanData) -> &'static str {
-    use dynspire_commons::planner::INDEX_ORDERS;
+    use spier_datalog::INDEX_ORDERS;
     use std::collections::HashSet;
 
     let bound: HashSet<String> = ip.bound_ints.keys().cloned().collect();
 
-    let mut var_depths_sorted: Vec<(usize, String)> = ip.var_depths.iter()
-        .map(|(d, p)| (*d, p.clone()))
-        .collect();
+    let mut var_depths_sorted: Vec<(usize, String)> =
+        ip.var_depths.iter().map(|(d, p)| (*d, p.clone())).collect();
     var_depths_sorted.sort_by_key(|(d, _)| *d);
     let mut var_positions: Vec<String> = var_depths_sorted.iter().map(|(_, p)| p.clone()).collect();
     for positions in ip.same_var_constraints.values() {
@@ -205,18 +204,26 @@ fn find_v2_compatible_index(ip: &IterPlanData) -> &'static str {
     }
 
     let spec_is_var = |pos: &str| -> bool {
-        let idx = match pos { "e" => 0, "a" => 1, "v" => 2, "t" => 3, "added" => 4, _ => 4 };
+        let idx = match pos {
+            "e" => 0,
+            "a" => 1,
+            "v" => 2,
+            "t" => 3,
+            "added" => 4,
+            _ => 4,
+        };
         matches!(ip.specs.get(idx), Some(SpecKind::Var(_)))
     };
 
     for (idx_name, idx_order) in &INDEX_ORDERS {
-        let n_bound_leading = idx_order.iter()
-            .take_while(|p| bound.contains(**p))
-            .count();
+        let n_bound_leading = idx_order.iter().take_while(|p| bound.contains(**p)).count();
 
-        if n_bound_leading < bound.len() { continue; }
+        if n_bound_leading < bound.len() {
+            continue;
+        }
 
-        let var_in_idx: Vec<String> = idx_order.iter()
+        let var_in_idx: Vec<String> = idx_order
+            .iter()
             .filter(|p| spec_is_var(p) && !bound.contains(**p))
             .map(|s| s.to_string())
             .collect();
@@ -232,11 +239,19 @@ fn find_v2_compatible_index(ip: &IterPlanData) -> &'static str {
 fn emit_plan_value(b: &mut Compiler, pv: &PlanValue) -> i32 {
     let r = b.alloc_reg();
     match pv {
-        PlanValue::Value(Value::Int64(n)) => b.emit(OpCode::ConstInt, r, 0, 0, InstructionData::Int(*n)),
+        PlanValue::Value(Value::Int64(n)) => {
+            b.emit(OpCode::ConstInt, r, 0, 0, InstructionData::Int(*n))
+        }
         PlanValue::Value(Value::Float64(f)) => {
             b.emit(OpCode::ConstFloat, r, 0, 0, InstructionData::Float(*f));
         }
-        PlanValue::Value(Value::Text(s)) => b.emit(OpCode::ConstStr, r, 0, 0, InstructionData::Str(s.as_str().to_string())),
+        PlanValue::Value(Value::Text(s)) => b.emit(
+            OpCode::ConstStr,
+            r,
+            0,
+            0,
+            InstructionData::Str(s.as_str().to_string()),
+        ),
         PlanValue::Value(_) => b.emit(OpCode::ConstInt, r, 0, 0, InstructionData::Int(0)),
         PlanValue::Param(idx) => b.emit(OpCode::Param, r, *idx as i32, 0, InstructionData::None),
     }
@@ -252,7 +267,13 @@ fn emit_literal_values(b: &mut Compiler, literal_values: &[Value]) {
             Value::Float64(f) => {
                 b.emit(OpCode::ConstFloat, r_tmp, 0, 0, InstructionData::Float(*f));
             }
-            Value::Text(s) => b.emit(OpCode::ConstStr, r_tmp, 0, 0, InstructionData::Str(s.as_str().to_string())),
+            Value::Text(s) => b.emit(
+                OpCode::ConstStr,
+                r_tmp,
+                0,
+                0,
+                InstructionData::Str(s.as_str().to_string()),
+            ),
             _ => b.emit(OpCode::ConstInt, r_tmp, 0, 0, InstructionData::Int(0)),
         }
         b.emit(OpCode::EmitValue, r_tmp, 0, 0, InstructionData::None);
@@ -264,7 +285,13 @@ fn emit_load_const(b: &mut Compiler, val: &BoundValue) -> i32 {
     let r = b.alloc_reg();
     match val {
         BoundValue::Str(s) | BoundValue::Attr(s) => {
-            b.emit(OpCode::ConstStr, r, 0, 0, InstructionData::Str(s.as_str().to_string()));
+            b.emit(
+                OpCode::ConstStr,
+                r,
+                0,
+                0,
+                InstructionData::Str(s.as_str().to_string()),
+            );
         }
         BoundValue::Int(n) => {
             b.emit(OpCode::ConstInt, r, 0, 0, InstructionData::Int(*n));
@@ -299,7 +326,13 @@ fn emit_probe(b: &mut Compiler, pattern: &Pattern, fail_label: &str) -> Option<(
                     b.emit(OpCode::ConstInt, r, 0, 0, InstructionData::Int(*id as i64));
                 }
                 BoundValue::Str(s) | BoundValue::Attr(s) => {
-                    b.emit(OpCode::InternA, r, 0, 0, InstructionData::Str(s.as_str().to_string()));
+                    b.emit(
+                        OpCode::InternA,
+                        r,
+                        0,
+                        0,
+                        InstructionData::Str(s.as_str().to_string()),
+                    );
                 }
                 BoundValue::Int(n) => {
                     b.emit(OpCode::ConstInt, r, 0, 0, InstructionData::Int(*n));
@@ -359,13 +392,23 @@ fn emit_projection(
         let r = if i > 0 { b.alloc_reg() } else { r_start };
         if let Some(pv) = constant_indices.get(&i) {
             match pv {
-                PlanValue::Value(Value::Int64(n)) => b.emit(OpCode::ConstInt, r, 0, 0, InstructionData::Int(*n)),
+                PlanValue::Value(Value::Int64(n)) => {
+                    b.emit(OpCode::ConstInt, r, 0, 0, InstructionData::Int(*n))
+                }
                 PlanValue::Value(Value::Float64(f)) => {
                     b.emit(OpCode::ConstFloat, r, 0, 0, InstructionData::Float(*f));
                 }
-                PlanValue::Value(Value::Text(s)) => b.emit(OpCode::ConstStr, r, 0, 0, InstructionData::Str(s.as_str().to_string())),
+                PlanValue::Value(Value::Text(s)) => b.emit(
+                    OpCode::ConstStr,
+                    r,
+                    0,
+                    0,
+                    InstructionData::Str(s.as_str().to_string()),
+                ),
                 PlanValue::Value(_) => b.emit(OpCode::Null, r, 0, 0, InstructionData::None),
-                PlanValue::Param(idx) => b.emit(OpCode::Param, r, *idx as i32, 0, InstructionData::None),
+                PlanValue::Param(idx) => {
+                    b.emit(OpCode::Param, r, *idx as i32, 0, InstructionData::None)
+                }
             }
             continue;
         }
@@ -388,7 +431,13 @@ fn emit_projection(
             b.emit(OpCode::ResolveVal, r, 0, 0, InstructionData::None);
         }
     }
-    b.emit(OpCode::ResultRow, first_r, total_proj_len as i32, 0, InstructionData::None);
+    b.emit(
+        OpCode::ResultRow,
+        first_r,
+        total_proj_len as i32,
+        0,
+        InstructionData::None,
+    );
 }
 
 struct TriejoinContext {
@@ -437,9 +486,16 @@ where
         synth_ordered.push(name.clone());
     }
 
-    let var_id_map: HashMap<String, usize> = var_names_list.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect();
-    let depth_var_pairs: Vec<(usize, usize)> = synth_ordered.iter().enumerate()
-        .map(|(d, name)| (d, var_id_map[name])).collect();
+    let var_id_map: HashMap<String, usize> = var_names_list
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.clone(), i))
+        .collect();
+    let depth_var_pairs: Vec<(usize, usize)> = synth_ordered
+        .iter()
+        .enumerate()
+        .map(|(d, name)| (d, var_id_map[name]))
+        .collect();
     let num_depths = synth_ordered.len();
 
     let mut b = Compiler::new(32, var_names_list.len());
@@ -448,7 +504,13 @@ where
     for (name, pv) in &synth_trailing {
         let depth = synth_ordered.iter().position(|v| v == name).unwrap();
         let r = emit_plan_value(&mut b, pv);
-        b.emit(OpCode::RangeOp, depth as i32, RANGE_OP_EQ, r, InstructionData::None);
+        b.emit(
+            OpCode::RangeOp,
+            depth as i32,
+            RANGE_OP_EQ,
+            r,
+            InstructionData::None,
+        );
     }
 
     for pattern in &plan.lookups {
@@ -466,7 +528,13 @@ where
         };
         for (branch_idx, branch) in branches.iter().enumerate() {
             if branch_idx > 0 {
-                b.emit(OpCode::RangeBranch, depth as i32, 0, 0, InstructionData::None);
+                b.emit(
+                    OpCode::RangeBranch,
+                    depth as i32,
+                    0,
+                    0,
+                    InstructionData::None,
+                );
             }
             for (op, pv) in branch {
                 let op_const = match op.as_str() {
@@ -480,7 +548,13 @@ where
                     _ => continue,
                 };
                 let r = emit_plan_value(&mut b, pv);
-                b.emit(OpCode::RangeOp, depth as i32, op_const, r, InstructionData::None);
+                b.emit(
+                    OpCode::RangeOp,
+                    depth as i32,
+                    op_const,
+                    r,
+                    InstructionData::None,
+                );
             }
         }
     }
@@ -492,9 +566,19 @@ where
 
         let v2_order: Vec<&str> = ip.idx_order.iter().map(|s| s.as_str()).collect();
         let cf_id = match ip.index_name.to_ascii_uppercase().as_str() {
-            "EAVT" => 0i32, "AEVT" => 1, "AVET" => 2, "VAET" => 3, _ => 0,
+            "EAVT" => 0i32,
+            "AEVT" => 1,
+            "AVET" => 2,
+            "VAET" => 3,
+            _ => 0,
         };
-        b.emit(OpCode::ScannerOpen, cid, cf_id, if history { 1 } else { 0 }, InstructionData::None);
+        b.emit(
+            OpCode::ScannerOpen,
+            cid,
+            cf_id,
+            if history { 1 } else { 0 },
+            InstructionData::None,
+        );
         for pos_name in &v2_order {
             let pv = match ip.bound_ints.get(*pos_name) {
                 Some(pv) => pv,
@@ -509,12 +593,24 @@ where
                 }
                 PlanValue::Value(Value::Text(name)) if *pos_name == "a" => {
                     let r = b.alloc_reg();
-                    b.emit(OpCode::InternA, r, 0, 0, InstructionData::Str(name.as_str().to_string()));
+                    b.emit(
+                        OpCode::InternA,
+                        r,
+                        0,
+                        0,
+                        InstructionData::Str(name.as_str().to_string()),
+                    );
                     r
                 }
                 _ => emit_plan_value(&mut b, pv),
             };
-            b.emit(OpCode::PrefixPush, cid, r, pos_idx as i32, InstructionData::None);
+            b.emit(
+                OpCode::PrefixPush,
+                cid,
+                r,
+                pos_idx as i32,
+                InstructionData::None,
+            );
         }
     }
 
@@ -542,20 +638,33 @@ where
     if max_projected < 0 {
         max_projected = num_depths as i32 - 1;
     }
-    let effective_deepest: usize = (0..num_depths).rev()
+    let effective_deepest: usize = (0..num_depths)
+        .rev()
         .find(|&d| depth_groups.get(&d).map_or(false, |v| !v.is_empty()))
         .unwrap_or(0);
     let dedup = max_projected < effective_deepest as i32;
 
     for depth in 0..num_depths {
         let cursor_ids = depth_groups.get(&depth).cloned().unwrap_or_default();
-        if cursor_ids.is_empty() { continue; }
+        if cursor_ids.is_empty() {
+            continue;
+        }
 
-        let fail_label = if depth == 0 { "done".to_string() } else { format!("d{}_back", depth) };
+        let fail_label = if depth == 0 {
+            "done".to_string()
+        } else {
+            format!("d{}_back", depth)
+        };
         b.emit_label(&format!("d{}_open", depth));
         for &cid in &cursor_ids {
             let pos_idx = depth_pos_map.get(&(cid, depth)).copied().unwrap_or(0) as i32;
-            b.emit(OpCode::DepthEnter, depth as i32, cid, pos_idx, InstructionData::None);
+            b.emit(
+                OpCode::DepthEnter,
+                depth as i32,
+                cid,
+                pos_idx,
+                InstructionData::None,
+            );
         }
         b.emit_leap_init(depth as i32, &fail_label);
     }
@@ -592,7 +701,11 @@ fn emit_triejoin_loop(b: &mut Compiler, ctx: &TriejoinContext) {
                     b.emit(OpCode::DepthUp, depth as i32, cid, 0, InstructionData::None);
                 }
             }
-            let mp_fail = if max_projected == 0 { "done".to_string() } else { format!("d{}_back", max_projected) };
+            let mp_fail = if max_projected == 0 {
+                "done".to_string()
+            } else {
+                format!("d{}_back", max_projected)
+            };
             b.emit_label(&format!("d{}_iter", max_projected));
             b.emit_leap_next(max_projected, &mp_fail);
             let next_depth = (max_projected as usize + 1..num_depths)
@@ -605,7 +718,11 @@ fn emit_triejoin_loop(b: &mut Compiler, ctx: &TriejoinContext) {
             let deepest = effective_deepest;
             let deepest_cursors = ctx.depth_groups.get(&deepest).cloned().unwrap_or_default();
             if !deepest_cursors.is_empty() {
-                let fail_label = if deepest == 0 { "done".to_string() } else { format!("d{}_back", deepest) };
+                let fail_label = if deepest == 0 {
+                    "done".to_string()
+                } else {
+                    format!("d{}_back", deepest)
+                };
                 b.emit_label(&format!("d{}_loop", deepest));
                 b.emit_leap_next(deepest as i32, &fail_label);
                 b.emit_goto("leaf");
@@ -614,8 +731,14 @@ fn emit_triejoin_loop(b: &mut Compiler, ctx: &TriejoinContext) {
 
         for depth in (1..num_depths).rev() {
             let cursor_ids = ctx.depth_groups.get(&depth).cloned().unwrap_or_default();
-            if cursor_ids.is_empty() { continue; }
-            let parent_fail = if depth - 1 == 0 { "done".to_string() } else { format!("d{}_back", depth - 1) };
+            if cursor_ids.is_empty() {
+                continue;
+            }
+            let parent_fail = if depth - 1 == 0 {
+                "done".to_string()
+            } else {
+                format!("d{}_back", depth - 1)
+            };
             b.emit_label(&format!("d{}_back", depth));
             for &cid in &cursor_ids {
                 b.emit(OpCode::DepthUp, depth as i32, cid, 0, InstructionData::None);
@@ -654,7 +777,16 @@ pub fn compile_triejoin(
         if exists_mode {
             emit_literal_values(b, literal_values);
         } else {
-            emit_projection(b, find_vars, &ctx.var_id_map, e_vars, attr_vars, &HashSet::new(), constant_indices, total_proj_len);
+            emit_projection(
+                b,
+                find_vars,
+                &ctx.var_id_map,
+                e_vars,
+                attr_vars,
+                &HashSet::new(),
+                constant_indices,
+                total_proj_len,
+            );
         }
     });
 
@@ -672,7 +804,11 @@ pub fn compile_triejoin(
                     b.emit(OpCode::DepthUp, depth as i32, cid, 0, InstructionData::None);
                 }
             }
-            let mp_fail = if max_projected == 0 { "done".to_string() } else { format!("d{}_back", max_projected) };
+            let mp_fail = if max_projected == 0 {
+                "done".to_string()
+            } else {
+                format!("d{}_back", max_projected)
+            };
             b.emit_label(&format!("d{}_iter", max_projected));
             b.emit_leap_next(max_projected, &mp_fail);
             let next_depth = (max_projected as usize + 1..num_depths)
@@ -685,14 +821,27 @@ pub fn compile_triejoin(
             let deepest = effective_deepest;
             let deepest_cursors = ctx.depth_groups.get(&deepest).cloned().unwrap_or_default();
             if !deepest_cursors.is_empty() {
-                let fail_label = if deepest == 0 { "done".to_string() } else { format!("d{}_back", deepest) };
+                let fail_label = if deepest == 0 {
+                    "done".to_string()
+                } else {
+                    format!("d{}_back", deepest)
+                };
                 b.emit_label(&format!("d{}_loop", deepest));
                 b.emit_leap_next(deepest as i32, &fail_label);
 
                 if exists_mode {
                     emit_literal_values(&mut b, literal_values);
                 } else {
-                    emit_projection(&mut b, find_vars, &ctx.var_id_map, e_vars, attr_vars, &HashSet::new(), constant_indices, total_proj_len);
+                    emit_projection(
+                        &mut b,
+                        find_vars,
+                        &ctx.var_id_map,
+                        e_vars,
+                        attr_vars,
+                        &HashSet::new(),
+                        constant_indices,
+                        total_proj_len,
+                    );
                     b.emit_goto(&format!("d{}_loop", deepest));
                 }
             }
@@ -700,8 +849,14 @@ pub fn compile_triejoin(
 
         for depth in (1..num_depths).rev() {
             let cursor_ids = ctx.depth_groups.get(&depth).cloned().unwrap_or_default();
-            if cursor_ids.is_empty() { continue; }
-            let parent_fail = if depth - 1 == 0 { "done".to_string() } else { format!("d{}_back", depth - 1) };
+            if cursor_ids.is_empty() {
+                continue;
+            }
+            let parent_fail = if depth - 1 == 0 {
+                "done".to_string()
+            } else {
+                format!("d{}_back", depth - 1)
+            };
             b.emit_label(&format!("d{}_back", depth));
             for &cid in &cursor_ids {
                 b.emit(OpCode::DepthUp, depth as i32, cid, 0, InstructionData::None);
@@ -729,14 +884,18 @@ pub fn compile_triejoin(
     for (&ip_idx, &cid) in &ctx.cursor_map {
         if let Some(ip) = plan.iter_plans.get(ip_idx) {
             let v2_idx = find_v2_compatible_index(ip);
-            let v2_order = dynspire_commons::transactor::keys::index_order(v2_idx);
+            let v2_order = spier_datalog::index_order(v2_idx);
             let spec_for_pos = |pos: &str| -> Option<&str> {
                 match pos {
                     "e" => ip.specs.get(0),
                     "a" => ip.specs.get(1),
                     "v" => ip.specs.get(2),
                     _ => None,
-                }.and_then(|s| match s { SpecKind::Var(n) => Some(n.as_str()), _ => None })
+                }
+                .and_then(|s| match s {
+                    SpecKind::Var(n) => Some(n.as_str()),
+                    _ => None,
+                })
             };
             let mut var_positions: HashMap<&str, Vec<usize>> = HashMap::new();
             for (idx, pos) in v2_order.iter().enumerate() {
@@ -746,14 +905,18 @@ pub fn compile_triejoin(
             }
             for positions in var_positions.values() {
                 if positions.len() >= 2 {
-                    let pairs: Vec<(usize, usize)> = positions[1..]
-                        .iter().map(|&p| (positions[0], p)).collect();
+                    let pairs: Vec<(usize, usize)> =
+                        positions[1..].iter().map(|&p| (positions[0], p)).collect();
                     same_var_constraints.push((cid, pairs));
                 }
             }
         }
     }
-    let program = b.build_with_constraints(ctx.var_names_list, ctx.depth_var_pairs, same_var_constraints);
+    let program = b.build_with_constraints(
+        ctx.var_names_list,
+        ctx.depth_var_pairs,
+        same_var_constraints,
+    );
     program
 }
 
@@ -774,7 +937,8 @@ pub fn compile_probes_only(
             }
         }
     }
-    let var_id_map: HashMap<String, usize> = t_var_names.iter()
+    let var_id_map: HashMap<String, usize> = t_var_names
+        .iter()
         .enumerate()
         .map(|(i, n)| (n.clone(), i))
         .collect();
@@ -792,7 +956,16 @@ pub fn compile_probes_only(
     if exists_mode {
         emit_literal_values(&mut b, literal_values);
     } else if !find_vars.is_empty() {
-        emit_projection(&mut b, find_vars, &var_id_map, &HashSet::new(), attr_vars, &t_var_set, constant_indices, total_proj_len);
+        emit_projection(
+            &mut b,
+            find_vars,
+            &var_id_map,
+            &HashSet::new(),
+            attr_vars,
+            &t_var_set,
+            constant_indices,
+            total_proj_len,
+        );
     } else {
         b.emit(OpCode::ResultRow, 0, 0, 0, InstructionData::None);
     }
@@ -818,47 +991,89 @@ pub fn compile_emit_exists(literal_values: &[Value]) -> VMProgram {
 
 // --- Rust AST compile functions (no PyO3 dependency) ---
 
-pub fn compile_rust_attribute(stmt: &dynspire_commons::sql_parse::RustAttributeStmt) -> VMProgram {
+pub fn compile_rust_attribute(stmt: &spier_sql_parse::RustAttributeStmt) -> VMProgram {
     let mut b = Compiler::new(4, 0);
     let r_attr = b.alloc_reg();
     let r_vt = b.alloc_reg();
     let r_card = b.alloc_reg();
-    b.emit(OpCode::ConstStr, r_attr, 0, 0, InstructionData::Str(stmt.attr.clone()));
-    b.emit(OpCode::ConstStr, r_vt, 0, 0, InstructionData::Str(stmt.value_type.clone()));
+    b.emit(
+        OpCode::ConstStr,
+        r_attr,
+        0,
+        0,
+        InstructionData::Str(stmt.attr.clone()),
+    );
+    b.emit(
+        OpCode::ConstStr,
+        r_vt,
+        0,
+        0,
+        InstructionData::Str(stmt.value_type.clone()),
+    );
     let flags = (if stmt.many { 1 } else { 0 }) | (if stmt.unique { 2 } else { 0 });
-    b.emit(OpCode::ExecAttribute, r_attr, flags, r_vt, InstructionData::None);
-    b.emit(OpCode::ConstStr, r_attr, 0, 0, InstructionData::Str(stmt.attr.clone()));
+    b.emit(
+        OpCode::ExecAttribute,
+        r_attr,
+        flags,
+        r_vt,
+        InstructionData::None,
+    );
+    b.emit(
+        OpCode::ConstStr,
+        r_attr,
+        0,
+        0,
+        InstructionData::Str(stmt.attr.clone()),
+    );
     let card_label = if stmt.unique {
         format!("{} unique", if stmt.many { "many" } else { "one" })
     } else {
         (if stmt.many { "many" } else { "one" }).to_string()
     };
-    b.emit(OpCode::ConstStr, r_card, 0, 0, InstructionData::Str(card_label));
+    b.emit(
+        OpCode::ConstStr,
+        r_card,
+        0,
+        0,
+        InstructionData::Str(card_label),
+    );
     b.emit(OpCode::ResultRow, r_attr, 2, 0, InstructionData::None);
     b.emit(OpCode::Halt, 0, 0, 0, InstructionData::None);
     b.build(vec![], vec![])
 }
 
-pub fn compile_rust_partition(stmt: &dynspire_commons::sql_parse::RustPartitionStmt) -> VMProgram {
+pub fn compile_rust_partition(stmt: &spier_sql_parse::RustPartitionStmt) -> VMProgram {
     let mut b = Compiler::new(4, 0);
     let r_name = b.alloc_reg();
     let r_part_id = b.alloc_reg();
-    b.emit(OpCode::ConstStr, r_name, 0, 0, InstructionData::Str(stmt.name.clone()));
-    b.emit(OpCode::DeclarePartition, r_name, r_part_id, 0, InstructionData::None);
+    b.emit(
+        OpCode::ConstStr,
+        r_name,
+        0,
+        0,
+        InstructionData::Str(stmt.name.clone()),
+    );
+    b.emit(
+        OpCode::DeclarePartition,
+        r_name,
+        r_part_id,
+        0,
+        InstructionData::None,
+    );
     b.emit(OpCode::ResultRow, r_part_id, 1, 0, InstructionData::None);
     b.emit(OpCode::Halt, 0, 0, 0, InstructionData::None);
     b.build(vec![], vec![])
 }
 
 pub fn compile_rust_delete_direct(
-    entity_val: &dynspire_commons::value::Value,
-    pairs: &[(String, dynspire_commons::value::Value)],
+    entity_val: &spier_value::Value,
+    pairs: &[(String, spier_value::Value)],
 ) -> Result<VMProgram, String> {
     let mut b = Compiler::new(16, 0);
 
     let r_ent = b.alloc_reg();
     match entity_val {
-        dynspire_commons::value::Value::Int64(n) => {
+        spier_value::Value::Int64(n) => {
             b.emit(OpCode::ConstInt, r_ent, 0, 0, InstructionData::Int(*n));
         }
         _ => return Err("entity must be integer in DELETE WHERE".to_string()),
@@ -866,15 +1081,37 @@ pub fn compile_rust_delete_direct(
 
     for (attr, val) in pairs {
         let r_attr = b.alloc_reg();
-        b.emit(OpCode::ConstStr, r_attr, 0, 0, InstructionData::Str(attr.clone()));
+        b.emit(
+            OpCode::ConstStr,
+            r_attr,
+            0,
+            0,
+            InstructionData::Str(attr.clone()),
+        );
         let r_val = b.alloc_reg();
         match val {
-            dynspire_commons::value::Value::Int64(n) => b.emit(OpCode::ConstInt, r_val, 0, 0, InstructionData::Int(*n)),
-            dynspire_commons::value::Value::Float64(f) => b.emit(OpCode::ConstFloat, r_val, 0, 0, InstructionData::Float(*f)),
-            dynspire_commons::value::Value::Text(s) => b.emit(OpCode::ConstStr, r_val, 0, 0, InstructionData::Str(s.as_str().to_string())),
+            spier_value::Value::Int64(n) => {
+                b.emit(OpCode::ConstInt, r_val, 0, 0, InstructionData::Int(*n))
+            }
+            spier_value::Value::Float64(f) => {
+                b.emit(OpCode::ConstFloat, r_val, 0, 0, InstructionData::Float(*f))
+            }
+            spier_value::Value::Text(s) => b.emit(
+                OpCode::ConstStr,
+                r_val,
+                0,
+                0,
+                InstructionData::Str(s.as_str().to_string()),
+            ),
             _ => b.emit(OpCode::ConstInt, r_val, 0, 0, InstructionData::Int(0)),
         }
-        b.emit(OpCode::ExecRetract, r_ent, r_attr, r_val, InstructionData::Int(-1));
+        b.emit(
+            OpCode::ExecRetract,
+            r_ent,
+            r_attr,
+            r_val,
+            InstructionData::Int(-1),
+        );
     }
     b.emit(OpCode::ResultRow, r_ent, 1, 0, InstructionData::None);
     b.emit(OpCode::Halt, 0, 0, 0, InstructionData::None);
@@ -886,7 +1123,7 @@ pub fn compile_triejoin_delete(
     range_bounds: &crate::datalog::RangeBoundsMap,
     find_vars: &[String],
     target_evar: &str,
-    retract_pairs: &[(String, dynspire_commons::value::Value)],
+    retract_pairs: &[(String, spier_value::Value)],
 ) -> Result<VMProgram, String> {
     let target_evar = target_evar.to_string();
     let retract_pairs = retract_pairs.to_vec();
@@ -894,20 +1131,52 @@ pub fn compile_triejoin_delete(
     let (mut b, ctx) = build_triejoin_skeleton(plan, range_bounds, find_vars, false, |b, ctx| {
         let e_var_id = ctx.var_id_map.get(&target_evar).copied().unwrap_or(0);
         let r_ent = b.alloc_reg();
-        b.emit(OpCode::BindGet, r_ent, e_var_id as i32, 0, InstructionData::None);
+        b.emit(
+            OpCode::BindGet,
+            r_ent,
+            e_var_id as i32,
+            0,
+            InstructionData::None,
+        );
 
         for (attr, val) in &retract_pairs {
             let r_attr = b.alloc_reg();
-            b.emit(OpCode::ConstStr, r_attr, 0, 0, InstructionData::Str(attr.clone()));
+            b.emit(
+                OpCode::ConstStr,
+                r_attr,
+                0,
+                0,
+                InstructionData::Str(attr.clone()),
+            );
             let r_val = b.alloc_reg();
             match val {
                 Value::Int64(n) => b.emit(OpCode::ConstInt, r_val, 0, 0, InstructionData::Int(*n)),
-                Value::Float64(f) => b.emit(OpCode::ConstFloat, r_val, 0, 0, InstructionData::Float(*f)),
-                Value::Text(s) => b.emit(OpCode::ConstStr, r_val, 0, 0, InstructionData::Str(s.as_str().to_string())),
-                Value::Bool(bv) => b.emit(OpCode::ConstBool, r_val, if *bv != 0 { 1 } else { 0 }, 0, InstructionData::None),
+                Value::Float64(f) => {
+                    b.emit(OpCode::ConstFloat, r_val, 0, 0, InstructionData::Float(*f))
+                }
+                Value::Text(s) => b.emit(
+                    OpCode::ConstStr,
+                    r_val,
+                    0,
+                    0,
+                    InstructionData::Str(s.as_str().to_string()),
+                ),
+                Value::Bool(bv) => b.emit(
+                    OpCode::ConstBool,
+                    r_val,
+                    if *bv != 0 { 1 } else { 0 },
+                    0,
+                    InstructionData::None,
+                ),
                 _ => b.emit(OpCode::ConstInt, r_val, 0, 0, InstructionData::Int(0)),
             }
-            b.emit(OpCode::ExecRetract, r_ent, r_attr, r_val, InstructionData::Int(-1));
+            b.emit(
+                OpCode::ExecRetract,
+                r_ent,
+                r_attr,
+                r_val,
+                InstructionData::Int(-1),
+            );
         }
 
         b.emit(OpCode::ResultRow, r_ent, 1, 0, InstructionData::None);
@@ -920,10 +1189,10 @@ pub fn compile_triejoin_delete(
 }
 
 pub fn compile_upsert(
-    stmt: &dynspire_commons::sql_parse::RustUpsertStmt,
-    params: &[dynspire_commons::value::Value],
+    stmt: &spier_sql_parse::RustUpsertStmt,
+    params: &[spier_value::Value],
 ) -> Result<VMProgram, String> {
-    use dynspire_commons::sql_parse::{UpsertEntityRef, RustValue};
+    use spier_sql_parse::{RustValue, UpsertEntityRef};
 
     let mut b = Compiler::new(32, 0);
 
@@ -938,7 +1207,10 @@ pub fn compile_upsert(
 
     for (clause_idx, clause) in stmt.clauses.iter().enumerate() {
         let r = b.alloc_reg();
-        let alias_key = clause.alias.clone().unwrap_or_else(|| format!("_auto_{}", clause_idx));
+        let alias_key = clause
+            .alias
+            .clone()
+            .unwrap_or_else(|| format!("_auto_{}", clause_idx));
         alias_regs.insert(alias_key.clone(), r);
 
         if clause_idx == 0 {
@@ -949,7 +1221,13 @@ pub fn compile_upsert(
         match &clause.entity_ref {
             UpsertEntityRef::New => {
                 let partition_id: u64 = 4;
-                b.emit(OpCode::AllocEntP, r, 0, 0, InstructionData::Int(partition_id as i64));
+                b.emit(
+                    OpCode::AllocEntP,
+                    r,
+                    0,
+                    0,
+                    InstructionData::Int(partition_id as i64),
+                );
             }
             UpsertEntityRef::Tx => {
                 b.emit(OpCode::LoadTxEnt, r, 0, 0, InstructionData::None);
@@ -966,24 +1244,47 @@ pub fn compile_upsert(
                 emit_upsert_value(&mut b, r_attr, attr, &params)?;
                 let r_val = b.alloc_reg();
                 emit_upsert_value(&mut b, r_val, value, &params)?;
-                b.emit(OpCode::LookupEntity, r, r_attr, r_val, InstructionData::None);
+                b.emit(
+                    OpCode::LookupEntity,
+                    r,
+                    r_attr,
+                    r_val,
+                    InstructionData::None,
+                );
             }
         }
     }
 
     for clause in &stmt.clauses {
-        let alias_key = clause.alias.clone().unwrap_or_else(|| "_auto_0".to_string());
+        let alias_key = clause
+            .alias
+            .clone()
+            .unwrap_or_else(|| "_auto_0".to_string());
         let r_ent = *alias_regs.get(&alias_key).ok_or("missing alias reg")?;
 
         for iv in &clause.values {
             let r_attr = b.alloc_reg();
-            b.emit(OpCode::ConstStr, r_attr, 0, 0, InstructionData::Str(iv.attr.clone()));
+            b.emit(
+                OpCode::ConstStr,
+                r_attr,
+                0,
+                0,
+                InstructionData::Str(iv.attr.clone()),
+            );
 
             let r_val = b.alloc_reg();
             match &iv.value {
                 RustValue::AliasRef(name) => {
-                    let src = alias_regs.get(name).ok_or_else(|| format!("unknown alias: {}", name))?;
-                    b.emit(OpCode::ExecInsert, r_ent, r_attr, *src, InstructionData::Int(-1));
+                    let src = alias_regs
+                        .get(name)
+                        .ok_or_else(|| format!("unknown alias: {}", name))?;
+                    b.emit(
+                        OpCode::ExecInsert,
+                        r_ent,
+                        r_attr,
+                        *src,
+                        InstructionData::Int(-1),
+                    );
                     continue;
                 }
                 RustValue::EidLookup { attr, value } => {
@@ -991,32 +1292,71 @@ pub fn compile_upsert(
                     emit_upsert_value(&mut b, r_lookup_attr, attr, &params)?;
                     let r_lookup_val = b.alloc_reg();
                     emit_upsert_value(&mut b, r_lookup_val, value, &params)?;
-                    b.emit(OpCode::LookupEntity, r_val, r_lookup_attr, r_lookup_val, InstructionData::None);
+                    b.emit(
+                        OpCode::LookupEntity,
+                        r_val,
+                        r_lookup_attr,
+                        r_lookup_val,
+                        InstructionData::None,
+                    );
                 }
                 RustValue::ValLookup { entity, attr } => {
                     let r_entity = b.alloc_reg();
                     match entity.as_ref() {
-                        RustValue::EidLookup { attr: ea, value: ev } => {
+                        RustValue::EidLookup {
+                            attr: ea,
+                            value: ev,
+                        } => {
                             let r_ea = b.alloc_reg();
                             emit_upsert_value(&mut b, r_ea, ea, &params)?;
                             let r_ev = b.alloc_reg();
                             emit_upsert_value(&mut b, r_ev, ev, &params)?;
-                            b.emit(OpCode::LookupEntity, r_entity, r_ea, r_ev, InstructionData::None);
+                            b.emit(
+                                OpCode::LookupEntity,
+                                r_entity,
+                                r_ea,
+                                r_ev,
+                                InstructionData::None,
+                            );
                         }
                         _ => emit_upsert_value(&mut b, r_entity, entity, &params)?,
                     }
                     let r_val_attr = b.alloc_reg();
                     emit_upsert_value(&mut b, r_val_attr, attr, &params)?;
-                    b.emit(OpCode::LookupValue, r_val, r_entity, r_val_attr, InstructionData::None);
+                    b.emit(
+                        OpCode::LookupValue,
+                        r_val,
+                        r_entity,
+                        r_val_attr,
+                        InstructionData::None,
+                    );
                 }
                 _ => emit_upsert_value(&mut b, r_val, &iv.value, &params)?,
             }
-            b.emit(OpCode::ExecInsert, r_ent, r_attr, r_val, InstructionData::Int(-1));
+            b.emit(
+                OpCode::ExecInsert,
+                r_ent,
+                r_attr,
+                r_val,
+                InstructionData::Int(-1),
+            );
         }
     }
 
-    b.emit(OpCode::ConstInt, r_count, 0, 0, InstructionData::Int(total_values as i64));
-    b.emit(OpCode::ResultRow, first_eid_reg, 2, 0, InstructionData::None);
+    b.emit(
+        OpCode::ConstInt,
+        r_count,
+        0,
+        0,
+        InstructionData::Int(total_values as i64),
+    );
+    b.emit(
+        OpCode::ResultRow,
+        first_eid_reg,
+        2,
+        0,
+        InstructionData::None,
+    );
     b.emit(OpCode::Halt, 0, 0, 0, InstructionData::None);
     Ok(b.build(vec![], vec![]))
 }
@@ -1024,10 +1364,10 @@ pub fn compile_upsert(
 fn emit_upsert_value(
     b: &mut Compiler,
     r_val: i32,
-    value: &dynspire_commons::sql_parse::RustValue,
-    _params: &[dynspire_commons::value::Value],
+    value: &spier_sql_parse::RustValue,
+    _params: &[spier_value::Value],
 ) -> Result<(), String> {
-    use dynspire_commons::sql_parse::{RustLiteral, RustValue};
+    use spier_sql_parse::{RustLiteral, RustValue};
     match value {
         RustValue::Literal(RustLiteral::Int(n)) => {
             b.emit(OpCode::ConstInt, r_val, 0, 0, InstructionData::Int(*n));
@@ -1036,10 +1376,22 @@ fn emit_upsert_value(
             b.emit(OpCode::ConstFloat, r_val, 0, 0, InstructionData::Float(*f));
         }
         RustValue::Literal(RustLiteral::Str(s)) => {
-            b.emit(OpCode::ConstStr, r_val, 0, 0, InstructionData::Str(s.as_str().to_string()));
+            b.emit(
+                OpCode::ConstStr,
+                r_val,
+                0,
+                0,
+                InstructionData::Str(s.as_str().to_string()),
+            );
         }
         RustValue::Literal(RustLiteral::Bool(bv)) => {
-            b.emit(OpCode::ConstBool, r_val, if *bv { 1 } else { 0 }, 0, InstructionData::None);
+            b.emit(
+                OpCode::ConstBool,
+                r_val,
+                if *bv { 1 } else { 0 },
+                0,
+                InstructionData::None,
+            );
         }
         RustValue::Param(idx) => {
             b.emit(OpCode::Param, r_val, *idx as i32, 0, InstructionData::None);
@@ -1064,7 +1416,7 @@ pub fn compile_triejoin_update(
     plan: &QueryPlanResult,
     range_bounds: &crate::datalog::RangeBoundsMap,
     find_vars: &[String],
-    all_set_values: &[(String, Vec<dynspire_commons::sql_parse::RustInsertValue>)],
+    all_set_values: &[(String, Vec<spier_sql_parse::RustInsertValue>)],
     _target_evar: &str,
 ) -> Result<VMProgram, String> {
     let all_set_values = all_set_values.to_vec();
@@ -1076,32 +1428,56 @@ pub fn compile_triejoin_update(
             let clause_evar = format!("_e_{}", alias_lower);
             let e_var_id = ctx.var_id_map.get(&clause_evar).copied().unwrap_or(0);
             let r_ent = b.alloc_reg();
-            b.emit(OpCode::BindGet, r_ent, e_var_id as i32, 0, InstructionData::None);
+            b.emit(
+                OpCode::BindGet,
+                r_ent,
+                e_var_id as i32,
+                0,
+                InstructionData::None,
+            );
             if i == 0 {
                 first_r_ent = r_ent;
             }
 
             for iv in set_values {
                 let r_attr = b.alloc_reg();
-                b.emit(OpCode::ConstStr, r_attr, 0, 0, InstructionData::Str(iv.attr.clone()));
+                b.emit(
+                    OpCode::ConstStr,
+                    r_attr,
+                    0,
+                    0,
+                    InstructionData::Str(iv.attr.clone()),
+                );
                 let r_val = b.alloc_reg();
                 match &iv.value {
-                    dynspire_commons::sql_parse::RustValue::Literal(dynspire_commons::sql_parse::RustLiteral::Int(n)) => {
+                    spier_sql_parse::RustValue::Literal(spier_sql_parse::RustLiteral::Int(n)) => {
                         b.emit(OpCode::ConstInt, r_val, 0, 0, InstructionData::Int(*n));
                     }
-                    dynspire_commons::sql_parse::RustValue::Literal(dynspire_commons::sql_parse::RustLiteral::Float(f)) => {
+                    spier_sql_parse::RustValue::Literal(spier_sql_parse::RustLiteral::Float(f)) => {
                         b.emit(OpCode::ConstFloat, r_val, 0, 0, InstructionData::Float(*f));
                     }
-                    dynspire_commons::sql_parse::RustValue::Literal(dynspire_commons::sql_parse::RustLiteral::Str(s)) => {
-                        b.emit(OpCode::ConstStr, r_val, 0, 0, InstructionData::Str(s.as_str().to_string()));
+                    spier_sql_parse::RustValue::Literal(spier_sql_parse::RustLiteral::Str(s)) => {
+                        b.emit(
+                            OpCode::ConstStr,
+                            r_val,
+                            0,
+                            0,
+                            InstructionData::Str(s.as_str().to_string()),
+                        );
                     }
-                    dynspire_commons::sql_parse::RustValue::Literal(dynspire_commons::sql_parse::RustLiteral::Bool(bv)) => {
-                        b.emit(OpCode::ConstBool, r_val, if *bv { 1 } else { 0 }, 0, InstructionData::None);
+                    spier_sql_parse::RustValue::Literal(spier_sql_parse::RustLiteral::Bool(bv)) => {
+                        b.emit(
+                            OpCode::ConstBool,
+                            r_val,
+                            if *bv { 1 } else { 0 },
+                            0,
+                            InstructionData::None,
+                        );
                     }
-                    dynspire_commons::sql_parse::RustValue::Param(idx) => {
+                    spier_sql_parse::RustValue::Param(idx) => {
                         b.emit(OpCode::Param, r_val, *idx as i32, 0, InstructionData::None);
                     }
-                    dynspire_commons::sql_parse::RustValue::AliasRef(name) => {
+                    spier_sql_parse::RustValue::AliasRef(name) => {
                         let ref_evar = format!("_e_{}", name.to_lowercase());
                         if let Some(&vid) = ctx.var_id_map.get(&ref_evar) {
                             b.emit(OpCode::BindGet, r_val, vid as i32, 0, InstructionData::None);
@@ -1109,7 +1485,13 @@ pub fn compile_triejoin_update(
                     }
                     _ => {}
                 }
-                b.emit(OpCode::ExecInsert, r_ent, r_attr, r_val, InstructionData::Int(-1));
+                b.emit(
+                    OpCode::ExecInsert,
+                    r_ent,
+                    r_attr,
+                    r_val,
+                    InstructionData::Int(-1),
+                );
             }
         }
         b.emit(OpCode::ResultRow, first_r_ent, 1, 0, InstructionData::None);
@@ -1143,10 +1525,13 @@ pub fn compile_from_plan(plan: &QueryPlanResult) -> Result<SelectResult, String>
     }
 
     let lit_vals: Vec<Value> = if plan.exists_mode {
-        plan.find_vars.iter().map(|fv| match fv {
-            FindVar::Const(_, bv) => bv.to_value().unwrap_or(Value::Int64(1)),
-            FindVar::Var(_) => Value::Int64(1),
-        }).collect()
+        plan.find_vars
+            .iter()
+            .map(|fv| match fv {
+                FindVar::Const(_, bv) => bv.to_value().unwrap_or(Value::Int64(1)),
+                FindVar::Var(_) => Value::Int64(1),
+            })
+            .collect()
     } else {
         Vec::new()
     };
@@ -1157,7 +1542,9 @@ pub fn compile_from_plan(plan: &QueryPlanResult) -> Result<SelectResult, String>
     }
     let mut triejoin_find_vars: Vec<String> = Vec::new();
     for (i, fv_name) in find_vars.iter().enumerate() {
-        if constant_indices.contains_key(&i) { continue; }
+        if constant_indices.contains_key(&i) {
+            continue;
+        }
         if where_names.contains(fv_name) || fv_name.starts_with("_added_") {
             triejoin_find_vars.push(fv_name.clone());
         }
@@ -1170,8 +1557,13 @@ pub fn compile_from_plan(plan: &QueryPlanResult) -> Result<SelectResult, String>
     let mut program = if plan.join_patterns.is_empty() {
         if !plan.lookups.is_empty() {
             compile_probes_only(
-                &plan.lookups, exists || plan.exists_mode, &lit_vals,
-                fv_pass, &constant_indices, total_proj_len, &plan.attr_vars,
+                &plan.lookups,
+                exists || plan.exists_mode,
+                &lit_vals,
+                fv_pass,
+                &constant_indices,
+                total_proj_len,
+                &plan.attr_vars,
             )
         } else if plan.exists_mode {
             compile_emit_exists(&lit_vals)
@@ -1180,9 +1572,13 @@ pub fn compile_from_plan(plan: &QueryPlanResult) -> Result<SelectResult, String>
         }
     } else {
         compile_triejoin(
-            plan, &plan.range_bounds, fv_pass, &constant_indices,
+            plan,
+            &plan.range_bounds,
+            fv_pass,
+            &constant_indices,
             total_proj_len,
-            plan.exists_mode, &lit_vals,
+            plan.exists_mode,
+            &lit_vals,
             plan.history,
         )
     };

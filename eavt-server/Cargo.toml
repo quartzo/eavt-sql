@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-dynspire-commons = { path = "../dynspire-commons" }
 spier-eavt-query = { path = "../spier-eavt-query" }
+spier-storage-traits = { path = "../spier-storage-traits" }
+spier-value = { path = "../spier-value" }
 tonic = "0.13"
 prost = "0.13"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

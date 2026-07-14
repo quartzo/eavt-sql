@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::datalog::{BoundValue, DatalogPattern, DatalogSlot, FindVar};
-use crate::query_ir::SpecKind;
-use crate::value::Value;
+use spier_datalog::{BoundValue, FindVar, Pattern};
+use spier_query_ir::SpecKind;
+use spier_value::Value;
 
 // ── PlanValue: Value or Param placeholder ─────────────────────────────
 
@@ -17,69 +17,13 @@ impl PlanValue {
         match bv {
             BoundValue::Int(n) => Some(PlanValue::Value(Value::Int64(*n))),
             BoundValue::Float(f) => Some(PlanValue::Value(Value::Float64(*f))),
-            BoundValue::Str(s) | BoundValue::Attr(s) => Some(PlanValue::Value(Value::text(s.clone()))),
+            BoundValue::Str(s) | BoundValue::Attr(s) => {
+                Some(PlanValue::Value(Value::text(s.clone())))
+            }
             BoundValue::ResolvedAttr(id, _, _) => Some(PlanValue::Value(Value::Int64(*id as i64))),
             BoundValue::Param(idx) => Some(PlanValue::Param(*idx)),
             _ => None,
         }
-    }
-}
-
-// ── Index catalog ───────────────────────────────────────────────────
-
-pub const INDEX_ORDERS: [(&str, [&str; 5]); 4] = [
-    ("EAVT", ["e", "a", "v", "t", "added"]),
-    ("AEVT", ["a", "e", "v", "t", "added"]),
-    ("AVET", ["a", "v", "e", "t", "added"]),
-    ("VAET", ["v", "a", "e", "t", "added"]),
-];
-
-// ── Pattern (planner working type, same shape as DatalogPattern) ────
-
-#[derive(Clone, Debug)]
-pub struct Pattern {
-    pub e: DatalogSlot,
-    pub a: DatalogSlot,
-    pub v: DatalogSlot,
-    pub t: DatalogSlot,
-    pub added: DatalogSlot,
-}
-
-impl Pattern {
-    pub fn slot(&self, pos: &str) -> &DatalogSlot {
-        match pos {
-            "e" => &self.e,
-            "a" => &self.a,
-            "v" => &self.v,
-            "t" => &self.t,
-            "added" => &self.added,
-            _ => &self.t,
-        }
-    }
-
-    pub fn is_lookup(&self) -> bool {
-        let const_and_some = |s: &DatalogSlot| matches!(s, DatalogSlot::Const(bv) if !matches!(bv, BoundValue::Missing(_)));
-        const_and_some(&self.e) && const_and_some(&self.a) && const_and_some(&self.v)
-    }
-
-    pub fn contains_var_in_eav(&self, var_name: &str) -> bool {
-        matches!(&self.e, DatalogSlot::Var(n) if n == var_name)
-            || matches!(&self.a, DatalogSlot::Var(n) if n == var_name)
-            || matches!(&self.v, DatalogSlot::Var(n) if n == var_name)
-            || matches!(&self.t, DatalogSlot::Var(n) if n == var_name)
-            || matches!(&self.added, DatalogSlot::Var(n) if n == var_name)
-    }
-}
-
-impl From<DatalogPattern> for Pattern {
-    fn from(p: DatalogPattern) -> Pattern {
-        Pattern { e: p.e, a: p.a, v: p.v, t: p.t, added: p.added }
-    }
-}
-
-impl From<Pattern> for DatalogPattern {
-    fn from(p: Pattern) -> DatalogPattern {
-        DatalogPattern { e: p.e, a: p.a, v: p.v, t: p.t, added: p.added }
     }
 }
 
@@ -109,16 +53,30 @@ impl std::fmt::Display for PlanTrace {
         let prefix = if self.pruned { "PRUNED " } else { "" };
         write!(f, "{prefix}[{vars}] cost={:.1}", self.total_cost)?;
         for (i, d) in self.depths.iter().enumerate() {
-            let clauses: Vec<String> = d.active_clauses.iter()
+            let clauses: Vec<String> = d
+                .active_clauses
+                .iter()
                 .map(|(ci, idx)| format!("p{}@{}", ci, idx))
                 .collect();
             let ncl = d.active_clauses.len();
             let pen = if d.penalty { " ×1.5pen" } else { "" };
             if d.is_blind {
-                write!(f, "\n  depth {i}: {} | blind | est={:.1}{}", d.var, d.estimated_elements, pen)?;
+                write!(
+                    f,
+                    "\n  depth {i}: {} | blind | est={:.1}{}",
+                    d.var, d.estimated_elements, pen
+                )?;
             } else {
-                write!(f, "\n  depth {i}: {} | clauses=[{}] | est={:.1} ×{}cl{} = {:.1}",
-                    d.var, clauses.join(", "), d.estimated_elements, ncl, pen, d.step_cost)?;
+                write!(
+                    f,
+                    "\n  depth {i}: {} | clauses=[{}] | est={:.1} ×{}cl{} = {:.1}",
+                    d.var,
+                    clauses.join(", "),
+                    d.estimated_elements,
+                    ncl,
+                    pen,
+                    d.step_cost
+                )?;
             }
         }
         Ok(())
@@ -179,7 +137,13 @@ impl std::fmt::Display for QueryPlanResult {
         if self.ordered_vars.is_empty() {
             writeln!(f, "Plan: lookups-only (no join){hist_tag}{exists_tag}")?;
         } else {
-            writeln!(f, "Join order: [{}]{}{}", self.ordered_vars.join(", "), hist_tag, exists_tag)?;
+            writeln!(
+                f,
+                "Join order: [{}]{}{}",
+                self.ordered_vars.join(", "),
+                hist_tag,
+                exists_tag
+            )?;
         }
 
         if !self.find_vars.is_empty() {
@@ -191,15 +155,28 @@ impl std::fmt::Display for QueryPlanResult {
             writeln!(f, "Iter plans:")?;
             for (i, ip) in self.iter_plans.iter().enumerate() {
                 let specs: Vec<String> = ip.specs.iter().map(fmt_spec).collect();
-                let bound: Vec<String> = ip.bound_ints.iter()
-                    .map(|(k, pv)| format!("{k}={pv:?}")).collect();
-                let depths: Vec<String> = ip.var_depths.iter()
-                    .map(|(d, pos)| format!("{pos}@d{d}")).collect();
-                writeln!(f, "  p{i} @ {} [{}] depths=[{}]{}",
+                let bound: Vec<String> = ip
+                    .bound_ints
+                    .iter()
+                    .map(|(k, pv)| format!("{k}={pv:?}"))
+                    .collect();
+                let depths: Vec<String> = ip
+                    .var_depths
+                    .iter()
+                    .map(|(d, pos)| format!("{pos}@d{d}"))
+                    .collect();
+                writeln!(
+                    f,
+                    "  p{i} @ {} [{}] depths=[{}]{}",
                     ip.index_name,
                     specs.join(", "),
                     depths.join(", "),
-                    if bound.is_empty() { String::new() } else { format!(" bound={{{}}}", bound.join(", ")) })?;
+                    if bound.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" bound={{{}}}", bound.join(", "))
+                    }
+                )?;
             }
         }
 

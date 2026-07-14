@@ -44,7 +44,10 @@ pub fn normalize_attr(name: &str) -> Result<String, String> {
     if name.starts_with(':') && name.contains('/') {
         Ok(name[1..].replace('/', "."))
     } else if !name.contains('.') {
-        Err(format!("attribute name must include namespace (e.g. 'company.name'), got {:?}", name))
+        Err(format!(
+            "attribute name must include namespace (e.g. 'company.name'), got {:?}",
+            name
+        ))
     } else {
         Ok(name.to_string())
     }

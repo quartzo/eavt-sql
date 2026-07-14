@@ -1,7 +1,5 @@
-use std::collections::BinaryHeap;
 use std::cmp::Reverse;
-
-
+use std::collections::BinaryHeap;
 
 pub trait ScanSource: Send {
     fn valid(&self) -> bool;
@@ -48,16 +46,22 @@ impl PageStoreIter {
 }
 
 impl ScanSource for PageStoreIter {
-    fn valid(&self) -> bool { self.valid }
+    fn valid(&self) -> bool {
+        self.valid
+    }
 
     fn key(&self) -> Vec<u8> {
         self.keys[self.idx].clone()
     }
 
-    fn value(&self) -> Vec<u8> { vec![] }
+    fn value(&self) -> Vec<u8> {
+        vec![]
+    }
 
     fn advance(&mut self) {
-        if !self.valid { return; }
+        if !self.valid {
+            return;
+        }
         self.idx += 1;
         self.valid = self.idx < self.keys.len() && &self.keys[self.idx][..] <= &self.end[..];
     }
@@ -67,7 +71,9 @@ impl ScanSource for PageStoreIter {
         self.valid = self.idx < self.keys.len() && &self.keys[self.idx][..] <= &self.end[..];
     }
 
-    fn advance_to(&mut self, target: &[u8]) { self.seek(target); }
+    fn advance_to(&mut self, target: &[u8]) {
+        self.seek(target);
+    }
 
     fn update_end(&mut self, end: &[u8]) {
         self.end = end.to_vec();
@@ -77,11 +83,12 @@ impl ScanSource for PageStoreIter {
     }
 
     fn skip_group(&mut self, group: &[u8]) {
-        if !self.valid { return; }
+        if !self.valid {
+            return;
+        }
         let glen = group.len();
-        self.idx += self.keys[self.idx..].partition_point(|k| {
-            k.len() >= glen && k[..glen] == group[..]
-        });
+        self.idx +=
+            self.keys[self.idx..].partition_point(|k| k.len() >= glen && k[..glen] == group[..]);
         self.valid = self.idx < self.keys.len() && &self.keys[self.idx][..] <= &self.end[..];
     }
 }
@@ -145,7 +152,7 @@ impl ScanSource for SourceKind {
 }
 
 // Cursor trait is defined in dynspire-commons
-pub use dynspire_commons::transactor::cursor::Cursor;
+pub use spier_storage_traits::Cursor;
 
 pub fn merge_collect(sources: Vec<SourceKind>) -> Vec<(Vec<u8>, Vec<u8>)> {
     let end = vec![0xFF; 64];
@@ -316,13 +323,27 @@ impl MergedInner {
 }
 
 impl Cursor for MergedInner {
-    fn is_valid(&self) -> bool { self.valid }
-    fn current_key(&self) -> Option<&[u8]> { self.cur_key.as_deref() }
-    fn step(&mut self) { MergedInner::step(self); }
-    fn skip_group(&mut self, group_end: usize) { MergedInner::skip_group(self, group_end); }
-    fn seek(&mut self, target: &[u8]) { MergedInner::seek(self, target); }
-    fn update_end(&mut self, end: &[u8]) { MergedInner::update_end(self, end); }
-    fn invalidate(&mut self) { self.valid = false; }
+    fn is_valid(&self) -> bool {
+        self.valid
+    }
+    fn current_key(&self) -> Option<&[u8]> {
+        self.cur_key.as_deref()
+    }
+    fn step(&mut self) {
+        MergedInner::step(self);
+    }
+    fn skip_group(&mut self, group_end: usize) {
+        MergedInner::skip_group(self, group_end);
+    }
+    fn seek(&mut self, target: &[u8]) {
+        MergedInner::seek(self, target);
+    }
+    fn update_end(&mut self, end: &[u8]) {
+        MergedInner::update_end(self, end);
+    }
+    fn invalidate(&mut self) {
+        self.valid = false;
+    }
 }
 
 pub trait ReverseScanSource: Send {
@@ -350,19 +371,32 @@ impl ReversePageStoreIter {
         let start = prefix.to_vec();
         let idx = 0;
         let valid = !keys.is_empty() && keys[idx].as_slice() >= start.as_slice();
-        ReversePageStoreIter { keys, idx, start, valid }
+        ReversePageStoreIter {
+            keys,
+            idx,
+            start,
+            valid,
+        }
     }
 }
 
 impl ReverseScanSource for ReversePageStoreIter {
-    fn valid(&self) -> bool { self.valid }
+    fn valid(&self) -> bool {
+        self.valid
+    }
 
-    fn key(&self) -> Vec<u8> { self.keys[self.idx].clone() }
+    fn key(&self) -> Vec<u8> {
+        self.keys[self.idx].clone()
+    }
 
-    fn value(&self) -> Vec<u8> { vec![] }
+    fn value(&self) -> Vec<u8> {
+        vec![]
+    }
 
     fn prev(&mut self) {
-        if !self.valid { return; }
+        if !self.valid {
+            return;
+        }
         if self.idx + 1 < self.keys.len() {
             self.idx += 1;
             self.valid = self.keys[self.idx].as_slice() >= self.start.as_slice();
@@ -486,13 +520,23 @@ impl ReverseMergedInner {
 }
 
 impl Cursor for ReverseMergedInner {
-    fn is_valid(&self) -> bool { self.valid }
-    fn current_key(&self) -> Option<&[u8]> { self.cur_key.as_deref() }
-    fn step(&mut self) { ReverseMergedInner::step(self); }
+    fn is_valid(&self) -> bool {
+        self.valid
+    }
+    fn current_key(&self) -> Option<&[u8]> {
+        self.cur_key.as_deref()
+    }
+    fn step(&mut self) {
+        ReverseMergedInner::step(self);
+    }
     fn skip_group(&mut self, _: usize) {}
-    fn seek(&mut self, target: &[u8]) { self.seek_reverse(target); }
+    fn seek(&mut self, target: &[u8]) {
+        self.seek_reverse(target);
+    }
     fn update_end(&mut self, _: &[u8]) {}
-    fn invalidate(&mut self) { self.valid = false; }
+    fn invalidate(&mut self) {
+        self.valid = false;
+    }
 }
 
 #[cfg(test)]
@@ -621,7 +665,9 @@ mod tests {
         let mut seek_count = 0;
         let mut seek_found = Vec::new();
         loop {
-            if !merged.valid { break; }
+            if !merged.valid {
+                break;
+            }
             let key = merged.cur_key.clone().unwrap();
             let a = u32::from_be_bytes(key[8..12].try_into().unwrap());
             if a == partner_aid {
@@ -637,6 +683,10 @@ mod tests {
                 merged.step();
             }
         }
-        assert_eq!(seek_count, 19, "merged seek: expected 19, got {} ({:?})", seek_count, seek_found);
+        assert_eq!(
+            seek_count, 19,
+            "merged seek: expected 19, got {} ({:?})",
+            seek_count, seek_found
+        );
     }
 }

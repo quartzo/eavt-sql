@@ -5,6 +5,5 @@ edition = "2021"
 description = "SQL frontend (parse + datalog IR, stage 1 of compilation)"
 
 [dependencies]
-dynspire-commons = { path = "../dynspire-commons" }
-spier-sql-parse = { path = "../spier-sql-parse" }
 spier-datalog = { path = "../spier-datalog" }
+spier-sql-parse = { path = "../spier-sql-parse" }

@@ -6,4 +6,4 @@ description = "MemTable write buffer (crossbeam SkipMap per CF, Arc-swap snapsho
 
 [dependencies]
 crossbeam-skiplist = "0.1"
-dynspire-commons = { path = "../dynspire-commons" }
+spier-storage-traits = { path = "../spier-storage-traits" }

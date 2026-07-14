@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use dynspire_commons::transactor::cursor::invalid_cursor_handle;
-use dynspire_commons::transactor::keys::{self, BoundValue, EncodeMode};
-use dynspire_commons::transactor::resolver_consts as resolver;
-use dynspire_commons::transactor::TransactorEngine;
-use dynspire_commons::value::Value;
+use spier_storage_traits::invalid_cursor_handle;
+use spier_transactor::keys::{self, BoundValue, EncodeMode};
+use spier_transactor::resolver_consts as resolver;
+use spier_transactor::TransactorEngine;
 use spier_transactor::TransactorState;
+use spier_value::Value;
 
 use crate::engine::scanner::ValueScanner;
-use crate::engine::vm::{EngineError, QueryContext, RawDatomView, VMEngine, BoundPart};
+use crate::engine::vm::{BoundPart, EngineError, QueryContext, RawDatomView, VMEngine};
 
 fn cf_name_to_id() -> HashMap<String, usize> {
     spier_transactor::constants::cf_name_map()
@@ -61,16 +61,18 @@ impl QueryEngineInner {
             .or_else(|| config.get("url"))
             .ok_or("path/url required for s3 backend")?;
         let parsed: Vec<&str> = s3_url.trim_start_matches("s3://").splitn(2, '/').collect();
-        let bucket = parsed.first()
-            .ok_or("S3 URL missing bucket")?
-            .to_string();
+        let bucket = parsed.first().ok_or("S3 URL missing bucket")?.to_string();
         let prefix = parsed.get(1).unwrap_or(&"").to_string();
-        let prefix = if prefix.is_empty() { "eavt".to_string() } else { prefix };
+        let prefix = if prefix.is_empty() {
+            "eavt".to_string()
+        } else {
+            prefix
+        };
 
-        let access_key = std::env::var("AWS_ACCESS_KEY_ID")
-            .map_err(|_| "AWS_ACCESS_KEY_ID not set")?;
-        let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY")
-            .map_err(|_| "AWS_SECRET_ACCESS_KEY not set")?;
+        let access_key =
+            std::env::var("AWS_ACCESS_KEY_ID").map_err(|_| "AWS_ACCESS_KEY_ID not set")?;
+        let secret_key =
+            std::env::var("AWS_SECRET_ACCESS_KEY").map_err(|_| "AWS_SECRET_ACCESS_KEY not set")?;
         let endpoint = std::env::var("AWS_ENDPOINT_URL_S3")
             .or_else(|_| std::env::var("AWS_ENDPOINT_URL"))
             .map_err(|_| "AWS_ENDPOINT_URL_S3 or AWS_ENDPOINT_URL not set")?;
@@ -79,8 +81,7 @@ impl QueryEngineInner {
             .unwrap_or_else(|_| "us-east-1".into());
 
         let journal_dir = format!("/tmp/eavt-journal/{}/{}", bucket, prefix);
-        std::fs::create_dir_all(&journal_dir)
-            .map_err(|e| format!("journal dir: {e}"))?;
+        std::fs::create_dir_all(&journal_dir).map_err(|e| format!("journal dir: {e}"))?;
 
         let mut config = config.clone();
         config.insert("backend".into(), "s3".into());
@@ -129,7 +130,12 @@ impl QueryEngineInner {
         self.tx.journal_size().unwrap_or(0)
     }
 
-    pub fn collect_active_deduped(&self, cf: &str, prefix: &[u8], as_of_us: Option<u64>) -> Vec<RawDatomView> {
+    pub fn collect_active_deduped(
+        &self,
+        cf: &str,
+        prefix: &[u8],
+        as_of_us: Option<u64>,
+    ) -> Vec<RawDatomView> {
         let cf_id = self.cf_id(cf);
         let prefix = prefix.to_vec();
         let attr_type = self.attr_type_from_prefix(cf, &prefix);
@@ -296,7 +302,14 @@ impl QueryEngineInner {
         }
         crate::engine::opcodes::reset_scanner_stats();
 
-        let mut vm = crate::engine::vm::VM::new(program, Arc::clone(self) as Arc<dyn VMEngine + Send + Sync>, params, limit, t, as_of_us);
+        let mut vm = crate::engine::vm::VM::new(
+            program,
+            Arc::clone(self) as Arc<dyn VMEngine + Send + Sync>,
+            params,
+            limit,
+            t,
+            as_of_us,
+        );
         let results = vm.run()?;
         Ok(results)
     }
@@ -322,7 +335,7 @@ impl VMEngine for QueryEngineInner {
         &self,
         cf_id: u32,
         prefix: &[u8],
-    ) -> Result<std::sync::Arc<std::cell::RefCell<dyn dynspire_commons::transactor::cursor::Cursor>>, String> {
+    ) -> Result<std::sync::Arc<std::cell::RefCell<dyn spier_storage_traits::Cursor>>, String> {
         let h = self.tx.open_cursor_direct(cf_id, prefix)?;
         Ok(h.cursor)
     }
@@ -335,7 +348,8 @@ impl VMEngine for QueryEngineInner {
             Ok(h) => h.cursor,
             Err(_) => invalid_cursor_handle().cursor,
         };
-        let mut scanner = ValueScanner::new(cursor, prefix.clone(), cf, "v", ctx.as_of_us, attr_type);
+        let mut scanner =
+            ValueScanner::new(cursor, prefix.clone(), cf, "v", ctx.as_of_us, attr_type);
         let mut results = Vec::new();
         while !scanner.at_end() {
             if let Some(key) = scanner.current_key() {
@@ -355,7 +369,12 @@ impl VMEngine for QueryEngineInner {
         results
     }
 
-    fn probe_collect(&self, index: &str, bound: &[BoundPart], ctx: &QueryContext) -> Vec<RawDatomView> {
+    fn probe_collect(
+        &self,
+        index: &str,
+        bound: &[BoundPart],
+        ctx: &QueryContext,
+    ) -> Vec<RawDatomView> {
         let (cf, _, prefix, _) = self.resolve_bound_prefix(index, bound);
         self.collect_active(&cf, &prefix, ctx)
     }
@@ -369,13 +388,17 @@ impl VMEngine for QueryEngineInner {
     ) -> Result<(), EngineError> {
         let e_id = self.resolve_entity(e);
         let as_of = ctx.as_of_us.unwrap_or(u64::MAX);
-        self.tx.eavt_save(e_id, attr, v.clone(), ctx.current_t, as_of).map_err(EngineError)
+        self.tx
+            .eavt_save(e_id, attr, v.clone(), ctx.current_t, as_of)
+            .map_err(EngineError)
     }
 
     fn retract(&self, e: &Value, attr: &str, v: &Value, ctx: &QueryContext) {
         let e_id = self.resolve_entity(e);
         let as_of = ctx.as_of_us.unwrap_or(u64::MAX);
-        let _ = self.tx.eavt_retract(e_id, attr, v.clone(), ctx.current_t, as_of);
+        let _ = self
+            .tx
+            .eavt_retract(e_id, attr, v.clone(), ctx.current_t, as_of);
     }
 
     fn declare_attr_from_sql(
@@ -386,7 +409,8 @@ impl VMEngine for QueryEngineInner {
         unique: bool,
         ctx: &QueryContext,
     ) -> Result<(), EngineError> {
-        let result = self.tx
+        let result = self
+            .tx
             .eavt_declare_attr_from_sql(attr, type_name, many, unique, ctx.current_t)
             .map_err(EngineError);
         if result.is_ok() {
@@ -402,7 +426,9 @@ impl VMEngine for QueryEngineInner {
     }
 
     fn default_user_partition(&self) -> u64 {
-        self.tx.default_user_partition().unwrap_or(resolver::PART_USER)
+        self.tx
+            .default_user_partition()
+            .unwrap_or(resolver::PART_USER)
     }
 
     fn allocate_t_and_write_tx(&self) -> u64 {
@@ -410,17 +436,30 @@ impl VMEngine for QueryEngineInner {
     }
 
     fn declare_partition(&self, name: &str, ctx: &QueryContext) -> Result<u64, EngineError> {
-        self.tx.eavt_declare_partition(name, ctx.current_t).map_err(EngineError)
+        self.tx
+            .eavt_declare_partition(name, ctx.current_t)
+            .map_err(EngineError)
     }
 
     fn lookup_entity(&self, attr_name: &str, value: &Value, _ctx: &QueryContext) -> Option<u64> {
-        self.tx.lookup_entity(attr_name, value.clone()).ok().flatten()
+        self.tx
+            .lookup_entity(attr_name, value.clone())
+            .ok()
+            .flatten()
     }
 
     fn lookup_value(&self, eid: u64, attr_name: &str, ctx: &QueryContext) -> Option<Value> {
         let aid = self.lookup_attr_cached(attr_name)?;
-        let prefix: Vec<u8> = eid.to_be_bytes().iter().chain(aid.to_be_bytes().iter()).copied().collect();
-        self.collect_active("eavt", &prefix, ctx).into_iter().next().map(|d| d.v)
+        let prefix: Vec<u8> = eid
+            .to_be_bytes()
+            .iter()
+            .chain(aid.to_be_bytes().iter())
+            .copied()
+            .collect();
+        self.collect_active("eavt", &prefix, ctx)
+            .into_iter()
+            .next()
+            .map(|d| d.v)
     }
 
     fn is_unique_attr(&self, attr_name: &str) -> bool {
