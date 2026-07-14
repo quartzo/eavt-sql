@@ -470,15 +470,14 @@ fn open_config(db_path: &str) -> std::collections::HashMap<String, String> {
     let mut m = std::collections::HashMap::new();
     if db_path.starts_with("s3://") {
         m.insert("backend".into(), "s3".into());
+        m.insert("path".into(), db_path.into());
     } else if db_path == ":memory:" {
-        let tmp = format!("/tmp/opencode/eavt-server-{}", std::process::id());
-        m.insert("backend".into(), "file".into());
-        m.insert("path".into(), format!("{tmp}/db"));
+        m.insert("backend".into(), "memory".into());
         return m;
     } else {
         m.insert("backend".into(), "file".into());
+        m.insert("path".into(), db_path.into());
     }
-    m.insert("path".into(), db_path.into());
     m
 }
 
