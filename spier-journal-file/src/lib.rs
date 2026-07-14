@@ -92,4 +92,13 @@ impl JournalEngine for JournalFile {
         }
         Ok(())
     }
+
+    fn journal_size(&self) -> Result<u64, String> {
+        let base = self.base()?;
+        let path = base.join("journal");
+        if !path.exists() {
+            return Ok(0);
+        }
+        Ok(fs::metadata(&path).map(|m| m.len()).unwrap_or(0))
+    }
 }

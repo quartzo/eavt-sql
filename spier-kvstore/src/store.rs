@@ -476,9 +476,7 @@ impl Transactor {
     pub fn journal_size(&self) -> u64 {
         let inner = self.inner.read().unwrap();
         if let Some(ref store) = inner.store {
-            let sst = store.cf_stats(4).map(|s| s.sst_size).unwrap_or(0);
-            let mem = store.cf_stats(4).map(|s| s.memtable_size).unwrap_or(0);
-            return sst + mem;
+            return store.journal_size().unwrap_or(0);
         }
         0
     }

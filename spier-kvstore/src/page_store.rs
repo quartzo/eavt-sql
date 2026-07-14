@@ -42,6 +42,7 @@ pub trait PageStore: Send + Sync {
 
     fn journal_put(&self, key: &[u8], value: &[u8]) -> TransactorResult<()>;
     fn journal_scan(&self) -> TransactorResult<Vec<u8>>;
+    fn journal_size(&self) -> TransactorResult<u64>;
 
     /// Collect all live blob UUIDs (index pages + leaf pages) reachable from
     /// the current root. Used by GC.

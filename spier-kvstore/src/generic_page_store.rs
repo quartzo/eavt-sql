@@ -1331,6 +1331,13 @@ impl PageStore for GenericPageStore {
         }
     }
 
+    fn journal_size(&self) -> TransactorResult<u64> {
+        match &self.journal {
+            Some(j) => j.journal_size().map_err(Into::into),
+            None => Ok(0),
+        }
+    }
+
     fn collect_live_uuids(&self) -> TransactorResult<HashSet<[u8; 16]>> {
         let inner = self.inner.read().unwrap();
         let mut live = HashSet::new();
