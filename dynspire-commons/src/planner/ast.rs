@@ -220,7 +220,7 @@ impl std::fmt::Display for QueryPlanResult {
     }
 }
 
-/// Wrapper — crosses FFI as 1 boxed pointer (opaque in .dspi).
+/// Planner output wrapper.
 #[derive(Clone)]
 pub struct QueryPlanSt {
     pub plan: QueryPlanResult,
