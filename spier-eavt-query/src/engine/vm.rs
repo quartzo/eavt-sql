@@ -1294,12 +1294,22 @@ impl VM {
                                 _ => 0,
                             };
                             let prefix = scanner.prefix_bytes().to_vec();
+                            let cursor_t0 = if do_timing {
+                                Some(Instant::now())
+                            } else {
+                                None
+                            };
                             let cursor = match self.engine.open_raw_cursor(cf_id, &prefix) {
                                 Ok(c) => c,
                                 Err(_) => std::sync::Arc::new(std::cell::RefCell::new(
                                     crate::engine::scanner::InvalidCursor,
                                 )),
                             };
+                            if let Some(t) = cursor_t0 {
+                                crate::engine::opcodes::cursor_open_elapsed(
+                                    t.elapsed().as_nanos() as u64
+                                );
+                            }
                             scanner.set_cursor(cursor);
                             scanner.advance_to_active_at(pos_idx);
                             if scanner.value_attr_type().is_none() {

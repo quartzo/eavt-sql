@@ -94,15 +94,34 @@ impl MemTable {
     }
 
     /// Extract the Arc<SkipMap> for a given CF from a snapshot.
-    /// Returns None if the CF doesn't exist or the snapshot type is wrong.
     pub fn get_cf_map(&self, snap: &MemTableSnapshot, cf: u32) -> Option<CfMap> {
         let cfs = snap.data.downcast_ref::<CfSnapshots>()?;
         cfs.get(cf as usize).cloned()
     }
 
-    /// Compute the exclusive upper bound for a prefix scan.
-    pub fn prefix_upper(prefix: &[u8]) -> Vec<u8> {
-        prefix_upper_bound(prefix)
+    /// Like scan_prefix but returns Vec<Vec<u8>> directly, skipping pack/unpack.
+    pub fn scan_prefix_keys(
+        &self,
+        snap: &MemTableSnapshot,
+        cf: u32,
+        prefix: &[u8],
+    ) -> Vec<Vec<u8>> {
+        let cfs = match snap.data.downcast_ref::<CfSnapshots>() {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+        let map = match cfs.get(cf as usize) {
+            Some(m) => m,
+            None => return Vec::new(),
+        };
+        if prefix.is_empty() {
+            map.iter().map(|e| e.key().clone()).collect()
+        } else {
+            let upper = prefix_upper_bound(prefix);
+            map.range(prefix.to_vec()..upper)
+                .map(|e| e.key().clone())
+                .collect()
+        }
     }
 }
 

@@ -56,10 +56,14 @@ pub fn reset_scanner_stats() {
     SCANNER_SEEK_COUNT.store(0, AtomicOrdering::Relaxed);
     CONVERGE_COUNT.store(0, AtomicOrdering::Relaxed);
     SKIP_GROUP_COUNT.store(0, AtomicOrdering::Relaxed);
+    CURSOR_OPEN_NS.store(0, AtomicOrdering::Relaxed);
+    CURSOR_OPEN_COUNT.store(0, AtomicOrdering::Relaxed);
 }
 
 static CONVERGE_COUNT: AtomicU64 = AtomicU64::new(0);
 static SKIP_GROUP_COUNT: AtomicU64 = AtomicU64::new(0);
+static CURSOR_OPEN_NS: AtomicU64 = AtomicU64::new(0);
+static CURSOR_OPEN_COUNT: AtomicU64 = AtomicU64::new(0);
 
 pub fn converge_call() {
     CONVERGE_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
@@ -69,7 +73,12 @@ pub fn skip_group_call() {
     SKIP_GROUP_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
 }
 
-pub(crate) fn get_scanner_stats() -> (u64, u64, u64, u64, u64, u64) {
+pub fn cursor_open_elapsed(nanos: u64) {
+    CURSOR_OPEN_NS.fetch_add(nanos, AtomicOrdering::Relaxed);
+    CURSOR_OPEN_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+}
+
+pub(crate) fn get_scanner_stats() -> (u64, u64, u64, u64, u64, u64, u64, u64) {
     (
         SCANNER_ADVANCE_NS.load(AtomicOrdering::Relaxed),
         SCANNER_ADVANCE_COUNT.load(AtomicOrdering::Relaxed),
@@ -77,6 +86,8 @@ pub(crate) fn get_scanner_stats() -> (u64, u64, u64, u64, u64, u64) {
         SCANNER_SEEK_COUNT.load(AtomicOrdering::Relaxed),
         CONVERGE_COUNT.load(AtomicOrdering::Relaxed),
         SKIP_GROUP_COUNT.load(AtomicOrdering::Relaxed),
+        CURSOR_OPEN_NS.load(AtomicOrdering::Relaxed),
+        CURSOR_OPEN_COUNT.load(AtomicOrdering::Relaxed),
     )
 }
 
@@ -149,8 +160,27 @@ impl TimingStats {
             );
         }
 
-        let (adv_ns, adv_cnt, seek_ns, seek_cnt, converge_cnt, skip_grp_cnt) = get_scanner_stats();
+        let (
+            adv_ns,
+            adv_cnt,
+            seek_ns,
+            seek_cnt,
+            converge_cnt,
+            skip_grp_cnt,
+            cursor_open_ns,
+            cursor_open_cnt,
+        ) = get_scanner_stats();
         eprintln!("  --- scanner ---");
+        if cursor_open_cnt > 0 {
+            eprintln!(
+                "  {:20} {:8.3}s ({:5.1}%) {:>6} calls  avg={:.1}us",
+                "cursor_open",
+                cursor_open_ns as f64 / 1_000_000_000.0,
+                cursor_open_ns as f64 / total_ns as f64 * 100.0,
+                cursor_open_cnt,
+                cursor_open_ns as f64 / cursor_open_cnt as f64 / 1_000.0,
+            );
+        }
         if adv_cnt > 0 {
             eprintln!(
                 "  {:20} {:8.3}s  {:>6} calls  avg={:.1}us",

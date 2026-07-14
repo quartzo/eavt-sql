@@ -88,31 +88,25 @@ impl StoreInner {
         let mut sources = Vec::new();
         if let Some(ref store) = self.store {
             let keys = Self::load_page_keys(store.as_ref(), cf_id, prefix);
-            sources.push(SourceKind::PageStore(
-                crate::merge_iter::PageStoreIter::new(keys, prefix),
-            ));
+            if !keys.is_empty() {
+                sources.push(SourceKind::PageStore(
+                    crate::merge_iter::PageStoreIter::new(keys, prefix),
+                ));
+            }
         }
         if let Some(ref snap) = self.flush_snap {
-            let packed = self
-                .mt
-                .scan_prefix(snap.clone(), cf_id as u32, prefix)
-                .unwrap_or_default();
-            if !packed.is_empty() {
-                let snap_keys = unpack_keys(&packed);
+            let keys = self.mt.scan_prefix_keys(snap, cf_id as u32, prefix);
+            if !keys.is_empty() {
                 sources.push(SourceKind::MemTable(crate::merge_iter::PageStoreIter::new(
-                    snap_keys, prefix,
+                    keys, prefix,
                 )));
             }
         }
         let live_snap = self.mt.snapshot().unwrap();
-        let packed = self
-            .mt
-            .scan_prefix(live_snap, cf_id as u32, prefix)
-            .unwrap_or_default();
-        if !packed.is_empty() {
-            let mt_keys = unpack_keys(&packed);
+        let keys = self.mt.scan_prefix_keys(&live_snap, cf_id as u32, prefix);
+        if !keys.is_empty() {
             sources.push(SourceKind::MemTable(crate::merge_iter::PageStoreIter::new(
-                mt_keys, prefix,
+                keys, prefix,
             )));
         }
         sources

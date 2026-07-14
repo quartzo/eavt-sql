@@ -5,6 +5,17 @@ use std::ops::Bound;
 use crossbeam_skiplist::SkipMap;
 use spier_memtable::CfMap;
 
+fn prefix_upper_bound(prefix: &[u8]) -> Vec<u8> {
+    let mut e = prefix.to_vec();
+    for b in e.iter_mut().rev() {
+        if *b < 0xFF {
+            *b += 1;
+            return e;
+        }
+    }
+    vec![0xFF; 64]
+}
+
 pub trait ScanSource: Send {
     fn valid(&self) -> bool;
     fn key(&self) -> Vec<u8>;
@@ -35,7 +46,7 @@ impl LazyMemTableSource {
         let upper = if prefix.is_empty() {
             vec![0xFF; 64]
         } else {
-            spier_memtable::MemTable::prefix_upper(prefix)
+            prefix_upper_bound(prefix)
         };
         let mut src = Self {
             map,
