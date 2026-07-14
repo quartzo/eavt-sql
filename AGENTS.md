@@ -4,7 +4,7 @@
 
 - **Rust tests:** `cargo test --release`
 - **Rust build:** `cargo build --workspace --release`
-- **Python tests:** `uv run pytest tests/ spier-sql-parse/tests/`
+- **Python tests:** `uv run pytest tests/`
 - **Python deps:** `uv sync --group dev`
 - **gRPC server:** `uv run --project py_eavt_client --group dev` (isolated client venv)
 - **All Python commands must use `uv run`.**
