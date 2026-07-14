@@ -271,7 +271,7 @@ impl EavtService for EavtServer {
         } else {
             "file"
         };
-        let blobs_path = std::path::Path::new(&path).with_extension("blobs");
+        let blobs_path = std::path::Path::new(&path).join("blobs");
         let disk_usage = dir_size(&blobs_path);
 
         Ok(Response::new(eavt::StatusResponse {
