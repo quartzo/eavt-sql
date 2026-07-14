@@ -11,12 +11,12 @@ use dynspire_commons::transactor::query_codec;
 use spier_eavt_query::QueryState;
 
 pub struct EavtServer {
-    client: Arc<dyn QueryEngine>,
+    client: Arc<QueryState>,
     writable: bool,
 }
 
 impl EavtServer {
-    pub fn new(client: Arc<dyn QueryEngine>, writable: bool) -> Self {
+    pub fn new(client: Arc<QueryState>, writable: bool) -> Self {
         Self { client, writable }
     }
 }
@@ -61,7 +61,7 @@ fn proto_to_value(v: &eavt::Value) -> dynspire_commons::value::Value {
 const U64_MAX: u64 = u64::MAX;
 
 fn run_sql(
-    client: &dyn QueryEngine,
+    client: &QueryState,
     query: &str,
     params: &[dynspire_commons::value::Value],
     limit: Option<u32>,
@@ -361,7 +361,7 @@ fn open_config(db_path: &str) -> std::collections::HashMap<String, String> {
     m
 }
 
-fn open_query(db_path: &str, gc_max_age_secs: Option<u64>) -> Result<Arc<dyn QueryEngine>, String> {
+fn open_query(db_path: &str, gc_max_age_secs: Option<u64>) -> Result<Arc<QueryState>, String> {
     let mut config = open_config(db_path);
     if let Some(secs) = gc_max_age_secs {
         config.insert("gc_max_age_secs".into(), secs.to_string());
@@ -427,7 +427,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn run_gc_once(client: &dyn QueryEngine, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn run_gc_once(client: &QueryState, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
     let buf = client.gc_full(dry_run, false).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     if buf.len() < 41 {
         eprintln!("gc_full: unexpected response length ({})", buf.len());

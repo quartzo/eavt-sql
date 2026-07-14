@@ -6,7 +6,7 @@ use crate::memtable::{MemTableEngine, MemTableSnapshot};
 use crate::error::{TransactorError, TransactorResult};
 use crate::generic_page_store::{GenericPageStore, GcFullResult};
 use crate::merge_iter::{SourceKind, ReverseSourceKind};
-use crate::page_store::{self, PageStore};
+use crate::page_store::{self, PageStore}; // PageStore trait used for load_page_keys helper
 
 fn unpack_keys(buf: &[u8]) -> Vec<Vec<u8>> {
     let mut keys = Vec::new();
@@ -65,7 +65,7 @@ impl Default for TransactorConfig {
 }
 
 struct StoreInner {
-    store: Option<Arc<dyn PageStore>>,
+    store: Option<Arc<GenericPageStore>>,
     mt: Arc<dyn MemTableEngine>,
     mt_size: u64,
     flush_snap: Option<MemTableSnapshot>,
@@ -75,7 +75,7 @@ struct StoreInner {
 }
 
 impl StoreInner {
-    fn load_page_keys(store: &dyn PageStore, cf_id: usize, prefix: &[u8]) -> Vec<Vec<u8>> {
+    fn load_page_keys(store: &GenericPageStore, cf_id: usize, prefix: &[u8]) -> Vec<Vec<u8>> {
         match store.get_keys_in_prefix(cf_id, prefix) {
             Ok(keys) => keys,
             Err(_) => Vec::new(),

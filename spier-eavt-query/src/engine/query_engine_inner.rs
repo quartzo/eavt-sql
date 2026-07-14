@@ -16,7 +16,7 @@ fn cf_name_to_id() -> HashMap<String, usize> {
 }
 
 pub struct QueryEngineInner {
-    tx: Arc<dyn TransactorEngine>,
+    tx: Arc<TransactorState>,
     cf_map: HashMap<String, usize>,
     vt_cache: RwLock<HashMap<u32, Option<u32>>>,
     attr_id_cache: RwLock<HashMap<String, Option<u32>>>,
@@ -25,7 +25,7 @@ pub struct QueryEngineInner {
 
 impl QueryEngineInner {
     pub fn load(_name: &str, config: &HashMap<String, String>) -> Result<Self, String> {
-        let tx: Arc<dyn TransactorEngine> = Arc::new(TransactorState::open(config)?);
+        let tx = Arc::new(TransactorState::open(config)?);
         let path = config.get("path").cloned().unwrap_or_default();
         Ok(Self {
             tx,
