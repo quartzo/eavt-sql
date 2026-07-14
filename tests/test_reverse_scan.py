@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from eavt_sql._ffi import load_spier
+import spier_transactor_py
 from helpers import unpack_keys
 
 
@@ -10,13 +10,8 @@ CF = 0
 
 
 @pytest.fixture
-def kv_lib():
-    return load_spier("spier_transactor")
-
-
-@pytest.fixture
-def kv(kv_lib, tmp_path):
-    handle = kv_lib.create_handle({"backend": "file", "path": str(tmp_path)})
+def kv(tmp_path):
+    handle = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
     yield handle
     handle.close()
 

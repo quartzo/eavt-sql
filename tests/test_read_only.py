@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from eavt_sql._ffi import load_spier
+import spier_transactor_py
 from helpers import unpack_keys
 
 
@@ -17,15 +17,11 @@ def _file_config(tmp_path, read_only=False):
 
 
 def _open_writable(tmp_path):
-    kv_lib = load_spier("spier_transactor")
-    handle = kv_lib.create_handle(_file_config(tmp_path, read_only=False))
-    return handle
+    return spier_transactor_py.Engine(_file_config(tmp_path, read_only=False))
 
 
 def _open_read_only(tmp_path):
-    kv_lib = load_spier("spier_transactor")
-    handle = kv_lib.create_handle(_file_config(tmp_path, read_only=True))
-    return handle
+    return spier_transactor_py.Engine(_file_config(tmp_path, read_only=True))
 
 
 class TestReadOnlyBasic:

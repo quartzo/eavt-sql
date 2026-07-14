@@ -12,26 +12,11 @@ import struct
 
 import pytest
 
-from eavt_sql._ffi import load_spier
+import spier_transactor_py
 from helpers import unpack_keys
 
 U64_MAX = 0xFFFFFFFFFFFFFFFF
 LARGE_SIZE = 70_000
-
-
-@pytest.fixture
-def lib():
-    return load_spier("spier_transactor")
-
-
-@pytest.fixture
-def Value(lib):
-    return lib.Value
-
-
-@pytest.fixture
-def ValueType(lib):
-    return lib.ValueType
 
 
 def _scan(h, prefix):
@@ -45,17 +30,17 @@ def _make_payload(size: int, marker: str = "X") -> bytes:
 class TestLargeValueSaveFlushScan:
     """Save a 70KB text value, flush to PageStore, scan it back."""
 
-    def test_70kb_text_save_scan(self, lib, tmp_path, Value, ValueType):
-        h = lib.create_handle({"backend": "file", "path": str(tmp_path)})
+    def test_70kb_text_save_scan(self, tmp_path):
+        h = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
         h.eavt_declare_attr(**{
-            "name": "doc.body", "value_type": ValueType.String(),
+            "name": "doc.body", "value_type": "String",
             "many": False, "current_t": U64_MAX,
         })
         eid = h.allocate_entity_id()
         payload = _make_payload(LARGE_SIZE, "ABCD")
         h.eavt_save(**{
             "e_id": eid, "attr": "doc.body",
-            "v": Value.Text(payload.decode()),
+            "v": payload.decode(),
             "t": U64_MAX, "as_of_us": U64_MAX,
         })
 
@@ -70,10 +55,10 @@ class TestLargeValueSaveFlushScan:
         assert keys_after_flush == keys, "scan after flush must match scan before flush"
         h.close()
 
-    def test_multiple_70kb_values_flush(self, lib, tmp_path, Value, ValueType):
-        h = lib.create_handle({"backend": "file", "path": str(tmp_path)})
+    def test_multiple_70kb_values_flush(self, tmp_path):
+        h = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
         h.eavt_declare_attr(**{
-            "name": "doc.data", "value_type": ValueType.String(),
+            "name": "doc.data", "value_type": "String",
             "many": True, "current_t": U64_MAX,
         })
         eids = []
@@ -83,7 +68,7 @@ class TestLargeValueSaveFlushScan:
             payload = _make_payload(LARGE_SIZE, chr(65 + i))
             h.eavt_save(**{
                 "e_id": eid, "attr": "doc.data",
-                "v": Value.Text(payload.decode()),
+                "v": payload.decode(),
                 "t": U64_MAX, "as_of_us": U64_MAX,
             })
             eids.append(eid)
@@ -96,23 +81,23 @@ class TestLargeValueSaveFlushScan:
         assert len(large_keys) >= 5, f"expected >=5 large keys, got {len(large_keys)} among {len(all_keys)} total"
         h.close()
 
-    def test_70kb_value_survives_reopen(self, lib, tmp_path, Value, ValueType):
-        h = lib.create_handle({"backend": "file", "path": str(tmp_path)})
+    def test_70kb_value_survives_reopen(self, tmp_path):
+        h = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
         h.eavt_declare_attr(**{
-            "name": "doc.persisted", "value_type": ValueType.String(),
+            "name": "doc.persisted", "value_type": "String",
             "many": False, "current_t": U64_MAX,
         })
         eid = h.allocate_entity_id()
         payload = _make_payload(LARGE_SIZE, "Z")
         h.eavt_save(**{
             "e_id": eid, "attr": "doc.persisted",
-            "v": Value.Text(payload.decode()),
+            "v": payload.decode(),
             "t": U64_MAX, "as_of_us": U64_MAX,
         })
         h.flush()
         h.close()
 
-        h2 = lib.create_handle({"backend": "file", "path": str(tmp_path)})
+        h2 = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
         keys = _scan(h2, struct.pack(">Q", eid))
         assert len(keys) == 1
         assert len(keys[0]) > LARGE_SIZE, "70KB key must survive flush + reopen"
@@ -122,22 +107,22 @@ class TestLargeValueSaveFlushScan:
 class TestLargeValueJournalRecovery:
     """Exercise journal write/read/replay path with 70KB+ keys."""
 
-    def test_70kb_value_journal_recovery(self, lib, tmp_path, Value, ValueType):
-        h = lib.create_handle({"backend": "file", "path": str(tmp_path)})
+    def test_70kb_value_journal_recovery(self, tmp_path):
+        h = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
         h.eavt_declare_attr(**{
-            "name": "doc.journaled", "value_type": ValueType.String(),
+            "name": "doc.journaled", "value_type": "String",
             "many": False, "current_t": U64_MAX,
         })
         eid = h.allocate_entity_id()
         payload = _make_payload(LARGE_SIZE, "J")
         h.eavt_save(**{
             "e_id": eid, "attr": "doc.journaled",
-            "v": Value.Text(payload.decode()),
+            "v": payload.decode(),
             "t": U64_MAX, "as_of_us": U64_MAX,
         })
         h.close()
 
-        h2 = lib.create_handle({"backend": "file", "path": str(tmp_path)})
+        h2 = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
         keys = _scan(h2, struct.pack(">Q", eid))
         assert len(keys) == 1
         assert len(keys[0]) > LARGE_SIZE, "70KB key must survive journal recovery on reopen"
@@ -147,8 +132,8 @@ class TestLargeValueJournalRecovery:
 class TestLargeValueBatchWrite:
     """Exercise batch_write FFI path directly with large keys."""
 
-    def test_batch_write_70kb_key(self, lib, tmp_path):
-        h = lib.create_handle({"backend": "file", "path": str(tmp_path)})
+    def test_batch_write_70kb_key(self, tmp_path):
+        h = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
         big_key = _make_payload(LARGE_SIZE, "K")
         ops = bytearray()
         ops.append(0)
@@ -158,8 +143,8 @@ class TestLargeValueBatchWrite:
         assert h.get(**{"cf": 0, "key": big_key}) is True
         h.close()
 
-    def test_batch_put_70kb_key(self, lib, tmp_path):
-        h = lib.create_handle({"backend": "file", "path": str(tmp_path)})
+    def test_batch_put_70kb_key(self, tmp_path):
+        h = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
         big_key = _make_payload(LARGE_SIZE, "P")
         buf = bytearray()
         buf.extend(struct.pack(">I", len(big_key)))
@@ -172,8 +157,8 @@ class TestLargeValueBatchWrite:
 class TestLargeValueCursorScan:
     """Exercise cursor + scan output framing with 70KB+ keys."""
 
-    def test_scan_returns_70kb_keys(self, lib, tmp_path):
-        h = lib.create_handle({"backend": "file", "path": str(tmp_path)})
+    def test_scan_returns_70kb_keys(self, tmp_path):
+        h = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
         keys_in = []
         for i in range(3):
             k = struct.pack(">Q", 100 + i) + _make_payload(LARGE_SIZE, chr(65 + i))
@@ -189,8 +174,8 @@ class TestLargeValueCursorScan:
         assert keys_out == sorted(keys_in)
         h.close()
 
-    def test_items_returns_70kb_keys(self, lib, tmp_path):
-        h = lib.create_handle({"backend": "file", "path": str(tmp_path)})
+    def test_items_returns_70kb_keys(self, tmp_path):
+        h = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
         k = _make_payload(LARGE_SIZE, "I")
         h.put(**{"cf": 0, "key": k})
         h.flush()

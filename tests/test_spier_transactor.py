@@ -4,32 +4,20 @@ import struct
 
 import pytest
 
-from eavt_sql._ffi import load_spier
+import spier_transactor_py
 from helpers import unpack_keys
 
 
 @pytest.fixture
-def kv_lib():
-    return load_spier("spier_transactor")
-
-
-@pytest.fixture
 def kv_instance(tmp_path):
-    kv_lib = load_spier("spier_transactor")
-    handle = kv_lib.create_handle({"backend": "file", "path": str(tmp_path)})
+    handle = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
     yield handle
     handle.close()
 
 
 class TestKVSchemaReflection:
-    def test_idl_hash_matches(self, kv_lib):
-        assert kv_lib.idl_hash() != 0
-
-    def test_spier_name(self, kv_lib):
-        assert kv_lib.name == "spier_transactor"
-
-    def test_typed_methods_exist(self, kv_lib):
-        cls = kv_lib._client_class
+    def test_typed_methods_exist(self):
+        cls = spier_transactor_py.Engine
         for name in (
             "put", "get", "scan", "flush", "close", "journal_put",
             "journal_scan", "items", "batch_write", "path",
@@ -40,14 +28,14 @@ class TestKVSchemaReflection:
 
 
 class TestKVPutGet:
-    def test_put_then_get_found(self, kv_instance, kv_lib):
+    def test_put_then_get_found(self, kv_instance):
         kv_instance.put(**{"cf": 0, "key": b"key1"})
         assert kv_instance.get(**{"cf": 0, "key": b"key1"}) is True
 
-    def test_get_missing(self, kv_instance, kv_lib):
+    def test_get_missing(self, kv_instance):
         assert kv_instance.get(**{"cf": 0, "key": b"nonexistent"}) is False
 
-    def test_put_multiple_cfs(self, kv_instance, kv_lib):
+    def test_put_multiple_cfs(self, kv_instance):
         kv_instance.put(**{"cf": 0, "key": b"cf0_key"})
         kv_instance.put(**{"cf": 1, "key": b"cf1_key"})
         kv_instance.put(**{"cf": 2, "key": b"cf2_key"})
@@ -56,35 +44,35 @@ class TestKVPutGet:
         assert kv_instance.get(**{"cf": 2, "key": b"cf2_key"}) is True
         assert kv_instance.get(**{"cf": 0, "key": b"cf1_key"}) is False
 
-    def test_put_overwrite(self, kv_instance, kv_lib):
+    def test_put_overwrite(self, kv_instance):
         kv_instance.put(**{"cf": 0, "key": b"k"})
         kv_instance.put(**{"cf": 0, "key": b"k"})
         assert kv_instance.get(**{"cf": 0, "key": b"k"}) is True
 
 
 class TestKVScan:
-    def test_scan_empty(self, kv_instance, kv_lib):
+    def test_scan_empty(self, kv_instance):
         assert unpack_keys(bytes(kv_instance.scan(**{"cf": 0, "prefix": b""}))) == []
 
-    def test_scan_returns_keys(self, kv_instance, kv_lib):
+    def test_scan_returns_keys(self, kv_instance):
         kv_instance.put(**{"cf": 0, "key": b"aaa"})
         kv_instance.put(**{"cf": 0, "key": b"bbb"})
         kv_instance.put(**{"cf": 0, "key": b"ccc"})
         assert unpack_keys(bytes(kv_instance.scan(**{"cf": 0, "prefix": b""}))) == [b"aaa", b"bbb", b"ccc"]
 
-    def test_scan_with_prefix(self, kv_instance, kv_lib):
+    def test_scan_with_prefix(self, kv_instance):
         kv_instance.put(**{"cf": 0, "key": b"ns/aaa"})
         kv_instance.put(**{"cf": 0, "key": b"ns/bbb"})
         kv_instance.put(**{"cf": 0, "key": b"other"})
         assert unpack_keys(bytes(kv_instance.scan(**{"cf": 0, "prefix": b"ns/"}))) == [b"ns/aaa", b"ns/bbb"]
 
-    def test_scan_separate_cfs(self, kv_instance, kv_lib):
+    def test_scan_separate_cfs(self, kv_instance):
         kv_instance.put(**{"cf": 0, "key": b"a"})
         kv_instance.put(**{"cf": 1, "key": b"b"})
         assert unpack_keys(bytes(kv_instance.scan(**{"cf": 0, "prefix": b""}))) == [b"a"]
         assert unpack_keys(bytes(kv_instance.scan(**{"cf": 1, "prefix": b""}))) == [b"b"]
 
-    def test_scan_reverse(self, kv_instance, kv_lib):
+    def test_scan_reverse(self, kv_instance):
         kv_instance.put(**{"cf": 0, "key": b"a"})
         kv_instance.put(**{"cf": 0, "key": b"b"})
         kv_instance.put(**{"cf": 0, "key": b"c"})
@@ -92,7 +80,7 @@ class TestKVScan:
 
 
 class TestKVFlush:
-    def test_flush_then_scan(self, kv_instance, kv_lib, tmp_path):
+    def test_flush_then_scan(self, kv_instance, tmp_path):
         kv_instance.put(**{"cf": 0, "key": b"key1"})
         kv_instance.put(**{"cf": 0, "key": b"key2"})
         kv_instance.flush()
@@ -100,7 +88,7 @@ class TestKVFlush:
 
 
 class TestKVJournal:
-    def test_journal_put_scan(self, kv_instance, kv_lib):
+    def test_journal_put_scan(self, kv_instance):
         kv_instance.journal_put(**{"key": b"jk", "value": b"jv"})
         raw = bytes(kv_instance.journal_scan())
         pos = 0
@@ -112,7 +100,7 @@ class TestKVJournal:
 
 
 class TestKVClose:
-    def test_close_then_error(self, kv_instance, kv_lib):
+    def test_close_then_error(self, kv_instance):
         kv_instance.close()
         with pytest.raises(RuntimeError, match="not open"):
             kv_instance.put(**{"cf": 0, "key": b"should_fail"})
@@ -121,32 +109,30 @@ class TestKVClose:
 class TestKVStorage:
     def test_creates_directories(self, tmp_path):
         data_dir = tmp_path / "deep"
-        kv_lib = load_spier("spier_transactor")
-        handle = kv_lib.create_handle({"backend": "file", "path": str(data_dir)})
+        handle = spier_transactor_py.Engine({"backend": "file", "path": str(data_dir)})
         import os
         assert os.path.isdir(str(data_dir / "blobs"))
         handle.close()
 
     def test_empty_config_defaults_to_memory(self):
-        kv_lib = load_spier("spier_transactor")
-        handle = kv_lib.create_handle({})
+        handle = spier_transactor_py.Engine({})
         handle.put(**{"cf": 0, "key": b"k"})
         assert handle.get(**{"cf": 0, "key": b"k"}) is True
         handle.close()
 
 
 class TestKVItems:
-    def test_items_returns_all_keys(self, kv_instance, kv_lib):
+    def test_items_returns_all_keys(self, kv_instance):
         kv_instance.put(**{"cf": 0, "key": b"aaa"})
         kv_instance.put(**{"cf": 0, "key": b"bbb"})
         assert unpack_keys(bytes(kv_instance.items(**{"cf": 0}))) == [b"aaa", b"bbb"]
 
-    def test_items_empty_cf(self, kv_instance, kv_lib):
+    def test_items_empty_cf(self, kv_instance):
         assert unpack_keys(bytes(kv_instance.items(**{"cf": 0}))) == []
 
 
 class TestKVBatchWrite:
-    def test_batch_write_multi_cf(self, kv_instance, kv_lib):
+    def test_batch_write_multi_cf(self, kv_instance):
         ops = bytearray()
         for cf, key in [(0, b"k0"), (1, b"k1"), (2, b"k2")]:
             ops.append(cf)
@@ -157,7 +143,7 @@ class TestKVBatchWrite:
         assert kv_instance.get(**{"cf": 1, "key": b"k1"}) is True
         assert kv_instance.get(**{"cf": 2, "key": b"k2"}) is True
 
-    def test_batch_put_multiple_keys(self, kv_instance, kv_lib):
+    def test_batch_put_multiple_keys(self, kv_instance):
         keys = [b"a", b"bb", b"ccc", b"dddd", b"eeeee"]
         buf = bytearray()
         for key in keys:
@@ -167,7 +153,7 @@ class TestKVBatchWrite:
         for key in keys:
             assert kv_instance.get(**{"cf": 0, "key": key}) is True
 
-    def test_batch_put_many_keys(self, kv_instance, kv_lib):
+    def test_batch_put_many_keys(self, kv_instance):
         keys = [f"key_{i:04d}".encode() for i in range(50)]
         buf = bytearray()
         for key in keys:
@@ -179,20 +165,20 @@ class TestKVBatchWrite:
 
 
 class TestKVPath:
-    def test_path_returns_string(self, kv_instance, kv_lib, tmp_path):
+    def test_path_returns_string(self, kv_instance, tmp_path):
         p = str(kv_instance.path())
         assert isinstance(p, str)
 
 
 class TestKVMemtable:
-    def test_memtable_size_grows(self, kv_instance, kv_lib):
+    def test_memtable_size_grows(self, kv_instance):
         size0 = kv_instance.memtable_size()
         assert isinstance(size0, int)
         kv_instance.put(**{"cf": 0, "key": b"somewhat_long_key"})
         size1 = kv_instance.memtable_size()
         assert size1 > size0
 
-    def test_memtable_count(self, kv_instance, kv_lib):
+    def test_memtable_count(self, kv_instance):
         kv_instance.put(**{"cf": 0, "key": b"a"})
         kv_instance.put(**{"cf": 0, "key": b"b"})
         count = kv_instance.memtable_count(**{"cf": 0})
@@ -200,11 +186,11 @@ class TestKVMemtable:
 
 
 class TestKVJournalSize:
-    def test_journal_size(self, kv_instance, kv_lib):
+    def test_journal_size(self, kv_instance):
         size = kv_instance.journal_size()
         assert isinstance(size, int)
 
-    def test_journal_size_after_flush(self, kv_instance, kv_lib):
+    def test_journal_size_after_flush(self, kv_instance):
         kv_instance.put(**{"cf": 0, "key": b"test"})
         kv_instance.journal_put(**{"key": b"jk", "value": b"\x00"})
         kv_instance.flush()
@@ -213,7 +199,7 @@ class TestKVJournalSize:
 
 
 class TestKVApproximateSizes:
-    def test_approximate_sizes(self, kv_instance, kv_lib):
+    def test_approximate_sizes(self, kv_instance):
         kv_instance.put(**{"cf": 0, "key": b"key_a"})
         kv_instance.put(**{"cf": 0, "key": b"key_b"})
         sz = kv_instance.approximate_sizes(**{"cf": 0, "start": b"key_a", "end": b"key_c"})
@@ -222,7 +208,7 @@ class TestKVApproximateSizes:
 
 
 class TestKVCfStats:
-    def test_cf_stats_packed(self, kv_instance, kv_lib):
+    def test_cf_stats_packed(self, kv_instance):
         kv_instance.put(**{"cf": 0, "key": b"testkey"})
         raw = bytes(kv_instance.cf_stats(**{"cf": 0}))
         assert isinstance(raw, bytes)
@@ -233,7 +219,7 @@ class TestKVCfStats:
 
 
 class TestKVDbStats:
-    def test_db_stats_packed(self, kv_instance, kv_lib):
+    def test_db_stats_packed(self, kv_instance):
         kv_instance.put(**{"cf": 0, "key": b"test"})
         raw = bytes(kv_instance.db_stats())
         assert isinstance(raw, bytes)
@@ -245,7 +231,7 @@ class TestKVDbStats:
 
 
 class TestKVGcFull:
-    def test_gc_full_dry_run(self, kv_instance, kv_lib):
+    def test_gc_full_dry_run(self, kv_instance):
         kv_instance.put(**{"cf": 0, "key": b"test"})
         kv_instance.flush()
         raw = bytes(kv_instance.gc_full(**{"dry_run": True, "nowait": True}))
@@ -262,12 +248,12 @@ class TestKVGcFull:
 # ---------------------------------------------------------------------------
 
 class TestKVCursorForward:
-    def test_open_cursor_direct_returns_handle(self, kv_instance, kv_lib):
+    def test_open_cursor_direct_returns_handle(self, kv_instance):
         kv_instance.put(**{"cf": 0, "key": b"a"})
         cursor = kv_instance.open_cursor_direct(**{"cf": 0, "prefix": b""})
         assert cursor is not None
 
-    def test_open_cursor_current_key(self, kv_instance, kv_lib):
+    def test_open_cursor_current_key(self, kv_instance):
         for k in [b"aaa", b"bbb", b"ccc"]:
             kv_instance.put(**{"cf": 0, "key": k})
         cursor_ptr = kv_instance.open_cursor_direct(**{"cf": 0, "prefix": b""})
@@ -275,12 +261,12 @@ class TestKVCursorForward:
         assert has_data
         assert outs[0] == b"aaa"
 
-    def test_open_cursor_empty_scan(self, kv_instance, kv_lib):
+    def test_open_cursor_empty_scan(self, kv_instance):
         cursor_ptr = kv_instance.open_cursor_direct(**{"cf": 0, "prefix": b""})
         has_data, _ = kv_instance.cursor_current_key(**{"cursor": cursor_ptr})
         assert not has_data
 
-    def test_open_cursor_with_prefix(self, kv_instance, kv_lib):
+    def test_open_cursor_with_prefix(self, kv_instance):
         kv_instance.put(**{"cf": 0, "key": b"ns/a"})
         kv_instance.put(**{"cf": 0, "key": b"ns/b"})
         kv_instance.put(**{"cf": 0, "key": b"other"})
@@ -288,7 +274,7 @@ class TestKVCursorForward:
         has_data, outs = kv_instance.cursor_current_key(**{"cursor": cursor_ptr})
         assert has_data and outs[0] == b"ns/a"
 
-    def test_cursor_iteration(self, kv_instance, kv_lib):
+    def test_cursor_iteration(self, kv_instance):
         kv_instance.put(**{"cf": 0, "key": b"aaa"})
         kv_instance.put(**{"cf": 0, "key": b"bbb"})
         kv_instance.put(**{"cf": 0, "key": b"ccc"})
@@ -303,7 +289,7 @@ class TestKVCursorForward:
 
         assert keys == [b"aaa", b"bbb", b"ccc"]
 
-    def test_cursor_with_prefix(self, kv_instance, kv_lib):
+    def test_cursor_with_prefix(self, kv_instance):
         kv_instance.put(**{"cf": 0, "key": b"ns/a"})
         kv_instance.put(**{"cf": 0, "key": b"ns/b"})
         kv_instance.put(**{"cf": 0, "key": b"other"})
@@ -318,12 +304,12 @@ class TestKVCursorForward:
 
         assert keys == [b"ns/a", b"ns/b"]
 
-    def test_cursor_empty_scan(self, kv_instance, kv_lib):
+    def test_cursor_empty_scan(self, kv_instance):
         ptr = kv_instance.open_cursor_direct(**{"cf": 0, "prefix": b""})
         has_data, _ = kv_instance.cursor_current_key(**{"cursor": ptr})
         assert not has_data
 
-    def test_cursor_seek(self, kv_instance, kv_lib):
+    def test_cursor_seek(self, kv_instance):
         for c in [b"a1", b"a2", b"a3", b"b1", b"b2"]:
             kv_instance.put(**{"cf": 0, "key": c})
 
@@ -338,7 +324,7 @@ class TestKVCursorForward:
 
         assert keys == [b"b1", b"b2"]
 
-    def test_cursor_skip_group(self, kv_instance, kv_lib):
+    def test_cursor_skip_group(self, kv_instance):
         kv_instance.put(**{"cf": 0, "key": b"aa1"})
         kv_instance.put(**{"cf": 0, "key": b"aa2"})
         kv_instance.put(**{"cf": 0, "key": b"aa3"})
@@ -351,7 +337,7 @@ class TestKVCursorForward:
         has_data, outs = kv_instance.cursor_current_key(**{"cursor": ptr})
         assert has_data and outs[0] == b"bb1"
 
-    def test_cursor_update_end(self, kv_instance, kv_lib):
+    def test_cursor_update_end(self, kv_instance):
         kv_instance.put(**{"cf": 0, "key": b"a"})
         kv_instance.put(**{"cf": 0, "key": b"b"})
         kv_instance.put(**{"cf": 0, "key": b"c"})
@@ -369,7 +355,7 @@ class TestKVCursorForward:
         assert b"b" in keys
         assert b"c" not in keys
 
-    def test_multiple_cursors(self, kv_instance, kv_lib):
+    def test_multiple_cursors(self, kv_instance):
         kv_instance.put(**{"cf": 0, "key": b"x"})
         kv_instance.put(**{"cf": 1, "key": b"y"})
 
@@ -384,7 +370,7 @@ class TestKVCursorForward:
 
 
 class TestKVCursorReverse:
-    def test_reverse_iteration(self, kv_instance, kv_lib):
+    def test_reverse_iteration(self, kv_instance):
         kv_instance.put(**{"cf": 0, "key": b"a"})
         kv_instance.put(**{"cf": 0, "key": b"b"})
         kv_instance.put(**{"cf": 0, "key": b"c"})
@@ -399,7 +385,7 @@ class TestKVCursorReverse:
 
         assert keys == [b"c", b"b", b"a"]
 
-    def test_reverse_seek(self, kv_instance, kv_lib):
+    def test_reverse_seek(self, kv_instance):
         for c in [b"a1", b"a2", b"b1", b"b2", b"c1"]:
             kv_instance.put(**{"cf": 0, "key": c})
 
