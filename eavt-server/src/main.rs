@@ -37,9 +37,9 @@ fn value_to_proto(v: &dynspire_commons::value::Value) -> Option<eavt::Value> {
     Some(match v {
         Int64(n) => eavt::Value { kind: Some(eavt::value::Kind::IntVal(*n)) },
         Float64(f) => eavt::Value { kind: Some(eavt::value::Kind::FloatVal(*f)) },
-        Text(s) => eavt::Value { kind: Some(eavt::value::Kind::TextVal(s.clone())) },
+        Text(s) => eavt::Value { kind: Some(eavt::value::Kind::TextVal(s.as_str().to_string())) },
         Bool(b) => eavt::Value { kind: Some(eavt::value::Kind::BoolVal(*b != 0)) },
-        Bytes(b) => eavt::Value { kind: Some(eavt::value::Kind::BytesVal(b.clone())) },
+        Bytes(b) => eavt::Value { kind: Some(eavt::value::Kind::BytesVal(b.as_slice().to_vec())) },
         _ => return None,
     })
 }
@@ -51,7 +51,7 @@ fn proto_to_value(v: &eavt::Value) -> dynspire_commons::value::Value {
         Some(Kind::FloatVal(f)) => dynspire_commons::value::Value::Float64(*f),
         Some(Kind::TextVal(s)) => dynspire_commons::value::Value::text(s.clone()),
         Some(Kind::BoolVal(b)) => dynspire_commons::value::Value::Bool(*b as u8),
-        Some(Kind::BytesVal(b)) => dynspire_commons::value::Value::Bytes(b.clone()),
+        Some(Kind::BytesVal(b)) => dynspire_commons::value::Value::Bytes(b.clone().into()),
         Some(Kind::RefVal(id)) => dynspire_commons::value::Value::entity_id(*id),
         None => dynspire_commons::value::Value::Int64(0),
     }
@@ -264,7 +264,7 @@ impl EavtService for EavtServer {
 
         let rows: Vec<eavt::DatomRow> = values.chunks(5).map(|chunk| {
             let e = match &chunk[0] { dynspire_commons::value::Value::Int64(n) => *n as u64, _ => 0 };
-            let attr_name = match &chunk[2] { dynspire_commons::value::Value::Text(s) => s.clone(), _ => String::new() };
+            let attr_name = match &chunk[2] { dynspire_commons::value::Value::Text(s) => s.as_str().to_string(), _ => String::new() };
             let t = match &chunk[4] { dynspire_commons::value::Value::Int64(n) => *n as u64, _ => 0 };
             eavt::DatomRow {
                 e,

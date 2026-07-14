@@ -72,7 +72,7 @@ pub fn encode_fixed(v: &Value) -> Vec<u8> {
 pub fn encode_variable(v: &Value) -> Vec<u8> {
     let raw: &[u8] = match v {
         Value::Text(s) => s.as_bytes(),
-        Value::Bytes(b) => b,
+        Value::Bytes(b) => b.as_slice(),
         _ => panic!("cannot encode tag {} as variable", v.tag()),
     };
     let mut out = Vec::with_capacity(((raw.len() + 7) / 8) * 9);
@@ -99,7 +99,7 @@ pub fn encode_variable(v: &Value) -> Vec<u8> {
 
 pub fn encode_variable_unordered(v: &Value) -> Vec<u8> {
     let raw: &[u8] = match v {
-        Value::Bytes(b) => b,
+        Value::Bytes(b) => b.as_slice(),
         _ => panic!("cannot encode tag {} as unordered bytes", v.tag()),
     };
     let mut out = Vec::with_capacity(4 + raw.len());
@@ -110,11 +110,11 @@ pub fn encode_variable_unordered(v: &Value) -> Vec<u8> {
 
 pub fn decode_variable_unordered(data: &[u8]) -> Value {
     if data.len() < 4 {
-        return Value::Bytes(Vec::new());
+        return Value::Bytes(Vec::new().into());
     }
     let len = u32::from_be_bytes(data[0..4].try_into().unwrap()) as usize;
     let end = (4 + len).min(data.len());
-    Value::Bytes(data[4..end].to_vec())
+    Value::Bytes(data[4..end].to_vec().into())
 }
 
 pub fn decode_fixed(tag: i8, bits: u64) -> Value {
@@ -146,13 +146,13 @@ pub fn decode_variable(tag: i8, data: &[u8]) -> Value {
     match tag {
         TAG_STR => {
             if let Ok(s) = String::from_utf8(raw.clone()) {
-                Value::Text(s)
+                Value::Text(s.into())
             } else {
-                Value::Bytes(raw)
+                Value::Bytes(raw.into())
             }
         }
-        TAG_BYTES => Value::Bytes(raw),
-        _ => Value::Bytes(raw),
+        TAG_BYTES => Value::Bytes(raw.into()),
+        _ => Value::Bytes(raw.into()),
     }
 }
 
@@ -520,7 +520,7 @@ mod tests {
 
     #[test]
     fn test_build_entries_unordered_bytes() {
-        let v = Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE]);
+        let v = Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE].into());
         let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Blob);
         assert_eq!(ie.entries.len(), 3);
         assert_eq!(ie.entries[0].0, "eavt");
@@ -531,7 +531,7 @@ mod tests {
 
     #[test]
     fn test_encode_decode_variable_unordered() {
-        let v = Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        let v = Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF].into());
         let encoded = encode_variable_unordered(&v);
         assert_eq!(encoded, vec![0, 0, 0, 4, 0xDE, 0xAD, 0xBE, 0xEF]);
         let decoded = decode_variable_unordered(&encoded);
@@ -541,7 +541,7 @@ mod tests {
     #[test]
     fn test_encode_decode_variable_unordered_large() {
         let raw: Vec<u8> = (0..1000).map(|i| (i % 256) as u8).collect();
-        let v = Value::Bytes(raw.clone());
+        let v = Value::Bytes(raw.clone().into());
         let encoded = encode_variable_unordered(&v);
         assert_eq!(encoded.len(), 4 + 1000);
         let decoded = decode_variable_unordered(&encoded);
@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn test_encode_decode_variable_unordered_empty() {
-        let v = Value::Bytes(Vec::new());
+        let v = Value::Bytes(Vec::new().into());
         let encoded = encode_variable_unordered(&v);
         assert_eq!(encoded, vec![0, 0, 0, 0]);
         let decoded = decode_variable_unordered(&encoded);
@@ -662,22 +662,22 @@ mod tests {
 
     #[test]
     fn test_encode_variable_empty() {
-        let v = Value::Text(String::new());
+        let v = Value::Text(String::new().into());
         let bytes = encode_variable(&v);
         assert_eq!(bytes, b"\x00\x00\x00\x00\x00\x00\x00\x00\x00");
         let decoded = decode_variable(TAG_STR, &bytes);
-        assert_eq!(decoded, Value::Text(String::new()));
+        assert_eq!(decoded, Value::Text(String::new().into()));
     }
 
     #[test]
     fn test_encode_variable_bytes() {
-        let v = Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        let v = Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF].into());
         let bytes = encode_variable(&v);
         assert_eq!(bytes[0..4], [0xDE, 0xAD, 0xBE, 0xEF]);
         assert_eq!(bytes[4..8], [0x00, 0x00, 0x00, 0x00]);
         assert_eq!(bytes[8], 4);
         let decoded = decode_variable(TAG_BYTES, &bytes);
-        assert_eq!(decoded, Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+        assert_eq!(decoded, Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF].into()));
     }
 
     #[test]

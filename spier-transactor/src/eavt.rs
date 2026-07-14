@@ -93,7 +93,7 @@ fn coerce_value(a_id: u32, v: &Value, resolver: &Resolver) -> Value {
                 return Value::Timestamp(v.raw_int());
             }
             if let Value::Text(s) = v {
-                if let Ok(us) = value::parse_instant_to_us(s) {
+                if let Ok(us) = value::parse_instant_to_us(s.as_str()) {
                     return Value::Timestamp(us);
                 }
             }
@@ -176,7 +176,7 @@ impl EavtEngine {
             }
             if let Value::Text(ref s) = raw.v {
                 if raw.e >= resolver::BOOTSTRAP_FIRST_USER_ID {
-                    ident_map.insert(raw.e, s.clone());
+                    ident_map.insert(raw.e, s.as_str().to_string());
                 }
             }
         }
@@ -693,7 +693,7 @@ impl EavtEngine {
         let p = resolver.declare_partition(name);
         let entity_id = resolver.allocate_schema_id();
         let t = current_t_or_alloc(current_t, &mut resolver);
-        let ident_v = Value::Text(name.to_string());
+        let ident_v = Value::Text(name.to_string().into());
         let part_id_v = Value::Int64(p as i64);
         let entries =
             keys::build_entries(entity_id, resolver::DB_IDENT_AID, &ident_v, t, false, EncodeMode::Variable);

@@ -30,7 +30,7 @@ pub fn resolve_delete_pairs(
             RustConditionRight::Literal(RustLiteral::Float(f)) => Ok(Value::Float64(*f)),
             RustConditionRight::Literal(RustLiteral::Str(s)) => Ok(Value::text(s.clone())),
             RustConditionRight::Literal(RustLiteral::Bool(b)) => Ok(Value::Bool(*b as u8)),
-            RustConditionRight::Literal(RustLiteral::Bytes(b)) => Ok(Value::Bytes(b.clone())),
+            RustConditionRight::Literal(RustLiteral::Bytes(b)) => Ok(Value::Bytes(b.clone().into())),
             _ => Err("unsupported condition right in delete".to_string()),
         }
     };
@@ -236,7 +236,7 @@ fn emit_plan_value(b: &mut Compiler, pv: &PlanValue) -> i32 {
         PlanValue::Value(Value::Float64(f)) => {
             b.emit(OpCode::ConstFloat, r, 0, 0, InstructionData::Float(*f));
         }
-        PlanValue::Value(Value::Text(s)) => b.emit(OpCode::ConstStr, r, 0, 0, InstructionData::Str(s.clone())),
+        PlanValue::Value(Value::Text(s)) => b.emit(OpCode::ConstStr, r, 0, 0, InstructionData::Str(s.as_str().to_string())),
         PlanValue::Value(_) => b.emit(OpCode::ConstInt, r, 0, 0, InstructionData::Int(0)),
         PlanValue::Param(idx) => b.emit(OpCode::Param, r, *idx as i32, 0, InstructionData::None),
     }
@@ -252,7 +252,7 @@ fn emit_literal_values(b: &mut Compiler, literal_values: &[Value]) {
             Value::Float64(f) => {
                 b.emit(OpCode::ConstFloat, r_tmp, 0, 0, InstructionData::Float(*f));
             }
-            Value::Text(s) => b.emit(OpCode::ConstStr, r_tmp, 0, 0, InstructionData::Str(s.clone())),
+            Value::Text(s) => b.emit(OpCode::ConstStr, r_tmp, 0, 0, InstructionData::Str(s.as_str().to_string())),
             _ => b.emit(OpCode::ConstInt, r_tmp, 0, 0, InstructionData::Int(0)),
         }
         b.emit(OpCode::EmitValue, r_tmp, 0, 0, InstructionData::None);
@@ -264,7 +264,7 @@ fn emit_load_const(b: &mut Compiler, val: &BoundValue) -> i32 {
     let r = b.alloc_reg();
     match val {
         BoundValue::Str(s) | BoundValue::Attr(s) => {
-            b.emit(OpCode::ConstStr, r, 0, 0, InstructionData::Str(s.clone()));
+            b.emit(OpCode::ConstStr, r, 0, 0, InstructionData::Str(s.as_str().to_string()));
         }
         BoundValue::Int(n) => {
             b.emit(OpCode::ConstInt, r, 0, 0, InstructionData::Int(*n));
@@ -299,7 +299,7 @@ fn emit_probe(b: &mut Compiler, pattern: &Pattern, fail_label: &str) -> Option<(
                     b.emit(OpCode::ConstInt, r, 0, 0, InstructionData::Int(*id as i64));
                 }
                 BoundValue::Str(s) | BoundValue::Attr(s) => {
-                    b.emit(OpCode::InternA, r, 0, 0, InstructionData::Str(s.clone()));
+                    b.emit(OpCode::InternA, r, 0, 0, InstructionData::Str(s.as_str().to_string()));
                 }
                 BoundValue::Int(n) => {
                     b.emit(OpCode::ConstInt, r, 0, 0, InstructionData::Int(*n));
@@ -363,7 +363,7 @@ fn emit_projection(
                 PlanValue::Value(Value::Float64(f)) => {
                     b.emit(OpCode::ConstFloat, r, 0, 0, InstructionData::Float(*f));
                 }
-                PlanValue::Value(Value::Text(s)) => b.emit(OpCode::ConstStr, r, 0, 0, InstructionData::Str(s.clone())),
+                PlanValue::Value(Value::Text(s)) => b.emit(OpCode::ConstStr, r, 0, 0, InstructionData::Str(s.as_str().to_string())),
                 PlanValue::Value(_) => b.emit(OpCode::Null, r, 0, 0, InstructionData::None),
                 PlanValue::Param(idx) => b.emit(OpCode::Param, r, *idx as i32, 0, InstructionData::None),
             }
@@ -509,7 +509,7 @@ where
                 }
                 PlanValue::Value(Value::Text(name)) if *pos_name == "a" => {
                     let r = b.alloc_reg();
-                    b.emit(OpCode::InternA, r, 0, 0, InstructionData::Str(name.clone()));
+                    b.emit(OpCode::InternA, r, 0, 0, InstructionData::Str(name.as_str().to_string()));
                     r
                 }
                 _ => emit_plan_value(&mut b, pv),
@@ -871,7 +871,7 @@ pub fn compile_rust_delete_direct(
         match val {
             dynspire_commons::value::Value::Int64(n) => b.emit(OpCode::ConstInt, r_val, 0, 0, InstructionData::Int(*n)),
             dynspire_commons::value::Value::Float64(f) => b.emit(OpCode::ConstFloat, r_val, 0, 0, InstructionData::Float(*f)),
-            dynspire_commons::value::Value::Text(s) => b.emit(OpCode::ConstStr, r_val, 0, 0, InstructionData::Str(s.clone())),
+            dynspire_commons::value::Value::Text(s) => b.emit(OpCode::ConstStr, r_val, 0, 0, InstructionData::Str(s.as_str().to_string())),
             _ => b.emit(OpCode::ConstInt, r_val, 0, 0, InstructionData::Int(0)),
         }
         b.emit(OpCode::ExecRetract, r_ent, r_attr, r_val, InstructionData::Int(-1));
@@ -903,7 +903,7 @@ pub fn compile_triejoin_delete(
             match val {
                 Value::Int64(n) => b.emit(OpCode::ConstInt, r_val, 0, 0, InstructionData::Int(*n)),
                 Value::Float64(f) => b.emit(OpCode::ConstFloat, r_val, 0, 0, InstructionData::Float(*f)),
-                Value::Text(s) => b.emit(OpCode::ConstStr, r_val, 0, 0, InstructionData::Str(s.clone())),
+                Value::Text(s) => b.emit(OpCode::ConstStr, r_val, 0, 0, InstructionData::Str(s.as_str().to_string())),
                 Value::Bool(bv) => b.emit(OpCode::ConstBool, r_val, if *bv != 0 { 1 } else { 0 }, 0, InstructionData::None),
                 _ => b.emit(OpCode::ConstInt, r_val, 0, 0, InstructionData::Int(0)),
             }
@@ -1036,7 +1036,7 @@ fn emit_upsert_value(
             b.emit(OpCode::ConstFloat, r_val, 0, 0, InstructionData::Float(*f));
         }
         RustValue::Literal(RustLiteral::Str(s)) => {
-            b.emit(OpCode::ConstStr, r_val, 0, 0, InstructionData::Str(s.clone()));
+            b.emit(OpCode::ConstStr, r_val, 0, 0, InstructionData::Str(s.as_str().to_string()));
         }
         RustValue::Literal(RustLiteral::Bool(bv)) => {
             b.emit(OpCode::ConstBool, r_val, if *bv { 1 } else { 0 }, 0, InstructionData::None);
@@ -1093,7 +1093,7 @@ pub fn compile_triejoin_update(
                         b.emit(OpCode::ConstFloat, r_val, 0, 0, InstructionData::Float(*f));
                     }
                     dynspire_commons::sql_parse::RustValue::Literal(dynspire_commons::sql_parse::RustLiteral::Str(s)) => {
-                        b.emit(OpCode::ConstStr, r_val, 0, 0, InstructionData::Str(s.clone()));
+                        b.emit(OpCode::ConstStr, r_val, 0, 0, InstructionData::Str(s.as_str().to_string()));
                     }
                     dynspire_commons::sql_parse::RustValue::Literal(dynspire_commons::sql_parse::RustLiteral::Bool(bv)) => {
                         b.emit(OpCode::ConstBool, r_val, if *bv { 1 } else { 0 }, 0, InstructionData::None);

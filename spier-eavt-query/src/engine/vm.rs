@@ -957,7 +957,7 @@ impl VM {
 
                 OpCode::DeclarePartition => {
                     let name = match &self.regs[inst.p1 as usize] {
-                        Some(Value::Text(s)) => s.clone(),
+                        Some(Value::Text(s)) => s.as_str().to_string(),
                         _ => {
                             self.pc += 1;
                             continue;
@@ -1000,7 +1000,7 @@ impl VM {
                         }
                     };
                     let attr = match &attr_val {
-                        Value::Text(s) => s.clone(),
+                        Value::Text(s) => s.as_str().to_string(),
                         _ => attr_val.raw_int().to_string(),
                     };
                     self.engine.save_with_t(&entity_val, &attr, &value_val, &self.ctx)?;
@@ -1029,7 +1029,7 @@ impl VM {
                         }
                     };
                     let attr = match &attr_val {
-                        Value::Text(s) => s.clone(),
+                        Value::Text(s) => s.as_str().to_string(),
                         _ => attr_val.raw_int().to_string(),
                     };
                     self.engine.retract(&entity_val, &attr, &value_val, &self.ctx);
@@ -1044,11 +1044,11 @@ impl VM {
                         }
                     };
                     let attr = match &attr_val {
-                        Value::Text(s) => s.clone(),
+                        Value::Text(s) => s.as_str().to_string(),
                         _ => attr_val.raw_int().to_string(),
                     };
                     let vt_name = match &self.regs.get(inst.p3 as usize).and_then(|r| r.as_ref()) {
-                        Some(Value::Text(s)) => s.clone(),
+                        Some(Value::Text(s)) => s.as_str().to_string(),
                         _ => "STRING".to_string(),
                     };
                     self.engine.declare_attr_from_sql(&attr, &vt_name, inst.p2 & 1 != 0, inst.p2 & 2 != 0, &self.ctx)?;
@@ -1059,7 +1059,7 @@ impl VM {
                     let attr_reg = inst.p2 as usize;
                     let val_reg = inst.p3 as usize;
                     let attr_name = match &self.regs[attr_reg] {
-                        Some(Value::Text(s)) => s.clone(),
+                        Some(Value::Text(s)) => s.as_str().to_string(),
                         _ => {
                             self.pc += 1;
                             continue;
@@ -1098,7 +1098,7 @@ impl VM {
                         }
                     };
                     let attr_name = match &self.regs[attr_reg] {
-                        Some(Value::Text(s)) => s.clone(),
+                        Some(Value::Text(s)) => s.as_str().to_string(),
                         _ => {
                             self.pc += 1;
                             continue;

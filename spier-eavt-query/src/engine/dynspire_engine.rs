@@ -233,7 +233,7 @@ impl DynSpireEngine {
                     BoundPart::Attr(a) => Some(*a),
                     BoundPart::Val(v) => {
                         if let Value::Text(ref s) = v {
-                            self.lookup_attr_cached(s)
+                            self.lookup_attr_cached(s.as_str())
                         } else {
                             Some(v.raw_int() as u32)
                         }
@@ -267,7 +267,7 @@ impl DynSpireEngine {
                         }
                         "a" => {
                             if let Value::Text(ref s) = v {
-                                BoundValue::Attr(self.lookup_attr_cached(s).unwrap_or(0))
+                                BoundValue::Attr(self.lookup_attr_cached(s.as_str()).unwrap_or(0))
                             } else {
                                 BoundValue::Attr(v.raw_int() as u32)
                             }

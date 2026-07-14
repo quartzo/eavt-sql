@@ -294,7 +294,7 @@ impl QueryEngine for QueryState {
             let attr_name = engine.tx().attr_name(d.a)?;
             values.push(Value::Int64(d.e as i64));
             values.push(Value::Int64(d.a as i64));
-            values.push(Value::Text(attr_name));
+            values.push(Value::Text(attr_name.into()));
             values.push(d.v.clone());
             values.push(Value::Int64(d.t as i64));
         }

@@ -124,7 +124,7 @@ fn spec_kind_json(spec: &SpecKind) -> String {
             let val = match v {
                 crate::value::Value::Int64(n) => format!("{}", n),
                 crate::value::Value::Float64(f) => format!("{}", f),
-                crate::value::Value::Text(s) => format!("\"{}\"", json_escape(s)),
+                crate::value::Value::Text(s) => format!("\"{}\"", json_escape(s.as_str())),
                 crate::value::Value::Bool(b) => format!("{}", *b != 0),
                 other => format!("\"{}\"", json_escape(&format!("{:?}", other))),
             };

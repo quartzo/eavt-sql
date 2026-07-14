@@ -93,7 +93,7 @@ impl Value {
 
     pub fn raw_str(&self) -> &str {
         match self {
-            Value::Text(s) => s,
+            Value::Text(s) => s.as_str(),
             _ => panic!("raw_str on non-text Value"),
         }
     }
@@ -107,7 +107,7 @@ impl Value {
     }
 
     pub fn text(s: impl Into<String>) -> Value {
-        Value::Text(s.into())
+        Value::Text(s.into().into())
     }
 
     pub fn int64(n: i64) -> Value {
@@ -127,7 +127,7 @@ impl Value {
     }
 
     pub fn bytes_(b: Vec<u8>) -> Value {
-        Value::Bytes(b)
+        Value::Bytes(b.into())
     }
 
     pub fn timestamp(us: i64) -> Value {
@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn test_tag() {
         assert_eq!(Value::Text("".into()).tag(), 2);
-        assert_eq!(Value::Bytes(vec![]).tag(), 3);
+        assert_eq!(Value::Bytes(vec![].into()).tag(), 3);
         assert_eq!(Value::Bool(0).tag(), 4);
         assert_eq!(Value::Int64(0).tag(), 12);
         assert_eq!(Value::Float64(0.0).tag(), 14);
@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn test_is_variable() {
         assert!(Value::Text("hello".into()).is_variable());
-        assert!(Value::Bytes(vec![]).is_variable());
+        assert!(Value::Bytes(vec![].into()).is_variable());
         assert!(!Value::Int64(42).is_variable());
     }
 
@@ -272,7 +272,7 @@ mod tests {
         assert_eq!(Value::float64(3.0), Value::Float64(3.0));
         assert_eq!(Value::bool_(true), Value::Bool(1));
         assert_eq!(Value::entity_id(100), Value::Int64(100));
-        assert_eq!(Value::bytes_(vec![1, 2, 3]), Value::Bytes(vec![1, 2, 3]));
+        assert_eq!(Value::bytes_(vec![1, 2, 3]), Value::Bytes(vec![1, 2, 3].into()));
         assert_eq!(Value::timestamp(12345), Value::Timestamp(12345));
     }
 

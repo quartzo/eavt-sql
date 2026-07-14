@@ -421,8 +421,8 @@ dependencies = [
 
 [[package]]
 name = "dynspire"
-version = "0.1.0"
-source = "git+https://github.com/quartzo/dynspire#04c463be52d0370483e4441d5f1df0e253f04a97"
+version = "0.3.4"
+source = "git+https://github.com/quartzo/dynspire#686640a2aed760a74ac64448a721ad5b15eaaf62"
 dependencies = [
  "form_urlencoded",
  "libloading",
@@ -431,8 +431,8 @@ dependencies = [
 
 [[package]]
 name = "dynspire-codegen"
-version = "0.1.0"
-source = "git+https://github.com/quartzo/dynspire#04c463be52d0370483e4441d5f1df0e253f04a97"
+version = "0.3.4"
+source = "git+https://github.com/quartzo/dynspire#686640a2aed760a74ac64448a721ad5b15eaaf62"
 
 [[package]]
 name = "dynspire-commons"
@@ -1786,7 +1786,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

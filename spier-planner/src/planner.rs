@@ -568,7 +568,7 @@ pub fn build_query_plan(
                 match bv {
                     BoundValue::Int(n) => { bound_ints.insert("e".to_string(), PlanValue::Value(Value::Int64(*n))); }
                     BoundValue::Str(s) | BoundValue::Attr(s) => {
-                        bound_ints.insert("e".to_string(), PlanValue::Value(Value::Text(s.clone())));
+                        bound_ints.insert("e".to_string(), PlanValue::Value(Value::Text(s.clone().into())));
                     }
                     BoundValue::Param(idx) => { bound_ints.insert("e".to_string(), PlanValue::Param(*idx)); }
                     _ => {}
@@ -580,7 +580,7 @@ pub fn build_query_plan(
                         bound_ints.insert("a".to_string(), PlanValue::Value(Value::Int64(*id as i64)));
                     }
                     BoundValue::Str(s) | BoundValue::Attr(s) => {
-                        bound_ints.insert("a".to_string(), PlanValue::Value(Value::Text(s.clone())));
+                        bound_ints.insert("a".to_string(), PlanValue::Value(Value::Text(s.clone().into())));
                     }
                     BoundValue::Param(idx) => { bound_ints.insert("a".to_string(), PlanValue::Param(*idx)); }
                     _ => {}

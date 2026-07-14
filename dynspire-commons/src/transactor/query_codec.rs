@@ -83,7 +83,7 @@ pub fn encode_one(buf: &mut Vec<u8>, v: &Value) {
         Value::Bytes(b) => {
             buf.push(5);
             buf.extend_from_slice(&(b.len() as u32).to_be_bytes());
-            buf.extend_from_slice(b);
+            buf.extend_from_slice(b.as_slice());
         }
         Value::Timestamp(us) => {
             buf.push(6);
@@ -106,7 +106,7 @@ fn decode_one(buf: &[u8], pos: usize) -> Result<(Value, usize), String> {
     match tag {
         1 => {
             let (s, np) = read_str(buf, pos)?;
-            Ok((Value::Text(s), np))
+            Ok((Value::Text(s.into()), np))
         }
         2 => {
             if pos + 8 > buf.len() {
@@ -130,7 +130,7 @@ fn decode_one(buf: &[u8], pos: usize) -> Result<(Value, usize), String> {
         }
         5 => {
             let (b, np) = read_bytes(buf, pos)?;
-            Ok((Value::Bytes(b), np))
+            Ok((Value::Bytes(b.into()), np))
         }
         6 => {
             if pos + 8 > buf.len() {
