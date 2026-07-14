@@ -1,6 +1,6 @@
 # spier-blobstore-memory
 
-In-memory BlobStore spier for the DynSpire dynamic plugin architecture.
+In-memory BlobStore backend implementing `spier_storage_traits::BlobStoreEngine`.
 
 Stores blobs and roots in `HashMap`/`BTreeMap` — all in-process, no persistence. Use for testing, caching layers, or ephemeral workloads (`:memory:` mode).
 
@@ -10,7 +10,7 @@ Stores blobs and roots in `HashMap`/`BTreeMap` — all in-process, no persistenc
 cargo build --release -p spier-blobstore-memory
 ```
 
-Produces `libspier_blobstore_memory.so`.
+Produces `libspier_blobstore_memory.rlib` (linked into the workspace, not a plugin).
 
 ## Config
 
@@ -18,21 +18,11 @@ No config needed. Ignores `[storage.{ctx_name}]`.
 
 ## Operations
 
-| Op | Access | Description |
-|----|--------|-------------|
-| `put` | Exclusive | Store under random UUID |
-| `put_at` | Exclusive | Store under given UUID |
-| `get` | Concurrent | Return blob by UUID |
-| `delete` | Exclusive | Remove blob by UUID |
-| `list` | Concurrent | Return all stored UUIDs |
-| `put_root` | Exclusive | Store named root |
-| `get_root` | Concurrent | Return named root |
-| `list_roots` | Concurrent | Return all root names |
-| `delete_root` | Exclusive | Remove named root |
+Implements the `BlobStoreEngine` trait (`spier-storage-traits/src/blobstore.rs`):
+
+`put`, `put_at`, `get`, `delete`, `list`, `put_root`, `get_root`, `list_roots`, `delete_root`.
 
 ## Dependencies
 
-- `dynspire` — arena, FFI types
-- `spier-kvstore` — `BlobStoreEngine` IDL (`idl/blobstore.dspi`)
-- `dynspire-codegen` — `impl_blobstore_spier!()` macro, `#[slot_struct]`
-- `zstd` — blob compression
+- `spier-storage-traits` — `BlobStoreEngine` trait
+- `uuid` — UUID generation

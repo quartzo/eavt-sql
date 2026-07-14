@@ -23,9 +23,9 @@ none unified:
 
 | # | Entry point | Layer | Problem |
 |---|-------------|-------|---------|
-| 1 | `run_vm` (batch) | `QueryEngine` (`query_engine.dspi`) | Materializes the entire result in Rust (`Vec<Vec<Value>>`) then serializes once |
-| 2 | `run_vm_streaming` + `stream_next` + `stream_close` | `QueryEngine` (`query_engine.dspi`) | Thread + channel + registry; **buggy and unused from Python** |
-| 3 | `scan_datoms` | `QueryEngine` (`query_engine.dspi`) | Bulk EAVT dump for export — not a VM program |
+| 1 | `run_vm` (batch) | `QueryEngine` (`spier-eavt-query/src/lib.rs`) | Materializes the entire result in Rust (`Vec<Vec<Value>>`) then serializes once |
+| 2 | `run_vm_streaming` + `stream_next` + `stream_close` | `QueryEngine` (`spier-eavt-query/src/lib.rs`) | Thread + channel + registry; **buggy and unused from Python** |
+| 3 | `scan_datoms` | `QueryEngine` (`spier-eavt-query/src/lib.rs`) | Bulk EAVT dump for export — not a VM program |
 | 4 | `open_cursor_direct` + `cursor_*` | `TransactorEngine` / `KVStoreEngine` | Raw key cursor — no VM, no join, no projection |
 
 `run_vm_streaming` has four concrete defects:
@@ -56,7 +56,7 @@ resumable session whose results are pulled in batches:
 ```
 run_vm_cursor(program, params, limit, as_of) -> SessionHandle   ← THE primitive
 session_next_batch(handle, max_rows) -> Vec<u8>                 ← pull rows
-# cleanup: automatic (Arc refcount + FFIResource.__del__)
+# cleanup: automatic (Arc refcount + Drop)
 ```
 
 - `SELECT` → cursor yields projected rows.
@@ -64,9 +64,9 @@ session_next_batch(handle, max_rows) -> Vec<u8>                 ← pull rows
   triejoin scan progresses (streaming `RETURNING`).
 - `run_vm` (batch) becomes a thin wrapper: open cursor → drain all → pack.
 
-This reuses the proven `CursorHandle` / `#[slot_struct]` / `FFIResource`
-machinery already used for raw key cursors, eliminates the thread+channel
-path entirely, and gives Python true streaming with bounded memory.
+This reuses the proven `CursorHandle` / `Arc` / `Drop` machinery already
+used for raw key cursors, eliminates the thread+channel path entirely, and
+gives Python true streaming with bounded memory.
 
 ---
 
@@ -157,8 +157,8 @@ impl VMSession<'_> {
 
 ### Transport
 
-`SessionHandle` mirrors `CursorHandle` exactly (`dynspire-commons/src/transactor/cursor.rs:16`) —
-a `#[slot_struct]` wrapping an `Arc<RefCell<dyn …>>`, crossing FFI as 1 boxed
+`SessionHandle` mirrors `CursorHandle` exactly (`spier-storage-traits/src/cursor.rs`) —
+a struct wrapping an `Arc<RefCell<dyn …>>`, crossing FFI as 1 boxed
 pointer both as a return value and as an input parameter:
 
 ```rust
@@ -166,7 +166,6 @@ pub trait VMResultStream: Send {
     fn next_batch(&mut self, out: &mut Vec<u8>, max_rows: usize) -> Result<bool, EngineError>;
 }
 
-#[slot_struct]
 #[derive(Clone)]
 pub struct SessionHandle {
     pub session: Arc<RefCell<dyn VMResultStream>>,
@@ -175,22 +174,20 @@ pub struct SessionHandle {
 
 - **Rust callers** call `session.borrow_mut().next_batch(...)` directly via
   the vtable — zero per-call FFI.
-- **Python ctypes callers** receive an `FFIResource` wrapping the pointer
-  and pass it back to `session_next_batch` (1 slot in, identical to how
-  `cursor_step(cursor: CursorHandle)` works).
-- **GC is automatic** — Arc refcount + `FFIResource.__del__` (Python) /
-  `Drop` (Rust). No `session_close`, no handle registry, no `u64` IDs.
+- **Python callers** (PyO3) receive the `SessionHandle` and pass it back to
+  `session_next_batch` (identical to how `cursor_step(cursor: CursorHandle)`
+  works).
+- **GC is automatic** — Arc refcount + Python garbage collection.
+  No `session_close`, no handle registry, no `u64` IDs.
 
 **No `u64` handles anywhere.** Both the program and the session cross as
-`#[slot_struct]` boxed pointers. The program part is **already implemented**:
-`compile_sql` returns a `ProgramHandle` (`Arc<VMProgram>` via `#[slot_struct]`,
-`dynspire-commons/src/query_ir/opcodes.rs`), which eliminates the former
-`HashMap<u64, Arc<VMProgram>>` registry, `next_program_id`, and `free_program`
-— the caller holds the refcounted program and cleanup is automatic (`Arc` +
-`Drop` / `FFIResource.__del__`). `run_vm` / `run_vm_streaming` now take
-`ProgramHandle`. This is the same pointer-transport model AGENTS.md mandates
-over the `u64`-handle anti-pattern. The `SessionHandle` for cursors (below)
-follows the identical pattern, mirroring `CursorHandle`.
+boxed pointers (`Arc`). The program part is **already implemented**:
+`compile_sql` returns a `ProgramHandle` (`Arc<VMProgram>`), which eliminates
+the former `HashMap<u64, Arc<VMProgram>>` registry, `next_program_id`, and
+`free_program` — the caller holds the refcounted program and cleanup is
+automatic (`Arc` + `Drop`). `run_vm` / `run_vm_streaming` now take
+`ProgramHandle`. The `SessionHandle` for cursors (below) follows the
+identical pattern, mirroring `CursorHandle`.
 
 ---
 
@@ -199,12 +196,12 @@ follows the identical pattern, mirroring `CursorHandle`.
 ### DONE — program as `ProgramHandle` (replaces `u64` handle + `free_program`)
 
 `compile_sql`, `run_vm`, and `run_vm_streaming` now use `ProgramHandle`
-(`#[slot_struct]` wrapping `Arc<VMProgram>`, `opcodes.rs:198`) instead of a
-`u64` registry ID. `free_program` and the `programs: HashMap<u64, Arc<VMProgram>>`
-registry are removed — cleanup is automatic via `Arc` refcount. `ProgramHandle`
-crosses as 1 slot (boxed pointer); passing it as a by-value input parameter is
-a cheap `Arc` clone (mirrors `cursor_step(cursor: CursorHandle)`), so it is
-safe on every `run_vm` call for prepared statements.
+(`Arc<VMProgram>`) instead of a `u64` registry ID. `free_program` and the
+`programs: HashMap<u64, Arc<VMProgram>>` registry are removed — cleanup is
+automatic via `Arc` refcount. `ProgramHandle` crosses as 1 boxed pointer;
+passing it as a by-value input parameter is a cheap `Arc` clone (mirrors
+`cursor_step(cursor: CursorHandle)`), so it is safe on every `run_vm` call
+for prepared statements.
 
 ```rust
 // ALREADY IMPLEMENTED
@@ -218,28 +215,29 @@ fn run_vm_streaming(&self, program: ProgramHandle, sql_params: &[u8], limit: u64
 
 Two new methods on `QueryEngine` replace the streaming trio:
 
-```dspi
-// query_engine.dspi
-interface QueryEngine {
+```rust
+// spier-eavt-query/src/lib.rs
+pub trait QueryEngine: Send + Sync {
     // ... compile_sql / run_vm now take ProgramHandle (above) ...
 
     /// Open a resumable VM execution session. `program` is a ProgramHandle.
-    /// Returns a SessionHandle (#[slot_struct]). Pull rows with
-    /// session_next_batch. Cleanup is automatic (Arc refcount + FFIResource.__del__).
-    fn run_vm_cursor(program: ProgramHandle, sql_params: &[u8], limit: u64, as_of_us: u64)
+    /// Returns a SessionHandle. Pull rows with session_next_batch.
+    /// Cleanup is automatic (Arc refcount + Drop).
+    fn run_vm_cursor(&self, program: ProgramHandle, sql_params: &[u8], limit: u64, as_of_us: u64)
         -> Result<SessionHandle, String>;
 
     /// Pull up to max_rows packed rows from a session.
     /// Returns [u32 num_cols][values]... repeated. Empty Vec = done.
-    fn session_next_batch(session: SessionHandle, max_rows: u64) -> Result<Vec<u8>, String>;
+    fn session_next_batch(&self, session: SessionHandle, max_rows: u64) -> Result<Vec<u8>, String>;
 
     // run_vm (batch) is RETAINED as a backward-compatible wrapper.
 }
 ```
 
-`ProgramHandle` and `SessionHandle` both cross as 1 slot (boxed pointer). Passing
-them as input parameters works exactly like `cursor_step(cursor: CursorHandle)`
-does today (`transactor/idl.rs:146`) — the slot system extracts the pointer.
+`ProgramHandle` and `SessionHandle` both carry an `Arc`. Passing them as
+input parameters is a cheap `Arc` clone, identical to how
+`cursor_step(cursor: CursorHandle)` works today
+(`spier-storage-traits/src/kvstore.rs`).
 
 ### `run_vm` becomes a wrapper
 
@@ -263,7 +261,7 @@ fn run_vm(&self, program: VMProgram, sql_params: &[u8], limit: u64, as_of_us: u6
 | `stream_close` | ✅ Removed — automatic via Arc refcount / `Drop` |
 | `StreamHandle`, stream `HashMap`, `sync_channel` | ✅ Removed — no thread needed |
 | `StreamSink` + 30s auto-terminate + busy-spin | ✅ Removed — pull model has no backpressure problem |
-| `programs: HashMap<u64, Arc<VMProgram>>`, `next_program_id`, `free_program` | ✅ Removed — program crosses as `ProgramHandle` (`#[slot_struct]`) |
+| `programs: HashMap<u64, Arc<VMProgram>>`, `next_program_id`, `free_program` | ✅ Removed — program crosses as `ProgramHandle` (`Arc<VMProgram>`) |
 
 `scan_datoms` (bulk export) and `open_cursor_direct` (raw key cursor) stay
 as-is — they serve different purposes and are not VM-result paths.
@@ -351,7 +349,7 @@ def sql(self, query, *params, limit=None, as_of=None):
             for row in decode_rows(batch):   # [u32 ncols][vals] repeated
                 yield row
     finally:
-        del session   # FFIResource.__del__ → Arc dec (no explicit close)
+        del session   # Arc dec + Drop (no explicit close)
         # prog stays owned by the caller; reuse for PreparedStatement
 ```
 
@@ -361,7 +359,7 @@ def sql(self, query, *params, limit=None, as_of=None):
 - **Amortized FFI** — one slot-dispatch per batch, not per row.
 - **Errors propagate** — a VM failure raises inside `session_next_batch`
   (no silent swallowing).
-- **No lifecycle burden** — `del session` drops the `FFIResource`; the
+- **No lifecycle burden** — `del session` drops the `Arc`; the
   `Arc<VMSession>` decrements; `Drop` frees the VM. No `stream_close`,
   no leak if the caller abandons the generator.
 
@@ -371,7 +369,7 @@ def sql(self, query, *params, limit=None, as_of=None):
 
 ## 7. gRPC Implications
 
-The cursor is an **in-process pointer** (`SessionHandle` via `#[slot_struct]`)
+The cursor is an **in-process pointer** (`SessionHandle` via `Arc`)
 — it cannot cross the network to a gRPC client. So for gRPC, the cursor is a
 **server-side primitive**: the server holds the `SessionHandle`, pulls batches,
 and forwards each as a streaming RPC message.
@@ -410,12 +408,12 @@ so `Arc<RefCell<…>>` is `!Send` — the session cannot cross thread boundaries
 the session cannot be moved into it.
 
 The solution: create the session **inside** a dedicated `std::thread::spawn`
-closure. The thread captures `Arc<DynSpireQueryClient>` (which is `Send +
-Sync` — `DynSpireClient` has `unsafe impl Send + Sync`) and the compiled
-`ProgramHandle` (also `Send` — wraps `Arc<VMProgram>`). The session is created
-on the thread, lives on the thread, and drops on the thread. Results are
-forwarded to the tokio async runtime via `tx.blocking_send` (designed for
-exactly this sync→async bridge pattern).
+closure. The thread captures `Arc<QueryState>` (which is `Send + Sync` —
+`QueryState` wraps `RwLock<QueryInner>`) and the compiled `ProgramHandle`
+(also `Send` — wraps `Arc<VMProgram>`). The session is created on the
+thread, lives on the thread, and drops on the thread. Results are forwarded
+to the tokio async runtime via `tx.blocking_send` (designed for exactly
+this sync→async bridge pattern).
 
 ### The async/sync boundary belongs at the gRPC layer
 
@@ -493,28 +491,28 @@ is identical, only the loop boundary moves. *Files:* `spier-eavt-query/src/engin
 ### Step 2 — ✅ DONE: VMSession + transport
 `VM` now owns `Arc<VMProgram>` and `Arc<dyn VMEngine + Send + Sync>` (no lifetime
 parameter), enabling it to live inside a `'static` session object. `VMSession`
-wraps `VM` and implements `VMResultStream`. `SessionHandle` (`#[slot_struct]`,
+wraps `VM` and implements `VMResultStream`. `SessionHandle` (`Arc<RefCell<…>>`,
 mirroring `CursorHandle`) wraps `Arc<RefCell<dyn VMResultStream>>`. The IDL
 methods `run_vm_cursor` and `session_next_batch` are implemented in the
 `QueryEngine` trait and `QueryState` impl. The gRPC query client dispatches
 both via slot dispatch.
 *Files:* `spier-eavt-query/src/engine/vm.rs`, `spier-eavt-query/src/engine/session.rs`,
-`spier-eavt-query/src/engine/dynspire_engine.rs`, `spier-eavt-query/src/lib.rs`,
-`dynspire-commons/src/query_engine.dspi`, `eavt-server/src/main.rs`.
+`spier-eavt-query/src/lib.rs`,
+`eavt-server/src/main.rs`.
 
-### Step 3 — ✅ DONE: program as slot_struct
-`compile_sql` now returns `ProgramHandle` (`Arc<VMProgram>` via `#[slot_struct]`),
+### Step 3 — ✅ DONE: program as ProgramHandle
+`compile_sql` now returns `ProgramHandle` (`Arc<VMProgram>`),
 and `run_vm` / `run_vm_streaming` take `ProgramHandle`. The
 `programs: HashMap<u64, Arc<VMProgram>>` registry, `next_program_id`, and
 `free_program` are removed (cleanup via `Arc` refcount). The remaining cursor
 methods (`run_vm_cursor` + `session_next_batch`) are still PROPOSED — add them
 to the `QueryEngine` trait when implementing the cursor primitive.
-*Files:* `dynspire-commons/src/query_engine.dspi`, `dynspire-commons/src/query_ir/opcodes.rs`, `spier-eavt-query/src/lib.rs`, `eavt-server/src/main.rs`, `src/eavt_sql/engine.py`.
+*Files:* `spier-query-ir/src/opcodes.rs`, `spier-eavt-query/src/lib.rs`, `eavt-server/src/main.rs`, `src/eavt_sql/engine.py`.
 
 ### Step 4 — ✅ DONE: Python streaming path
 `EAVTEngine.sql()` and `PreparedStatement.execute()` now use `run_vm_cursor` +
 `session_next_batch` (batch size 1024) instead of `run_vm` (batch). Results
-stream with bounded memory. Cleanup is automatic via `FFIResource.__del__`.
+stream with bounded memory. Cleanup is automatic via `Arc` + `Drop`.
 Added `decode_rows()` to `query_codec.py` for the per-row wire format.
 *Files:* `src/eavt_sql/engine.py`, `src/eavt_sql/query_codec.py`.
 
@@ -536,16 +534,16 @@ consumed entirely within the thread because `SessionHandle` is `!Send`
 (wraps `Arc<RefCell<dyn VMResultStream>>`). The `Execute` RPC keeps using
 `run_vm` (batch analog). The proto is unchanged. Added
 `query_codec::decode_rows` (Rust) for the cursor batch wire format.
-*Files:* `eavt-server/src/main.rs`, `dynspire-commons/src/transactor/query_codec.rs`.
+*Files:* `eavt-server/src/main.rs`, `spier-value/src/query_codec.rs`.
 
 ### Step 7 — ✅ DONE: Remove old streaming
-Deleted `run_vm_streaming` / `stream_next` / `stream_close` from the IDL,
-`QueryState`, and `DynSpireQueryClient`. Removed `StreamSink`, `StreamHandle`,
+Deleted `run_vm_streaming` / `stream_next` / `stream_close` from the
+`QueryEngine` trait and `QueryState`. Removed `StreamSink`, `StreamHandle`,
 `streams` HashMap, `sync_channel`, thread spawning, and the `sink` parameter
 from `VM::run` / `VM::run_batch`. The pull-based cursor is the sole streaming
 mechanism. Net: -216 lines.
-*Files:* `dynspire-commons/src/query_engine.dspi`, `spier-eavt-query/src/lib.rs`,
-`spier-eavt-query/src/engine/vm.rs`, `spier-eavt-query/src/engine/dynspire_engine.rs`,
+*Files:* `spier-eavt-query/src/lib.rs`,
+`spier-eavt-query/src/engine/vm.rs`,
 `spier-eavt-query/src/engine/session.rs`.
 
 ### Step 8 — ✅ DONE: Docs

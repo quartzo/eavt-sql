@@ -6,7 +6,7 @@ use std::sync::Mutex;
 
 use spier_storage_traits::journal::JournalEngine;
 
-/// Pure Rust file-backed journal. No dynspire/FFI — just implements [`JournalEngine`].
+/// Pure Rust file-backed journal. just implements [`JournalEngine`].
 pub struct JournalFile {
     base: Mutex<Option<PathBuf>>,
 }

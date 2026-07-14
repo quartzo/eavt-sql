@@ -12,7 +12,7 @@ struct MemInner {
     roots: BTreeMap<String, Vec<u8>>,
 }
 
-/// Pure Rust in-memory blob store. No dynspire/FFI — just implements [`BlobStoreEngine`].
+/// Pure Rust in-memory blob store. just implements [`BlobStoreEngine`].
 pub struct MemoryBlobStore {
     inner: RwLock<MemInner>,
 }

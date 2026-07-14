@@ -39,7 +39,7 @@ fn write_file_atomic(path: &PathBuf, data: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// Pure Rust file-backed blob store. No dynspire/FFI — just implements [`BlobStoreEngine`].
+/// Pure Rust file-backed blob store. just implements [`BlobStoreEngine`].
 pub struct FileBlobStore {
     base: Mutex<Option<PathBuf>>,
     read_only: Mutex<bool>,

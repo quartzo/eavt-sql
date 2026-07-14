@@ -83,9 +83,9 @@ Full syntax: **[SQL Reference](./docs/sql-reference.md)**.
 engine.export_jsonl("data.jsonl.gz", history=True)   # full history, portable
 ```
 
-## Everything is a plugin
+## Layered Rust core
 
-The entire engine is split into **well-isolated modules, each compiled to its own shared library (`.so`) and loaded at runtime via [DynSpire](https://github.com/quartzo/dynspire)**. A `.dspi` interface file is the contract between any two plugins; `dynspire-codegen` turns it into Rust traits, typed clients, and a versioning hash checked at load time. Swap the storage backend, the planner, or the parser without touching the others.
+The entire engine is a **Rust workspace of layered crates**. Each crate depends on the next through `Cargo.toml` paths — no runtime `dlopen`, no C ABI slot buffer, no code generation step. Storage backends implement the `BlobStoreEngine` / `JournalEngine` / `MemTableEngine` traits from `spier-storage-traits`; the layers above import the definitions of the layers below.
 
 ```
 SQL text
@@ -106,10 +106,13 @@ VM program ──► spier-eavt-query           (leapfrog triejoin VM, streaming
                              └► spier-journal-file        (write-ahead log)
 ```
 
-| Plugin (`.so`) | Responsibility |
-|----------------|----------------|
+| Crate | Responsibility |
+|-------|----------------|
+| `spier-storage-traits` | `BlobStoreEngine`, `JournalEngine`, `MemTableEngine`, `KVStoreEngine`, `Cursor` |
+| `spier-value` | Core `Value` / `ValueType` + `query_codec` |
+| `spier-query-ir` | VM opcodes, `Instruction`, `VMProgram`, `SpecKind` |
 | `spier-sql-parse` | Pure-Rust SQL lexer + parser |
-| `spier-datalog` | SQL AST → Datalog IR (patterns `[?e ?a ?v ?t ?added]`) |
+| `spier-datalog` | SQL AST → Datalog IR + `resolve_ir` + `CompileStats` |
 | `spier-sql-frontend` | Stage-1 compile: parse + datalog IR |
 | `spier-planner` | Stage-2a: cost-based join ordering + index selection (stats only, no transactor) |
 | `spier-compiler` | Stage-2b: plan → VM bytecode |
@@ -120,7 +123,7 @@ VM program ──► spier-eavt-query           (leapfrog triejoin VM, streaming
 | `spier-blobstore-memory` / `-file` / `-s3` | Pluggable page storage backends |
 | `spier-journal-file` | Local write-ahead journal (not needed for `:memory:`) |
 
-> **[Spier & Tower Map](./docs/spier-map.md)** — which plugin consumes which, and the IDL behind each boundary.
+> **[Spier & Crate Map](./docs/spier-map.md)** — which crate consumes which, and the trait behind each boundary.
 
 ## Storage backends
 
@@ -143,7 +146,7 @@ Attribute declarations persist to disk and reload on reopen.
 Requires Python 3.13+, [uv](https://docs.astral.sh/uv/), and a Rust toolchain.
 
 ```bash
-cargo build --release     # compile the spier .so plugins (Python loads these)
+cargo build --release     # compile the Rust crates (PyO3 bindings are .so)
 uv sync --group dev       # install Python deps
 uv run pytest tests/ -v   # run the suite (Rust tests: cargo test --release)
 ```
@@ -195,36 +198,39 @@ All four are key-only and prefix-compressed (varint sizes, 256 KB page splits). 
 - **Leapfrog triejoin VM**: resumable, pull-based cursors stream results in bounded batches; `EXPLAIN` dumps every candidate join ordering with costs plus the compiled bytecode.
 - **MemTable swap-flush**: on threshold, the live write buffer is frozen and a fresh one takes over; flush reads frozen data non-destructively, so reads stay consistent during flush.
 - **Single-writer, per-datom locking**: one `Mutex<Resolver>` serializes writes, held only for one datom — not a whole statement. UNIQUE checks run inside the same lock (no TOCTOU). Non-blocking `flush()`/`gc_full()` return `Busy` rather than blocking; a background poller auto-flushes by size and GCs by age.
-- **In-process FFI, not RPC**: DynSpire plugins share one address space. Live objects (cursors, snapshots, VM programs) cross the boundary as a single boxed pointer (`#[slot_struct]`) — zero per-call serialization.
+- **In-process, not RPC**: the Python layer calls the Rust crates through PyO3 bindings in the same address space. Live objects (cursors, snapshots, VM programs) cross the boundary as a single `Arc` boxed pointer — zero per-call serialization.
 
 ### Project layout
 
 ```
-dynspire-commons/       # Shared protocol: .dspi IDLs + types + codegen clients + utils
-dynspire-libs/          # Shared constants (CF names, flush threshold)
-spier-sql-parse/        # SQL parser plugin (lexer + parser)
-spier-sql-frontend/     # Stage-1 plugin: parse + datalog IR
-spier-datalog/          # AST → Datalog IR plugin
-spier-planner/          # Cost-based join ordering plugin
-spier-compiler/         # Stage-2 plugin: plan + codegen
-spier-eavt-query/       # Query engine plugin: VM, triejoin (orchestrates the pipeline)
-spier-transactor/       # EAVT engine plugin: save/retract + resolver + constraints
-spier-kvstore/          # KV store plugin (MemTable + PageStore + flush); storage .dspi IDLs in src/idl/
-spier-memtable/         # MemTable plugin (crossbeam SkipMap per CF)
-spier-blobstore-memory/ # In-memory BlobStore plugin
-spier-blobstore-file/   # File-backed BlobStore plugin
-spier-blobstore-s3/     # S3-backed BlobStore plugin
-spier-journal-file/     # File-backed Journal plugin
-eavt-cli/               # eavt-repl: REPL client (gRPC)
-eavt-server/            # gRPC server (tonic)
-src/eavt_sql/           # Python package
-  __init__.py           # Re-exports Rust classes + constants
-  engine.py             # EAVTEngine
-  _ffi.py               # load_spier: loads codegen-emitted typed ctypes clients
-  sql_parse_client.py   # SqlParseClient (spier-sql-parse via FFI)
-  query_codec.py        # Value serialization for query params/results
-  types.py              # Datom, Timestamp, ref, etc.
-tests/                  # All tests
+spier-storage-traits/  # Storage-layer traits (BlobStore/Journal/MemTable/KVStore)
+spier-value/           # Core Value type + query_codec
+spier-query-ir/        # VM opcodes, instructions, SpecKind
+spier-sql-parse/       # SQL parser (lexer + parser)
+spier-sql-frontend/    # Stage-1: parse + datalog IR
+spier-datalog/         # AST → Datalog IR + resolve_ir + CompileStats
+spier-planner/         # Cost-based join ordering
+spier-compiler/        # Stage-2: plan + codegen
+spier-eavt-query/      # Query engine: VM, triejoin (orchestrates the pipeline)
+spier-transactor/      # EAVT engine: save/retract + resolver + constraints
+spier-kvstore/         # KV store (MemTable + PageStore + flush)
+spier-memtable/        # MemTable (crossbeam SkipMap per CF)
+spier-blobstore-memory/ # In-memory BlobStore backend
+spier-blobstore-file/   # File-backed BlobStore backend
+spier-blobstore-s3/     # S3-backed BlobStore backend
+spier-journal-file/     # File-backed Journal backend
+spier-sql-parse-py/    # PyO3 bindings for spier-sql-parse
+spier-transactor-py/   # PyO3 bindings for spier-transactor
+spier-eavt-query-py/   # PyO3 bindings for spier-eavt-query
+eavt-cli/              # eavt-repl: REPL client (gRPC)
+eavt-server/           # gRPC server (tonic)
+src/eavt_sql/          # Python package
+  __init__.py          # Re-exports Rust classes + constants
+  engine.py            # EAVTEngine
+  sql_parse_client.py  # SqlParseClient (spier-sql-parse via PyO3)
+  query_codec.py       # Value serialization for query params/results
+  types.py             # Datom, Timestamp, ref, etc.
+tests/                 # All tests
 ```
 
 ### Dependencies

@@ -81,7 +81,7 @@ impl MemTableInner {
 // frozen view while the live MemTable continues mutating a different map.
 type CfSnapshots = Vec<CfMap>;
 
-/// Pure Rust MemTable. No dynspire/FFI — just implements [`MemTableEngine`].
+/// Pure Rust MemTable. just implements [`MemTableEngine`].
 pub struct MemTable {
     inner: Mutex<MemTableInner>,
 }

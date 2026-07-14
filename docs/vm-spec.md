@@ -21,11 +21,12 @@ a two-phase architecture:
 
 ### Transport
 
-`VMProgram` crosses FFI as a `#[slot_struct]` — 1 boxed pointer. The nested
-`Vec<Instruction>`, `Vec<String>`, etc. ride along unserialized. No binary
-wire format is needed for Rust→Rust or Python→Rust communication. Python
-callers interact via `engine.sql()` which calls `compile_sql` then `run_vm`
-through the DynSpire tower.
+`VMProgram` is shared via `ProgramHandle` (`Arc<VMProgram>`) — 1 boxed pointer
+that crosses FFI as a cloned `Arc`. The nested `Vec<Instruction>`,
+`Vec<String>`, etc. ride along unserialized. No binary wire format is needed
+for Rust→Rust or Python→Rust communication. Python callers interact via
+`engine.sql()` which calls `compile_sql` then `run_vm` through the PyO3
+binding.
 
 ### Scanner-Centric Architecture (v2)
 
@@ -133,7 +134,7 @@ is a variable, VAET can serve as the iteration index with v at position 0.
 ### 3.1 Value Enum
 
 Every data element in the VM is a `Value` — a tagged enum defined in
-`dynspire-commons`:
+`spier-value`:
 
 ```rust
 pub enum Value {
@@ -224,7 +225,6 @@ pub enum InstructionData {
 ```
 
 ```rust
-#[slot_struct]
 #[derive(Clone)]
 pub struct VMProgram {
     pub instructions: Vec<Instruction>,
@@ -238,8 +238,8 @@ pub struct VMProgram {
 }
 ```
 
-`VMProgram` crosses FFI as 1 boxed pointer via `#[slot_struct]`. No
-serialization needed — the nested `Vec`s travel intact.
+`VMProgram` is shared via `ProgramHandle` (`Arc<VMProgram>`). No
+serialization is needed — the nested `Vec`s travel intact inside the `Arc`.
 
 ---
 

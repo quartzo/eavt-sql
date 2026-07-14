@@ -151,7 +151,7 @@ impl ScanSource for SourceKind {
     }
 }
 
-// Cursor trait is defined in dynspire-commons
+// Cursor trait is defined in spier-storage-traits
 pub use spier_storage_traits::Cursor;
 
 pub fn merge_collect(sources: Vec<SourceKind>) -> Vec<(Vec<u8>, Vec<u8>)> {

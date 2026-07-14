@@ -259,7 +259,7 @@ key reason not to route the reduction through SQL's triejoin.
 ### Cursor trait fit
 
 The `BitmapScanner` implements the existing `Cursor` contract
-(`dynspire-commons/src/transactor/cursor.rs`): `is_valid` / `current_key` /
+(`spier-storage-traits/src/cursor.rs`): `is_valid` / `current_key` /
 `step` / `seek` / `skip_group`. It iterates entity IDs (8-byte big-endian, the
 reduced set) in ascending order — roaring's native iteration is sorted, so it
 slots into the v2 forward-only scanner constraint with no special handling. The

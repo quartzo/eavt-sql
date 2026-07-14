@@ -14,7 +14,7 @@ pub trait SqlParseEngine: Send + Sync {
     fn parse_json(&self, sql: &str) -> Result<String, String>;
 }
 
-/// Pure Rust SQL parser. No dynspire/FFI — just implements [`SqlParseEngine`].
+/// Pure Rust SQL parser. just implements [`SqlParseEngine`].
 pub struct SqlParser;
 
 impl SqlParser {

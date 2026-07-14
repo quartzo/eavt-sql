@@ -31,7 +31,7 @@ struct S3Inner {
     prefix: String,
 }
 
-/// Pure Rust S3-backed blob store. No dynspire/FFI — just implements [`BlobStoreEngine`].
+/// Pure Rust S3-backed blob store. just implements [`BlobStoreEngine`].
 pub struct S3BlobStore {
     options: Mutex<HashMap<String, String>>,
     inner: Mutex<S3Inner>,

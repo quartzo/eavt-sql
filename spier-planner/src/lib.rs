@@ -13,7 +13,7 @@ pub trait PlannerEngine: Send + Sync {
     fn to_string(&self, plan: QueryPlanSt) -> Result<String, String>;
 }
 
-/// Pure Rust query planner. No dynspire/FFI — just implements [`PlannerEngine`].
+/// Pure Rust query planner. just implements [`PlannerEngine`].
 pub struct Planner;
 
 impl Planner {

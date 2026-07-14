@@ -32,7 +32,7 @@ pub trait CompilerEngine: Send + Sync {
     ) -> Result<CompileResultSt, String>;
 }
 
-/// Pure Rust SQL compiler. No dynspire/FFI — just implements [`CompilerEngine`].
+/// Pure Rust SQL compiler. just implements [`CompilerEngine`].
 pub struct Compiler {
     planner: Planner,
 }

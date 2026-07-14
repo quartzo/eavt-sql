@@ -1,6 +1,6 @@
 # spier-journal-file
 
-File-backed journal spier for DynSpire. Implements the `JournalEngine` IDL — stores entries as a sequential binary file with length-prefixed key-value pairs.
+File-backed journal backend implementing `spier_storage_traits::JournalEngine`. Stores entries as a sequential binary file with length-prefixed key-value pairs.
 
 ## Build
 
@@ -8,19 +8,19 @@ File-backed journal spier for DynSpire. Implements the `JournalEngine` IDL — s
 cargo build --release -p spier-journal-file
 ```
 
-Produces `libspier_journal_file.so`.
+Produces `libspier_journal_file.rlib` (linked into the workspace, not a plugin).
 
 ## Config
 
-Reads `[storage.{ctx_name}]` from DynSpire config at init. Derives journal path as `{path}/journal`. Creates the directory if it doesn't exist.
+Reads `path` from the `HashMap<String, String>` config passed to `JournalFile::new`. Derives journal path as `{path}/journal`. Creates the directory if it doesn't exist.
 
 ## Operations
 
-| Op | Access | Description |
-|----|--------|-------------|
-| `journal_append` | Exclusive | Append `[u32 klen][key][u32 vlen][value]` to `base/journal` |
-| `journal_read` | Concurrent | Parse and return all entries from `base/journal` |
-| `journal_truncate` | Exclusive | Delete `base/journal` |
+Implements the `JournalEngine` trait (`spier-storage-traits/src/journal.rs`):
+
+- `journal_append` — append `[u32 klen][key][u32 vlen][value]` to `base/journal`
+- `journal_read` — parse and return all entries from `base/journal`
+- `journal_truncate` — delete `base/journal`
 
 ## File Format
 
@@ -38,7 +38,4 @@ Truncated entries at the end of the file (partial writes from a crash) are silen
 
 ## Dependencies
 
-- `dynspire` — arena, FFI types
-- `spier-kvstore` — `JournalEngine` IDL (`idl/journal.dspi`)
-- `dynspire-codegen` — `impl_journal_spier!()` macro, `#[slot_struct]`
-- `dynspire-libs` — config
+- `spier-storage-traits` — `JournalEngine` trait

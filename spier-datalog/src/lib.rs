@@ -22,7 +22,7 @@ pub trait DatalogEngine: Send + Sync {
     fn to_string(&self, ir: DatalogIRSt) -> Result<String, String>;
 }
 
-/// Pure Rust Datalog IR builder. No dynspire/FFI — just implements [`DatalogEngine`].
+/// Pure Rust Datalog IR builder. just implements [`DatalogEngine`].
 pub struct DatalogBuilder;
 
 impl DatalogBuilder {
