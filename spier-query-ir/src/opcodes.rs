@@ -224,11 +224,9 @@ pub struct VMProgram {
 
 /// Shared, refcounted handle to a compiled `VMProgram`.
 ///
-/// Crosses FFI as 1 boxed pointer via `#[slot_struct]` (mirrors `CursorHandle`).
-/// Cloning is a cheap `Arc` clone, so it is safe to pass as a by-value IDL
+/// Cloning is a cheap `Arc` clone, so it is safe to pass as a by-value
 /// parameter on every `run_vm` call (e.g. prepared statements). There is no
-/// `free_program` — the `Arc` refcount + `Drop` / `FFIResource.__del__` handle
-/// cleanup, avoiding the `u64`-handle + explicit-close anti-pattern.
+/// `free_program` — the `Arc` refcount + `Drop` handle cleanup automatically.
 #[derive(Clone)]
 pub struct ProgramHandle {
     pub program: Arc<VMProgram>,

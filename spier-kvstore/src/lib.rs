@@ -401,7 +401,7 @@ impl KVStoreEngine for KVState {
     }
 
     // ------------------------------------------------------------------
-    // 5. CURSORS — CursorHandle via #[slot_struct] pointer transport
+    // 5. CURSORS — CursorHandle via Arc pointer transport
     // ------------------------------------------------------------------
 
     fn open_cursor_direct(&self, cf: u32, prefix: &[u8]) -> Result<CursorHandle, String> {

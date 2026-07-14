@@ -201,7 +201,7 @@ exhausted (the underlying `MergedInner` does not clear `cur_key` when invalidate
 - **EAVT_TRACE**: env var `EAVT_TRACE=vm,cursor` (or `all`/`1`) enables execution tracing. Cached `AtomicBool`.
 - **Recovery**: on open, replay journal into MemTable
 - **S3 mode**: blobs on S3, journal file on local disk
-- **Python layer**: PyO3 bindings per layer (`spier-sql-parse-py`, `spier-transactor-py`, `spier-eavt-query-py`). `src/eavt_sql/_ffi.py` exposes the same `load_spier(name)` / `create_handle(config)` surface over PyO3 so existing tests keep working without ctypes.
+- **Python layer**: PyO3 bindings per layer (`spier-sql-parse-py`, `spier-transactor-py`, `spier-eavt-query-py`). The Python package `src/eavt_sql/` wraps these bindings in a typed API.
 
 ## Conventions
 
