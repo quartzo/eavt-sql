@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Inspect SQL planning: AST → DatalogIR → Explain (disassembly + traces).
+"""Inspect SQL planning: AST → Explain (resolved IR + plan traces + bytecode).
 
-Calls spier-sql-parse and spier-datalog directly for AST/DatalogIR.
-Uses EAVTEngine.explain() for the plan+codegen stage. Attrs are
-auto-declared into a temp :memory: DB (unless --db is given), so the
-script works standalone.
+Uses spier_sql_parse_py directly for AST, then EAVTEngine for plan/codegen.
+Attrs are auto-declared into a temp :memory: DB (unless --db is given), so
+the script works standalone.
 
 Usage:
     uv run python scripts/inspect_plan.py [--db PATH] 'SQL' [params...]
@@ -16,7 +15,7 @@ Examples:
 from __future__ import annotations
 
 import json
-import re
+import os
 import sys
 from pathlib import Path
 
@@ -26,8 +25,6 @@ _release = _root / "target" / "release"
 _debug = _root / "target" / "debug"
 _so_dir = _release if _release.exists() else _debug
 
-import os
-
 existing = os.environ.get("LD_LIBRARY_PATH", "")
 if str(_so_dir) not in existing:
     os.environ["LD_LIBRARY_PATH"] = (
@@ -35,9 +32,8 @@ if str(_so_dir) not in existing:
     )
 sys.path.insert(0, str(_root / "src"))
 
-from eavt_sql._ffi import load_spier
+import spier_sql_parse_py
 from eavt_sql.engine import EAVTEngine
-from eavt_sql.query_codec import encode_values
 
 
 def extract_attr_names(ast: dict) -> list[str]:
@@ -83,29 +79,16 @@ def main() -> None:
 
     sql = args[0]
     raw_params = args[1:]
+    params = [int(p) if p.lstrip("-").isdigit() else p for p in raw_params]
 
-    # 1. Parse SQL → AST (standalone spier, no transactor needed)
-    parse_lib = load_spier("spier_sql_parse")
-    parse_handle = parse_lib.create_handle({})
-    ast_json = parse_handle.parse_json(sql)
+    # 1. Parse SQL → AST
+    parser = spier_sql_parse_py.SqlParser()
+    ast_json = parser.parse_json(sql)
 
     print("=== AST ===")
     print(ast_json)
 
-    # 2. Build DatalogIR (standalone spier, no transactor needed)
-    params = [int(p) if p.lstrip("-").isdigit() else p for p in raw_params]
-    params_bytes = encode_values(params)
-    stmt = parse_handle.parse(sql)
-
-    datalog_lib = load_spier("spier_datalog")
-    datalog_handle = datalog_lib.create_handle({})
-    ir = datalog_handle.build(stmt, params_bytes)
-    dl_str = datalog_handle.to_string(ir)
-
-    print("\n=== DATALOG IR ===")
-    print(dl_str)
-
-    # 3. Plan (join order, cost estimates, index selection)
+    # 2. Plan (join order, cost estimates, index selection)
     #    For :memory: DBs, auto-declare attrs found in the query so
     #    schema resolution succeeds. For --db, assume schema exists.
     engine = EAVTEngine(db_path)
@@ -117,6 +100,7 @@ def main() -> None:
             except Exception:
                 pass  # attr may already exist or type mismatch — skip
 
+    # 3. Resolved IR + plan traces
     if raw_params:
         plan_out = engine.explain_plan(sql, *params)
     else:
@@ -132,11 +116,32 @@ def main() -> None:
     num_ir_str = "\n".join(lines[:split_idx]).strip()
     plan_str = "\n".join(lines[split_idx:]).strip()
 
-    print("\n=== DATALOG NUM IR ===")
+    print("\n=== DATALOG NUM IR (resolved) ===")
     print(num_ir_str)
 
     print("\n=== PLAN ===")
     print(plan_str)
+
+    # 4. Bytecode disassembly
+    if raw_params:
+        explain_out = engine.explain(sql, *params)
+    else:
+        explain_out = engine.explain(sql)
+
+    # explain returns plan traces + bytecode disassembly.
+    # The disassembly starts at the first all-caps opcode line.
+    bc_lines = explain_out.split("\n")
+    bc_start = next(
+        (i for i, ln in enumerate(bc_lines) if ln.strip()[:3].isdigit()),
+        len(bc_lines),
+    )
+    bytecode_str = "\n".join(bc_lines[bc_start:]).strip()
+
+    if bytecode_str:
+        print("\n=== BYTECODE ===")
+        print(bytecode_str)
+
+    engine.close()
 
 
 if __name__ == "__main__":

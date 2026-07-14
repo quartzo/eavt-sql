@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Inspect SQL compilation: shows the Datalog IR and Query Plan.
+"""Inspect generated VM bytecode for a SELECT query.
+
+Shows: AST → plan traces → bytecode disassembly.
 
 Usage:
-    uv run python scripts/inspect_plan.py 'SQL' [params...] [--db PATH]
+    uv run python scripts/inspect_generated_code.py 'SQL' [params...] [--db PATH]
 
 Examples:
-    uv run python scripts/inspect_plan.py 'SELECT d2.person.name WHERE d1.eid = 1000 AND d1.company.partner = d2.eid'
-    uv run python scripts/inspect_plan.py 'SELECT d1.company.name WHERE d1.eid = %1' 1000
-    uv run python scripts/inspect_plan.py 'SELECT d1.company.name WHERE d1.eid = %1' 1000 --db /path/to/db
+    uv run python scripts/inspect_generated_code.py 'SELECT d2.person.name WHERE d1.eid = 1000 AND d1.company.partner = d2.eid'
+    uv run python scripts/inspect_generated_code.py 'SELECT d1.company.name WHERE d1.eid = %1' 1000
+    uv run python scripts/inspect_generated_code.py 'SELECT d1.company.name WHERE d1.eid = %1' 1000 --db /path/to/db
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -28,52 +31,30 @@ if str(_so_dir) not in existing:
     )
 sys.path.insert(0, str(_root / "src"))
 
-from eavt_sql._ffi import load_spier
+import spier_sql_parse_py
 from eavt_sql.engine import EAVTEngine
-from eavt_sql.query_codec import encode_values
 
 
-def show_datalog(sql: str, params: list) -> None:
-    """Parse SQL → AST → Datalog IR (via spier-sql-parse + spier-datalog).
+def extract_attr_names(ast: dict) -> list[str]:
+    seen: list[str] = []
 
-    Accepts ``%N`` parameter placeholders — values are passed through to
-    spier-datalog's ``build()``.
-    """
-    parse_lib = load_spier("spier_sql_parse")
-    parse_handle = parse_lib.create_handle({})
-    ast_json = parse_handle.parse_json(sql)
+    def add(name: str) -> None:
+        if name not in seen:
+            seen.append(name)
 
-    print("=== AST ===")
-    print(ast_json)
+    def walk(obj: object) -> None:
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if k == "field" and isinstance(v, str) and "." in v:
+                    add(v)
+                else:
+                    walk(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
 
-    try:
-        datalog_lib = load_spier("spier_datalog")
-        datalog_handle = datalog_lib.create_handle({})
-        stmt = parse_handle.parse(sql)
-        params_bytes = encode_values(
-            [int(p) if p.lstrip("-").isdigit() else p for p in params]
-        )
-        ir = datalog_handle.build(stmt, params_bytes)
-        dl_str = datalog_handle.to_string(ir)
-
-        print("\n=== DATALOG IR ===")
-        print(dl_str)
-    except RuntimeError as e:
-        print(f"\n=== DATALOG IR ===\n(skipped: {e})")
-
-
-def show_plan(sql: str, params: list, db_path: str) -> None:
-    """Show plan traces + bytecode via EAVTEngine.explain().
-
-    The planner needs a transactor for cost estimation (index sizes, attr
-    lookups). For ``:memory:`` with no declared schema, traces show blind
-    estimates but join ordering and index selection are still visible.
-    """
-    engine = EAVTEngine(db_path)
-    explanation = engine.explain(sql, *params)
-
-    print("\n=== PLAN ===")
-    print(explanation)
+    walk(ast)
+    return seen
 
 
 def main() -> None:
@@ -96,10 +77,32 @@ def main() -> None:
         sys.exit(1)
 
     sql = args[0]
-    params = args[1:]
+    raw_params = args[1:]
+    params = [int(p) if p.lstrip("-").isdigit() else p for p in raw_params]
 
-    show_datalog(sql, params)
-    show_plan(sql, params, db_path)
+    # 1. AST
+    parser = spier_sql_parse_py.SqlParser()
+    ast_json = parser.parse_json(sql)
+
+    print("=== AST ===")
+    print(ast_json)
+
+    # 2. Plan traces + bytecode disassembly via EAVTEngine.explain()
+    engine = EAVTEngine(db_path)
+    if db_path == ":memory:":
+        ast_obj = json.loads(ast_json)
+        for attr_name in extract_attr_names(ast_obj):
+            try:
+                list(engine.sql(f"ATTRIBUTE {attr_name} STRING ONE"))
+            except Exception:
+                pass
+
+    explanation = engine.explain(sql, *params)
+
+    print("\n=== EXPLAIN (plan traces + bytecode) ===")
+    print(explanation)
+
+    engine.close()
 
 
 if __name__ == "__main__":
