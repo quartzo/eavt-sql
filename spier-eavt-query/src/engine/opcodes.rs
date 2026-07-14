@@ -4,7 +4,24 @@ pub use spier_query_ir::{InstructionData, OpCode, VMProgram};
 
 static DEBUG_TIMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+static DEBUG_TIMING_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+fn init_debug_timing() {
+    DEBUG_TIMING_INIT.get_or_init(|| {
+        let v = std::env::var("EAVT_TIMING").unwrap_or_default();
+        let enabled = v == "1" || v == "true";
+        if enabled {
+            eprintln!("[EAVT] timing enabled via EAVT_TIMING={}", v);
+            std::fs::write("/tmp/eavt_timing_debug.txt", format!("enabled v={}", v)).ok();
+        } else {
+            std::fs::write("/tmp/eavt_timing_debug.txt", format!("disabled v={:?}", v)).ok();
+        }
+        DEBUG_TIMING.store(enabled, AtomicOrdering::Relaxed);
+    });
+}
+
 pub fn debug_timing_enabled() -> bool {
+    init_debug_timing();
     DEBUG_TIMING.load(AtomicOrdering::Relaxed)
 }
 
@@ -37,14 +54,29 @@ pub fn reset_scanner_stats() {
     SCANNER_SEEK_NS.store(0, AtomicOrdering::Relaxed);
     SCANNER_ADVANCE_COUNT.store(0, AtomicOrdering::Relaxed);
     SCANNER_SEEK_COUNT.store(0, AtomicOrdering::Relaxed);
+    CONVERGE_COUNT.store(0, AtomicOrdering::Relaxed);
+    SKIP_GROUP_COUNT.store(0, AtomicOrdering::Relaxed);
 }
 
-pub(crate) fn get_scanner_stats() -> (u64, u64, u64, u64) {
+static CONVERGE_COUNT: AtomicU64 = AtomicU64::new(0);
+static SKIP_GROUP_COUNT: AtomicU64 = AtomicU64::new(0);
+
+pub fn converge_call() {
+    CONVERGE_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+}
+
+pub fn skip_group_call() {
+    SKIP_GROUP_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+}
+
+pub(crate) fn get_scanner_stats() -> (u64, u64, u64, u64, u64, u64) {
     (
         SCANNER_ADVANCE_NS.load(AtomicOrdering::Relaxed),
         SCANNER_ADVANCE_COUNT.load(AtomicOrdering::Relaxed),
         SCANNER_SEEK_NS.load(AtomicOrdering::Relaxed),
         SCANNER_SEEK_COUNT.load(AtomicOrdering::Relaxed),
+        CONVERGE_COUNT.load(AtomicOrdering::Relaxed),
+        SKIP_GROUP_COUNT.load(AtomicOrdering::Relaxed),
     )
 }
 
@@ -66,9 +98,11 @@ pub(crate) struct TimingStats {
     pub leap_init: TimingCounter,
     pub leap_next: TimingCounter,
     pub depth_up: TimingCounter,
+    pub depth_enter: TimingCounter,
     pub result_row: TimingCounter,
     pub bind_get: TimingCounter,
     pub resolve_val: TimingCounter,
+    pub leap_converge: TimingCounter,
 }
 
 impl TimingStats {
@@ -82,7 +116,9 @@ impl TimingStats {
         let mut entries: Vec<(&str, &TimingCounter)> = vec![
             ("leap_init", &self.leap_init),
             ("leap_next", &self.leap_next),
+            ("leap_converge", &self.leap_converge),
             ("depth_up", &self.depth_up),
+            ("depth_enter", &self.depth_enter),
             ("result_row", &self.result_row),
             ("bind_get", &self.bind_get),
             ("resolve_val", &self.resolve_val),
@@ -113,7 +149,7 @@ impl TimingStats {
             );
         }
 
-        let (adv_ns, adv_cnt, seek_ns, seek_cnt) = get_scanner_stats();
+        let (adv_ns, adv_cnt, seek_ns, seek_cnt, converge_cnt, skip_grp_cnt) = get_scanner_stats();
         eprintln!("  --- scanner ---");
         if adv_cnt > 0 {
             eprintln!(
@@ -133,6 +169,8 @@ impl TimingStats {
                 seek_ns as f64 / seek_cnt as f64 / 1_000.0,
             );
         }
+        eprintln!("  {:20} {:>6} calls", "leap_converge", converge_cnt);
+        eprintln!("  {:20} {:>6} calls", "skip_group", skip_grp_cnt);
         let total_s = total_ns as f64 / 1_000_000_000.0;
         eprintln!("  TOTAL: {:.3}s", total_s);
     }

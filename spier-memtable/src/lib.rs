@@ -27,7 +27,7 @@ fn prefix_upper_bound(prefix: &[u8]) -> Vec<u8> {
 // Each CF holds an Arc<SkipMap>. Snapshots clone the Arc (O(1)); clear/drain
 // swaps in a fresh empty SkipMap (O(1)). Old snapshots keep the previous SkipMap
 // alive via Arc until they drop — no tombstones, no GC, lock-free reads.
-type CfMap = Arc<SkipMap<Vec<u8>, ()>>;
+pub type CfMap = Arc<SkipMap<Vec<u8>, ()>>;
 
 struct CfData {
     map: CfMap,
@@ -79,7 +79,7 @@ impl MemTableInner {
 // Snapshot holds Arc clones of every CF's SkipMap. After clear()/drain() swaps
 // in fresh empty maps, this still points at the pre-clear state — readers see a
 // frozen view while the live MemTable continues mutating a different map.
-type CfSnapshots = Vec<CfMap>;
+pub type CfSnapshots = Vec<CfMap>;
 
 /// Pure Rust MemTable. just implements [`MemTableEngine`].
 pub struct MemTable {
@@ -91,6 +91,18 @@ impl MemTable {
         Self {
             inner: Mutex::new(MemTableInner::new(num_cf)),
         }
+    }
+
+    /// Extract the Arc<SkipMap> for a given CF from a snapshot.
+    /// Returns None if the CF doesn't exist or the snapshot type is wrong.
+    pub fn get_cf_map(&self, snap: &MemTableSnapshot, cf: u32) -> Option<CfMap> {
+        let cfs = snap.data.downcast_ref::<CfSnapshots>()?;
+        cfs.get(cf as usize).cloned()
+    }
+
+    /// Compute the exclusive upper bound for a prefix scan.
+    pub fn prefix_upper(prefix: &[u8]) -> Vec<u8> {
+        prefix_upper_bound(prefix)
     }
 }
 

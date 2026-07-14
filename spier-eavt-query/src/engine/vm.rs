@@ -380,6 +380,7 @@ impl VM {
     }
 
     fn v2_leap_converge(&mut self, depth: usize, sids: &[usize]) -> bool {
+        crate::engine::opcodes::converge_call();
         let max_iters = sids.len() * 2 + 1;
         for _ in 0..max_iters {
             let mut max_val: Option<Value> = None;
@@ -1269,6 +1270,11 @@ impl VM {
                 }
 
                 OpCode::DepthEnter => {
+                    let t0 = if do_timing {
+                        Some(Instant::now())
+                    } else {
+                        None
+                    };
                     let depth = inst.p1 as usize;
                     let sid = inst.p2 as usize;
                     let pos_idx = inst.p3 as usize;
@@ -1332,6 +1338,9 @@ impl VM {
                                 self.vars[var_id] = Some(val);
                             }
                         }
+                    }
+                    if let Some(t0) = t0 {
+                        timing.depth_enter.add(t0.elapsed());
                     }
                 }
 

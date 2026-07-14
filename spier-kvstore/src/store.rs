@@ -68,7 +68,7 @@ impl Default for TransactorConfig {
 
 struct StoreInner {
     store: Option<Arc<GenericPageStore>>,
-    mt: Arc<dyn MemTableEngine>,
+    mt: Arc<spier_memtable::MemTable>,
     mt_size: u64,
     flush_snap: Option<MemTableSnapshot>,
     config: TransactorConfig,
@@ -93,24 +93,23 @@ impl StoreInner {
             ));
         }
         if let Some(ref snap) = self.flush_snap {
-            let packed = self
-                .mt
-                .scan_prefix(snap.clone(), cf_id as u32, prefix)
-                .unwrap_or_default();
-            let snap_keys = unpack_keys(&packed);
-            sources.push(SourceKind::MemTable(crate::merge_iter::PageStoreIter::new(
-                snap_keys, prefix,
-            )));
+            if let Some(map) = self.mt.get_cf_map(snap, cf_id as u32) {
+                if !map.is_empty() {
+                    sources.push(SourceKind::MemTable(
+                        crate::merge_iter::LazyMemTableSource::new(map, prefix),
+                    ));
+                }
+            }
         }
         let live_snap = self.mt.snapshot().unwrap();
-        let packed = self
-            .mt
-            .scan_prefix(live_snap, cf_id as u32, prefix)
-            .unwrap_or_default();
-        let mt_keys = unpack_keys(&packed);
-        sources.push(SourceKind::MemTable(crate::merge_iter::PageStoreIter::new(
-            mt_keys, prefix,
-        )));
+        if let Some(map) = self.mt.get_cf_map(&live_snap, cf_id as u32) {
+            if !map.is_empty() {
+                sources.push(SourceKind::MemTable(
+                    crate::merge_iter::LazyMemTableSource::new(map, prefix),
+                ));
+            }
+        }
+        drop(live_snap);
         sources
     }
 
@@ -178,7 +177,7 @@ impl Transactor {
     pub fn open(
         blobs: Box<dyn BlobStoreEngine + Send + Sync>,
         journal: Option<Box<dyn JournalEngine + Send + Sync>>,
-        mt: Box<dyn MemTableEngine>,
+        mt: spier_memtable::MemTable,
         path: &str,
         config: TransactorConfig,
     ) -> TransactorResult<Self> {
@@ -201,7 +200,7 @@ impl Transactor {
     pub fn open_read_only(
         blobs: Box<dyn BlobStoreEngine + Send + Sync>,
         journal: Option<Box<dyn JournalEngine + Send + Sync>>,
-        mt: Box<dyn MemTableEngine>,
+        mt: spier_memtable::MemTable,
         path: &str,
         config: TransactorConfig,
     ) -> TransactorResult<Self> {
@@ -778,8 +777,8 @@ mod tests {
         }
     }
 
-    fn make_mt() -> Box<dyn MemTableEngine> {
-        Box::new(LocalMemTable::new(4))
+    fn make_mt() -> spier_memtable::MemTable {
+        spier_memtable::MemTable::new(4)
     }
 
     struct TestBlobStore {

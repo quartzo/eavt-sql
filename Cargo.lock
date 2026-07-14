@@ -1730,6 +1730,7 @@ dependencies = [
 name = "spier-kvstore"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-skiplist",
  "libc",
  "lru",
  "spier-blobstore-file",

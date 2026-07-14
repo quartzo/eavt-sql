@@ -446,6 +446,18 @@ impl V2Scanner {
     }
 
     pub fn advance_to_active_at(&mut self, pos_idx: usize) {
+        let t0 = if crate::engine::opcodes::debug_timing_enabled() {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        self.advance_to_active_at_inner(pos_idx);
+        if let Some(t0) = t0 {
+            crate::engine::opcodes::scanner_advance_elapsed(t0.elapsed().as_nanos() as u64);
+        }
+    }
+
+    fn advance_to_active_at_inner(&mut self, pos_idx: usize) {
         let pos_name = self.pos_name(pos_idx);
 
         if pos_name == "added" {
@@ -519,6 +531,7 @@ impl V2Scanner {
                     found_key = Some(key.clone());
                 }
 
+                crate::engine::opcodes::skip_group_call();
                 self.cursor.borrow_mut().skip_group(ge);
 
                 if found_key.is_some() {
@@ -659,6 +672,18 @@ impl V2Scanner {
     }
 
     pub fn seek_to_value(&mut self, pos_idx: usize, value: &Value) {
+        let t0 = if crate::engine::opcodes::debug_timing_enabled() {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        self.seek_to_value_inner(pos_idx, value);
+        if let Some(t0) = t0 {
+            crate::engine::opcodes::scanner_seek_elapsed(t0.elapsed().as_nanos() as u64);
+        }
+    }
+
+    fn seek_to_value_inner(&mut self, pos_idx: usize, value: &Value) {
         let pos_name = self.pos_name(pos_idx);
         let key = match self.current_active_key.as_ref() {
             Some(k) => k.clone(),

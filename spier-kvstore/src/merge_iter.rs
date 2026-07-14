@@ -1,5 +1,9 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::ops::Bound;
+
+use crossbeam_skiplist::SkipMap;
+use spier_memtable::CfMap;
 
 pub trait ScanSource: Send {
     fn valid(&self) -> bool;
@@ -13,8 +17,105 @@ pub trait ScanSource: Send {
 }
 
 pub enum SourceKind {
-    MemTable(PageStoreIter),
+    MemTable(LazyMemTableSource),
     PageStore(PageStoreIter),
+}
+
+/// Lazy cursor over a MemTable snapshot's SkipMap. Instead of materializing
+/// all keys upfront, it uses `lower_bound` (O(log n)) on each advance/seek.
+/// This makes scanner open O(1) instead of O(K).
+pub struct LazyMemTableSource {
+    map: CfMap,
+    upper: Vec<u8>,
+    cur_key: Option<Vec<u8>>,
+}
+
+impl LazyMemTableSource {
+    pub fn new(map: CfMap, prefix: &[u8]) -> Self {
+        let upper = if prefix.is_empty() {
+            vec![0xFF; 64]
+        } else {
+            spier_memtable::MemTable::prefix_upper(prefix)
+        };
+        let mut src = Self {
+            map,
+            upper,
+            cur_key: None,
+        };
+        src.reposition(Bound::Included(prefix));
+        src
+    }
+
+    fn reposition(&mut self, bound: Bound<&[u8]>) {
+        if self.cur_key.as_deref().map_or(true, |k| match bound {
+            Bound::Included(t) => k < t,
+            Bound::Excluded(t) => k <= t,
+            Bound::Unbounded => false,
+        }) {
+            let entry = self.map.lower_bound(bound);
+            match entry {
+                Some(e) => {
+                    let k = e.key().clone();
+                    if k.as_slice() < self.upper.as_slice() {
+                        self.cur_key = Some(k);
+                    } else {
+                        self.cur_key = None;
+                    }
+                }
+                None => self.cur_key = None,
+            }
+        }
+    }
+}
+
+impl ScanSource for LazyMemTableSource {
+    fn valid(&self) -> bool {
+        self.cur_key.is_some()
+    }
+
+    fn key(&self) -> Vec<u8> {
+        self.cur_key.clone().unwrap_or_default()
+    }
+
+    fn value(&self) -> Vec<u8> {
+        Vec::new()
+    }
+
+    fn advance(&mut self) {
+        if let Some(k) = &self.cur_key {
+            let k = k.clone();
+            self.reposition(Bound::Excluded(&k));
+        }
+    }
+
+    fn seek(&mut self, target: &[u8]) {
+        self.reposition(Bound::Included(target));
+    }
+
+    fn advance_to(&mut self, target: &[u8]) {
+        self.reposition(Bound::Included(target));
+    }
+
+    fn update_end(&mut self, end: &[u8]) {
+        self.upper = end.to_vec();
+        if let Some(ref k) = self.cur_key {
+            if k.as_slice() >= end {
+                self.cur_key = None;
+            }
+        }
+    }
+
+    fn skip_group(&mut self, group: &[u8]) {
+        // Skip all keys that start with `group`
+        while let Some(k) = &self.cur_key {
+            if k.len() >= group.len() && k[..group.len()] == *group {
+                let k = k.clone();
+                self.reposition(Bound::Excluded(&k));
+            } else {
+                break;
+            }
+        }
+    }
 }
 
 pub struct PageStoreIter {
@@ -542,15 +643,20 @@ impl Cursor for ReverseMergedInner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
-    fn mt_source(keys: Vec<&[u8]>) -> PageStoreIter {
-        let owned: Vec<Vec<u8>> = keys.into_iter().map(|k| k.to_vec()).collect();
-        PageStoreIter::new(owned, b"")
+    fn lazy_source(keys: Vec<&[u8]>) -> LazyMemTableSource {
+        let map: CfMap = Arc::new(
+            keys.into_iter()
+                .map(|k| (k.to_vec(), ()))
+                .collect::<SkipMap<Vec<u8>, ()>>(),
+        );
+        LazyMemTableSource::new(map, b"")
     }
 
     #[test]
     fn test_merge_single_source() {
-        let s1 = mt_source(vec![b"a", b"b", b"c"]);
+        let s1 = lazy_source(vec![b"a", b"b", b"c"]);
         let sources = vec![SourceKind::MemTable(s1)];
         let result = merge_collect(sources);
         assert_eq!(result.len(), 3);
@@ -560,8 +666,8 @@ mod tests {
 
     #[test]
     fn test_merge_two_sources() {
-        let s1 = mt_source(vec![b"a", b"c"]);
-        let s2 = mt_source(vec![b"b", b"d"]);
+        let s1 = lazy_source(vec![b"a", b"c"]);
+        let s2 = lazy_source(vec![b"b", b"d"]);
         let sources = vec![SourceKind::MemTable(s1), SourceKind::MemTable(s2)];
         let result = merge_collect(sources);
         assert_eq!(result.len(), 4);
@@ -571,8 +677,8 @@ mod tests {
 
     #[test]
     fn test_merge_overlapping_last_writer_wins() {
-        let s1 = mt_source(vec![b"a"]);
-        let s2 = mt_source(vec![b"a"]);
+        let s1 = lazy_source(vec![b"a"]);
+        let s2 = lazy_source(vec![b"a"]);
         let sources = vec![SourceKind::MemTable(s1), SourceKind::MemTable(s2)];
         let result = merge_collect(sources);
         assert_eq!(result.len(), 1);
@@ -588,7 +694,7 @@ mod tests {
 
     #[test]
     fn test_merged_inner_seek() {
-        let s1 = mt_source(vec![b"a", b"b", b"c", b"d"]);
+        let s1 = lazy_source(vec![b"a", b"b", b"c", b"d"]);
         let sources = vec![SourceKind::MemTable(s1)];
         let mut merged = MergedInner::new(sources, b"");
         assert!(merged.valid);
@@ -600,7 +706,7 @@ mod tests {
 
     #[test]
     fn test_merged_inner_skip_group() {
-        let s1 = mt_source(vec![b"aa1", b"aa2", b"aa3", b"bb1"]);
+        let s1 = lazy_source(vec![b"aa1", b"aa2", b"aa3", b"bb1"]);
         let sources = vec![SourceKind::MemTable(s1)];
         let mut merged = MergedInner::new(sources, b"");
         assert_eq!(merged.cur_key, Some(b"aa1".to_vec()));
@@ -657,7 +763,13 @@ mod tests {
         }
         all_keys.sort();
 
-        let s = PageStoreIter::new(all_keys, b"");
+        let map: CfMap = Arc::new(
+            all_keys
+                .into_iter()
+                .map(|k| (k, ()))
+                .collect::<SkipMap<Vec<u8>, ()>>(),
+        );
+        let s = LazyMemTableSource::new(map, b"");
         let sources = vec![SourceKind::MemTable(s)];
         let mut merged = MergedInner::new(sources, b"");
         assert!(merged.valid);

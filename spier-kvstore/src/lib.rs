@@ -62,8 +62,8 @@ impl KVState {
     }
 }
 
-fn load_memtable() -> Result<Box<dyn spier_storage_traits::memtable::MemTableEngine>, String> {
-    Ok(Box::new(MemTable::new(4)))
+fn load_memtable() -> Result<MemTable, String> {
+    Ok(MemTable::new(4))
 }
 
 fn make_transactor_config(config: &HashMap<String, String>) -> TransactorConfig {
