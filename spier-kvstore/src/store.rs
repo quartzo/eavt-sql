@@ -391,23 +391,15 @@ impl Transactor {
             total += pages_in_range * 700;
         }
 
-        // MemTable + flush_snap
+        // MemTable + flush_snap — count keys without materializing
         if start.is_empty() {
             total += (inner.mt_size as usize) / 40;
         } else {
             if let Some(ref snap) = inner.flush_snap {
-                let packed = inner
-                    .mt
-                    .scan_prefix(snap.clone(), cf_id as u32, start)
-                    .unwrap_or_default();
-                total += unpack_keys(&packed).len();
+                total += inner.mt.count_prefix(snap, cf_id as u32, start);
             }
             let live_snap = inner.mt.snapshot().unwrap();
-            let packed = inner
-                .mt
-                .scan_prefix(live_snap, cf_id as u32, start)
-                .unwrap_or_default();
-            total += unpack_keys(&packed).len();
+            total += inner.mt.count_prefix(&live_snap, cf_id as u32, start);
         }
 
         Ok(total)

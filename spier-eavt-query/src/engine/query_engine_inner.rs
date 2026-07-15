@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use spier_storage_traits::invalid_cursor_handle;
 use spier_transactor::keys::{self, BoundValue, EncodeMode};
@@ -15,11 +16,56 @@ fn cf_name_to_id() -> HashMap<String, usize> {
     spier_transactor::constants::cf_name_map()
 }
 
+/// TTL cache for cardinality estimates. Keyed by (cf_id, prefix_bytes).
+/// Entries expire after STATS_TTL. Prevents repeated MemTable scans during
+/// compile — estimates only feed join-variable ordering, never correctness,
+/// so short staleness is safe.
+pub(crate) struct StatsCache {
+    entries: RwLock<HashMap<(u32, Vec<u8>), (Instant, f64)>>,
+}
+
+const STATS_TTL: Duration = Duration::from_secs(30);
+const STATS_MAX_ENTRIES: usize = 512;
+
+impl StatsCache {
+    fn new() -> Self {
+        Self {
+            entries: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Returns cached estimate if fresh (< STATS_TTL old).
+    pub(crate) fn get(&self, key: &(u32, Vec<u8>)) -> Option<f64> {
+        let entries = self.entries.read().unwrap();
+        let (ts, val) = entries.get(key)?;
+        if ts.elapsed() < STATS_TTL {
+            Some(*val)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn put(&self, key: (u32, Vec<u8>), val: f64) {
+        let mut entries = self.entries.write().unwrap();
+        if entries.len() >= STATS_MAX_ENTRIES {
+            entries.clear();
+        }
+        entries.insert(key, (Instant::now(), val));
+    }
+
+    /// Invalidate all entries (called after flush/schema changes if needed).
+    #[allow(dead_code)]
+    fn invalidate(&self) {
+        self.entries.write().unwrap().clear();
+    }
+}
+
 pub struct QueryEngineInner {
     tx: Arc<TransactorState>,
     cf_map: HashMap<String, usize>,
     vt_cache: RwLock<HashMap<u32, Option<u32>>>,
     attr_id_cache: RwLock<HashMap<String, Option<u32>>>,
+    stats_cache: StatsCache,
     path: String,
 }
 
@@ -32,6 +78,7 @@ impl QueryEngineInner {
             cf_map: cf_name_to_id(),
             vt_cache: RwLock::new(HashMap::new()),
             attr_id_cache: RwLock::new(HashMap::new()),
+            stats_cache: StatsCache::new(),
             path,
         })
     }
@@ -100,6 +147,10 @@ impl QueryEngineInner {
 
     pub fn tx(&self) -> &dyn TransactorEngine {
         self.tx.as_ref()
+    }
+
+    pub(crate) fn stats_cache(&self) -> &StatsCache {
+        &self.stats_cache
     }
 
     fn cf_id(&self, cf: &str) -> usize {

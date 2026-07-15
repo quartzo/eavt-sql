@@ -123,6 +123,31 @@ impl MemTable {
                 .collect()
         }
     }
+
+    /// Count keys matching a prefix without materializing them (zero allocation).
+    /// Used by approximate_sizes for cardinality estimation.
+    pub fn count_prefix(
+        &self,
+        snap: &MemTableSnapshot,
+        cf: u32,
+        prefix: &[u8],
+    ) -> usize {
+        let cfs = match snap.data.downcast_ref::<CfSnapshots>() {
+            Some(c) => c,
+            None => return 0,
+        };
+        match cfs.get(cf as usize) {
+            Some(map) => {
+                if prefix.is_empty() {
+                    map.len()
+                } else {
+                    let upper = prefix_upper_bound(prefix);
+                    map.range(prefix.to_vec()..upper).count()
+                }
+            }
+            None => 0,
+        }
+    }
 }
 
 impl MemTableEngine for MemTable {

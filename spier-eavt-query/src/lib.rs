@@ -170,17 +170,26 @@ fn disassemble(program: &VMProgram) -> String {
 
 /// Local bridge: TransactorEngine → CompileStats. Keeps every other crate
 /// free of direct transactor references.
-struct TxStats<'a>(&'a dyn TransactorEngine);
+struct TxStats<'a> {
+    tx: &'a dyn TransactorEngine,
+    stats_cache: &'a engine::query_engine_inner::StatsCache,
+}
+
+impl<'a> TxStats<'a> {
+    fn new(tx: &'a dyn TransactorEngine, stats_cache: &'a engine::query_engine_inner::StatsCache) -> Self {
+        Self { tx, stats_cache }
+    }
+}
 
 impl<'a> CompileStats for TxStats<'a> {
     fn lookup_attr(&self, name: &str) -> Option<u32> {
-        TransactorEngine::lookup_attr(self.0, name).ok().flatten()
+        TransactorEngine::lookup_attr(self.tx, name).ok().flatten()
     }
 
     fn estimate_index_size(&self, index: &str, bound: &[u64]) -> f64 {
         use spier_transactor::keys;
         let cf = keys::cf_for_index(index);
-        let cf_id = keys::cf_name_to_id(cf);
+        let cf_id = keys::cf_name_to_id(cf) as u32;
         let idx_order = keys::index_order(index);
         let mut prefix = Vec::new();
         for (i, pos) in idx_order.iter().enumerate() {
@@ -194,6 +203,12 @@ impl<'a> CompileStats for TxStats<'a> {
                 prefix.extend_from_slice(&val.to_be_bytes());
             }
         }
+
+        let cache_key = (cf_id, prefix.clone());
+        if let Some(cached) = self.stats_cache.get(&cache_key) {
+            return cached;
+        }
+
         let end = if prefix.is_empty() {
             vec![0xFF; 64]
         } else {
@@ -201,19 +216,23 @@ impl<'a> CompileStats for TxStats<'a> {
             e.extend_from_slice(&[0xFF; 32]);
             e
         };
-        TransactorEngine::approximate_sizes(self.0, cf_id, &prefix, &end).unwrap_or(0) as f64
+        let val = TransactorEngine::approximate_sizes(self.tx, cf_id, &prefix, &end)
+            .unwrap_or(0) as f64;
+
+        self.stats_cache.put(cache_key, val);
+        val
     }
 
     fn partition_id_for(&self, name: &str) -> Option<u64> {
-        TransactorEngine::partition_id_for(self.0, name)
+        TransactorEngine::partition_id_for(self.tx, name)
             .ok()
             .flatten()
     }
 
     fn is_ref_attr(&self, name: &str) -> bool {
         use spier_transactor::resolver_consts::DB_TYPE_REF;
-        if let Some(aid) = TransactorEngine::lookup_attr(self.0, name).ok().flatten() {
-            TransactorEngine::value_type_for(self.0, aid)
+        if let Some(aid) = TransactorEngine::lookup_attr(self.tx, name).ok().flatten() {
+            TransactorEngine::value_type_for(self.tx, aid)
                 .ok()
                 .flatten()
                 .map(|vt| spier_transactor::value_type_to_eid(vt) == DB_TYPE_REF)
@@ -238,7 +257,7 @@ fn resolve_and_stats(ir: DatalogIR, tx_stats: &TxStats<'_>) -> Result<DatalogNum
 fn do_compile(
     frontend: &SqlFrontend,
     compiler: &Compiler,
-    tx: &dyn TransactorEngine,
+    engine: &QueryEngineInner,
     sql: &str,
     sql_params: &[u8],
 ) -> Result<(CompileResultSt, Option<DatalogIR>), String> {
@@ -247,7 +266,7 @@ fn do_compile(
     match &stmt_st.stmt {
         RustStmt::Select(_) | RustStmt::DatalogSelect(_) => {
             let ir = SqlFrontendEngine::build_datalog(frontend, stmt_st, sql_params)?;
-            let tx_stats = TxStats(tx);
+            let tx_stats = TxStats::new(engine.tx(), engine.stats_cache());
             let num_ir = resolve_and_stats(ir.ir, &tx_stats)?;
             let result = compiler.compile_select(DatalogNumIRSt {
                 num_ir: num_ir.clone(),
@@ -265,7 +284,7 @@ fn do_compile(
             if needs_scan {
                 let stmt_for_compiler = stmt_st.clone();
                 let ir = SqlFrontendEngine::build_datalog(frontend, stmt_st, sql_params)?;
-                let tx_stats = TxStats(tx);
+                let tx_stats = TxStats::new(engine.tx(), engine.stats_cache());
                 let num_ir = resolve_and_stats(ir.ir, &tx_stats)?;
                 let result = compiler.compile_dml_scan(
                     stmt_for_compiler,
@@ -299,7 +318,7 @@ impl QueryEngine for QueryState {
         let frontend = inner.frontend.as_ref().ok_or("frontend not loaded")?;
         let compiler = inner.compiler.as_ref().ok_or("compiler not loaded")?;
 
-        let (result, _) = do_compile(frontend, compiler, engine.tx(), sql, sql_params)?;
+        let (result, _) = do_compile(frontend, compiler, engine.as_ref(), sql, sql_params)?;
 
         Ok(ProgramHandle {
             program: Arc::new(result.program),
@@ -404,7 +423,7 @@ impl QueryEngine for QueryState {
         let frontend = inner.frontend.as_ref().ok_or("frontend not loaded")?;
         let compiler = inner.compiler.as_ref().ok_or("compiler not loaded")?;
 
-        let (result, _) = do_compile(frontend, compiler, engine.tx(), sql, sql_params)?;
+        let (result, _) = do_compile(frontend, compiler, engine.as_ref(), sql, sql_params)?;
 
         let mut out = String::new();
         for t in &result.traces {
@@ -420,7 +439,7 @@ impl QueryEngine for QueryState {
         let frontend = inner.frontend.as_ref().ok_or("frontend not loaded")?;
         let compiler = inner.compiler.as_ref().ok_or("compiler not loaded")?;
 
-        let (result, num_ir) = do_compile(frontend, compiler, engine.tx(), sql, sql_params)?;
+        let (result, num_ir) = do_compile(frontend, compiler, engine.as_ref(), sql, sql_params)?;
 
         let mut out = String::new();
         if let Some(ir) = num_ir {
@@ -438,7 +457,7 @@ impl QueryEngine for QueryState {
         let frontend = inner.frontend.as_ref().ok_or("frontend not loaded")?;
         let compiler = inner.compiler.as_ref().ok_or("compiler not loaded")?;
 
-        let (result, _) = do_compile(frontend, compiler, engine.tx(), sql, sql_params)?;
+        let (result, _) = do_compile(frontend, compiler, engine.as_ref(), sql, sql_params)?;
         Ok(result.program.to_json())
     }
 
