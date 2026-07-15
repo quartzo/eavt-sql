@@ -27,6 +27,26 @@ pub enum ValueType {
     Blob,
 }
 
+/// Maps a semantic `ValueType` to the corresponding bootstrap type entity id
+/// (e.g. `ValueType::Ref` -> `DB_TYPE_REF`).
+pub fn value_type_to_eid(vt: ValueType) -> u32 {
+    use resolver_consts::{
+        DB_TYPE_BLOB, DB_TYPE_BOOLEAN, DB_TYPE_BYTES, DB_TYPE_FLOAT, DB_TYPE_INSTANT,
+        DB_TYPE_KEYWORD, DB_TYPE_LONG, DB_TYPE_REF, DB_TYPE_STRING,
+    };
+    match vt {
+        ValueType::String => DB_TYPE_STRING,
+        ValueType::Ref => DB_TYPE_REF,
+        ValueType::Long => DB_TYPE_LONG,
+        ValueType::Keyword => DB_TYPE_KEYWORD,
+        ValueType::Boolean => DB_TYPE_BOOLEAN,
+        ValueType::Instant => DB_TYPE_INSTANT,
+        ValueType::Bytes => DB_TYPE_BYTES,
+        ValueType::Float => DB_TYPE_FLOAT,
+        ValueType::Blob => DB_TYPE_BLOB,
+    }
+}
+
 pub trait TransactorEngine: Send + Sync {
     // KV methods
     fn put(&self, cf: u32, key: &[u8]) -> Result<(), String>;
@@ -96,6 +116,7 @@ pub trait TransactorEngine: Send + Sync {
     fn lookup_attr(&self, name: &str) -> Result<Option<u32>, String>;
     fn is_declared(&self, aid: u32) -> Result<bool, String>;
     fn attr_name(&self, aid: u32) -> Result<String, String>;
+    fn attr_name_opt(&self, aid: u32) -> Result<Option<String>, String>;
     fn value_type_for(&self, aid: u32) -> Result<Option<ValueType>, String>;
     fn is_many(&self, aid: u32) -> Result<bool, String>;
     fn is_unique(&self, aid: u32) -> Result<bool, String>;
@@ -119,6 +140,7 @@ impl TransactorState {
         let eavt = EavtEngine::new(kv);
         eavt.recover_journal();
         eavt.bootstrap_resolver();
+        eavt.persist_bootstrap_schema();
         Ok(TransactorState { eavt })
     }
 }
@@ -256,6 +278,7 @@ impl TransactorEngine for TransactorState {
         t: u64,
         as_of_us: u64,
     ) -> Result<(), String> {
+        let t = if t == u64::MAX { None } else { Some(t) };
         let as_of = if as_of_us == u64::MAX {
             None
         } else {
@@ -300,7 +323,7 @@ impl TransactorEngine for TransactorState {
         };
         Ok(self
             .eavt
-            .declare_attr_with_t(name, value_type as u32, many, ct))
+            .declare_attr_with_t(name, value_type_to_eid(value_type), many, ct))
     }
 
     fn eavt_declare_attr_from_sql(
@@ -344,6 +367,10 @@ impl TransactorEngine for TransactorState {
 
     fn attr_name(&self, aid: u32) -> Result<String, String> {
         Ok(self.eavt.resolver.lock().unwrap().attr_name(aid))
+    }
+
+    fn attr_name_opt(&self, aid: u32) -> Result<Option<String>, String> {
+        Ok(self.eavt.resolver.lock().unwrap().attr_name_opt(aid))
     }
 
     fn value_type_for(&self, aid: u32) -> Result<Option<ValueType>, String> {

@@ -11,7 +11,7 @@ pub use crate::resolver_consts::{
 
 const FIRST_CUSTOM_PARTITION: u64 = 64;
 
-const BOOTSTRAP_SCHEMA: &[(&str, u32)] = &[
+pub(crate) const BOOTSTRAP_SCHEMA: &[(&str, u32)] = &[
     ("db.ident", 1),
     ("db.cardinality", 2),
     ("db.valueType", 3),
@@ -165,6 +165,10 @@ impl Resolver {
             .get(&aid)
             .cloned()
             .unwrap_or_else(|| aid.to_string())
+    }
+
+    pub fn attr_name_opt(&self, aid: u32) -> Option<String> {
+        self.attrs_rev.get(&aid).cloned()
     }
 
     pub fn load_attrs(&mut self, store_items: impl Iterator<Item = (Vec<u8>, Vec<u8>)>) {

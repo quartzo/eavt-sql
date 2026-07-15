@@ -26,12 +26,14 @@ dev = [
     "spier-sql-parse-py",
     "spier-transactor-py",
     "spier-eavt-query-py",
+    "spier-kvstore-py",
 ]
 
 [tool.uv.sources]
 spier-sql-parse-py = { path = "spier-sql-parse-py" }
 spier-transactor-py = { path = "spier-transactor-py" }
 spier-eavt-query-py = { path = "spier-eavt-query-py" }
+spier-kvstore-py = { path = "spier-kvstore-py" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "spier-sql-parse/tests"]

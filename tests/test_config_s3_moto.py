@@ -37,12 +37,12 @@ def _s3_config(endpoint: str, path: str) -> dict:
     }
 
 
-import spier_transactor_py
+import spier_kvstore_py
 
 
 class TestS3Backend:
     def test_s3_put_get(self, s3_endpoint, tmp_path):
-        handle = spier_transactor_py.Engine(_s3_config(s3_endpoint, str(tmp_path)))
+        handle = spier_kvstore_py.Engine(_s3_config(s3_endpoint, str(tmp_path)))
 
         handle.put(**{"cf": 0, "key": b"s3key1"})
         assert handle.get(**{"cf": 0, "key": b"s3key1"}) is True
@@ -50,7 +50,7 @@ class TestS3Backend:
         handle.close()
 
     def test_s3_scan_and_flush(self, s3_endpoint, tmp_path):
-        handle = spier_transactor_py.Engine(_s3_config(s3_endpoint, str(tmp_path)))
+        handle = spier_kvstore_py.Engine(_s3_config(s3_endpoint, str(tmp_path)))
 
         for i in range(5):
             handle.put(**{"cf": 0, "key": f"item{i:03d}".encode()})
@@ -69,7 +69,7 @@ class TestS3Backend:
         handle.close()
 
     def test_s3_cursor(self, s3_endpoint, tmp_path):
-        handle = spier_transactor_py.Engine(_s3_config(s3_endpoint, str(tmp_path)))
+        handle = spier_kvstore_py.Engine(_s3_config(s3_endpoint, str(tmp_path)))
 
         for i in range(3):
             handle.put(**{"cf": 1, "key": f"cur{i}".encode()})

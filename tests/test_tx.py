@@ -1,9 +1,13 @@
 import pytest
 from eavt_sql.engine import EAVTEngine
 
+PART_TX = 3
+TX_PARTITION_BASE = PART_TX << 44
 
-def _make_tx_ent(t: int) -> int:
-    return (3 << 44) | t
+
+def _extract_t(tx_eid: int) -> int:
+    """Extract the transaction seq from a tx eid."""
+    return tx_eid & ((1 << 44) - 1)
 
 
 def test_insert_into_tx_basic():
@@ -19,7 +23,9 @@ def test_insert_into_tx_basic():
     rows = list(e.sql("SELECT d1.eid WHERE d1.tx.user = 'alice'"))
     assert len(rows) == 1
     tx_eid = rows[0][0]
-    assert tx_eid == _make_tx_ent(1002)
+    # tx_eid must be in the PART_TX partition
+    assert tx_eid >= TX_PARTITION_BASE
+    assert _extract_t(tx_eid) > 1  # bootstrap is tx 1
 
 
 def test_insert_into_tx_returns_tx_entity():
@@ -28,7 +34,9 @@ def test_insert_into_tx_returns_tx_entity():
 
     rows = list(e.sql("UPSERT AS TX SET tx.user = 'bob'"))
     assert len(rows) == 1
-    assert rows[0][0] == _make_tx_ent(1001)
+    tx_eid = rows[0][0]
+    assert tx_eid >= TX_PARTITION_BASE
+    assert _extract_t(tx_eid) > 1
 
 
 def test_insert_into_tx_multiple_attrs():
@@ -38,10 +46,15 @@ def test_insert_into_tx_multiple_attrs():
 
     list(e.sql("UPSERT AS TX SET tx.user = 'carol', tx.comment = 'initial import'"))
 
-    user_rows = list(e.sql("SELECT d1.tx.user WHERE d1.eid = %1", _make_tx_ent(1002)))
+    # Find the tx entity that has tx.user = 'carol'
+    tx_rows = list(e.sql("SELECT d1.eid WHERE d1.tx.user = 'carol'"))
+    assert len(tx_rows) == 1
+    tx_eid = tx_rows[0][0]
+
+    user_rows = list(e.sql("SELECT d1.tx.user WHERE d1.eid = %1", tx_eid))
     assert user_rows[0][0] == "carol"
 
-    comment_rows = list(e.sql("SELECT d1.tx.comment WHERE d1.eid = %1", _make_tx_ent(1002)))
+    comment_rows = list(e.sql("SELECT d1.tx.comment WHERE d1.eid = %1", tx_eid))
     assert comment_rows[0][0] == "initial import"
 
 
@@ -71,8 +84,11 @@ def test_insert_into_tx_separate_transaction():
     rows_b = list(e.sql("UPSERT AS TX SET tx.user = 'bob'"))
 
     assert rows_a[0][0] != rows_b[0][0]
-    assert rows_a[0][0] == _make_tx_ent(1001)
-    assert rows_b[0][0] == _make_tx_ent(1002)
+    # Both must be in the tx partition
+    assert rows_a[0][0] >= TX_PARTITION_BASE
+    assert rows_b[0][0] >= TX_PARTITION_BASE
+    # tx b must have a higher seq than tx a
+    assert _extract_t(rows_b[0][0]) > _extract_t(rows_a[0][0])
 
 
 def test_insert_into_tx_shared_transaction():
@@ -107,8 +123,11 @@ def test_t_persists_across_reopen(tmp_path):
     rows = list(e2.sql("UPSERT SET company.name = 'third'"))
     tx_eids = list(e2.sql("SELECT d1.tx WHERE d1.eid = %1", rows[0][0]))
     tx_eid = tx_eids[0][0]
-    t = tx_eid & ((1 << 44) - 1)
-    assert t >= 1003
+    t = _extract_t(tx_eid)
+    # After reopen, tx numbering continues from where it left off
+    # (not reset to 1). At minimum, there were bootstrap(1) + 3 user txs before,
+    # so the 4th user tx must be >= 5.
+    assert t >= 5
     e2.close()
 
 

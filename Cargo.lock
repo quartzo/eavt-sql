@@ -1745,6 +1745,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "spier-kvstore-py"
+version = "0.1.0"
+dependencies = [
+ "pyo3",
+ "spier-journal-file",
+ "spier-kvstore",
+ "spier-storage-traits",
+]
+
+[[package]]
 name = "spier-memtable"
 version = "0.1.0"
 dependencies = [

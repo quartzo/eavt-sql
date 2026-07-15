@@ -62,8 +62,8 @@ class EAVTEngine:
         if as_of is None:
             return U64_MAX
         if isinstance(as_of, int):
-            if as_of > (1 << 44):
-                return as_of & ((1 << 44) - 1)
+            # tx_eids have partition bits set (>= 1 << 44); pass through as-is.
+            # Small integers are treated as raw tx seq or micros timestamp.
             return as_of
         if isinstance(as_of, str):
             dt = datetime.fromisoformat(as_of)
@@ -186,6 +186,8 @@ class EAVTEngine:
             values = decode_values(result_bytes[4:])
             for i in range(0, len(values), 5):
                 e, _a, attr_name, v, t = values[i : i + 5]
+                if e < 100:
+                    continue  # skip bootstrap entities
                 if isinstance(v, bytes):
                     v_json: Any = list(v)
                 else:

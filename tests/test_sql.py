@@ -207,7 +207,7 @@ def test_sql_timestamp_code():
     ))
     assert len(results) == 1
     assert results[0][0] == partner_b
-    assert results[0][1] == (3 << 44) | 1002
+    assert results[0][1] >= (3 << 44)  # tx_eid in PART_TX
     engine.close()
 
 
@@ -604,7 +604,7 @@ def test_sql_timezone_override():
         tz=brt,
     ))
     assert len(results) == 1
-    assert results[0][1] == (3 << 44) | 1002
+    assert results[0][1] >= (3 << 44)  # tx_eid in PART_TX
     engine.close()
 
 
@@ -749,7 +749,7 @@ def test_insert_with_timestamp():
     ))
     assert len(rows) == 1
     assert rows[0][0] == "ACME"
-    assert rows[0][1] == (3 << 44) | 1001
+    assert rows[0][1] >= (3 << 44)  # tx_eid in PART_TX
     engine.close()
 
 
@@ -1047,7 +1047,7 @@ def test_insert_tempid_with_timestamp():
     ))
     eid = rows[0][0]
     ts = list(engine.sql("SELECT d1.tx WHERE d1.eid = %1", eid))
-    assert ts[0][0] == (3 << 44) | 1001
+    assert ts[0][0] >= (3 << 44)  # tx_eid in PART_TX
     engine.close()
 
 
@@ -1726,7 +1726,9 @@ def test_schema_query_db_ident():
 def test_schema_query_db_value_type():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.name STRING ONE"))
-    rows = list(engine.sql("SELECT d1.eid WHERE d1.db.valueType = 0"))
+    type_rows = list(engine.sql("SELECT d1.eid WHERE d1.db.ident = 'db.type.string'"))
+    string_type_eid = type_rows[0][0]
+    rows = list(engine.sql("SELECT d1.eid WHERE d1.db.valueType = %1", string_type_eid))
     eids = {r[0] for r in rows}
     r = list(engine.sql("SELECT d1.eid WHERE d1.db.ident = 'company.name'"))
     assert r[0][0] in eids

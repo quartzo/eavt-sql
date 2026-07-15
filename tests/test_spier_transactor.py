@@ -4,20 +4,20 @@ import struct
 
 import pytest
 
-import spier_transactor_py
+import spier_kvstore_py
 from helpers import unpack_keys
 
 
 @pytest.fixture
 def kv_instance(tmp_path):
-    handle = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
+    handle = spier_kvstore_py.Engine({"backend": "file", "path": str(tmp_path)})
     yield handle
     handle.close()
 
 
 class TestKVSchemaReflection:
     def test_typed_methods_exist(self):
-        cls = spier_transactor_py.Engine
+        cls = spier_kvstore_py.Engine
         for name in (
             "put", "get", "scan", "flush", "close", "journal_put",
             "journal_scan", "items", "batch_write", "path",
@@ -109,13 +109,13 @@ class TestKVClose:
 class TestKVStorage:
     def test_creates_directories(self, tmp_path):
         data_dir = tmp_path / "deep"
-        handle = spier_transactor_py.Engine({"backend": "file", "path": str(data_dir)})
+        handle = spier_kvstore_py.Engine({"backend": "file", "path": str(data_dir)})
         import os
         assert os.path.isdir(str(data_dir / "blobs"))
         handle.close()
 
     def test_empty_config_defaults_to_memory(self):
-        handle = spier_transactor_py.Engine({})
+        handle = spier_kvstore_py.Engine({})
         handle.put(**{"cf": 0, "key": b"k"})
         assert handle.get(**{"cf": 0, "key": b"k"}) is True
         handle.close()

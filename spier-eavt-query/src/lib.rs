@@ -216,7 +216,7 @@ impl<'a> CompileStats for TxStats<'a> {
             TransactorEngine::value_type_for(self.0, aid)
                 .ok()
                 .flatten()
-                .map(|vt| vt as u32 == DB_TYPE_REF)
+                .map(|vt| spier_transactor::value_type_to_eid(vt) == DB_TYPE_REF)
                 .unwrap_or(false)
         } else {
             false
@@ -446,21 +446,91 @@ impl QueryEngine for QueryState {
         let inner = self.inner.read().unwrap();
         let engine = inner.engine.as_ref().ok_or("engine not open")?;
 
-        let as_of_opt = if as_of_us == u64::MAX {
+        let as_of_tx = if as_of_us == u64::MAX {
             None
         } else {
-            Some(as_of_us)
+            engine.tx().resolve_as_of(as_of_us)?
         };
 
-        let datoms = engine.collect_active_deduped("eavt", b"", as_of_opt);
+        // Read raw EAVT keys and decode values using the attribute's own value type,
+        // so Ref/Boolean/Instant/etc. are decoded correctly instead of as raw Int64 bits.
+        let eavt_keys = engine.tx().scan(0, b"").unwrap_or_default();
+        let mut pos = 0;
+        let mut all: Vec<spier_transactor::keys::RawDatom> = Vec::new();
+        while pos + 4 <= eavt_keys.len() {
+            let klen = u32::from_be_bytes([
+                eavt_keys[pos],
+                eavt_keys[pos + 1],
+                eavt_keys[pos + 2],
+                eavt_keys[pos + 3],
+            ]) as usize;
+            pos += 4;
+            if pos + klen > eavt_keys.len() {
+                break;
+            }
+            let key = &eavt_keys[pos..pos + klen];
+            pos += klen;
 
-        let mut values: Vec<Value> = Vec::with_capacity(datoms.len() * 5);
-        for d in &datoms {
-            let attr_name = engine.tx().attr_name(d.a)?;
+            let raw = spier_transactor::keys::unpack_key_with_vt("eavt", key, |aid| {
+                engine
+                    .tx()
+                    .value_type_for(aid)
+                    .ok()
+                    .flatten()
+                    .map(spier_transactor::value_type_to_eid)
+            });
+            all.push(raw);
+        }
+
+        // Keep only active (non-retracted) datoms, applying as-of if requested.
+        // Group by (e, a, v) and take the latest t.
+        use std::collections::HashMap;
+        let mut groups: HashMap<(u64, u32, Value), spier_transactor::keys::RawDatom> =
+            HashMap::new();
+        for raw in all {
+            if let Some(as_of) = as_of_tx {
+                if raw.t > as_of {
+                    continue;
+                }
+            }
+            let group_key = (raw.e, raw.a, raw.v.clone());
+            match groups.get(&group_key) {
+                Some(existing) if existing.t > raw.t => {}
+                _ => {
+                    groups.insert(group_key, raw);
+                }
+            }
+        }
+
+        let mut active: Vec<&spier_transactor::keys::RawDatom> =
+            groups.values().filter(|d| !d.retracted).collect();
+        active.sort_by(|a, b| a.e.cmp(&b.e).then_with(|| a.a.cmp(&b.a)).then_with(|| format!("{:?}", a.v).cmp(&format!("{:?}", b.v))));
+
+        let mut values: Vec<Value> = Vec::with_capacity(active.len() * 5);
+        for d in active {
+            let tx = engine.tx();
+            let attr_name = tx.attr_name(d.a)?;
+
+            // Decorar refs cujo alvo seja uma entidade de schema (PART_DB) com
+            // seu db.ident quando disponível no Resolver, exibindo "name(eid)".
+            // Refs a partições de usuário/tx permanecem como número puro.
+            let v_out = match (&d.v, tx.value_type_for(d.a)?) {
+                (Value::Int64(eid), Some(ValueType::Ref))
+                    if spier_transactor::resolver_consts::partition_of(*eid as u64)
+                        == spier_transactor::resolver::PART_DB =>
+                {
+                    match tx.attr_name_opt(*eid as u32)? {
+                        Some(name) => Value::Text(format!("{}({})", name, eid)),
+                        None => d.v.clone(),
+                    }
+                }
+                _ => d.v.clone(),
+            };
+
             values.push(Value::Int64(d.e as i64));
             values.push(Value::Int64(d.a as i64));
             values.push(Value::Text(attr_name.into()));
-            values.push(d.v.clone());
+            values.push(v_out);
             values.push(Value::Int64(d.t as i64));
         }
 

@@ -6,13 +6,24 @@ import struct
 import pytest
 
 import spier_transactor_py
-from helpers import unpack_keys
+from eavt_sql.engine import EAVTEngine
 
 U64_MAX = 0xFFFFFFFFFFFFFFFF
 
 
-def _scan(h, prefix):
-    return unpack_keys(bytes(h.scan(**{"cf": 0, "prefix": prefix})))
+def _scan_via_sql(path, eid, handle=None):
+    """Open a Python EAVTEngine on the same path and query the entity's datoms.
+    If handle is provided and open, flush it first so uncommitted data is visible."""
+    if handle is not None:
+        try:
+            handle.flush()
+        except Exception:
+            pass  # handle may already be closed
+    e = EAVTEngine(path)
+    try:
+        return list(e.sql("SELECT d1.attr, d1.val WHERE d1.eid = %1", eid))
+    finally:
+        e.close()
 
 
 @pytest.fixture
@@ -21,10 +32,6 @@ def handle(tmp_path):
     yield h
     h.close()
 
-
-# ---------------------------------------------------------------------------
-# Typed client surface — verify EAVT methods are present on the generated client
-# ---------------------------------------------------------------------------
 
 class TestEavtSchemaReflection:
     def test_eavt_methods_exist(self):
@@ -300,9 +307,9 @@ class TestEavtPartitions:
 # ---------------------------------------------------------------------------
 
 class TestEavtSave:
-    def test_save_text_value(self, handle):
+    def test_save_text_value(self, handle, tmp_path):
         h = handle
-        aid = h.eavt_declare_attr(**{
+        h.eavt_declare_attr(**{
             "name": "company.name", "value_type": "String",
             "many": False, "current_t": U64_MAX,
         })
@@ -312,10 +319,10 @@ class TestEavtSave:
             "v": "Acme Inc",
             "t": U64_MAX, "as_of_us": U64_MAX,
         })
-        keys = _scan(h, b"")
-        assert len(keys) > 0
+        rows = _scan_via_sql(str(tmp_path), eid, h)
+        assert len(rows) > 0
 
-    def test_save_long_value(self, handle):
+    def test_save_long_value(self, handle, tmp_path):
         h = handle
         h.eavt_declare_attr(**{
             "name": "person.age", "value_type": "Long",
@@ -327,10 +334,10 @@ class TestEavtSave:
             "v": 42,
             "t": U64_MAX, "as_of_us": U64_MAX,
         })
-        keys = _scan(h, b"")
-        assert len(keys) > 0
+        rows = _scan_via_sql(str(tmp_path), eid, h)
+        assert len(rows) > 0
 
-    def test_save_boolean_value(self, handle):
+    def test_save_boolean_value(self, handle, tmp_path):
         h = handle
         h.eavt_declare_attr(**{
             "name": "flag.active", "value_type": "Boolean",
@@ -342,10 +349,10 @@ class TestEavtSave:
             "v": True,
             "t": U64_MAX, "as_of_us": U64_MAX,
         })
-        keys = _scan(h, b"")
-        assert len(keys) > 0
+        rows = _scan_via_sql(str(tmp_path), eid, h)
+        assert len(rows) > 0
 
-    def test_save_float_value(self, handle):
+    def test_save_float_value(self, handle, tmp_path):
         h = handle
         h.eavt_declare_attr(**{
             "name": "sensor.temp", "value_type": "Float",
@@ -357,10 +364,10 @@ class TestEavtSave:
             "v": 23.5,
             "t": U64_MAX, "as_of_us": U64_MAX,
         })
-        keys = _scan(h, b"")
-        assert len(keys) > 0
+        rows = _scan_via_sql(str(tmp_path), eid, h)
+        assert len(rows) > 0
 
-    def test_save_bytes_value(self, handle):
+    def test_save_bytes_value(self, handle, tmp_path):
         h = handle
         h.eavt_declare_attr(**{
             "name": "file.data", "value_type": "Bytes",
@@ -372,58 +379,59 @@ class TestEavtSave:
             "v": b"\x00\x01\x02\xff",
             "t": U64_MAX, "as_of_us": U64_MAX,
         })
-        keys = _scan(h, b"")
-        assert len(keys) > 0
+        rows = _scan_via_sql(str(tmp_path), eid, h)
+        assert len(rows) > 0
 
-    def test_save_cardinality_one_overwrites(self, handle):
+    def test_save_cardinality_one_overwrites(self, handle, tmp_path):
         h = handle
         h.eavt_declare_attr(**{
             "name": "company.name", "value_type": "String",
             "many": False, "current_t": U64_MAX,
         })
         eid = h.allocate_entity_id()
-        eid_prefix = struct.pack(">Q", eid)
         h.eavt_save(**{
             "e_id": eid, "attr": "company.name",
             "v": "Old Name",
             "t": U64_MAX, "as_of_us": U64_MAX,
         })
-        keys_before = _scan(h, eid_prefix)
-        assert len(keys_before) == 1
+        rows_before = _scan_via_sql(str(tmp_path), eid, h)
+        assert any(r[1] == "Old Name" for r in rows_before)
 
         h.eavt_save(**{
             "e_id": eid, "attr": "company.name",
             "v": "New Name",
             "t": U64_MAX, "as_of_us": U64_MAX,
         })
-        keys_after = _scan(h, eid_prefix)
-        # cardinality one: old value retracted + new value asserted
-        assert len(keys_after) == 3
+        rows_after = _scan_via_sql(str(tmp_path), eid, h)
+        # cardinality one: only "New Name" should be visible
+        assert any(r[1] == "New Name" for r in rows_after)
+        assert not any(r[1] == "Old Name" for r in rows_after)
 
-    def test_save_cardinality_many_adds(self, handle):
+    def test_save_cardinality_many_adds(self, handle, tmp_path):
         h = handle
         h.eavt_declare_attr(**{
             "name": "company.tags", "value_type": "String",
             "many": True, "current_t": U64_MAX,
         })
         eid = h.allocate_entity_id()
-        eid_prefix = struct.pack(">Q", eid)
         h.eavt_save(**{
             "e_id": eid, "attr": "company.tags",
             "v": "tag1",
             "t": U64_MAX, "as_of_us": U64_MAX,
         })
-        keys1 = _scan(h, eid_prefix)
-        assert len(keys1) == 1
+        rows1 = _scan_via_sql(str(tmp_path), eid, h)
+        assert any(r[1] == "tag1" for r in rows1)
 
         h.eavt_save(**{
             "e_id": eid, "attr": "company.tags",
             "v": "tag2",
             "t": U64_MAX, "as_of_us": U64_MAX,
         })
-        keys2 = _scan(h, eid_prefix)
-        # cardinality many: both values kept, no retraction
-        assert len(keys2) == 2
+        rows2 = _scan_via_sql(str(tmp_path), eid, h)
+        # cardinality many: both values visible
+        values = {r[1] for r in rows2}
+        assert "tag1" in values
+        assert "tag2" in values
 
 
 # ---------------------------------------------------------------------------
@@ -431,14 +439,13 @@ class TestEavtSave:
 # ---------------------------------------------------------------------------
 
 class TestEavtRetract:
-    def test_retract_removes_datom(self, handle):
+    def test_retract_removes_datom(self, handle, tmp_path):
         h = handle
         h.eavt_declare_attr(**{
             "name": "company.tags", "value_type": "String",
             "many": True, "current_t": U64_MAX,
         })
         eid = h.allocate_entity_id()
-        eid_prefix = struct.pack(">Q", eid)
         h.eavt_save(**{
             "e_id": eid, "attr": "company.tags",
             "v": "tag1",
@@ -449,17 +456,20 @@ class TestEavtRetract:
             "v": "tag2",
             "t": U64_MAX, "as_of_us": U64_MAX,
         })
-        keys_before = _scan(h, eid_prefix)
-        assert len(keys_before) == 2
+        rows_before = _scan_via_sql(str(tmp_path), eid, h)
+        values_before = {r[1] for r in rows_before}
+        assert "tag1" in values_before
+        assert "tag2" in values_before
 
         h.eavt_retract(**{
             "e_id": eid, "attr": "company.tags",
             "v": "tag1",
             "current_t": U64_MAX, "as_of_us": U64_MAX,
         })
-        keys_after = _scan(h, eid_prefix)
-        # retract adds a retraction entry (2 assertions + 1 retraction)
-        assert len(keys_after) == 3
+        rows_after = _scan_via_sql(str(tmp_path), eid, h)
+        values_after = {r[1] for r in rows_after}
+        assert "tag1" not in values_after
+        assert "tag2" in values_after
 
 
 # ---------------------------------------------------------------------------
@@ -526,7 +536,6 @@ class TestEavtPersistence:
             "many": False, "current_t": U64_MAX,
         })
         eid = h.allocate_entity_id()
-        eid_prefix = struct.pack(">Q", eid)
         h.eavt_save(**{
             "e_id": eid, "attr": "company.name",
             "v": "Acme",
@@ -535,7 +544,6 @@ class TestEavtPersistence:
         h.flush()
         h.close()
 
-        h2 = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
-        keys = _scan(h2, eid_prefix)
-        assert len(keys) == 1
-        h2.close()
+        rows = _scan_via_sql(str(tmp_path), eid, h)
+        assert len(rows) == 1
+        assert rows[0][1] == "Acme"

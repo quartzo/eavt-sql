@@ -245,6 +245,94 @@ impl EavtEngine {
         resolver.init_ent_id_from_eavt(eavt_pairs, vec![]);
     }
 
+    pub fn persist_bootstrap_schema(&self) {
+        let resolver = self.resolver.lock().unwrap();
+
+        // Detect whether bootstrap schema has already been persisted by looking
+        // for the db.ident attribute's self-description.
+        let db_ident_self_prefix =
+            build_ea_prefix(resolver::DB_IDENT_AID as u64, resolver::DB_IDENT_AID);
+        let active = self.collect_active_raw("eavt", &db_ident_self_prefix, None, &resolver);
+        if active.iter().any(|d| match &d.v {
+            Value::Text(s) => s.as_str() == "db.ident",
+            _ => false,
+        }) {
+            return;
+        }
+        drop(resolver);
+
+        let t = self.allocate_t_and_write_tx();
+        let resolver = self.resolver.lock().unwrap();
+
+        fn bootstrap_meta(name: &str) -> (u32, u32, Option<u32>) {
+            use crate::resolver_consts as r;
+            let vt = match name {
+                "db.ident" | "db.part/id" => r::DB_TYPE_STRING,
+                "db.txInstant" => r::DB_TYPE_INSTANT,
+                "db.isComponent" | "db.index" | "db.fulltext" | "db.noHistory" => {
+                    r::DB_TYPE_BOOLEAN
+                }
+                _ => r::DB_TYPE_REF,
+            };
+            let card = r::DB_CARDINALITY_ONE;
+            let unique = if name == "db.unique.value" {
+                Some(r::DB_UNIQUE_VALUE)
+            } else if name == "db.unique.identity" {
+                Some(r::DB_UNIQUE_IDENTITY)
+            } else {
+                None
+            };
+            (vt, card, unique)
+        }
+
+        for &(name, aid) in resolver::BOOTSTRAP_SCHEMA {
+            let (vt, card, unique) = bootstrap_meta(name);
+            let _mode = keys::encode_mode_for(resolver.value_type_for(aid));
+
+            let ident_v = Value::text(name);
+            self.put_schema_entries(keys::build_entries(
+                aid as u64,
+                resolver::DB_IDENT_AID,
+                &ident_v,
+                t,
+                false,
+                keys::EncodeMode::Variable,
+            ));
+
+            let vt_v = Value::entity_id(vt as u64);
+            self.put_schema_entries(keys::build_entries(
+                aid as u64,
+                resolver::DB_VALUE_TYPE_AID,
+                &vt_v,
+                t,
+                false,
+                keys::EncodeMode::Ref,
+            ));
+
+            let card_v = Value::entity_id(card as u64);
+            self.put_schema_entries(keys::build_entries(
+                aid as u64,
+                resolver::DB_CARDINALITY_AID,
+                &card_v,
+                t,
+                false,
+                keys::EncodeMode::Ref,
+            ));
+
+            if let Some(unique_id) = unique {
+                let unique_v = Value::entity_id(unique_id as u64);
+                self.put_schema_entries(keys::build_entries(
+                    aid as u64,
+                    resolver::DB_UNIQUE_AID,
+                    &unique_v,
+                    t,
+                    false,
+                    keys::EncodeMode::Ref,
+                ));
+            }
+        }
+    }
+
     pub fn recover_journal(&self) {
         let packed = match self.kv.journal_scan() {
             Ok(e) => e,
@@ -346,6 +434,14 @@ impl EavtEngine {
     /// qualifies or if as_of_us itself is None.
     pub fn resolve_as_of_tx(&self, as_of_us: Option<u64>, resolver: &Resolver) -> Option<u64> {
         let as_of_us = as_of_us?;
+        // If the value looks like a tx_eid (partition bits set), treat it
+        // directly as the as-of tx and return it.
+        let partition = as_of_us >> 44;
+        if partition == resolver::PART_TX {
+            return Some(as_of_us);
+        }
+        // Otherwise treat it as a timestamp in microseconds and find the
+        // newest transaction whose db.txInstant is <= that timestamp.
         let tx_instant_prefix = resolver::DB_TX_INSTANT_AID.to_be_bytes().to_vec();
         let mut best_tx: Option<u64> = None;
         let mut best_instant: u64 = 0;
@@ -484,9 +580,16 @@ impl EavtEngine {
         e_id: u64,
         attr: &str,
         v: &Value,
-        t: u64,
+        t: Option<u64>,
         as_of_us: Option<u64>,
     ) -> Result<(), String> {
+        if e_id < resolver::BOOTSTRAP_FIRST_USER_ID {
+            return Err(format!(
+                "cannot write to reserved entity id {} (below {})",
+                e_id,
+                resolver::BOOTSTRAP_FIRST_USER_ID
+            ));
+        }
         let mut resolver = self.resolver.lock().unwrap();
         let a_id = resolver
             .lookup_attr(attr)
@@ -504,6 +607,8 @@ impl EavtEngine {
         if resolver.is_unique(a_id) {
             self.check_unique_constraint(e_id, a_id, &v, as_of_tx, &resolver)?;
         }
+
+        let t = current_t_or_alloc(t, &mut resolver);
 
         if resolver.is_many(a_id) {
             let mode = keys::encode_mode_for(resolver.value_type_for(a_id));
@@ -543,6 +648,9 @@ impl EavtEngine {
         current_t: Option<u64>,
         as_of_us: Option<u64>,
     ) {
+        if e_id < resolver::BOOTSTRAP_FIRST_USER_ID {
+            return;
+        }
         let mut resolver = self.resolver.lock().unwrap();
         let a_id = match resolver.lookup_attr(attr) {
             Some(id) => id,

@@ -322,6 +322,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-timeout" },
     { name = "spier-eavt-query-py" },
+    { name = "spier-kvstore-py" },
     { name = "spier-sql-parse-py" },
     { name = "spier-transactor-py" },
 ]
@@ -335,6 +336,7 @@ dev = [
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },
     { name = "spier-eavt-query-py", directory = "spier-eavt-query-py" },
+    { name = "spier-kvstore-py", directory = "spier-kvstore-py" },
     { name = "spier-sql-parse-py", directory = "spier-sql-parse-py" },
     { name = "spier-transactor-py", directory = "spier-transactor-py" },
 ]
@@ -1222,6 +1224,11 @@ wheels = [
 name = "spier-eavt-query-py"
 version = "0.1.0"
 source = { directory = "spier-eavt-query-py" }
+
+[[package]]
+name = "spier-kvstore-py"
+version = "0.1.0"
+source = { directory = "spier-kvstore-py" }
 
 [[package]]
 name = "spier-sql-parse-py"

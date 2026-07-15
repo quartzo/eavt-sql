@@ -109,9 +109,8 @@ def test_as_of_integer_t_value():
     list(e.sql("UPSERT SET company.name = 'second'"))
 
     tx1 = list(e.sql("SELECT d1.tx WHERE d1.company.name = 'first'"))[0][0]
-    t1 = _extract_t(tx1)
 
-    filtered = list(e.sql("SELECT d1.company.name", as_of=t1))
+    filtered = list(e.sql("SELECT d1.company.name", as_of=tx1))
     assert set(r[0] for r in filtered) == {"first"}
     e.close()
 

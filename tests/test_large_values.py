@@ -12,6 +12,7 @@ import struct
 
 import pytest
 
+import spier_kvstore_py
 import spier_transactor_py
 from helpers import unpack_keys
 
@@ -20,7 +21,21 @@ LARGE_SIZE = 70_000
 
 
 def _scan(h, prefix):
-    return unpack_keys(bytes(h.scan(**{"cf": 0, "prefix": prefix})))
+    """Scan raw keys via a KV handle opened on the same path."""
+    # For transactor handles, we need to re-open as KV for raw inspection.
+    # For KV handles, scan directly.
+    if hasattr(h, 'scan'):
+        return unpack_keys(bytes(h.scan(**{"cf": 0, "prefix": prefix})))
+    raise RuntimeError("handle has no scan method")
+
+
+def _scan_kv(path, prefix):
+    """Open a KV-only engine on the same path for raw key inspection."""
+    kv = spier_kvstore_py.Engine({"backend": "file", "path": path})
+    try:
+        return unpack_keys(bytes(kv.scan(**{"cf": 0, "prefix": prefix})))
+    finally:
+        kv.close()
 
 
 def _make_payload(size: int, marker: str = "X") -> bytes:
@@ -44,13 +59,13 @@ class TestLargeValueSaveFlushScan:
             "t": U64_MAX, "as_of_us": U64_MAX,
         })
 
-        keys = _scan(h, struct.pack(">Q", eid))
+        h.flush()
+
+        keys = _scan_kv(str(tmp_path), struct.pack(">Q", eid))
         assert len(keys) == 1
         assert len(keys[0]) > LARGE_SIZE, f"key should embed 70KB+ value, got {len(keys[0])}"
 
-        h.flush()
-
-        keys_after_flush = _scan(h, struct.pack(">Q", eid))
+        keys_after_flush = _scan_kv(str(tmp_path), struct.pack(">Q", eid))
         assert len(keys_after_flush) == 1
         assert keys_after_flush == keys, "scan after flush must match scan before flush"
         h.close()
@@ -76,7 +91,7 @@ class TestLargeValueSaveFlushScan:
 
         h.flush()
 
-        all_keys = _scan(h, b"")
+        all_keys = _scan_kv(str(tmp_path), b"")
         large_keys = [k for k in all_keys if len(k) > LARGE_SIZE]
         assert len(large_keys) >= 5, f"expected >=5 large keys, got {len(large_keys)} among {len(all_keys)} total"
         h.close()
@@ -97,17 +112,17 @@ class TestLargeValueSaveFlushScan:
         h.flush()
         h.close()
 
-        h2 = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
-        keys = _scan(h2, struct.pack(">Q", eid))
+        keys = _scan_kv(str(tmp_path), struct.pack(">Q", eid))
         assert len(keys) == 1
         assert len(keys[0]) > LARGE_SIZE, "70KB key must survive flush + reopen"
-        h2.close()
 
 
 class TestLargeValueJournalRecovery:
     """Exercise journal write/read/replay path with 70KB+ keys."""
 
     def test_70kb_value_journal_recovery(self, tmp_path):
+        from eavt_sql.engine import EAVTEngine
+
         h = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
         h.eavt_declare_attr(**{
             "name": "doc.journaled", "value_type": "String",
@@ -122,18 +137,23 @@ class TestLargeValueJournalRecovery:
         })
         h.close()
 
-        h2 = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
-        keys = _scan(h2, struct.pack(">Q", eid))
+        # Reopen via EAVTEngine which replays the journal
+        e = EAVTEngine(str(tmp_path))
+        kv = spier_kvstore_py.Engine({"backend": "file", "path": str(tmp_path)})
+        try:
+            keys = unpack_keys(bytes(kv.scan(**{"cf": 0, "prefix": struct.pack(">Q", eid)})))
+        finally:
+            kv.close()
+        e.close()
         assert len(keys) == 1
         assert len(keys[0]) > LARGE_SIZE, "70KB key must survive journal recovery on reopen"
-        h2.close()
 
 
 class TestLargeValueBatchWrite:
     """Exercise batch_write FFI path directly with large keys."""
 
     def test_batch_write_70kb_key(self, tmp_path):
-        h = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
+        h = spier_kvstore_py.Engine({"backend": "file", "path": str(tmp_path)})
         big_key = _make_payload(LARGE_SIZE, "K")
         ops = bytearray()
         ops.append(0)
@@ -144,7 +164,7 @@ class TestLargeValueBatchWrite:
         h.close()
 
     def test_batch_put_70kb_key(self, tmp_path):
-        h = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
+        h = spier_kvstore_py.Engine({"backend": "file", "path": str(tmp_path)})
         big_key = _make_payload(LARGE_SIZE, "P")
         buf = bytearray()
         buf.extend(struct.pack(">I", len(big_key)))
@@ -158,7 +178,7 @@ class TestLargeValueCursorScan:
     """Exercise cursor + scan output framing with 70KB+ keys."""
 
     def test_scan_returns_70kb_keys(self, tmp_path):
-        h = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
+        h = spier_kvstore_py.Engine({"backend": "file", "path": str(tmp_path)})
         keys_in = []
         for i in range(3):
             k = struct.pack(">Q", 100 + i) + _make_payload(LARGE_SIZE, chr(65 + i))
@@ -175,7 +195,7 @@ class TestLargeValueCursorScan:
         h.close()
 
     def test_items_returns_70kb_keys(self, tmp_path):
-        h = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
+        h = spier_kvstore_py.Engine({"backend": "file", "path": str(tmp_path)})
         k = _make_payload(LARGE_SIZE, "I")
         h.put(**{"cf": 0, "key": k})
         h.flush()

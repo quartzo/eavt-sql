@@ -190,7 +190,12 @@ impl QueryEngineInner {
                 return *vt;
             }
         }
-        let vt = self.tx.value_type_for(aid).ok().flatten().map(|v| v as u32);
+        let vt = self
+            .tx
+            .value_type_for(aid)
+            .ok()
+            .flatten()
+            .map(spier_transactor::value_type_to_eid);
         if let Ok(mut cache) = self.vt_cache.write() {
             cache.insert(aid, vt);
         }

@@ -22,9 +22,9 @@ class TestConfigFileBackend:
         script = '''
 import os
 tmp = os.environ["TEST_TMP_PATH"]
-import spier_transactor_py
+import spier_kvstore_py
 
-handle = spier_transactor_py.Engine({"backend": "file", "path": tmp})
+handle = spier_kvstore_py.Engine({"backend": "file", "path": tmp})
 
 handle.put(**{"cf": 0, "key": b"hello"})
 assert handle.get(**{"cf": 0, "key": b"hello"}) is True
@@ -41,9 +41,9 @@ print("OK")
         script = '''
 import os
 tmp = os.environ["TEST_TMP_PATH"]
-import spier_transactor_py
+import spier_kvstore_py
 
-handle = spier_transactor_py.Engine({"backend": "file", "path": tmp})
+handle = spier_kvstore_py.Engine({"backend": "file", "path": tmp})
 
 for i in range(5):
     handle.put(**{"cf": 0, "key": f"key{i:03d}".encode()})
@@ -70,9 +70,9 @@ print("OK")
         script = '''
 import os
 tmp = os.environ["TEST_TMP_PATH"]
-import spier_transactor_py
+import spier_kvstore_py
 
-handle = spier_transactor_py.Engine({"backend": "file", "path": tmp})
+handle = spier_kvstore_py.Engine({"backend": "file", "path": tmp})
 
 for i in range(10):
     handle.put(**{"cf": 0, "key": f"k{i:04d}".encode()})
@@ -101,9 +101,9 @@ print("OK")
 class TestConfigMemoryBackend:
     def test_memory_auto_init(self, tmp_path):
         script = '''
-import spier_transactor_py
+import spier_kvstore_py
 
-handle = spier_transactor_py.Engine({"backend": "memory"})
+handle = spier_kvstore_py.Engine({"backend": "memory"})
 
 handle.put(**{"cf": 1, "key": b"memkey"})
 assert handle.get(**{"cf": 1, "key": b"memkey"}) is True
@@ -117,9 +117,9 @@ print("OK")
 
     def test_memory_multi_cf(self, tmp_path):
         script = '''
-import spier_transactor_py
+import spier_kvstore_py
 
-handle = spier_transactor_py.Engine({"backend": "memory"})
+handle = spier_kvstore_py.Engine({"backend": "memory"})
 
 for cf in range(4):
     handle.put(**{"cf": cf, "key": f"cf{cf}".encode()})

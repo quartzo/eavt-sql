@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-import spier_transactor_py
+import spier_kvstore_py
 from helpers import unpack_keys
 
 
@@ -11,7 +11,7 @@ CF = 0
 
 @pytest.fixture
 def kv(tmp_path):
-    handle = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
+    handle = spier_kvstore_py.Engine({"backend": "file", "path": str(tmp_path)})
     yield handle
     handle.close()
 
