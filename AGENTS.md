@@ -4,10 +4,25 @@
 
 - **Rust tests:** `cargo test --release`
 - **Rust build:** `cargo build --workspace --release`
+- **Build PyO3 bindings:** `./build_py.sh` (all) or `./build_py.sh eavt` (one crate)
 - **Python tests:** `uv run pytest tests/`
-- **Python deps:** `uv sync --group dev`
+- **Python deps:** `uv sync --group dev` (pure-Python deps only)
 - **gRPC server:** `uv run --project py_eavt_client --group dev` (isolated client venv)
 - **All Python commands must use `uv run`.**
+
+### PyO3 Binding Workflow
+
+The 4 `spier-*-py` crates are **not managed by uv** — they are installed as
+editable packages via `maturin develop`. After changing Rust code that affects
+the Python bindings, rebuild with `./build_py.sh` before running tests.
+
+```
+uv sync --group dev          # one-time: install pure-Python deps (pytest, moto, etc.)
+./build_py.sh                # one-time: install all PyO3 bindings via maturin develop
+# After Rust changes:
+./build_py.sh eavt           # rebuild only the affected crate (fuzzy match)
+uv run pytest tests/         # uv does NOT touch the bindings
+```
 
 ## Project Structure
 
