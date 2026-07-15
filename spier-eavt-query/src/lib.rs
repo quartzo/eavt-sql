@@ -365,13 +365,14 @@ impl QueryEngine for QueryState {
         } else {
             Some(limit as usize)
         };
-        let as_of_opt = if as_of_us == u64::MAX {
+        let as_of_us_opt = if as_of_us == u64::MAX {
             None
         } else {
             Some(as_of_us)
         };
 
         let t = engine.allocate_t_and_write_tx();
+        let as_of_tx = as_of_us_opt.and_then(|us| engine.tx().resolve_as_of(us).ok().flatten());
         crate::engine::opcodes::reset_scanner_stats();
 
         let session = engine::session::VMSession::new(
@@ -380,7 +381,7 @@ impl QueryEngine for QueryState {
             vm_params,
             limit_opt,
             t,
-            as_of_opt,
+            as_of_tx,
         );
 
         Ok(SessionHandle {

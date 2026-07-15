@@ -47,7 +47,6 @@ pub struct Resolver {
     attrs: HashMap<String, u32>,
     attrs_rev: HashMap<u32, String>,
     next_aid: u32,
-    next_t: u64,
     partitions: HashMap<u64, PartitionCounter>,
     partition_names: HashMap<String, u64>,
     next_custom_partition: u64,
@@ -63,7 +62,6 @@ impl Resolver {
             attrs: HashMap::new(),
             attrs_rev: HashMap::new(),
             next_aid: 1,
-            next_t: 1000,
             partitions: HashMap::new(),
             partition_names: HashMap::new(),
             next_custom_partition: FIRST_CUSTOM_PARTITION,
@@ -278,22 +276,6 @@ impl Resolver {
                 counter.next_seq = s + 1;
             }
         }
-    }
-
-    pub fn allocate_t(&mut self) -> u64 {
-        let t = self.next_t;
-        self.next_t += 1;
-        t
-    }
-
-    pub fn set_next_t(&mut self, t: u64) {
-        if t >= self.next_t {
-            self.next_t = t + 1;
-        }
-    }
-
-    pub fn next_t(&self) -> u64 {
-        self.next_t
     }
 
     pub fn allocate_entity_id(&mut self) -> u64 {

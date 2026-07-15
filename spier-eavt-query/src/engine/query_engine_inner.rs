@@ -136,6 +136,7 @@ impl QueryEngineInner {
         prefix: &[u8],
         as_of_us: Option<u64>,
     ) -> Vec<RawDatomView> {
+        let as_of_tx = as_of_us.and_then(|us| self.tx.resolve_as_of(us).ok().flatten());
         let cf_id = self.cf_id(cf);
         let prefix = prefix.to_vec();
         let attr_type = self.attr_type_from_prefix(cf, &prefix);
@@ -143,7 +144,7 @@ impl QueryEngineInner {
             Ok(h) => h.cursor,
             Err(_) => invalid_cursor_handle().cursor,
         };
-        let mut scanner = ValueScanner::new(cursor, prefix.clone(), cf, "v", as_of_us, attr_type);
+        let mut scanner = ValueScanner::new(cursor, prefix.clone(), cf, "v", as_of_tx, attr_type);
 
         let mut prev_eav_key: Option<Vec<u8>> = None;
         let mut best: Option<RawDatomView> = None;
@@ -296,6 +297,7 @@ impl QueryEngineInner {
         as_of_us: Option<u64>,
     ) -> Result<Vec<Vec<Value>>, EngineError> {
         let t = self.allocate_t_and_write_tx();
+        let as_of_tx = as_of_us.and_then(|us| self.tx.resolve_as_of(us).ok().flatten());
 
         if std::env::var("EAVT_DEBUG_TIMING").is_ok() {
             crate::engine::opcodes::set_debug_timing(true);
@@ -308,7 +310,7 @@ impl QueryEngineInner {
             params,
             limit,
             t,
-            as_of_us,
+            as_of_tx,
         );
         let results = vm.run()?;
         Ok(results)
@@ -349,7 +351,7 @@ impl VMEngine for QueryEngineInner {
             Err(_) => invalid_cursor_handle().cursor,
         };
         let mut scanner =
-            ValueScanner::new(cursor, prefix.clone(), cf, "v", ctx.as_of_us, attr_type);
+            ValueScanner::new(cursor, prefix.clone(), cf, "v", ctx.as_of_tx, attr_type);
         let mut results = Vec::new();
         while !scanner.at_end() {
             if let Some(key) = scanner.current_key() {
@@ -387,7 +389,7 @@ impl VMEngine for QueryEngineInner {
         ctx: &QueryContext,
     ) -> Result<(), EngineError> {
         let e_id = self.resolve_entity(e);
-        let as_of = ctx.as_of_us.unwrap_or(u64::MAX);
+        let as_of = ctx.as_of_tx.unwrap_or(u64::MAX);
         self.tx
             .eavt_save(e_id, attr, v.clone(), ctx.current_t, as_of)
             .map_err(EngineError)
@@ -395,7 +397,7 @@ impl VMEngine for QueryEngineInner {
 
     fn retract(&self, e: &Value, attr: &str, v: &Value, ctx: &QueryContext) {
         let e_id = self.resolve_entity(e);
-        let as_of = ctx.as_of_us.unwrap_or(u64::MAX);
+        let as_of = ctx.as_of_tx.unwrap_or(u64::MAX);
         let _ = self
             .tx
             .eavt_retract(e_id, attr, v.clone(), ctx.current_t, as_of);

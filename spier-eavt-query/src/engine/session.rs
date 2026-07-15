@@ -19,9 +19,9 @@ impl VMSession {
         params: Vec<Value>,
         limit: Option<usize>,
         current_t: u64,
-        as_of_us: Option<u64>,
+        as_of_tx: Option<u64>,
     ) -> Self {
-        let vm = VM::new(program, engine, params, limit, current_t, as_of_us);
+        let vm = VM::new(program, engine, params, limit, current_t, as_of_tx);
         Self { vm, done: false }
     }
 }

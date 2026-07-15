@@ -73,7 +73,7 @@ pub struct V2Scanner {
     prefix_values: Vec<(String, Value)>,
     prefix_bytes_cache: Vec<u8>,
     positions_filled: usize,
-    as_of_us: Option<u64>,
+    as_of_tx: Option<u64>,
     value_attr_type: Option<u32>,
     current_active_key: Option<Vec<u8>>,
     at_end: bool,
@@ -85,7 +85,7 @@ impl V2Scanner {
     pub fn new(
         index_name: &str,
         idx_order: Vec<String>,
-        as_of_us: Option<u64>,
+        as_of_tx: Option<u64>,
         value_attr_type: Option<u32>,
     ) -> Self {
         Self {
@@ -95,7 +95,7 @@ impl V2Scanner {
             prefix_values: Vec::new(),
             prefix_bytes_cache: Vec::new(),
             positions_filled: 0,
-            as_of_us,
+            as_of_tx,
             value_attr_type,
             current_active_key: None,
             at_end: true,
@@ -469,7 +469,7 @@ impl V2Scanner {
             return;
         }
 
-        let as_of_us = self.as_of_us;
+        let as_of_tx = self.as_of_tx;
         let is_t_pos = pos_name == "t";
 
         if self.history_mode && is_t_pos {
@@ -522,7 +522,7 @@ impl V2Scanner {
                 let suffix = Self::extract_suffix(&key);
                 let (t, retracted) = decode_suffix(suffix);
 
-                if as_of_us.is_some() && t > as_of_us.unwrap() {
+                if as_of_tx.is_some() && t > as_of_tx.unwrap() {
                     self.cursor.borrow_mut().step();
                     continue;
                 }
@@ -550,7 +550,7 @@ impl V2Scanner {
     }
 
     fn advance_history_each(&mut self, pos_idx: usize) {
-        let as_of_us = self.as_of_us;
+        let as_of_tx = self.as_of_tx;
 
         let bound_prefix: Option<Vec<u8>> = self.current_active_key.as_ref().map(|k| {
             let end = self.value_start(k, pos_idx);
@@ -574,7 +574,7 @@ impl V2Scanner {
             let suffix = Self::extract_suffix(&key);
             let (t, _) = decode_suffix(suffix);
 
-            if as_of_us.is_some() && t > as_of_us.unwrap() {
+            if as_of_tx.is_some() && t > as_of_tx.unwrap() {
                 self.cursor.borrow_mut().step();
                 continue;
             }
@@ -725,7 +725,7 @@ pub struct ValueScanner {
     inner: Arc<RefCell<dyn Cursor>>,
     index_name: String,
     value_pos: String,
-    as_of_us: Option<u64>,
+    as_of_tx: Option<u64>,
     prefix: Vec<u8>,
     current_value: Option<Value>,
     current_ts: Option<TimestampInfo>,
@@ -741,14 +741,14 @@ impl ValueScanner {
         prefix: Vec<u8>,
         index_name: &str,
         value_pos: &str,
-        as_of_us: Option<u64>,
+        as_of_tx: Option<u64>,
         value_attr_type: Option<u32>,
     ) -> Self {
         let mut scanner = Self {
             inner: cursor,
             index_name: index_name.to_ascii_uppercase(),
             value_pos: value_pos.to_string(),
-            as_of_us,
+            as_of_tx,
             prefix,
             current_value: None,
             current_ts: None,
@@ -1023,7 +1023,7 @@ impl ValueScanner {
 
     fn advance_to_active(&mut self) {
         let t0 = crate::engine::opcodes::debug_timing_enabled().then(std::time::Instant::now);
-        let as_of_us = self.as_of_us;
+        let as_of_tx = self.as_of_tx;
 
         while self.inner.borrow().is_valid() {
             let first_key = self.inner.borrow().current_key().unwrap().to_vec();
@@ -1058,7 +1058,7 @@ impl ValueScanner {
                 let suffix = Self::extract_suffix(&key);
                 let (t, retracted) = decode_suffix(suffix);
 
-                if as_of_us.is_some() && t > as_of_us.unwrap() {
+                if as_of_tx.is_some() && t > as_of_tx.unwrap() {
                     self.inner.borrow_mut().step();
                     continue;
                 }

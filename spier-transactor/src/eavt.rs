@@ -74,7 +74,7 @@ fn now_micros() -> u64 {
 }
 
 fn current_t_or_alloc(current_t: Option<u64>, resolver: &mut Resolver) -> u64 {
-    current_t.unwrap_or_else(|| resolver.allocate_t())
+    current_t.unwrap_or_else(|| resolver.allocate_in_partition(resolver::PART_TX))
 }
 
 fn coerce_value(a_id: u32, v: &Value, resolver: &Resolver) -> Value {
@@ -243,20 +243,6 @@ impl EavtEngine {
         let eavt_pairs: Vec<(Vec<u8>, Vec<u8>)> =
             eavt_keys.iter().map(|k| (k.clone(), Vec::new())).collect();
         resolver.init_ent_id_from_eavt(eavt_pairs, vec![]);
-
-        let mut max_t: u64 = 0;
-        for k in &eavt_keys {
-            if k.len() >= 8 {
-                let suffix = u64::from_be_bytes(k[k.len() - 8..].try_into().unwrap());
-                let (t, _) = keys::decode_suffix(suffix);
-                if t > max_t {
-                    max_t = t;
-                }
-            }
-        }
-        if max_t >= resolver.next_t() {
-            resolver.set_next_t(max_t);
-        }
     }
 
     pub fn recover_journal(&self) {
@@ -355,13 +341,38 @@ impl EavtEngine {
         self.write_entries(entries, is_ref);
     }
 
+    /// Resolve an as-of timestamp (microseconds since epoch) to the newest transaction
+    /// entity whose db.txInstant is <= the timestamp. Returns None if no transaction
+    /// qualifies or if as_of_us itself is None.
+    pub fn resolve_as_of_tx(&self, as_of_us: Option<u64>, resolver: &Resolver) -> Option<u64> {
+        let as_of_us = as_of_us?;
+        let tx_instant_prefix = resolver::DB_TX_INSTANT_AID.to_be_bytes().to_vec();
+        let mut best_tx: Option<u64> = None;
+        let mut best_instant: u64 = 0;
+        for k in &unpack_keys(&self.kv.scan(1, &tx_instant_prefix).unwrap_or_default()) {
+            let raw = keys::unpack_key("aevt", k, resolver);
+            if raw.a != resolver::DB_TX_INSTANT_AID {
+                continue;
+            }
+            if raw.retracted {
+                continue;
+            }
+            let us = raw.v.raw_int().max(0) as u64;
+            if us <= as_of_us && (best_tx.is_none() || us > best_instant) {
+                best_tx = Some(raw.e);
+                best_instant = us;
+            }
+        }
+        best_tx
+    }
+
     /// Scan a CF prefix and return only the latest active (non-retracted) datom per group.
     /// Uses simple MergedInner iteration (no ValueScanner) to avoid eavt-query dependency.
     fn collect_active_raw(
         &self,
         cf: &str,
         prefix: &[u8],
-        as_of_us: Option<u64>,
+        as_of_tx: Option<u64>,
         resolver: &Resolver,
     ) -> Vec<RawDatom> {
         let cf_id = cf_name_to_id(cf);
@@ -372,7 +383,7 @@ impl EavtEngine {
         for key in &keys {
             let group = key[..key.len() - 8].to_vec();
             let raw = keys::unpack_key(cf, key, resolver);
-            if let Some(as_of) = as_of_us {
+            if let Some(as_of) = as_of_tx {
                 if raw.t > as_of {
                     continue;
                 }
@@ -404,12 +415,12 @@ impl EavtEngine {
         e_id: u64,
         a_id: u32,
         v: &Value,
-        as_of_us: Option<u64>,
+        as_of_tx: Option<u64>,
         resolver: &Resolver,
     ) -> Result<(), String> {
         let mode = keys::encode_mode_for(resolver.value_type_for(a_id));
         let prefix = keys::avet_value_prefix(a_id, v, mode);
-        let active = self.collect_active_raw("avet", &prefix, as_of_us, resolver);
+        let active = self.collect_active_raw("avet", &prefix, as_of_tx, resolver);
         for dv in &active {
             if dv.e != e_id {
                 let attr_name = resolver.attr_name(a_id);
@@ -429,12 +440,12 @@ impl EavtEngine {
         v_new: &Value,
         t: u64,
         is_retract: bool,
-        as_of_us: Option<u64>,
+        as_of_tx: Option<u64>,
         resolver: &Resolver,
     ) -> Option<Vec<(usize, Vec<u8>, Vec<u8>)>> {
         let mode = keys::encode_mode_for(resolver.value_type_for(a_id));
         let prefix = build_ea_prefix(e_id, a_id);
-        let active = self.collect_active_raw("eavt", &prefix, as_of_us, resolver);
+        let active = self.collect_active_raw("eavt", &prefix, as_of_tx, resolver);
 
         let mut batch: Vec<(usize, Vec<u8>, Vec<u8>)> = Vec::new();
         let mut already_active = false;
@@ -488,8 +499,10 @@ impl EavtEngine {
         let v = coerce_value(a_id, v, &resolver);
         validate_value_type(a_id, &v, &resolver)?;
 
+        let as_of_tx = self.resolve_as_of_tx(as_of_us, &resolver);
+
         if resolver.is_unique(a_id) {
-            self.check_unique_constraint(e_id, a_id, &v, as_of_us, &resolver)?;
+            self.check_unique_constraint(e_id, a_id, &v, as_of_tx, &resolver)?;
         }
 
         if resolver.is_many(a_id) {
@@ -497,7 +510,7 @@ impl EavtEngine {
             let entries = keys::build_entries(e_id, a_id, &v, t, false, mode);
             self.write_entries(entries, mode == EncodeMode::Ref);
         } else if let Some(batch) =
-            self.build_retract_entries(e_id, a_id, &v, t, false, as_of_us, &resolver)
+            self.build_retract_entries(e_id, a_id, &v, t, false, as_of_tx, &resolver)
         {
             let is_ref = batch.iter().any(|(cf_id, _, _)| *cf_id == 3);
             self.write_entries(
@@ -539,12 +552,14 @@ impl EavtEngine {
         let t = current_t_or_alloc(current_t, &mut resolver);
         let v = coerce_value(a_id, v, &resolver);
 
+        let as_of_tx = self.resolve_as_of_tx(as_of_us, &resolver);
+
         if resolver.is_many(a_id) {
             let mode = keys::encode_mode_for(resolver.value_type_for(a_id));
             let entries = keys::build_entries(e_id, a_id, &v, t, true, mode);
             self.write_entries(entries, mode == EncodeMode::Ref);
         } else if let Some(batch) =
-            self.build_retract_entries(e_id, a_id, &v, t, true, as_of_us, &resolver)
+            self.build_retract_entries(e_id, a_id, &v, t, true, as_of_tx, &resolver)
         {
             let is_ref = batch.iter().any(|(cf_id, _, _)| *cf_id == 3);
             self.write_entries(
@@ -757,20 +772,19 @@ impl EavtEngine {
 
     pub fn allocate_t_and_write_tx(&self) -> u64 {
         let mut resolver = self.resolver.lock().unwrap();
-        let t = resolver.allocate_t();
-        let tx_eid = resolver::make_entity_id(resolver::PART_TX, t);
+        let tx_eid = resolver.allocate_in_partition(resolver::PART_TX);
         let now_us = now_micros();
         let instant_v = Value::Timestamp(now_us as i64);
         let entries = keys::build_entries(
             tx_eid,
             resolver::DB_TX_INSTANT_AID,
             &instant_v,
-            t,
+            tx_eid,
             false,
             EncodeMode::Fixed,
         );
         self.put_schema_entries(entries);
-        t
+        tx_eid
     }
 
     // ===== Resolver accessors (for StoreEngine delegation) =====
@@ -811,7 +825,10 @@ impl EavtEngine {
     }
 
     pub fn allocate_t_locked(&self) -> u64 {
-        self.resolver.lock().unwrap().allocate_t()
+        self.resolver
+            .lock()
+            .unwrap()
+            .allocate_in_partition(resolver::PART_TX)
     }
 
     pub fn default_user_partition_locked(&self) -> u64 {
@@ -840,7 +857,8 @@ impl EavtEngine {
         let aid = resolver.lookup_attr(attr_name)?;
         let mode = keys::encode_mode_for(resolver.value_type_for(aid));
         let prefix = keys::avet_value_prefix(aid, value, mode);
-        let datoms = self.collect_active_raw("avet", &prefix, as_of_us, &resolver);
+        let as_of_tx = self.resolve_as_of_tx(as_of_us, &resolver);
+        let datoms = self.collect_active_raw("avet", &prefix, as_of_tx, &resolver);
         for d in &datoms {
             if !d.retracted {
                 return Some(d.e);

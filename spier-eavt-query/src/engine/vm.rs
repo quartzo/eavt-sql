@@ -21,7 +21,7 @@ impl std::fmt::Display for EngineError {
 impl std::error::Error for EngineError {}
 
 pub struct QueryContext {
-    pub as_of_us: Option<u64>,
+    pub as_of_tx: Option<u64>,
     pub current_t: u64,
 }
 
@@ -344,7 +344,7 @@ impl VM {
         params: Vec<Value>,
         limit: Option<usize>,
         current_t: u64,
-        as_of_us: Option<u64>,
+        as_of_tx: Option<u64>,
     ) -> Self {
         let depth_var: HashMap<usize, usize> =
             program.depth_var.iter().map(|&(d, v)| (d, v)).collect();
@@ -359,7 +359,7 @@ impl VM {
             prog: program,
             engine,
             ctx: QueryContext {
-                as_of_us,
+                as_of_tx,
                 current_t,
             },
             params,
@@ -1249,7 +1249,7 @@ impl VM {
                     let mut scanner = crate::engine::scanner::V2Scanner::new(
                         index_name,
                         idx_order,
-                        self.ctx.as_of_us,
+                        self.ctx.as_of_tx,
                         None,
                     );
                     if history {
@@ -1838,7 +1838,7 @@ mod v2_vm_tests {
 
         let program = make_program(instructions, 4, 1, vec![(0, 0)]);
         let _ctx = QueryContext {
-            as_of_us: None,
+            as_of_tx: None,
             current_t: 1,
         };
         let mut vm = VM::new(Arc::new(program), Arc::new(engine), vec![], None, 1, None);

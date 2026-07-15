@@ -106,6 +106,7 @@ pub trait TransactorEngine: Send + Sync {
     fn allocate_entity_id(&self) -> Result<u64, String>;
     fn allocate_in_partition(&self, partition_id: u64) -> Result<u64, String>;
     fn allocate_t(&self) -> Result<u64, String>;
+    fn resolve_as_of(&self, as_of_us: u64) -> Result<Option<u64>, String>;
 }
 
 pub struct TransactorState {
@@ -400,5 +401,10 @@ impl TransactorEngine for TransactorState {
 
     fn allocate_t(&self) -> Result<u64, String> {
         Ok(self.eavt.allocate_t_locked())
+    }
+
+    fn resolve_as_of(&self, as_of_us: u64) -> Result<Option<u64>, String> {
+        let resolver = self.eavt.resolver.lock().unwrap();
+        Ok(self.eavt.resolve_as_of_tx(Some(as_of_us), &resolver))
     }
 }
