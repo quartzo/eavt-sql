@@ -54,7 +54,10 @@ fn value_to_proto(v: &spier_value::Value) -> Option<eavt::Value> {
         Bytes(b) => eavt::Value {
             kind: Some(eavt::value::Kind::BytesVal(b.as_slice().to_vec())),
         },
-        _ => return None,
+        Timestamp(us) => eavt::Value {
+            kind: Some(eavt::value::Kind::IntVal(*us)),
+        },
+        Unknown(_, _) => return None,
     })
 }
 
