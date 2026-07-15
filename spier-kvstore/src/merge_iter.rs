@@ -666,6 +666,7 @@ impl Cursor for ReverseMergedInner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossbeam_skiplist::SkipMap;
     use std::sync::Arc;
 
     fn chunked_source(keys: Vec<&[u8]>) -> ChunkedMemTableSource {

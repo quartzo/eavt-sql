@@ -652,129 +652,7 @@ mod tests {
     use super::*;
     use crate::blobstore::BlobStoreEngine;
     use crate::journal::JournalEngine;
-    use crate::memtable::MemTableEngine;
     use tempfile::TempDir;
-
-    struct LocalMemTable {
-        cfs: Vec<Mutex<BTreeSet<Vec<u8>>>>,
-    }
-
-    impl LocalMemTable {
-        fn new(num_cf: usize) -> Self {
-            Self {
-                cfs: (0..num_cf).map(|_| Mutex::new(BTreeSet::new())).collect(),
-            }
-        }
-    }
-
-    impl MemTableEngine for LocalMemTable {
-        fn put(&self, cf: u32, key: &[u8]) -> Result<u64, String> {
-            self.cfs[cf as usize].lock().unwrap().insert(key.to_vec());
-            let mut total = 0u64;
-            for c in &self.cfs {
-                for k in c.lock().unwrap().iter() {
-                    total += k.len() as u64;
-                }
-            }
-            Ok(total)
-        }
-        fn batch_write(&self, ops: &[u8]) -> Result<u64, String> {
-            let mut pos = 0;
-            while pos + 5 <= ops.len() {
-                let cf = ops[pos] as usize;
-                let klen =
-                    u32::from_be_bytes([ops[pos + 1], ops[pos + 2], ops[pos + 3], ops[pos + 4]])
-                        as usize;
-                if pos + 5 + klen > ops.len() {
-                    break;
-                }
-                self.cfs[cf]
-                    .lock()
-                    .unwrap()
-                    .insert(ops[pos + 5..pos + 5 + klen].to_vec());
-                pos += 5 + klen;
-            }
-            let mut total = 0u64;
-            for c in &self.cfs {
-                for k in c.lock().unwrap().iter() {
-                    total += k.len() as u64;
-                }
-            }
-            Ok(total)
-        }
-        fn clear(&self) -> Result<(), String> {
-            for c in &self.cfs {
-                c.lock().unwrap().clear();
-            }
-            Ok(())
-        }
-        fn snapshot(&self) -> Result<crate::memtable::MemTableSnapshot, String> {
-            let cfs: Vec<std::collections::BTreeSet<Vec<u8>>> =
-                self.cfs.iter().map(|c| c.lock().unwrap().clone()).collect();
-            Ok(crate::memtable::MemTableSnapshot {
-                data: std::sync::Arc::new(cfs),
-            })
-        }
-        fn scan_prefix(
-            &self,
-            snap: crate::memtable::MemTableSnapshot,
-            cf: u32,
-            prefix: &[u8],
-        ) -> Result<Vec<u8>, String> {
-            let cfs = snap
-                .data
-                .downcast_ref::<Vec<std::collections::BTreeSet<Vec<u8>>>>()
-                .ok_or("invalid snapshot type")?;
-            let set = match cfs.get(cf as usize) {
-                Some(s) => s,
-                None => return Ok(Vec::new()),
-            };
-            let keys: Vec<Vec<u8>> = set
-                .range::<[u8], _>((
-                    std::ops::Bound::Included(prefix),
-                    std::ops::Bound::Unbounded,
-                ))
-                .filter(|k| k.starts_with(prefix))
-                .cloned()
-                .collect();
-            let mut buf = Vec::new();
-            for k in &keys {
-                buf.extend_from_slice(&(k.len() as u32).to_be_bytes());
-                buf.extend_from_slice(k);
-            }
-            Ok(buf)
-        }
-        fn scan_prefix_reverse(
-            &self,
-            snap: crate::memtable::MemTableSnapshot,
-            cf: u32,
-            prefix: &[u8],
-        ) -> Result<Vec<u8>, String> {
-            let buf = self.scan_prefix(snap, cf, prefix)?;
-            let keys = unpack_keys(&buf);
-            let mut packed = Vec::new();
-            for k in keys.iter().rev() {
-                packed.extend_from_slice(&(k.len() as u32).to_be_bytes());
-                packed.extend_from_slice(k);
-            }
-            Ok(packed)
-        }
-        fn contains(
-            &self,
-            snap: crate::memtable::MemTableSnapshot,
-            cf: u32,
-            key: &[u8],
-        ) -> Result<bool, String> {
-            let cfs = snap
-                .data
-                .downcast_ref::<Vec<std::collections::BTreeSet<Vec<u8>>>>()
-                .ok_or("invalid snapshot type")?;
-            Ok(cfs
-                .get(cf as usize)
-                .map(|s| s.contains(key))
-                .unwrap_or(false))
-        }
-    }
 
     fn make_mt() -> spier_memtable::MemTable {
         spier_memtable::MemTable::new(4)
@@ -867,6 +745,9 @@ mod tests {
         fn journal_truncate(&self) -> Result<(), String> {
             self.journal.lock().unwrap().clear();
             Ok(())
+        }
+        fn journal_size(&self) -> Result<u64, String> {
+            Ok(0)
         }
     }
 

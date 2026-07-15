@@ -92,7 +92,7 @@ mod tests {
     use spier_datalog::{
         resolve::{compute_plan_stats, resolve_ir},
         BoundValue, CompileStats, DatalogIR, DatalogNumIR, DatalogNumIRSt, DatalogPattern,
-        DatalogSlot, FindVar, Pattern,
+        DatalogSlot, FindVar,
     };
 
     use crate::{Planner, PlannerEngine, QueryPlanSt};

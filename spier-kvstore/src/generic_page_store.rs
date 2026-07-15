@@ -1554,6 +1554,9 @@ mod tests {
             self.journal.lock().unwrap().clear();
             Ok(())
         }
+        fn journal_size(&self) -> Result<u64, String> {
+            Ok(0)
+        }
     }
 
     fn make_test_store(num_cf: usize) -> GenericPageStore {
