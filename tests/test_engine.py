@@ -991,6 +991,26 @@ def test_import_jsonl_current_state_round_trip():
     engine2.close()
 
 
+def test_scan_datoms_returns_raw_ref_values():
+    """scan_datoms must return raw integer entity IDs for REF values,
+    not decorated 'name(eid)' strings. Decoration belongs in .dump only."""
+    engine = EAVTEngine(":memory:")
+    list(engine.sql("ATTRIBUTE company.partner REF MANY"))
+    list(engine.sql("ATTRIBUTE company.name STRING ONE"))
+
+    out = "/tmp/opencode/test_raw_refs.jsonl.gz"
+    engine.export_jsonl(out)
+    engine.close()
+
+    rows = _read_jsonl(out)
+    # db.cardinality rows for declared attributes must have INTEGER values,
+    # not "db.cardinality.many(36)" strings.
+    cardinality_rows = [r for r in rows if r["a"] == "db.cardinality"]
+    assert len(cardinality_rows) > 0, "expected db.cardinality datoms in export"
+    for r in cardinality_rows:
+        assert isinstance(r["v"], int), f"expected raw int, got {type(r['v'])}: {r['v']!r}"
+
+
 # ── Cardinality put (one) / add (many) ─────────────────────────────
 
 def test_put_ref_replaces_int_value():
