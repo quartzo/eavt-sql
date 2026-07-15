@@ -1,0 +1,7 @@
+# Build output (nimble builds the binary here)
+eavt-repl-nim
+eavt_repl
+
+# Nim
+nimcache/
+*.o

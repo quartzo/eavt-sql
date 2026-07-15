@@ -1,0 +1,101 @@
+syntax = "proto3";
+
+package eavt;
+
+service EavtService {
+  rpc Sql(SqlRequest) returns (stream SqlRow);
+  rpc Execute(SqlRequest) returns (ExecuteResponse);
+  rpc Status(StatusRequest) returns (StatusResponse);
+  rpc Tree(TreeRequest) returns (TreeResponse);
+  rpc Dump(DumpRequest) returns (stream DatomRow);
+  rpc Memtable(MemtableRequest) returns (MemtableResponse);
+  rpc Flush(FlushRequest) returns (FlushResponse);
+}
+
+message SqlRequest {
+  string query = 1;
+  repeated Value params = 2;
+  optional int64 as_of_us = 3;
+  optional int64 limit = 5;
+}
+
+message SqlRow {
+  repeated Value values = 1;
+}
+
+message ExecuteResponse {
+  repeated SqlRow rows = 1;
+}
+
+message Value {
+  oneof kind {
+    int64 int_val = 1;
+    double float_val = 2;
+    string text_val = 3;
+    bool bool_val = 4;
+    bytes bytes_val = 5;
+    uint64 ref_val = 6;
+  }
+}
+
+// --- Admin RPCs ---
+
+message StatusRequest {}
+
+message StatusResponse {
+  string db_path = 1;
+  string storage_mode = 2;
+  uint64 disk_usage = 3;
+  uint64 sst_size = 4;
+  uint64 live_data = 5;
+  uint64 memtable_size = 6;
+  uint64 wal_size = 7;
+}
+
+message TreeRequest {}
+
+message CfStatsInfo {
+  string name = 1;
+  uint64 num_keys = 2;
+  uint64 live_size = 3;
+  uint64 sst_size = 4;
+  uint64 num_sst = 5;
+  uint64 memtable_size = 6;
+}
+
+message TreeResponse {
+  repeated CfStatsInfo cfs = 1;
+}
+
+message DumpRequest {
+  string index = 1;
+}
+
+message DatomRow {
+  uint64 e = 1;
+  string attr = 2;
+  Value value = 3;
+  uint64 t = 4;
+}
+
+message MemtableRequest {}
+
+message MemtableCfInfo {
+  string name = 1;
+  uint64 count = 2;
+}
+
+message MemtableResponse {
+  uint64 memtable_size = 1;
+  uint64 wal_size = 2;
+  repeated MemtableCfInfo cfs = 3;
+}
+
+message FlushRequest {}
+
+message FlushResponse {
+  uint64 memtable_before = 1;
+  uint64 memtable_after = 2;
+  uint64 wal_before = 3;
+  uint64 wal_after = 4;
+}
