@@ -605,6 +605,42 @@ impl GenericPageStore {
         Ok(())
     }
 
+    /// Collect total blob size and count for a tree.
+    fn collect_tree_blob_sizes_inline(&self, tree: &CfTree) -> (u64, u64) {
+        let mut total = 0u64;
+        let mut count = 0u64;
+        self.collect_tree_blob_sizes(tree, &mut total, &mut count);
+        (total, count)
+    }
+
+    /// Recursively walk a tree's blob UUIDs and sum their sizes.
+    fn collect_tree_blob_sizes(&self, tree: &CfTree, total: &mut u64, count: &mut u64) {
+        if tree.root_uuid == [0u8; 16] {
+            return;
+        }
+        let data = match blob_get(self.blobs.as_ref(), tree.root_uuid) {
+            Ok(Some(d)) => d,
+            _ => return,
+        };
+        *total += data.len() as u64;
+        *count += 1;
+        if tree.height == 0 {
+            return;
+        }
+        let entries = match deserialize_index_page(&data) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for (_, child_uuid) in &entries {
+            let child_tree = CfTree {
+                root_uuid: *child_uuid,
+                height: tree.height - 1,
+                num_leaves: 0,
+            };
+            self.collect_tree_blob_sizes(&child_tree, total, count);
+        }
+    }
+
     /// Load all entries from the root index page of a CF (height >= 1).
     /// For height 0, returns empty (single leaf page has no index).
     fn load_root_entries(&self, tree: &CfTree) -> TransactorResult<Vec<(Vec<u8>, [u8; 16])>> {
@@ -1352,19 +1388,33 @@ impl PageStore for GenericPageStore {
         if cf >= inner.num_cf {
             return Err(TransactorError::InvalidArg(format!("cf {cf} out of range")));
         }
+        let tree = &inner.trees[cf];
+        let mut sst_size = 0u64;
+        let mut num_sst = 0u64;
+        if tree.root_uuid != [0u8; 16] {
+            self.collect_tree_blob_sizes(tree, &mut sst_size, &mut num_sst);
+        }
         Ok(CfStatsData {
-            num_keys: inner.trees[cf].num_leaves as u64,
-            live_size: 0,
-            sst_size: 0,
-            num_sst: 0,
+            num_keys: tree.num_leaves as u64,
+            live_size: sst_size,
+            sst_size,
+            num_sst,
             memtable_size: 0,
         })
     }
 
     fn db_stats(&self) -> TransactorResult<DbStatsData> {
+        let inner = self.inner.read().unwrap();
+        let mut total_sst = 0u64;
+        for tree in &inner.trees {
+            if tree.root_uuid != [0u8; 16] {
+                let (s, _) = self.collect_tree_blob_sizes_inline(tree);
+                total_sst += s;
+            }
+        }
         Ok(DbStatsData {
-            total_sst_size: 0,
-            total_live_size: 0,
+            total_sst_size: total_sst,
+            total_live_size: total_sst,
         })
     }
 
