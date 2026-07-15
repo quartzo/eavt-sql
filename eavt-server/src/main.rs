@@ -6,8 +6,7 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use eavt::eavt_service_server::{EavtService, EavtServiceServer};
-use spier_eavt_query::QueryEngine;
-use spier_eavt_query::QueryState;
+use spier_eavt_query::{QueryEngine, QueryState, ValueType};
 use spier_value::query_codec;
 
 pub struct EavtServer {
@@ -75,6 +74,25 @@ fn proto_to_value(v: &eavt::Value) -> spier_value::Value {
 }
 
 const U64_MAX: u64 = u64::MAX;
+
+/// Decorate REF values pointing to schema entities (PART_DB) with their
+/// db.ident as "name(eid)" for human-readable .dump output.
+fn decorate_dump_value(
+    client: &QueryState,
+    aid: u32,
+    v: &spier_value::Value,
+) -> spier_value::Value {
+    if let spier_value::Value::Int64(eid) = v {
+        if let Ok(Some(vt)) = client.value_type_for(aid) {
+            if vt == ValueType::Ref {
+                if let Ok(Some(name)) = client.attr_name_opt(*eid as u32) {
+                    return spier_value::Value::text(format!("{}({})", name, eid));
+                }
+            }
+        }
+    }
+    v.clone()
+}
 
 fn run_sql(
     client: &QueryState,
@@ -355,6 +373,10 @@ impl EavtService for EavtServer {
                     spier_value::Value::Int64(n) => *n as u64,
                     _ => 0,
                 };
+                let aid = match &chunk[1] {
+                    spier_value::Value::Int64(n) => *n as u32,
+                    _ => 0,
+                };
                 let attr_name = match &chunk[2] {
                     spier_value::Value::Text(s) => s.as_str().to_string(),
                     _ => String::new(),
@@ -363,10 +385,11 @@ impl EavtService for EavtServer {
                     spier_value::Value::Int64(n) => *n as u64,
                     _ => 0,
                 };
+                let v = decorate_dump_value(&self.client, aid, &chunk[3]);
                 eavt::DatomRow {
                     e,
                     attr: attr_name,
-                    value: value_to_proto(&chunk[3]),
+                    value: value_to_proto(&v),
                     t,
                 }
             })

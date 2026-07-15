@@ -17,7 +17,8 @@ use spier_datalog::{
 use spier_query_ir::{InstructionData, VMProgram};
 use spier_sql_frontend::SqlFrontendEngine;
 use spier_sql_parse::RustStmt;
-use spier_transactor::{TransactorEngine, ValueType};
+use spier_transactor::TransactorEngine;
+pub use spier_transactor::ValueType;
 use spier_value::{query_codec, Value};
 
 pub trait VMResultStream {
@@ -64,6 +65,7 @@ pub trait QueryEngine: Send + Sync {
     ) -> Result<(), String>;
     fn lookup_attr(&self, name: &str) -> Result<Option<u32>, String>;
     fn attr_name(&self, aid: u32) -> Result<String, String>;
+    fn attr_name_opt(&self, eid: u32) -> Result<Option<String>, String>;
     fn is_declared(&self, aid: u32) -> Result<bool, String>;
     fn value_type_for(&self, aid: u32) -> Result<Option<ValueType>, String>;
     fn is_many(&self, aid: u32) -> Result<bool, String>;
@@ -530,26 +532,10 @@ impl QueryEngine for QueryState {
             let tx = engine.tx();
             let attr_name = tx.attr_name(d.a)?;
 
-            // Decorar refs cujo alvo seja uma entidade de schema (PART_DB) com
-            // seu db.ident quando disponível no Resolver, exibindo "name(eid)".
-            // Refs a partições de usuário/tx permanecem como número puro.
-            let v_out = match (&d.v, tx.value_type_for(d.a)?) {
-                (Value::Int64(eid), Some(ValueType::Ref))
-                    if spier_transactor::resolver_consts::partition_of(*eid as u64)
-                        == spier_transactor::resolver::PART_DB =>
-                {
-                    match tx.attr_name_opt(*eid as u32)? {
-                        Some(name) => Value::Text(format!("{}({})", name, eid)),
-                        None => d.v.clone(),
-                    }
-                }
-                _ => d.v.clone(),
-            };
-
             values.push(Value::Int64(d.e as i64));
             values.push(Value::Int64(d.a as i64));
             values.push(Value::Text(attr_name.into()));
-            values.push(v_out);
+            values.push(d.v.clone());
             values.push(Value::Int64(d.t as i64));
         }
 
@@ -595,6 +581,12 @@ impl QueryEngine for QueryState {
         let inner = self.inner.read().unwrap();
         let engine = inner.engine.as_ref().ok_or("engine not open")?;
         engine.tx().attr_name(aid)
+    }
+
+    fn attr_name_opt(&self, eid: u32) -> Result<Option<String>, String> {
+        let inner = self.inner.read().unwrap();
+        let engine = inner.engine.as_ref().ok_or("engine not open")?;
+        engine.tx().attr_name_opt(eid)
     }
 
     fn is_declared(&self, aid: u32) -> Result<bool, String> {
