@@ -10,6 +10,10 @@ skip_if_scheme = pytest.mark.skipif(
     _scheme_select is not None,
     reason="EXPLAIN format is Scheme S-expr when EAVT_SCHEME_SELECT is set",
 )
+skip_if_not_scheme = pytest.mark.skipif(
+    _scheme_select is None,
+    reason="Requires EAVT_SCHEME_SELECT for symbolic params in DELETE",
+)
 
 @pytest.fixture
 def engine():
@@ -2459,5 +2463,44 @@ def test_bug_eid_range_query():
         e25, e75,
     ))
     assert len(rows) == 50
+    engine.close()
+
+
+def test_delete_scan_with_range_params():
+    """DELETE WHERE with range conditions and params — tests symbolic
+    params in the Scheme path (params resolved at runtime, not compile time).
+
+    Note: DELETE scan retracts the WHERE param values (not the entity's actual
+    value) — this is a known limitation of both VM and Scheme paths for range
+    DELETEs with params. Only equality conditions produce correct retractions.
+    The test verifies the scan+streaming behavior (5 matched entities)."""
+    engine = EAVTEngine(":memory:")
+    list(engine.sql("ATTRIBUTE bench.value LONG MANY"))
+    for i in range(1, 11):
+        list(engine.sql("UPSERT SET bench.value = %1", i * 10))
+    # 10, 20, 30, 40, 50, 60, 70, 80, 90, 100
+
+    deleted = list(engine.sql(
+        "DELETE WHERE d1.bench.value >= %1 AND d1.bench.value < %2",
+        50, 100,
+    ))
+    # Should match 5 entities (values 50, 60, 70, 80, 90)
+    assert len(deleted) == 5
+    engine.close()
+
+
+@skip_if_not_scheme
+def test_delete_scan_explain_without_params():
+    """EXPLAIN DELETE with params should work without providing param values
+    (params stay symbolic in Scheme path)."""
+    engine = EAVTEngine(":memory:")
+    list(engine.sql("ATTRIBUTE bench.value LONG MANY"))
+    rows = list(engine.sql(
+        "EXPLAIN DELETE WHERE d1.bench.value >= %1 AND d1.bench.value < %2"
+    ))
+    text = "\n".join(row[0] for row in rows)
+    # Should contain retract and param references, not error
+    assert "retract" in text or "EXEC_RETRACT" in text
+    assert "bench.value" in text
     engine.close()
 

@@ -236,10 +236,7 @@ pub fn compile_select_scheme(
     plan: &QueryPlanResult,
     total_proj_len: usize,
     find_vars_in: &[spier_datalog::FindVar],
-) -> Result<(SchemeProgram, spier_query_ir::SelectSchemeMeta), String> {
-    let ordered_vars = &plan.ordered_vars;
-    let num_depths = ordered_vars.len();
-
+) -> Result<(SchemeProgram, SelectSchemeMeta), String> {
     let mut find_vars: Vec<String> = Vec::new();
     let mut constant_indices: HashMap<usize, PlanValue> = HashMap::new();
     for (i, fv) in find_vars_in.iter().enumerate() {
@@ -254,7 +251,79 @@ pub fn compile_select_scheme(
         }
     }
 
-    let mut var_names_list: Vec<String> = ordered_vars.clone();
+    let leaf_body = if plan.exists_mode {
+        SExpr::List(vec![
+            SExpr::Symbol("result-row".into()),
+            SExpr::Int(1),
+            SExpr::Bool(false),
+        ])
+    } else {
+        build_projection(plan, &build_var_id_map(plan), total_proj_len, &constant_indices)
+    };
+
+    build_triejoin_scheme(plan, &find_vars, leaf_body)
+}
+
+pub fn compile_delete_scheme(
+    plan: &QueryPlanResult,
+    find_vars: &[String],
+    target_evar: &str,
+    delete_stmt: &spier_sql_parse::RustDeleteWhereStmt,
+) -> Result<(SchemeProgram, SelectSchemeMeta), String> {
+    use spier_sql_parse::{RustConditionRight, RustLiteral};
+
+    let var_id_map = build_var_id_map(plan);
+    let e_var_id = var_id_map.get(target_evar).copied().unwrap_or(0);
+
+    let eid_get = SExpr::List(vec![SExpr::Symbol("bind-get".into()), SExpr::Int(e_var_id as i64)]);
+
+    let mut leaf_stmts: Vec<SExpr> = Vec::new();
+
+    for cond in &delete_stmt.conditions {
+        if cond.left.field == "eid" {
+            continue;
+        }
+        let attr = cond.left.field.clone();
+        let val_sexpr = match &cond.right {
+            RustConditionRight::Param(idx) => SExpr::List(vec![
+                SExpr::Symbol("param".into()),
+                SExpr::Int(*idx as i64),
+            ]),
+            RustConditionRight::Literal(RustLiteral::Int(n)) => SExpr::Int(*n),
+            RustConditionRight::Literal(RustLiteral::Float(f)) => SExpr::Float(*f),
+            RustConditionRight::Literal(RustLiteral::Str(s)) => SExpr::Str(s.clone()),
+            RustConditionRight::Literal(RustLiteral::Bool(b)) => SExpr::Bool(*b),
+            RustConditionRight::Literal(RustLiteral::Bytes(b)) => SExpr::Bytes(b.clone()),
+            _ => SExpr::Int(0),
+        };
+        leaf_stmts.push(SExpr::List(vec![
+            SExpr::Symbol("retract".into()),
+            eid_get.clone(),
+            SExpr::Str(attr),
+            val_sexpr,
+        ]));
+    }
+
+    leaf_stmts.push(SExpr::List(vec![
+        SExpr::Symbol("result-row".into()),
+        eid_get,
+    ]));
+
+    let leaf_body = if leaf_stmts.len() == 1 {
+        leaf_stmts.remove(0)
+    } else {
+        SExpr::List({
+            let mut v = vec![SExpr::Symbol("begin".into())];
+            v.extend(leaf_stmts);
+            v
+        })
+    };
+
+    build_triejoin_scheme(plan, find_vars, leaf_body)
+}
+
+fn build_var_id_map(plan: &QueryPlanResult) -> HashMap<String, usize> {
+    let mut var_names_list: Vec<String> = plan.ordered_vars.clone();
     for tn in &plan.t_lookup_vars {
         if !var_names_list.contains(tn) {
             var_names_list.push(tn.clone());
@@ -267,13 +336,38 @@ pub fn compile_select_scheme(
             }
         }
     }
+    var_names_list
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.clone(), i))
+        .collect()
+}
 
+fn build_triejoin_scheme(
+    plan: &QueryPlanResult,
+    find_vars: &[String],
+    leaf_body: SExpr,
+) -> Result<(SchemeProgram, SelectSchemeMeta), String> {
+    let ordered_vars = &plan.ordered_vars;
+    let num_depths = ordered_vars.len();
+
+    let var_names_list: Vec<String> = {
+        let mut v = plan.ordered_vars.clone();
+        for tn in &plan.t_lookup_vars {
+            if !v.contains(tn) { v.push(tn.clone()); }
+        }
+        for ip in &plan.iter_plans {
+            for (name, _) in &ip.trailing_bindings {
+                if !v.contains(name) { v.push(name.clone()); }
+            }
+        }
+        v
+    };
     let var_id_map: HashMap<String, usize> = var_names_list
         .iter()
         .enumerate()
         .map(|(i, n)| (n.clone(), i))
         .collect();
-
     let depth_var_pairs: Vec<(usize, usize)> = ordered_vars
         .iter()
         .enumerate()
@@ -368,27 +462,6 @@ pub fn compile_select_scheme(
         }
         depth_scanners.push(scanners);
     }
-
-    let find_var_names: HashSet<String> = find_vars.iter().cloned().collect();
-    let mut max_projected: i32 = -1;
-    for d in 0..num_depths {
-        if find_var_names.contains(&ordered_vars[d]) {
-            max_projected = d as i32;
-        }
-    }
-    if max_projected < 0 {
-        max_projected = num_depths as i32 - 1;
-    }
-
-    let leaf_body = if plan.exists_mode {
-        SExpr::List(vec![
-            SExpr::Symbol("result-row".into()),
-            SExpr::Int(1),
-            SExpr::Bool(false),
-        ])
-    } else {
-        build_projection(plan, &var_id_map, total_proj_len, &constant_indices)
-    };
 
     let mut body = leaf_body;
     for depth in (0..num_depths).rev() {

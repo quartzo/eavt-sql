@@ -468,7 +468,7 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                 | "scheme-leap-init" | "scheme-leap-next" | "depth-cleanup"
                 | "bind-get" | "bind-set" | "intern-a" | "param"
                 | "result-row" | "range-op" | "range-branch"
-                | "resolve-val" | "attr-name" | "probe-begin"
+                | "resolve-val" | "attr-name" | "probe-begin" | "retract"
         )
     }
 
@@ -736,6 +736,16 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                     !d.retracted && probe_value_matches(&d.v, &v_probe)
                 });
                 Ok(EvalStep::Done(SExpr::Bool(found)))
+            }
+
+            // -- DML: retract --
+
+            "retract" => {
+                let eid = expect_int(&args[0])? as u64;
+                let attr = expect_str(&args[1])?;
+                let val = sexpr_to_value(&args[2]).map_err(|e| he(e))?;
+                self.engine.retract(&Value::entity_id(eid), &attr, &val, &self.ctx);
+                Ok(EvalStep::Done(SExpr::Void))
             }
 
             // -- Result emission --

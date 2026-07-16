@@ -171,19 +171,31 @@ impl CompilerEngine for Compiler {
                     .unwrap_or_else(|| "D1".to_string());
                 let target_evar = format!("_e_{}", first_alias.to_lowercase());
 
-                let retract_pairs = compiler::resolve_delete_pairs(delete_stmt, &params)?;
-
-                let program = compiler::compile_triejoin_delete(
-                    plan,
-                    &plan.range_bounds,
-                    &find_vars,
-                    &target_evar,
-                    &retract_pairs,
-                )?;
-                Ok(CompileResultSt {
-                    program: CompiledProgram::Vm(Arc::new(program)),
-                    traces: plan.plan_traces.clone(),
-                })
+                if std::env::var("EAVT_SCHEME_SELECT").is_ok() {
+                    let (scheme_program, meta) = scheme_compile::compile_delete_scheme(
+                        plan,
+                        &find_vars,
+                        &target_evar,
+                        delete_stmt,
+                    )?;
+                    Ok(CompileResultSt {
+                        program: CompiledProgram::SelectScheme(scheme_program, meta),
+                        traces: plan.plan_traces.clone(),
+                    })
+                } else {
+                    let retract_pairs = compiler::resolve_delete_pairs(delete_stmt, &params)?;
+                    let program = compiler::compile_triejoin_delete(
+                        plan,
+                        &plan.range_bounds,
+                        &find_vars,
+                        &target_evar,
+                        &retract_pairs,
+                    )?;
+                    Ok(CompileResultSt {
+                        program: CompiledProgram::Vm(Arc::new(program)),
+                        traces: plan.plan_traces.clone(),
+                    })
+                }
             }
             _ => Err("compile_dml_scan only supports UPDATE/DELETE".to_string()),
         }
