@@ -142,6 +142,127 @@ fn expect_done(host: &mut dyn HostFns, name: &str, args: &[SExpr]) -> Result<SEx
     }
 }
 
+/// Map SQL-style operator symbols to range-op integers.
+fn range_op_symbol_to_int(op: &str) -> Option<i64> {
+    match op {
+        "=" => Some(0),   // RANGE_OP_EQ (single value, interacts with >/<)
+        "!=" => Some(1),
+        ">" => Some(2),
+        ">=" => Some(3),
+        "<" => Some(4),
+        "<=" => Some(5),
+        _ => None,
+    }
+}
+
+/// Map for multi-value `=` — uses RANGE_OP_IN (6) so ops_to_intervals
+/// produces separate [v,v] intervals instead of overwriting lo/hi.
+const RANGE_OP_IN: i64 = 6;
+
+/// Register ranges from a boolean tree (and/or) into the host's
+/// range-op/range-branch state. Called internally by eval_depth_run_frame.
+///
+/// Tree shapes:
+///   ()                          — no ranges
+///   (and (op val) (op val)...) — single branch, AND
+///   (or branch1 branch2...)    — multiple branches, OR
+///   (op val)                    — single condition (implicit AND)
+///
+/// Each `op` is a symbol: =, !=, >, >=, <, <=
+/// Each `val` is any SExpr (literal, (param idx), etc.)
+fn register_ranges(
+    host: &mut dyn HostFns,
+    depth: i64,
+    ranges: &SExpr,
+    env: &mut Environment,
+    tracer: &dyn SchemeTracer,
+) -> Result<(), EvalError> {
+    match ranges {
+        SExpr::List(items) if items.is_empty() => {
+            Ok(())
+        }
+        SExpr::List(items) => {
+            // Check first element for and/or
+            if let SExpr::Symbol(op) = &items[0] {
+                if op == "and" {
+                    for cond in &items[1..] {
+                        register_one_condition(host, depth, cond, env, tracer)?;
+                    }
+                    return Ok(());
+                }
+                if op == "or" {
+                    for (i, branch) in items[1..].iter().enumerate() {
+                        if i > 0 {
+                            expect_done(host, "range-branch", &[SExpr::Int(depth)])?;
+                        }
+                        match branch {
+                            SExpr::List(bitems) => {
+                                if let Some(SExpr::Symbol(first)) = bitems.first() {
+                                    if first == "and" {
+                                        for cond in &bitems[1..] {
+                                            register_one_condition(host, depth, cond, env, tracer)?;
+                                        }
+                                        continue;
+                                    }
+                                }
+                                register_one_condition(host, depth, branch, env, tracer)?;
+                            }
+                            _ => return Err(EvalError::Type {
+                                expected: "range condition",
+                                got: format!("{branch:?}"),
+                            }),
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+            register_one_condition(host, depth, ranges, env, tracer)
+        }
+        _ => Err(EvalError::Type {
+            expected: "ranges expression",
+            got: format!("{ranges:?}"),
+        }),
+    }
+}
+
+fn register_one_condition(
+    host: &mut dyn HostFns,
+    depth: i64,
+    cond: &SExpr,
+    env: &mut Environment,
+    tracer: &dyn SchemeTracer,
+) -> Result<(), EvalError> {
+    match cond {
+        SExpr::List(parts) if parts.len() >= 2 => {
+            let op_str = match &parts[0] {
+                SExpr::Symbol(s) => s.as_str(),
+                _ => return Err(EvalError::Type {
+                    expected: "range operator symbol",
+                    got: format!("{:?}", parts[0]),
+                }),
+            };
+            // (= v1 v2 v3) — multiple values → IN semantics (RANGE_OP_IN per value)
+            // (= val)      — single value  → EQ semantics (RANGE_OP_EQ)
+            let op_int = if op_str == "=" && parts.len() > 2 {
+                RANGE_OP_IN
+            } else {
+                range_op_symbol_to_int(op_str).ok_or_else(|| EvalError::Other(
+                    format!("unknown range operator: {op_str}")
+                ))?
+            };
+            for val_expr in &parts[1..] {
+                let val = eval_recursive(val_expr, env, host, tracer)?;
+                expect_done(host, "range-op", &[SExpr::Int(depth), SExpr::Int(op_int), val])?;
+            }
+            Ok(())
+        }
+        _ => Err(EvalError::Type {
+            expected: "(op value...) pair",
+            got: format!("{cond:?}"),
+        }),
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Stack-based evaluator (supports yield/resume)
 // ═══════════════════════════════════════════════════════════════════
@@ -846,12 +967,19 @@ fn eval_depth_run_frame(
     _tracer: &dyn SchemeTracer,
     state: &mut YieldState,
 ) -> Result<EvalResult, EvalError> {
-    if items.len() != 4 {
+    // Support 4 args (no ranges) or 5 args (with ranges):
+    //   (depth-run depth-id scanners (lambda () body))
+    //   (depth-run depth-id scanners ranges (lambda () body))
+    let (ranges, lambda_item) = if items.len() == 5 {
+        (&items[3], &items[4])
+    } else if items.len() == 4 {
+        (&SExpr::List(vec![]), &items[3])
+    } else {
         return Err(EvalError::Arity {
             name: "depth-run".into(),
-            expected: "(depth-run depth-id ((sid pos-idx) ...) (lambda () body...))",
+            expected: "(depth-run depth-id scanners [ranges] (lambda () body...))",
         });
-    }
+    };
     let depth_id = sexpr_to_int(&items[1])?;
     let scanner_configs = match &items[2] {
         SExpr::List(pairs) => pairs.clone(),
@@ -862,7 +990,11 @@ fn eval_depth_run_frame(
             });
         }
     };
-    let lambda = match &items[3] {
+
+    // Register ranges from the boolean tree into host's range-op/range-branch state
+    register_ranges(_host, depth_id, ranges, _env, _tracer)?;
+
+    let lambda = match lambda_item {
         SExpr::Symbol(name) => _env.get(name).cloned().ok_or_else(|| EvalError::Unbound(name.clone()))?,
         other => eval_recursive(other, _env, _host, _tracer)?,
     };
@@ -1041,12 +1173,16 @@ fn eval_depth_run_recursive(
     host: &mut dyn HostFns,
     tracer: &dyn SchemeTracer,
 ) -> Result<SExpr, EvalError> {
-    if items.len() != 4 {
+    let (ranges, lambda_item) = if items.len() == 5 {
+        (&items[3], &items[4])
+    } else if items.len() == 4 {
+        (&SExpr::List(vec![]), &items[3])
+    } else {
         return Err(EvalError::Arity {
             name: "depth-run".into(),
-            expected: "(depth-run depth-id ((sid pos-idx) ...) (lambda () body...))",
+            expected: "(depth-run depth-id scanners [ranges] (lambda () body...))",
         });
-    }
+    };
     let depth_id = sexpr_to_int(&items[1])?;
     let scanner_configs = match &items[2] {
         SExpr::List(pairs) => pairs.clone(),
@@ -1057,7 +1193,10 @@ fn eval_depth_run_recursive(
             });
         }
     };
-    let lambda = match &items[3] {
+
+    register_ranges(host, depth_id, ranges, env, tracer)?;
+
+    let lambda = match lambda_item {
         SExpr::Symbol(name) => env.get(name).cloned().ok_or_else(|| EvalError::Unbound(name.clone()))?,
         other => eval_recursive(other, env, host, tracer)?,
     };

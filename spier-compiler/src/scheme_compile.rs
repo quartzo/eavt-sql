@@ -364,16 +364,53 @@ fn bound_value_to_sexpr(bv: &BoundValue) -> SExpr {
     }
 }
 
-fn range_op_name_to_int(op: &str) -> Option<i64> {
-    match op {
-        "=" => Some(0),
-        "!=" => Some(1),
-        ">" => Some(2),
-        ">=" => Some(3),
-        "<" => Some(4),
-        "<=" => Some(5),
-        "in" => Some(6),
-        _ => None,
+/// Build a boolean tree SExpr from range bounds.
+/// Each branch is a Vec of (op_str, PlanValue) — ANDed within the branch.
+/// Multiple branches are ORed.
+///
+/// "in" entries within the same branch are collected into a single
+/// (= v1 v2 v3) form — multiple values use IN semantics.
+///
+/// Single branch, multiple conditions → (and (op val) (op val) ...)
+/// Multiple branches → (or (and (op val) ...) (and (op val) ...))
+/// Single branch, single condition → (op val) (implicit AND)
+fn build_range_tree(branches: &Vec<Vec<(String, PlanValue)>>) -> SExpr {
+    fn build_branch(branch: &Vec<(String, PlanValue)>) -> SExpr {
+        // Collect "in" values into a single (= v1 v2 ...) form
+        let mut in_vals: Vec<SExpr> = Vec::new();
+        let mut other_conds: Vec<SExpr> = Vec::new();
+        for (op, pv) in branch {
+            if op == "in" {
+                in_vals.push(plan_value_to_sexpr(pv));
+            } else {
+                other_conds.push(SExpr::List(vec![
+                    SExpr::Symbol(op.clone()),
+                    plan_value_to_sexpr(pv),
+                ]));
+            }
+        }
+        // (= v1 v2 ...) for collected IN values
+        if !in_vals.is_empty() {
+            let mut eq_items = vec![SExpr::Symbol("=".into())];
+            eq_items.extend(in_vals);
+            other_conds.push(SExpr::List(eq_items));
+        }
+        if other_conds.len() == 1 {
+            other_conds.into_iter().next().unwrap()
+        } else {
+            let mut and_items = vec![SExpr::Symbol("and".into())];
+            and_items.extend(other_conds);
+            SExpr::List(and_items)
+        }
+    }
+
+    if branches.len() == 1 {
+        build_branch(&branches[0])
+    } else {
+        let branch_sexprs: Vec<SExpr> = branches.iter().map(build_branch).collect();
+        let mut or_items = vec![SExpr::Symbol("or".into())];
+        or_items.extend(branch_sexprs);
+        SExpr::List(or_items)
     }
 }
 
@@ -623,30 +660,15 @@ fn build_triejoin_scheme(
 
     stmts.extend(prefix_stmts);
 
-    for (var_name, branches) in &plan.range_bounds {
-        let depth = match ordered_vars.iter().position(|v| v == var_name) {
-            Some(d) => d,
-            None => continue,
-        };
-        for (branch_idx, branch) in branches.iter().enumerate() {
-            if branch_idx > 0 {
-                stmts.push(SExpr::List(vec![
-                    SExpr::Symbol("range-branch".into()),
-                    SExpr::Int(depth as i64),
-                ]));
-            }
-            for (op_str, pv) in branch {
-                let op_int = range_op_name_to_int(op_str)
-                    .ok_or_else(|| format!("unsupported range op: {op_str}"))?;
-                stmts.push(SExpr::List(vec![
-                    SExpr::Symbol("range-op".into()),
-                    SExpr::Int(depth as i64),
-                    SExpr::Int(op_int),
-                    plan_value_to_sexpr(pv),
-                ]));
-            }
-        }
-    }
+    // Build per-depth range trees from plan.range_bounds.
+    // Each depth's ranges become a boolean tree: (and (op val) ...) or (or branch1 branch2)
+    let depth_ranges: HashMap<usize, SExpr> = plan.range_bounds.iter()
+        .filter_map(|(var_name, branches)| {
+            let depth = ordered_vars.iter().position(|v| v == var_name)?;
+            let range_sexpr = build_range_tree(branches);
+            Some((depth, range_sexpr))
+        })
+        .collect();
 
     let depth_groups = build_depth_groups(plan);
     let depth_pos_map = build_depth_pos_map(plan);
@@ -677,10 +699,12 @@ fn build_triejoin_scheme(
                 ])
             })
             .collect();
+        let ranges = depth_ranges.get(&depth).cloned().unwrap_or(SExpr::List(vec![]));
         body = SExpr::List(vec![
             SExpr::Symbol("depth-run".into()),
             SExpr::Int(depth as i64),
             SExpr::List(scanner_args),
+            ranges,
             SExpr::List(vec![SExpr::Symbol("lambda".into()), SExpr::List(vec![]), body]),
         ]);
     }
