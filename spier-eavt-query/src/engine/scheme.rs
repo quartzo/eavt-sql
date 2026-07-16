@@ -515,7 +515,8 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                 | "scheme-leap-init" | "scheme-leap-next" | "depth-cleanup"
                 | "bind-get" | "bind-set" | "intern-a" | "param"
                 | "result-row" | "range-op" | "range-branch"
-                | "resolve-val" | "attr-name" | "probe-begin" | "probe-get-t" | "save" | "retract"
+                | "resolve-val" | "attr-name" | "probe-begin" | "probe-get-t"
+                | "save" | "retract" | "scanner-push" | "scanner-pop"
         )
     }
 
@@ -565,6 +566,23 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                 Ok(EvalStep::Done(SExpr::Void))
             }
 
+            "scanner-push" => {
+                let sid = expect_int(&args[0])? as usize;
+                let val = sexpr_to_value(&args[1]).map_err(|e| he(e))?;
+                if let Some(scanner) = self.scanners.get_mut(&sid) {
+                    scanner.push_prefix_at(scanner.positions_filled, &val);
+                }
+                Ok(EvalStep::Done(SExpr::Void))
+            }
+
+            "scanner-pop" => {
+                let sid = expect_int(&args[0])? as usize;
+                if let Some(scanner) = self.scanners.get_mut(&sid) {
+                    scanner.pop_prefix();
+                }
+                Ok(EvalStep::Done(SExpr::Void))
+            }
+
             // -- DepthEnter (called by depth-run) --
 
             "scanner-init" => {
@@ -576,7 +594,6 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                     } else {
                         scanner.next_free_pos()
                     };
-                        scanner.idx_order, scanner.prefix_values, scanner.depth_positions);
                     if !scanner.is_open() {
                         if let Some(aid) = scanner.attr_id_from_prefix() {
                             let vt = self.engine.value_type_for(aid);

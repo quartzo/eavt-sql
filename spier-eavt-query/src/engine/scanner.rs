@@ -136,6 +136,11 @@ impl V2Scanner {
         }
     }
 
+    pub fn pop_prefix(&mut self) {
+        self.prefix_values.pop();
+        self.positions_filled = self.positions_filled.saturating_sub(1);
+    }
+
     fn passes_filters(&self, key: &[u8]) -> bool {
         let leading_count = {
             let mut count = 0;

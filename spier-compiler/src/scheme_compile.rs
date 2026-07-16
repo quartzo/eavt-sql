@@ -655,8 +655,6 @@ fn build_triejoin_scheme(
         }
     }
 
-    stmts.extend(prefix_stmts);
-
     // Build per-depth range trees from plan.range_bounds.
     // Each depth's ranges become a boolean tree: (and (op val) ...) or (or branch1 branch2)
     let depth_ranges: HashMap<usize, SExpr> = plan.range_bounds.iter()
@@ -669,25 +667,35 @@ fn build_triejoin_scheme(
 
     let depth_groups = build_depth_groups(plan);
 
-    let mut depth_scanners: Vec<Vec<usize>> = Vec::new();
+    // Build scanner configs per depth: ((s0 "e") (s1 "t")) with position names from var_depths
+    let mut depth_scanners: Vec<Vec<SExpr>> = Vec::new();
     for depth in 0..num_depths {
-        depth_scanners.push(
-            depth_groups.get(&depth).cloned().unwrap_or_default()
-        );
+        let mut args: Vec<SExpr> = Vec::new();
+        if let Some(cids) = depth_groups.get(&depth) {
+            for &cid in cids {
+                let pos_name = plan.iter_plans[cid].var_depths
+                    .iter()
+                    .find(|&&(d, _)| d == depth)
+                    .map(|&(_, ref name)| name.clone())
+                    .unwrap_or_else(|| "".to_string());
+                if pos_name.is_empty() { continue; }
+                args.push(SExpr::List(vec![
+                    SExpr::Symbol(format!("s{cid}")),
+                    SExpr::Str(pos_name),
+                ]));
+            }
+        }
+        depth_scanners.push(args);
     }
 
     let mut body = leaf_body;
     for depth in (0..num_depths).rev() {
-        let scanners = &depth_scanners[depth];
-        let scanner_args: Vec<SExpr> = scanners
-            .iter()
-            .map(|&sid| SExpr::Symbol(format!("s{sid}")))
-            .collect();
+        let scanner_args = &depth_scanners[depth];
         let ranges = depth_ranges.get(&depth).cloned().unwrap_or(SExpr::List(vec![]));
         body = SExpr::List(vec![
             SExpr::Symbol("depth-run".into()),
             SExpr::Int(depth as i64),
-            SExpr::List(scanner_args),
+            SExpr::List(scanner_args.clone()),
             ranges,
             SExpr::List(vec![SExpr::Symbol("lambda".into()), SExpr::List(vec![]), body]),
         ]);
@@ -720,6 +728,23 @@ fn build_triejoin_scheme(
             probe_call,
             body,
         ]);
+    }
+
+    // Wrap body in nested depth-fixed for each prefix-push (innermost first)
+    for stmt in prefix_stmts.iter().rev() {
+        if let SExpr::List(ref parts) = stmt {
+            if parts.len() >= 3 {
+                let scanner_ref = parts[1].clone();
+                let val = parts[2].clone();
+                body = SExpr::List(vec![
+                    SExpr::Symbol("depth-fixed".into()),
+                    SExpr::Int(0),
+                    SExpr::List(vec![scanner_ref]),
+                    val,
+                    SExpr::List(vec![SExpr::Symbol("lambda".into()), SExpr::List(vec![]), body]),
+                ]);
+            }
+        }
     }
 
     stmts.push(body);
@@ -789,6 +814,9 @@ fn build_depth_groups(plan: &QueryPlanResult) -> HashMap<usize, Vec<usize>> {
     let mut depth_groups: HashMap<usize, Vec<usize>> = HashMap::new();
     for (ip_idx, ip) in plan.iter_plans.iter().enumerate() {
         for &d in &ip.active_depths {
+            if !ip.var_depths.iter().any(|&(vd, _)| vd == d) {
+                continue;
+            }
             depth_groups.entry(d).or_default().push(ip_idx);
         }
     }

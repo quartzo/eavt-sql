@@ -120,6 +120,9 @@ pub(crate) enum Frame {
     DepthRunBody {
         depth: i64,
     },
+    DepthFixedPop {
+        scanner_configs: Vec<SExpr>,
+    },
 }
 
 enum EvalResult {
@@ -372,6 +375,18 @@ fn run_eval(
                             }
                         }
                     }
+                    EvalResult::Yield(row) => return Ok(EvalStep::Yield(row)),
+                    EvalResult::Pushed => {}
+                }
+            }
+            Frame::DepthFixedPop { scanner_configs } => {
+                for config in &scanner_configs {
+                    let sid_val = eval_recursive(config, env, host, tracer)?;
+                    let sid = sexpr_to_int(&sid_val)?;
+                    expect_done(host, "scanner-pop", &[SExpr::Int(sid)])?;
+                }
+                match process_value(SExpr::Void, env, host, state)? {
+                    EvalResult::Value(v) => return Ok(EvalStep::Done(v)),
                     EvalResult::Yield(row) => return Ok(EvalStep::Yield(row)),
                     EvalResult::Pushed => {}
                 }
@@ -752,6 +767,8 @@ fn eval_special_form_frame(
 
         "depth-run" => eval_depth_run_frame(items, env, host, tracer, state),
 
+        "depth-fixed" => eval_depth_fixed_frame(items, env, host, tracer, state),
+
         _ => unreachable!("checked by is_special_form"),
     }
 }
@@ -901,6 +918,10 @@ fn process_value(
             // Body finished — DepthRunBody is handled in the run_eval main loop.
             // Push it back and signal Pushed so the main loop processes it.
             state.stack.push(Frame::DepthRunBody { depth });
+            Ok(EvalResult::Pushed)
+        }
+        Frame::DepthFixedPop { scanner_configs } => {
+            state.stack.push(Frame::DepthFixedPop { scanner_configs });
             Ok(EvalResult::Pushed)
         }
         Frame::LetBindings {
@@ -1053,6 +1074,49 @@ fn eval_depth_run_frame(
     Ok(EvalResult::Pushed)
 }
 
+fn eval_depth_fixed_frame(
+    items: &[SExpr],
+    env: &mut Environment,
+    host: &mut dyn HostFns,
+    tracer: &dyn SchemeTracer,
+    state: &mut YieldState,
+) -> Result<EvalResult, EvalError> {
+    if items.len() != 5 {
+        return Err(EvalError::Arity {
+            name: "depth-fixed".into(),
+            expected: "(depth-fixed depth-id (scanner-refs...) value-expr (lambda () body))",
+        });
+    }
+    let scanner_configs = match &items[2] {
+        SExpr::List(refs) => refs.clone(),
+        _ => return Err(EvalError::Type { expected: "scanner refs list", got: format!("{:?}", items[2]) }),
+    };
+    let val = eval_recursive(&items[3], env, host, tracer)?;
+    for config in &scanner_configs {
+        let sid_val = eval_recursive(config, env, host, tracer)?;
+        let sid = sexpr_to_int(&sid_val)?;
+        expect_done(host, "scanner-push", &[SExpr::Int(sid), val.clone()])?;
+    }
+    let lambda = match &items[4] {
+        SExpr::Symbol(name) => env.get(name).cloned().ok_or_else(|| EvalError::Unbound(name.clone()))?,
+        other => eval_recursive(other, env, host, tracer)?,
+    };
+    let (body_exprs, _captured_env) = match lambda {
+        SExpr::Closure { params, body, .. } => {
+            if !params.is_empty() {
+                return Err(EvalError::Arity { name: "depth-fixed".into(), expected: "(lambda () body)" });
+            }
+            (body, ())
+        }
+        _ => return Err(EvalError::Type { expected: "lambda", got: format!("{lambda:?}") }),
+    };
+    state.stack.push(Frame::DepthFixedPop { scanner_configs });
+    for expr in body_exprs.iter().rev() {
+        state.stack.push(Frame::Eval(expr.clone()));
+    }
+    Ok(EvalResult::Pushed)
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Public API
 // ═══════════════════════════════════════════════════════════════════
@@ -1164,6 +1228,8 @@ fn eval_special_form_recursive(
         "assert" => eval_assert(items, env, host, tracer),
         "lambda" => eval_lambda(items, env),
         "depth-run" => eval_depth_run_recursive(items, env, host, tracer),
+
+        "depth-fixed" => eval_depth_fixed_recursive(items, env, host, tracer),
         _ => unreachable!("checked by is_special_form"),
     }
 }
@@ -1252,6 +1318,53 @@ fn eval_depth_run_recursive(
     Ok(SExpr::Void)
 }
 
+fn eval_depth_fixed_recursive(
+    items: &[SExpr],
+    env: &mut Environment,
+    host: &mut dyn HostFns,
+    tracer: &dyn SchemeTracer,
+) -> Result<SExpr, EvalError> {
+    if items.len() != 5 {
+        return Err(EvalError::Arity {
+            name: "depth-fixed".into(),
+            expected: "(depth-fixed depth-id (scanner-refs...) value-expr (lambda () body))",
+        });
+    }
+    let scanner_configs = match &items[2] {
+        SExpr::List(refs) => refs.clone(),
+        _ => return Err(EvalError::Type { expected: "scanner refs list", got: format!("{:?}", items[2]) }),
+    };
+    let val = eval_recursive(&items[3], env, host, tracer)?;
+    for config in &scanner_configs {
+        let sid_val = eval_recursive(config, env, host, tracer)?;
+        let sid = sexpr_to_int(&sid_val)?;
+        expect_done(host, "scanner-push", &[SExpr::Int(sid), val.clone()])?;
+    }
+    let lambda = match &items[4] {
+        SExpr::Symbol(name) => env.get(name).cloned().ok_or_else(|| EvalError::Unbound(name.clone()))?,
+        other => eval_recursive(other, env, host, tracer)?,
+    };
+    let (body_exprs, captured_env) = match lambda {
+        SExpr::Closure { params, body, env: closure_env } => {
+            if !params.is_empty() {
+                return Err(EvalError::Arity { name: "depth-fixed".into(), expected: "(lambda () body)" });
+            }
+            (body, closure_env)
+        }
+        _ => return Err(EvalError::Type { expected: "lambda", got: format!("{lambda:?}") }),
+    };
+    let mut inner_env = Environment { bindings: captured_env };
+    for expr in &body_exprs {
+        eval_recursive(expr, &mut inner_env, host, tracer)?;
+    }
+    for config in &scanner_configs {
+        let sid_val = eval_recursive(config, env, host, tracer)?;
+        let sid = sexpr_to_int(&sid_val)?;
+        expect_done(host, "scanner-pop", &[SExpr::Int(sid)])?;
+    }
+    Ok(SExpr::Void)
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Shared helpers
 // ═══════════════════════════════════════════════════════════════════
@@ -1260,7 +1373,7 @@ fn is_special_form(name: &str) -> bool {
     matches!(
         name,
         "let*" | "let" | "when" | "if" | "begin" | "set!" | "dbg" | "trace" | "log" | "assert"
-            | "lambda" | "depth-run"
+            | "lambda" | "depth-run" | "depth-fixed"
     )
 }
 
