@@ -69,10 +69,10 @@ fn is_unordered_attr(vt: Option<u32>) -> bool {
 pub struct V2Scanner {
     cursor: Arc<RefCell<dyn Cursor>>,
     index_name: String,
-    idx_order: Vec<String>,
+    pub(crate) idx_order: Vec<String>,
     prefix_values: Vec<(String, Value)>,
     prefix_bytes_cache: Vec<u8>,
-    positions_filled: usize,
+    pub positions_filled: usize,
     as_of_tx: Option<u64>,
     value_attr_type: Option<u32>,
     current_active_key: Option<Vec<u8>>,

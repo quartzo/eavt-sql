@@ -555,8 +555,11 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
             "prefix-push" => {
                 let sid = expect_int(&args[0])? as usize;
                 let val = sexpr_to_value(&args[1]).map_err(|e| he(e))?;
-                let pos_idx = expect_int(&args[2])? as usize;
+                let pos_name = expect_str(&args[2])?;
                 if let Some(scanner) = self.scanners.get_mut(&sid) {
+                    let pos_idx = scanner.idx_order.iter()
+                        .position(|s| *s == pos_name)
+                        .unwrap_or(0);
                     scanner.push_prefix_at(pos_idx, &val);
                 }
                 Ok(EvalStep::Done(SExpr::Void))

@@ -636,10 +636,6 @@ fn build_triejoin_scheme(
         let v2_order: Vec<&str> = ip.idx_order.iter().map(|s| s.as_str()).collect();
         for pos_name in &v2_order {
             if let Some(pv) = ip.bound_ints.get(*pos_name) {
-                let pos_idx = v2_order
-                    .iter()
-                    .position(|s| *s == *pos_name)
-                    .unwrap_or(0);
                 let val_expr = match pv {
                     PlanValue::Value(Value::Text(name)) if *pos_name == "a" => {
                         SExpr::List(vec![
@@ -653,7 +649,7 @@ fn build_triejoin_scheme(
                     SExpr::Symbol("prefix-push".into()),
                     SExpr::Symbol(format!("s{ip_idx}")),
                     val_expr,
-                    SExpr::Int(pos_idx as i64),
+                    SExpr::Str(pos_name.to_string()),
                 ]));
             }
         }
