@@ -14,7 +14,6 @@ use spier_datalog::{
     resolve::{compute_plan_stats, resolve_ir},
     DatalogIR, DatalogNumIR, DatalogNumIRSt,
 };
-use spier_query_ir::{InstructionData, VMProgram};
 use spier_sql_frontend::SqlFrontendEngine;
 use spier_sql_parse::RustStmt;
 use spier_transactor::TransactorEngine;
@@ -140,34 +139,6 @@ fn open_engine(config: &HashMap<String, String>) -> Result<QueryEngineInner, Str
         "s3" => QueryEngineInner::open_s3(config),
         other => Err(format!("unknown backend: {other}")),
     }
-}
-
-fn disassemble(program: &VMProgram) -> String {
-    let mut lines = Vec::new();
-    for (i, inst) in program.instructions.iter().enumerate() {
-        let op_name = format!("{:?}", inst.op)
-            .chars()
-            .fold(String::new(), |mut acc, c| {
-                if c.is_uppercase() && !acc.is_empty() {
-                    acc.push('_');
-                }
-                acc.push(c.to_ascii_uppercase());
-                acc
-            });
-        let p4_str = match &inst.p4 {
-            InstructionData::None => String::new(),
-            InstructionData::Int(n) => format!(" p4=int({})", n),
-            InstructionData::Float(f) => format!(" p4=float({})", f),
-            InstructionData::Str(s) => format!(" p4=str({:?})", s),
-            InstructionData::RangeFlags(f) => format!(" flags={}", f),
-            InstructionData::CursorPlan(_) => String::new(),
-        };
-        lines.push(format!(
-            "{:3}  {:<20} p1={} p2={} p3={}{}",
-            i, op_name, inst.p1, inst.p2, inst.p3, p4_str
-        ));
-    }
-    lines.join("\n")
 }
 
 /// Local bridge: TransactorEngine → CompileStats. Keeps every other crate
@@ -352,7 +323,7 @@ impl QueryEngine for QueryState {
 
         let vm_params = query_codec::decode_values(sql_params)?;
 
-        let limit_opt = if limit == u64::MAX {
+        let _limit_opt = if limit == u64::MAX {
             None
         } else {
             Some(limit as usize)
@@ -367,25 +338,6 @@ impl QueryEngine for QueryState {
         let as_of_tx = as_of_opt.and_then(|us| engine.tx().resolve_as_of(us).ok().flatten());
 
         match &*program.program {
-            spier_query_ir::CompiledProgram::Vm(p) => {
-                let rows = engine.run_vm(Arc::clone(p), vm_params, limit_opt, as_of_opt);
-                match rows {
-                    Ok(rows) => {
-                        let num_cols = rows.first().map(|r| r.len()).unwrap_or(0);
-                        let total_values: usize = rows.iter().map(|r| r.len()).sum();
-                        let mut out = Vec::with_capacity(total_values * 12 + 8);
-                        out.extend_from_slice(&(num_cols as u32).to_be_bytes());
-                        out.extend_from_slice(&(total_values as u32).to_be_bytes());
-                        for row in &rows {
-                            for v in row {
-                                query_codec::encode_one(&mut out, v);
-                            }
-                        }
-                        Ok(out)
-                    }
-                    Err(e) => Err(e.0),
-                }
-            }
             spier_query_ir::CompiledProgram::Scheme(scheme_prog) => {
                 let mut session = engine::scheme::SchemeSession::new(
                     scheme_prog.clone(),
@@ -413,18 +365,12 @@ impl QueryEngine for QueryState {
         &self,
         program: ProgramHandle,
         sql_params: &[u8],
-        limit: u64,
+        _limit: u64,
         as_of_us: u64,
     ) -> Result<SessionHandle, String> {
         let inner = self.inner.read().unwrap();
         let engine = inner.engine.as_ref().ok_or("engine not open")?;
-
         let vm_params = query_codec::decode_values(sql_params)?;
-        let limit_opt = if limit == u64::MAX {
-            None
-        } else {
-            Some(limit as usize)
-        };
         let as_of_us_opt = if as_of_us == u64::MAX {
             None
         } else {
@@ -435,17 +381,6 @@ impl QueryEngine for QueryState {
         let as_of_tx = as_of_us_opt.and_then(|us| engine.tx().resolve_as_of(us).ok().flatten());
 
         let session: Arc<RefCell<dyn VMResultStream>> = match &*program.program {
-            spier_query_ir::CompiledProgram::Vm(p) => {
-                crate::engine::opcodes::reset_scanner_stats();
-                Arc::new(RefCell::new(engine::session::VMSession::new(
-                    Arc::clone(p),
-                    Arc::clone(engine) as Arc<dyn engine::vm::VMEngine + Send + Sync>,
-                    vm_params,
-                    limit_opt,
-                    t,
-                    as_of_tx,
-                )))
-            }
             spier_query_ir::CompiledProgram::Scheme(scheme_prog) => {
                 Arc::new(RefCell::new(engine::scheme::SchemeSession::new(
                     scheme_prog.clone(),
@@ -489,7 +424,6 @@ impl QueryEngine for QueryState {
         out.push_str(&format!(
             "\n{}",
             match &result.program {
-                spier_query_ir::CompiledProgram::Vm(p) => disassemble(p),
                 spier_query_ir::CompiledProgram::Scheme(p)
                 | spier_query_ir::CompiledProgram::SelectScheme(p, _) => {
                     spier_scheme::write_scheme(&p.body)
@@ -525,7 +459,6 @@ impl QueryEngine for QueryState {
 
         let (result, _) = do_compile(frontend, compiler, engine.as_ref(), sql, sql_params)?;
         Ok(match result.program {
-            spier_query_ir::CompiledProgram::Vm(p) => p.to_json(),
             spier_query_ir::CompiledProgram::Scheme(p)
             | spier_query_ir::CompiledProgram::SelectScheme(p, _) => {
                 spier_scheme::write_scheme(&p.body)

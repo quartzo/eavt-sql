@@ -86,7 +86,7 @@ impl CompilerEngine for Compiler {
         num_ir: DatalogNumIRSt,
         sql_params: &[u8],
     ) -> Result<CompileResultSt, String> {
-        let params = decode_values(sql_params)?;
+        let _params = decode_values(sql_params)?;
         let plan_st = self.plan(num_ir)?;
         let plan = &plan_st.plan;
 

@@ -291,32 +291,6 @@ impl QueryEngineInner {
         (cf, cf_id, prefix, value_attr_type)
     }
 
-    pub fn run_vm(
-        self: &Arc<Self>,
-        program: Arc<crate::engine::opcodes::VMProgram>,
-        params: Vec<Value>,
-        limit: Option<usize>,
-        as_of_us: Option<u64>,
-    ) -> Result<Vec<Vec<Value>>, EngineError> {
-        let t = self.allocate_t_and_write_tx();
-        let as_of_tx = as_of_us.and_then(|us| self.tx.resolve_as_of(us).ok().flatten());
-
-        if std::env::var("EAVT_DEBUG_TIMING").is_ok() {
-            crate::engine::opcodes::set_debug_timing(true);
-        }
-        crate::engine::opcodes::reset_scanner_stats();
-
-        let mut vm = crate::engine::vm::VM::new(
-            program,
-            Arc::clone(self) as Arc<dyn VMEngine + Send + Sync>,
-            params,
-            limit,
-            t,
-            as_of_tx,
-        );
-        let results = vm.run()?;
-        Ok(results)
-    }
 }
 
 impl VMEngine for QueryEngineInner {
