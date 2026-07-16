@@ -20,7 +20,7 @@ impl PlanValue {
             BoundValue::Str(s) | BoundValue::Attr(s) => {
                 Some(PlanValue::Value(Value::text(s.clone())))
             }
-            BoundValue::ResolvedAttr(id, _, _) => Some(PlanValue::Value(Value::Int64(*id as i64))),
+            BoundValue::ResolvedAttr(id, _, _, _) => Some(PlanValue::Value(Value::Int64(*id as i64))),
             BoundValue::Param(idx) => Some(PlanValue::Param(*idx)),
             _ => None,
         }
@@ -45,12 +45,19 @@ pub struct PlanTrace {
     pub depths: Vec<DepthTrace>,
     pub total_cost: f64,
     pub pruned: bool,
+    pub chosen: bool,
 }
 
 impl std::fmt::Display for PlanTrace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let vars = self.ordering.join(", ");
-        let prefix = if self.pruned { "PRUNED " } else { "" };
+        let prefix = if self.pruned {
+            "PRUNED "
+        } else if self.chosen {
+            "→ "
+        } else {
+            ""
+        };
         write!(f, "{prefix}[{vars}] cost={:.1}", self.total_cost)?;
         for (i, d) in self.depths.iter().enumerate() {
             let clauses: Vec<String> = d
@@ -97,6 +104,7 @@ pub struct IterPlanData {
     #[allow(dead_code)]
     pub global_var_order: Vec<String>,
     pub trailing_bindings: Vec<(String, PlanValue)>,
+    pub attr_is_indexed: bool,
 }
 
 // ── Query plan result (planner output) ──────────────────────────────

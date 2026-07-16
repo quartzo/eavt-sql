@@ -5,7 +5,7 @@ import warnings
 
 from eavt_client import eavt_pb2 as eavt__pb2
 
-GRPC_GENERATED_VERSION = '1.81.0'
+GRPC_GENERATED_VERSION = '1.82.1'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -69,6 +69,21 @@ class EavtServiceStub:
                 request_serializer=eavt__pb2.FlushRequest.SerializeToString,
                 response_deserializer=eavt__pb2.FlushResponse.FromString,
                 _registered_method=True)
+        self.Prepare = channel.unary_unary(
+                '/eavt.EavtService/Prepare',
+                request_serializer=eavt__pb2.PrepareRequest.SerializeToString,
+                response_deserializer=eavt__pb2.PrepareResponse.FromString,
+                _registered_method=True)
+        self.ExecutePrepared = channel.unary_unary(
+                '/eavt.EavtService/ExecutePrepared',
+                request_serializer=eavt__pb2.ExecutePreparedRequest.SerializeToString,
+                response_deserializer=eavt__pb2.ExecuteResponse.FromString,
+                _registered_method=True)
+        self.Unprepare = channel.unary_unary(
+                '/eavt.EavtService/Unprepare',
+                request_serializer=eavt__pb2.UnprepareRequest.SerializeToString,
+                response_deserializer=eavt__pb2.UnprepareResponse.FromString,
+                _registered_method=True)
 
 
 class EavtServiceServicer:
@@ -116,6 +131,24 @@ class EavtServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def Prepare(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ExecutePrepared(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Unprepare(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_EavtServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -153,6 +186,21 @@ def add_EavtServiceServicer_to_server(servicer, server):
                     servicer.Flush,
                     request_deserializer=eavt__pb2.FlushRequest.FromString,
                     response_serializer=eavt__pb2.FlushResponse.SerializeToString,
+            ),
+            'Prepare': grpc.unary_unary_rpc_method_handler(
+                    servicer.Prepare,
+                    request_deserializer=eavt__pb2.PrepareRequest.FromString,
+                    response_serializer=eavt__pb2.PrepareResponse.SerializeToString,
+            ),
+            'ExecutePrepared': grpc.unary_unary_rpc_method_handler(
+                    servicer.ExecutePrepared,
+                    request_deserializer=eavt__pb2.ExecutePreparedRequest.FromString,
+                    response_serializer=eavt__pb2.ExecuteResponse.SerializeToString,
+            ),
+            'Unprepare': grpc.unary_unary_rpc_method_handler(
+                    servicer.Unprepare,
+                    request_deserializer=eavt__pb2.UnprepareRequest.FromString,
+                    response_serializer=eavt__pb2.UnprepareResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -344,6 +392,87 @@ class EavtService:
             '/eavt.EavtService/Flush',
             eavt__pb2.FlushRequest.SerializeToString,
             eavt__pb2.FlushResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Prepare(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/eavt.EavtService/Prepare',
+            eavt__pb2.PrepareRequest.SerializeToString,
+            eavt__pb2.PrepareResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ExecutePrepared(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/eavt.EavtService/ExecutePrepared',
+            eavt__pb2.ExecutePreparedRequest.SerializeToString,
+            eavt__pb2.ExecuteResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Unprepare(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/eavt.EavtService/Unprepare',
+            eavt__pb2.UnprepareRequest.SerializeToString,
+            eavt__pb2.UnprepareResponse.FromString,
             options,
             channel_credentials,
             insecure,

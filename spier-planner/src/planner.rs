@@ -33,13 +33,22 @@ fn find_best_index(
         .find(|&&pos| matches!(pattern.slot(pos), Slot::Var(n) if n == var_name))?;
 
     let attr_is_ref = match &pattern.a {
-        Slot::Const(BoundValue::ResolvedAttr(_, _, is_ref)) => *is_ref,
+        Slot::Const(BoundValue::ResolvedAttr(_, _, is_ref, _)) => *is_ref,
         _ => false,
+    };
+    // Only skip AVET when the attr is a known const that is not indexed.
+    // For wildcard (Var) attr patterns, AVET must remain a candidate.
+    let attr_is_indexed = match &pattern.a {
+        Slot::Const(BoundValue::ResolvedAttr(_, _, _, is_indexed)) => *is_indexed,
+        _ => true,
     };
     let mut best: Option<(String, usize, usize)> = None;
 
     for (idx_name, idx_order) in INDEX_ORDERS.iter() {
         if *idx_name == "VAET" && !attr_is_ref {
+            continue;
+        }
+        if *idx_name == "AVET" && !attr_is_indexed {
             continue;
         }
 
@@ -158,6 +167,7 @@ fn explore_ordering_depth(
             depths: depth_traces.clone(),
             total_cost: accumulated_cost,
             pruned: false,
+            chosen: false,
         };
         state.traces.push(trace);
 
@@ -175,6 +185,7 @@ fn explore_ordering_depth(
             depths: depth_traces.clone(),
             total_cost: accumulated_cost,
             pruned: true,
+            chosen: false,
         };
         state.traces.push(trace);
         return;
@@ -336,7 +347,7 @@ fn build_iter_plan(
             BoundValue::Int(n) => SpecKind::BoundValue(Value::Int64(*n)),
             BoundValue::Float(f) => SpecKind::BoundValue(Value::Float64(*f)),
             BoundValue::Str(s) => SpecKind::BoundValue(Value::text(s.clone())),
-            BoundValue::ResolvedAttr(id, _, _) => SpecKind::BoundAttr(*id),
+            BoundValue::ResolvedAttr(id, _, _, _) => SpecKind::BoundAttr(*id),
             BoundValue::Attr(s) => SpecKind::BoundValue(Value::text(s.clone())),
             BoundValue::Param(idx) => SpecKind::BoundParam(*idx),
             BoundValue::Missing(_) => SpecKind::Bound(0),
@@ -349,6 +360,7 @@ fn build_iter_plan(
     let mut active_depths_set: HashSet<usize> = HashSet::new();
 
     let mut specs = specs;
+    let mut seen_real_var = false;
 
     for pos in &idx_order {
         let spec_idx = match pos.as_str() {
@@ -362,6 +374,7 @@ fn build_iter_plan(
         let slot = pattern.slot(pos);
         match slot {
             Slot::Var(name) => {
+                seen_real_var = true;
                 if let Some(depth) = global_var_order.iter().position(|v| v == name) {
                     if !active_depths_set.contains(&depth) {
                         var_depths.push((depth, pos.clone()));
@@ -375,12 +388,14 @@ fn build_iter_plan(
                 }
             }
             Slot::Missing => {
-                let synth_name = format!("_skip_{}_{}", pos, idx_name.to_ascii_lowercase());
-                if let Some(depth) = global_var_order.iter().position(|v| *v == synth_name) {
-                    if !active_depths_set.contains(&depth) {
-                        var_depths.push((depth, pos.clone()));
-                        active_depths_set.insert(depth);
-                        specs[spec_idx] = SpecKind::Var(synth_name);
+                if !seen_real_var {
+                    let synth_name = format!("_skip_{}_{}", pos, idx_name.to_ascii_lowercase());
+                    if let Some(depth) = global_var_order.iter().position(|v| *v == synth_name) {
+                        if !active_depths_set.contains(&depth) {
+                            var_depths.push((depth, pos.clone()));
+                            active_depths_set.insert(depth);
+                            specs[spec_idx] = SpecKind::Var(synth_name);
+                        }
                     }
                 }
             }
@@ -392,43 +407,14 @@ fn build_iter_plan(
     active_depths.sort();
     var_depths.sort_by_key(|(d, _)| *d);
 
-    let mut global_var_order = global_var_order.to_vec();
-    let mut trailing_bindings: Vec<(String, PlanValue)> = Vec::new();
+    let global_var_order = global_var_order.to_vec();
+    let trailing_bindings: Vec<(String, PlanValue)> = Vec::new();
 
-    if let Some(&max_depth) = active_depths.last() {
-        let last_var_pos = var_depths
-            .iter()
-            .find(|(d, _)| *d == max_depth)
-            .map(|(_, pos)| pos.clone());
-        if let Some(ref lvp) = last_var_pos {
-            if let Some(last_idx) = idx_order.iter().position(|p| p == lvp) {
-                for pos_idx in (last_idx + 1)..idx_order.len() {
-                    let pos = idx_order[pos_idx].as_str();
-                    let spec_idx = match pos {
-                        "e" => 0,
-                        "a" => 1,
-                        "v" => 2,
-                        _ => continue,
-                    };
-                    let pv = match &specs[spec_idx] {
-                        SpecKind::BoundValue(ref val) => Some(PlanValue::Value(val.clone())),
-                        SpecKind::BoundParam(idx) => Some(PlanValue::Param(*idx)),
-                        _ => None,
-                    };
-                    if let Some(pv) = pv {
-                        let synth_name = format!("_trail_{}", pos);
-                        let synth_depth = global_var_order.len();
-                        global_var_order.push(synth_name.clone());
-                        var_depths.push((synth_depth, pos.to_string()));
-                        active_depths.push(synth_depth);
-                        trailing_bindings.push((synth_name.clone(), pv));
-                        specs[spec_idx] = SpecKind::Var(synth_name);
-                        bound_ints.remove(pos);
-                    }
-                }
-            }
-        }
-    }
+    let attr_is_indexed = match &pattern.a {
+        Slot::Const(BoundValue::ResolvedAttr(_, _, _, is_indexed)) => *is_indexed,
+        // Wildcard attr patterns must keep AVET available
+        _ => true,
+    };
 
     IterPlanData {
         index_name: idx_name.to_string(),
@@ -440,6 +426,7 @@ fn build_iter_plan(
         active_depths,
         global_var_order,
         trailing_bindings,
+        attr_is_indexed,
     }
 }
 
@@ -530,7 +517,7 @@ pub fn build_query_plan(
     let ref_attrs: HashSet<String> = join_patterns
         .iter()
         .filter_map(|p| match &p.a {
-            Slot::Const(BoundValue::ResolvedAttr(_, name, true)) => Some(name.clone()),
+            Slot::Const(BoundValue::ResolvedAttr(_, name, true, _)) => Some(name.clone()),
             _ => None,
         })
         .collect();
@@ -633,7 +620,7 @@ pub fn build_query_plan(
             }
             if let Slot::Const(bv) = &pattern.a {
                 match bv {
-                    BoundValue::ResolvedAttr(id, _, _) => {
+                    BoundValue::ResolvedAttr(id, _, _, _) => {
                         bound_ints
                             .insert("a".to_string(), PlanValue::Value(Value::Int64(*id as i64)));
                     }
@@ -698,6 +685,7 @@ pub fn build_query_plan(
         // Only reformat the winning trace to include synthetic vars;
         // all other traces keep their real ordering and depths
         if best_ordering_orig.as_deref() == Some(trace.ordering.as_slice()) {
+            trace.chosen = true;
             let old_depths: std::collections::HashMap<String, DepthTrace> =
                 trace.depths.drain(..).map(|d| (d.var.clone(), d)).collect();
             for var in &ordered_vars {

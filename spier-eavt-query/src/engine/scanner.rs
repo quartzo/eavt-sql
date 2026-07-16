@@ -79,6 +79,7 @@ pub struct V2Scanner {
     at_end: bool,
     history_mode: bool,
     pub depth_positions: std::collections::HashMap<usize, usize>,
+    filter_values: Vec<(usize, Value)>,
 }
 
 impl V2Scanner {
@@ -101,6 +102,7 @@ impl V2Scanner {
             at_end: true,
             history_mode: false,
             depth_positions: std::collections::HashMap::new(),
+            filter_values: Vec::new(),
         }
     }
 
@@ -127,28 +129,89 @@ impl V2Scanner {
             .map(|s| s.as_str())
             .unwrap_or("v")
             .to_string();
-        self.prefix_values.push((pos_name, val.clone()));
-        self.positions_filled += 1;
+        // Replace if this position already has a value
+        if let Some(existing) = self.prefix_values.iter_mut().find(|(p, _)| p == &pos_name) {
+            existing.1 = val.clone();
+        } else {
+            self.prefix_values.push((pos_name, val.clone()));
+            self.positions_filled += 1;
+        }
+    }
+
+    pub fn push_filter_at(&mut self, pos_in_idx: usize, val: &Value) {
+        if let Some(existing) = self.filter_values.iter_mut().find(|(p, _)| *p == pos_in_idx) {
+            existing.1 = val.clone();
+        } else {
+            self.filter_values.push((pos_in_idx, val.clone()));
+        }
+    }
+
+    fn passes_filters(&self, key: &[u8]) -> bool {
+        let leading_count = {
+            let mut count = 0;
+            for pos_name in &self.idx_order {
+                if self.prefix_values.iter().any(|(name, _)| name == pos_name) {
+                    count += 1;
+                } else {
+                    break;
+                }
+            }
+            count
+        };
+        for (pos_name, val) in &self.prefix_values {
+            let p_idx = self.idx_order.iter().position(|s| s == pos_name).unwrap_or(0);
+            if p_idx < leading_count {
+                continue;
+            }
+            let start = self.value_start(key, p_idx);
+            let end = self.value_end(key, p_idx);
+            if end > key.len() {
+                return false;
+            }
+            let key_slice = &key[start..end];
+            let encoded = match pos_name.as_str() {
+                "a" => (val.raw_int() as u32).to_be_bytes().to_vec(),
+                "e" => (val.raw_int() as u64).to_be_bytes().to_vec(),
+                "v" => {
+                    if self.value_attr_type == Some(DB_TYPE_REF) {
+                        (val.raw_int() as u64).to_be_bytes().to_vec()
+                    } else if self.is_unordered() {
+                        encode_variable_unordered(val)
+                    } else {
+                        encode_bound_value(val)
+                    }
+                }
+                _ => encode_bound_value(val),
+            };
+            if key_slice != encoded.as_slice() {
+                return false;
+            }
+        }
+        true
     }
 
     pub fn build_prefix_bytes(&mut self) {
         let mut buf = Vec::new();
-        for (pos_name, val) in &self.prefix_values {
+        for pos_name in &self.idx_order {
+            let pv = match self.prefix_values.iter().find(|(name, _)| name == pos_name) {
+                Some((_, v)) => v,
+                None => break,
+            };
             match pos_name.as_str() {
-                "a" => buf.extend_from_slice(&(val.raw_int() as u32).to_be_bytes()),
-                "e" => buf.extend_from_slice(&(val.raw_int() as u64).to_be_bytes()),
+                "a" => buf.extend_from_slice(&(pv.raw_int() as u32).to_be_bytes()),
+                "e" => buf.extend_from_slice(&(pv.raw_int() as u64).to_be_bytes()),
                 "v" => {
                     if self.value_attr_type == Some(DB_TYPE_REF) {
-                        buf.extend_from_slice(&(val.raw_int() as u64).to_be_bytes());
+                        buf.extend_from_slice(&(pv.raw_int() as u64).to_be_bytes());
                     } else if self.is_unordered() {
-                        buf.extend_from_slice(&encode_variable_unordered(val));
+                        buf.extend_from_slice(&encode_variable_unordered(pv));
                     } else {
-                        let enc = encode_bound_value(val);
+                        let enc = encode_bound_value(pv);
                         buf.extend_from_slice(&enc);
                     }
                 }
                 _ => {
-                    let enc = encode_bound_value(val);
+                    let enc = encode_bound_value(pv);
                     buf.extend_from_slice(&enc);
                 }
             }
@@ -528,7 +591,9 @@ impl V2Scanner {
                 }
 
                 if self.history_mode || !retracted {
-                    found_key = Some(key.clone());
+                    if self.passes_filters(&key) {
+                        found_key = Some(key.clone());
+                    }
                 }
 
                 crate::engine::opcodes::skip_group_call();

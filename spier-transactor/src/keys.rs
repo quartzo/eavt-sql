@@ -451,6 +451,7 @@ pub fn build_entries(
     t: u64,
     retracted: bool,
     mode: EncodeMode,
+    indexed: bool,
 ) -> IndexEntries {
     let suffix = encode_suffix(t, retracted);
     let sf = suffix.to_be_bytes();
@@ -465,50 +466,52 @@ pub fn build_entries(
     };
 
     if mode == EncodeMode::Ref {
-        IndexEntries {
-            entries: vec![
-                (
-                    CF_EAVT,
-                    [&e_bytes[..], &a_bytes[..], &v_bytes[..], &sf[..]].concat(),
-                    Vec::new(),
-                ),
-                (
-                    CF_AEVT,
-                    [&a_bytes[..], &e_bytes[..], &v_bytes[..], &sf[..]].concat(),
-                    Vec::new(),
-                ),
-                (
-                    CF_AVET,
-                    [&a_bytes[..], &v_bytes[..], &e_bytes[..], &sf[..]].concat(),
-                    Vec::new(),
-                ),
-                (
-                    CF_VAET,
-                    [&v_bytes[..], &a_bytes[..], &e_bytes[..], &sf[..]].concat(),
-                    Vec::new(),
-                ),
-            ],
+        let mut entries: Vec<(&str, Vec<u8>, Vec<u8>)> = vec![
+            (
+                CF_EAVT,
+                [&e_bytes[..], &a_bytes[..], &v_bytes[..], &sf[..]].concat(),
+                Vec::new(),
+            ),
+            (
+                CF_AEVT,
+                [&a_bytes[..], &e_bytes[..], &v_bytes[..], &sf[..]].concat(),
+                Vec::new(),
+            ),
+            (
+                CF_VAET,
+                [&v_bytes[..], &a_bytes[..], &e_bytes[..], &sf[..]].concat(),
+                Vec::new(),
+            ),
+        ];
+        if indexed {
+            entries.push((
+                CF_AVET,
+                [&a_bytes[..], &v_bytes[..], &e_bytes[..], &sf[..]].concat(),
+                Vec::new(),
+            ));
         }
+        IndexEntries { entries }
     } else {
-        IndexEntries {
-            entries: vec![
-                (
-                    CF_EAVT,
-                    [&e_bytes[..], &a_bytes[..], &v_bytes[..], &sf[..]].concat(),
-                    Vec::new(),
-                ),
-                (
-                    CF_AEVT,
-                    [&a_bytes[..], &e_bytes[..], &v_bytes[..], &sf[..]].concat(),
-                    Vec::new(),
-                ),
-                (
-                    CF_AVET,
-                    [&a_bytes[..], &v_bytes[..], &e_bytes[..], &sf[..]].concat(),
-                    Vec::new(),
-                ),
-            ],
+        let mut entries: Vec<(&str, Vec<u8>, Vec<u8>)> = vec![
+            (
+                CF_EAVT,
+                [&e_bytes[..], &a_bytes[..], &v_bytes[..], &sf[..]].concat(),
+                Vec::new(),
+            ),
+            (
+                CF_AEVT,
+                [&a_bytes[..], &e_bytes[..], &v_bytes[..], &sf[..]].concat(),
+                Vec::new(),
+            ),
+        ];
+        if indexed {
+            entries.push((
+                CF_AVET,
+                [&a_bytes[..], &v_bytes[..], &e_bytes[..], &sf[..]].concat(),
+                Vec::new(),
+            ));
         }
+        IndexEntries { entries }
     }
 }
 
@@ -583,26 +586,45 @@ mod tests {
     #[test]
     fn test_build_entries_ref() {
         let v = Value::Int64(55);
-        let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Ref);
+        let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Ref, true);
         assert_eq!(ie.entries.len(), 4);
         assert_eq!(ie.entries[0].0, "eavt");
         assert_eq!(ie.entries[1].0, "aevt");
-        assert_eq!(ie.entries[2].0, "avet");
-        assert_eq!(ie.entries[3].0, "vaet");
+        assert_eq!(ie.entries[2].0, "vaet");
+        assert_eq!(ie.entries[3].0, "avet");
+    }
+
+    #[test]
+    fn test_build_entries_ref_not_indexed() {
+        let v = Value::Int64(55);
+        let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Ref, false);
+        assert_eq!(ie.entries.len(), 3);
+        assert_eq!(ie.entries[0].0, "eavt");
+        assert_eq!(ie.entries[1].0, "aevt");
+        assert_eq!(ie.entries[2].0, "vaet");
     }
 
     #[test]
     fn test_build_entries_fixed() {
         let v = Value::Int64(100);
-        let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Fixed);
+        let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Fixed, true);
         assert_eq!(ie.entries.len(), 3);
         assert_eq!(ie.entries[0].0, "eavt");
     }
 
     #[test]
+    fn test_build_entries_fixed_not_indexed() {
+        let v = Value::Int64(100);
+        let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Fixed, false);
+        assert_eq!(ie.entries.len(), 2);
+        assert_eq!(ie.entries[0].0, "eavt");
+        assert_eq!(ie.entries[1].0, "aevt");
+    }
+
+    #[test]
     fn test_build_entries_variable() {
         let v = Value::Text("hello".into());
-        let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Variable);
+        let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Variable, true);
         assert_eq!(ie.entries.len(), 3);
         for (cf, key, _) in &ie.entries {
             assert!(
@@ -616,7 +638,7 @@ mod tests {
     #[test]
     fn test_build_entries_unordered_bytes() {
         let v = Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE].into());
-        let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Blob);
+        let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Blob, true);
         assert_eq!(ie.entries.len(), 3);
         assert_eq!(ie.entries[0].0, "eavt");
         for (cf, key, _) in &ie.entries {

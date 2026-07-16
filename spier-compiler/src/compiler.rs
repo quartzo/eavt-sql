@@ -222,6 +222,10 @@ fn find_v2_compatible_index(ip: &IterPlanData) -> &'static str {
             continue;
         }
 
+        if *idx_name == "AVET" && !ip.attr_is_indexed {
+            continue;
+        }
+
         let var_in_idx: Vec<String> = idx_order
             .iter()
             .filter(|p| spec_is_var(p) && !bound.contains(**p))
@@ -322,7 +326,7 @@ fn emit_probe(b: &mut Compiler, pattern: &Pattern, fail_label: &str) -> Option<(
         Slot::Const(bv) => {
             let r = b.alloc_reg();
             match bv {
-                BoundValue::ResolvedAttr(id, _, _) => {
+                BoundValue::ResolvedAttr(id, _, _, _) => {
                     b.emit(OpCode::ConstInt, r, 0, 0, InstructionData::Int(*id as i64));
                 }
                 BoundValue::Str(s) | BoundValue::Attr(s) => {
@@ -582,7 +586,7 @@ where
         for pos_name in &v2_order {
             let pv = match ip.bound_ints.get(*pos_name) {
                 Some(pv) => pv,
-                None => break,
+                None => continue,
             };
             let pos_idx = v2_order.iter().position(|s| **s == **pos_name).unwrap_or(0);
             let r = match pv {
@@ -616,8 +620,10 @@ where
 
     let mut depth_groups: HashMap<usize, Vec<i32>> = HashMap::new();
     let mut depth_pos_map: HashMap<(i32, usize), usize> = HashMap::new();
+    let mut cursor_ip_map: HashMap<i32, usize> = HashMap::new();
     for (ip_idx, ip) in plan.iter_plans.iter().enumerate() {
         if let Some(&cid) = cursor_map.get(&ip_idx) {
+            cursor_ip_map.insert(cid, ip_idx);
             for &d in &ip.active_depths {
                 depth_groups.entry(d).or_default().push(cid);
             }

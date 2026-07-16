@@ -8,4 +8,6 @@ pub trait CompileStats: Send + Sync {
     fn partition_id_for(&self, name: &str) -> Option<u64>;
 
     fn is_ref_attr(&self, attr_name: &str) -> bool;
+
+    fn is_indexed_attr(&self, attr_name: &str) -> bool;
 }

@@ -1022,8 +1022,6 @@ pub fn build_datalog_ir(stmt: RustStmt, params: &[Value]) -> Result<DatalogIR, S
         }
     }
 
-    eliminate_dead_e_vars(&mut patterns, &find_vars, &range_bounds);
-
     Ok(DatalogIR {
         patterns,
         find_vars,

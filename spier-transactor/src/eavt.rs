@@ -215,11 +215,22 @@ impl EavtEngine {
             unique_set.insert(raw.e);
         }
 
+        let mut indexed_set: HashSet<u64> = HashSet::new();
+        let db_index_prefix = resolver::DB_INDEX_AID.to_be_bytes().to_vec();
+        for k in &unpack_keys(&self.kv.scan(1, &db_index_prefix).unwrap_or_default()) {
+            let raw = keys::unpack_key("aevt", k, &resolver);
+            if raw.a != resolver::DB_INDEX_AID {
+                continue;
+            }
+            indexed_set.insert(raw.e);
+        }
+
         for (eid, name) in &ident_map {
             let vt = vt_map.get(eid).copied().unwrap_or(resolver::DB_TYPE_STRING);
             let many = card_map.get(eid).copied().unwrap_or(false);
             let unique = unique_set.contains(eid);
-            resolver.load_user_attr(name.clone(), *eid, vt, many, unique);
+            let indexed = indexed_set.contains(eid);
+            resolver.load_user_attr(name.clone(), *eid, vt, many, unique, indexed);
         }
 
         {
@@ -297,6 +308,7 @@ impl EavtEngine {
                 t,
                 false,
                 keys::EncodeMode::Variable,
+                true,
             ));
 
             let vt_v = Value::entity_id(vt as u64);
@@ -307,6 +319,7 @@ impl EavtEngine {
                 t,
                 false,
                 keys::EncodeMode::Ref,
+                true,
             ));
 
             let card_v = Value::entity_id(card as u64);
@@ -317,6 +330,7 @@ impl EavtEngine {
                 t,
                 false,
                 keys::EncodeMode::Ref,
+                true,
             ));
 
             if let Some(unique_id) = unique {
@@ -328,6 +342,7 @@ impl EavtEngine {
                     t,
                     false,
                     keys::EncodeMode::Ref,
+                    true,
                 ));
             }
         }
@@ -540,6 +555,7 @@ impl EavtEngine {
         resolver: &Resolver,
     ) -> Option<Vec<(usize, Vec<u8>, Vec<u8>)>> {
         let mode = keys::encode_mode_for(resolver.value_type_for(a_id));
+        let indexed = resolver.is_indexed(a_id);
         let prefix = build_ea_prefix(e_id, a_id);
         let active = self.collect_active_raw("eavt", &prefix, as_of_tx, resolver);
 
@@ -548,7 +564,7 @@ impl EavtEngine {
 
         for dv in &active {
             if is_retract || !values_match(v_new, &dv.v) {
-                let entries = keys::build_entries(dv.e, dv.a, &dv.v, t, true, mode);
+                let entries = keys::build_entries(dv.e, dv.a, &dv.v, t, true, mode, indexed);
                 for (cf, k, val) in entries.entries {
                     let cf_id = cf_name_to_id(&cf);
                     batch.push((cf_id, k, val));
@@ -559,7 +575,7 @@ impl EavtEngine {
         }
 
         if !is_retract && !already_active {
-            let entries = keys::build_entries(e_id, a_id, v_new, t, false, mode);
+            let entries = keys::build_entries(e_id, a_id, v_new, t, false, mode, indexed);
             for (cf, k, val) in entries.entries {
                 let cf_id = cf_name_to_id(&cf);
                 batch.push((cf_id, k, val));
@@ -612,7 +628,8 @@ impl EavtEngine {
 
         if resolver.is_many(a_id) {
             let mode = keys::encode_mode_for(resolver.value_type_for(a_id));
-            let entries = keys::build_entries(e_id, a_id, &v, t, false, mode);
+            let indexed = resolver.is_indexed(a_id);
+            let entries = keys::build_entries(e_id, a_id, &v, t, false, mode, indexed);
             self.write_entries(entries, mode == EncodeMode::Ref);
         } else if let Some(batch) =
             self.build_retract_entries(e_id, a_id, &v, t, false, as_of_tx, &resolver)
@@ -664,7 +681,8 @@ impl EavtEngine {
 
         if resolver.is_many(a_id) {
             let mode = keys::encode_mode_for(resolver.value_type_for(a_id));
-            let entries = keys::build_entries(e_id, a_id, &v, t, true, mode);
+            let indexed = resolver.is_indexed(a_id);
+            let entries = keys::build_entries(e_id, a_id, &v, t, true, mode, indexed);
             self.write_entries(entries, mode == EncodeMode::Ref);
         } else if let Some(batch) =
             self.build_retract_entries(e_id, a_id, &v, t, true, as_of_tx, &resolver)
@@ -714,6 +732,7 @@ impl EavtEngine {
                 t,
                 false,
                 EncodeMode::Variable,
+                true,
             );
             self.put_schema_entries(entries);
 
@@ -725,6 +744,7 @@ impl EavtEngine {
                 t,
                 false,
                 EncodeMode::Ref,
+                true,
             );
             self.put_schema_entries(entries);
 
@@ -741,6 +761,7 @@ impl EavtEngine {
                 t,
                 false,
                 EncodeMode::Ref,
+                true,
             );
             self.put_schema_entries(entries);
         }
@@ -805,6 +826,7 @@ impl EavtEngine {
                     t,
                     true,
                     EncodeMode::Ref,
+                    true,
                 );
                 self.put_schema_entries(entries);
                 let entries = keys::build_entries(
@@ -814,6 +836,7 @@ impl EavtEngine {
                     t,
                     false,
                     EncodeMode::Ref,
+                    true,
                 );
                 self.put_schema_entries(entries);
             }
@@ -836,6 +859,7 @@ impl EavtEngine {
                     t,
                     false,
                     EncodeMode::Ref,
+                    true,
                 );
                 self.put_schema_entries(entries);
             }
@@ -864,6 +888,7 @@ impl EavtEngine {
             t,
             false,
             EncodeMode::Variable,
+            true,
         );
         self.put_schema_entries(entries);
         let entries = keys::build_entries(
@@ -873,6 +898,7 @@ impl EavtEngine {
             t,
             false,
             EncodeMode::Fixed,
+            true,
         );
         self.put_schema_entries(entries);
         Ok(p)
@@ -890,6 +916,7 @@ impl EavtEngine {
             tx_eid,
             false,
             EncodeMode::Fixed,
+            false,
         );
         self.put_schema_entries(entries);
         tx_eid

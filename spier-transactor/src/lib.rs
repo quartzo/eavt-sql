@@ -121,6 +121,7 @@ pub trait TransactorEngine: Send + Sync {
     fn is_many(&self, aid: u32) -> Result<bool, String>;
     fn is_unique(&self, aid: u32) -> Result<bool, String>;
     fn is_unique_attr(&self, name: &str) -> Result<bool, String>;
+    fn is_indexed(&self, aid: u32) -> Result<bool, String>;
     fn default_user_partition(&self) -> Result<u64, String>;
     fn partition_id_for(&self, name: &str) -> Result<Option<u64>, String>;
     fn lookup_entity(&self, attr_name: &str, value: Value) -> Result<Option<u64>, String>;
@@ -404,6 +405,10 @@ impl TransactorEngine for TransactorState {
 
     fn is_unique_attr(&self, name: &str) -> Result<bool, String> {
         Ok(self.eavt.is_unique_attr_locked(name))
+    }
+
+    fn is_indexed(&self, aid: u32) -> Result<bool, String> {
+        Ok(self.eavt.resolver.lock().unwrap().is_indexed(aid))
     }
 
     fn default_user_partition(&self) -> Result<u64, String> {

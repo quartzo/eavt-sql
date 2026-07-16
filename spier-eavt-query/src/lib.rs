@@ -243,6 +243,18 @@ impl<'a> CompileStats for TxStats<'a> {
             false
         }
     }
+
+    fn is_indexed_attr(&self, name: &str) -> bool {
+        if let Some(aid) = TransactorEngine::lookup_attr(self.tx, name)
+            .ok()
+            .flatten()
+        {
+            TransactorEngine::is_unique(self.tx, aid).unwrap_or(false)
+                || TransactorEngine::is_indexed(self.tx, aid).unwrap_or(false)
+        } else {
+            false
+        }
+    }
 }
 
 /// Build a DatalogNumIR from a DatalogIR by resolving attributes and

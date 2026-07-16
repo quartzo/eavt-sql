@@ -2,22 +2,65 @@ mod eavt {
     tonic::include_proto!("eavt");
 }
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use tonic::{Request, Response, Status};
 
 use eavt::eavt_service_server::{EavtService, EavtServiceServer};
-use spier_eavt_query::{QueryEngine, QueryState, ValueType};
+use spier_eavt_query::{ProgramHandle, QueryEngine, QueryState, ValueType};
 use spier_value::query_codec;
+use spier_value::Value;
 
 pub struct EavtServer {
     client: Arc<QueryState>,
     writable: bool,
+    /// Prepared-statement table: stmt_id -> compiled program.
+    stmts: Mutex<HashMap<u64, ProgramHandle>>,
+    next_stmt_id: AtomicU64,
 }
 
 impl EavtServer {
     pub fn new(client: Arc<QueryState>, writable: bool) -> Self {
-        Self { client, writable }
+        Self {
+            client,
+            writable,
+            stmts: Mutex::new(HashMap::new()),
+            next_stmt_id: AtomicU64::new(1),
+        }
     }
+}
+
+/// Count `%N` placeholders in SQL and return the max N (0 if none).
+fn count_placeholders(sql: &str) -> usize {
+    let bytes = sql.as_bytes();
+    let mut max_n = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+            let mut n = 0usize;
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                n = n * 10 + (bytes[j] - b'0') as usize;
+                j += 1;
+            }
+            if n > max_n {
+                max_n = n;
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    max_n
+}
+
+/// Build the encoded dummy params buffer used during compile_sql.
+/// Mirrors the Python `PreparedStatement.__init__` which encodes
+/// `Value::Int64(0)` for every `%N` placeholder (the actual values
+/// arrive at `run_vm` time; only the arity matters for compilation).
+fn dummy_params(num: usize) -> Vec<u8> {
+    query_codec::encode_values(&vec![Value::Int64(0); num])
 }
 
 /// Returns true if the SQL statement mutates data or schema.
@@ -94,6 +137,27 @@ fn decorate_dump_value(
     v.clone()
 }
 
+fn run_vm_impl(
+    client: &QueryState,
+    prog: &ProgramHandle,
+    params_bytes: &[u8],
+    limit: u64,
+    as_of_us: u64,
+) -> Result<(usize, Vec<spier_value::Value>), String> {
+    let result_bytes = client.run_vm(prog.clone(), params_bytes, limit, as_of_us)?;
+    if result_bytes.is_empty() {
+        return Ok((0, Vec::new()));
+    }
+    let num_cols = u32::from_be_bytes([
+        result_bytes[0],
+        result_bytes[1],
+        result_bytes[2],
+        result_bytes[3],
+    ]) as usize;
+    let values = query_codec::decode_values(&result_bytes[4..])?;
+    Ok((num_cols, values))
+}
+
 fn run_sql(
     client: &QueryState,
     query: &str,
@@ -105,19 +169,8 @@ fn run_sql(
     let prog = client.compile_sql(query, &params_bytes)?;
     let limit_val = limit.map(|l| l as u64).unwrap_or(U64_MAX);
     let as_of_val = as_of_us.unwrap_or(U64_MAX);
-    let result_bytes = client.run_vm(prog, &params_bytes, limit_val, as_of_val)?;
+    let (num_cols, values) = run_vm_impl(client, &prog, &params_bytes, limit_val, as_of_val)?;
     // prog (ProgramHandle) drops here — Arc refcount handles cleanup, no free_program.
-
-    if result_bytes.is_empty() {
-        return Ok((0, Vec::new()));
-    }
-    let num_cols = u32::from_be_bytes([
-        result_bytes[0],
-        result_bytes[1],
-        result_bytes[2],
-        result_bytes[3],
-    ]) as usize;
-    let values = query_codec::decode_values(&result_bytes[4..])?;
     Ok((num_cols, values))
 }
 
@@ -471,6 +524,63 @@ impl EavtService for EavtServer {
             wal_before,
             wal_after,
         }))
+    }
+
+    async fn prepare(
+        &self,
+        request: Request<eavt::PrepareRequest>,
+    ) -> Result<Response<eavt::PrepareResponse>, Status> {
+        let req = request.into_inner();
+        let num = count_placeholders(&req.query);
+        let dummy = dummy_params(num);
+        let prog = self
+            .client
+            .compile_sql(&req.query, &dummy)
+            .map_err(Status::internal)?;
+        let id = self.next_stmt_id.fetch_add(1, Ordering::Relaxed);
+        self.stmts.lock().unwrap().insert(id, prog);
+        Ok(Response::new(eavt::PrepareResponse { stmt_id: id }))
+    }
+
+    async fn execute_prepared(
+        &self,
+        request: Request<eavt::ExecutePreparedRequest>,
+    ) -> Result<Response<eavt::ExecuteResponse>, Status> {
+        let req = request.into_inner();
+        let prog = {
+            let table = self.stmts.lock().unwrap();
+            table
+                .get(&req.stmt_id)
+                .cloned()
+                .ok_or_else(|| Status::not_found(format!("stmt_id {} not found", req.stmt_id)))?
+        };
+        let params: Vec<Value> = req.params.iter().map(proto_to_value).collect();
+        let params_bytes = query_codec::encode_values(&params);
+        let limit_val = req.limit.map(|v| v as u64).unwrap_or(U64_MAX);
+        let as_of_val = req.as_of_us.map(|v| v as u64).unwrap_or(U64_MAX);
+        let (num_cols, values) =
+            run_vm_impl(self.client.as_ref(), &prog, &params_bytes, limit_val, as_of_val)
+                .map_err(Status::internal)?;
+        let rows: Vec<eavt::SqlRow> = if num_cols > 0 {
+            values
+                .chunks(num_cols)
+                .map(|chunk| eavt::SqlRow {
+                    values: chunk.iter().filter_map(value_to_proto).collect(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(Response::new(eavt::ExecuteResponse { rows }))
+    }
+
+    async fn unprepare(
+        &self,
+        request: Request<eavt::UnprepareRequest>,
+    ) -> Result<Response<eavt::UnprepareResponse>, Status> {
+        let req = request.into_inner();
+        self.stmts.lock().unwrap().remove(&req.stmt_id);
+        Ok(Response::new(eavt::UnprepareResponse {}))
     }
 }
 

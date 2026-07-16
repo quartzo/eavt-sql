@@ -19,3 +19,7 @@ generated/
 # Virtual environments
 .venv
 :memory:.blobs/
+
+# Benchmark artifacts
+bench_data/
+tests/bench_cnpj_eavt_vs_mmap_results.md

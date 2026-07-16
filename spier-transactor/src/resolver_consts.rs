@@ -16,6 +16,7 @@ pub const DB_TYPE_BLOB: u32 = 28;
 pub const DB_CARDINALITY_ONE: u32 = 35;
 pub const DB_CARDINALITY_MANY: u32 = 36;
 pub const DB_UNIQUE_AID: u32 = 5;
+pub const DB_INDEX_AID: u32 = 6;
 pub const DB_UNIQUE_VALUE: u32 = 37;
 pub const DB_UNIQUE_IDENTITY: u32 = 38;
 

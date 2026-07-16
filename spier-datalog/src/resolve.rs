@@ -25,7 +25,8 @@ pub fn resolve_ir(ir: DatalogIR, stats: &dyn CompileStats) -> Result<DatalogIR, 
                 .lookup_attr(&name)
                 .ok_or_else(|| format!("unknown attribute: {}", name))?;
             let is_ref = stats.is_ref_attr(&name);
-            pattern.a = DatalogSlot::Const(BoundValue::ResolvedAttr(id, name, is_ref));
+            let is_indexed = stats.is_indexed_attr(&name);
+            pattern.a = DatalogSlot::Const(BoundValue::ResolvedAttr(id, name, is_ref, is_indexed));
         }
     }
 
@@ -42,7 +43,8 @@ pub fn resolve_ir(ir: DatalogIR, stats: &dyn CompileStats) -> Result<DatalogIR, 
                         .lookup_attr(&name)
                         .ok_or_else(|| format!("unknown attribute: {}", name))?;
                     let is_ref = stats.is_ref_attr(&name);
-                    *bv = BoundValue::ResolvedAttr(id, name, is_ref);
+                    let is_indexed = stats.is_indexed_attr(&name);
+                    *bv = BoundValue::ResolvedAttr(id, name, is_ref, is_indexed);
                 }
             }
         }
@@ -80,7 +82,7 @@ pub fn compute_plan_stats(ir: &DatalogIR, stats: &dyn CompileStats) -> PlanStats
                     match slot {
                         DatalogSlot::Const(bv) => match bv {
                             BoundValue::Int(n) => bound_vals.push(*n as u64),
-                            BoundValue::ResolvedAttr(id, _, _) => bound_vals.push(*id as u64),
+                            BoundValue::ResolvedAttr(id, _, _, _) => bound_vals.push(*id as u64),
                             _ => bound_vals.push(0),
                         },
                         _ => bound_vals.push(0),

@@ -10,6 +10,9 @@ service EavtService {
   rpc Dump(DumpRequest) returns (stream DatomRow);
   rpc Memtable(MemtableRequest) returns (MemtableResponse);
   rpc Flush(FlushRequest) returns (FlushResponse);
+  rpc Prepare(PrepareRequest) returns (PrepareResponse);
+  rpc ExecutePrepared(ExecutePreparedRequest) returns (ExecuteResponse);
+  rpc Unprepare(UnprepareRequest) returns (UnprepareResponse);
 }
 
 message SqlRequest {
@@ -99,3 +102,26 @@ message FlushResponse {
   uint64 wal_before = 3;
   uint64 wal_after = 4;
 }
+
+// --- Prepared statement RPCs ---
+
+message PrepareRequest {
+  string query = 1;
+}
+
+message PrepareResponse {
+  uint64 stmt_id = 1;
+}
+
+message ExecutePreparedRequest {
+  uint64 stmt_id = 1;
+  repeated Value params = 2;
+  optional int64 as_of_us = 3;
+  optional int64 limit = 4;
+}
+
+message UnprepareRequest {
+  uint64 stmt_id = 1;
+}
+
+message UnprepareResponse {}

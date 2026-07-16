@@ -154,6 +154,10 @@ mod tests {
         fn is_ref_attr(&self, name: &str) -> bool {
             self.refs.contains(name)
         }
+
+        fn is_indexed_attr(&self, _name: &str) -> bool {
+            true
+        }
     }
 
     fn resolve_and_plan(ir: DatalogIR) -> QueryPlanSt {
@@ -203,7 +207,7 @@ mod tests {
             "lookup-only plan has no ordered vars"
         );
         match &plan.plan.lookups[0].a {
-            DatalogSlot::Const(BoundValue::ResolvedAttr(id, name, is_ref)) => {
+            DatalogSlot::Const(BoundValue::ResolvedAttr(id, name, is_ref, _)) => {
                 assert_eq!(*id, 100);
                 assert_eq!(name, "user.name");
                 assert!(!is_ref);
@@ -291,7 +295,7 @@ mod tests {
         );
         assert_eq!(plan.plan.iter_plans.len(), 1);
         match &plan.plan.join_patterns[0].a {
-            DatalogSlot::Const(BoundValue::ResolvedAttr(id, name, is_ref)) => {
+            DatalogSlot::Const(BoundValue::ResolvedAttr(id, name, is_ref, _)) => {
                 assert_eq!(*id, 200);
                 assert_eq!(name, "company.ceo");
                 assert!(is_ref);

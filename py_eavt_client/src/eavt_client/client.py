@@ -56,6 +56,32 @@ class EavtClient:
         row = rows[0] if rows else ("", "")
         return {"db_path": row[0], "storage_mode": row[1]}
 
+    def prepare(self, query: str) -> int:
+        """Compile SQL once, return stmt_id for ExecutePrepared."""
+        resp = self.stub.Prepare(pb.PrepareRequest(query=query))
+        return resp.stmt_id
+
+    def execute_prepared(
+        self,
+        stmt_id: int,
+        *params,
+        as_of_us: int | None = None,
+        limit: int | None = None,
+    ) -> list[tuple]:
+        """Execute a previously prepared statement with new params."""
+        request = pb.ExecutePreparedRequest(
+            stmt_id=stmt_id,
+            params=[_to_proto_value(p) for p in params],
+            as_of_us=as_of_us,
+            limit=limit,
+        )
+        resp = self.stub.ExecutePrepared(request)
+        return [tuple(_from_proto_value(v) for v in row.values) for row in resp.rows]
+
+    def unprepare(self, stmt_id: int) -> None:
+        """Drop a prepared statement from server-side cache."""
+        self.stub.Unprepare(pb.UnprepareRequest(stmt_id=stmt_id))
+
 
 def _to_proto_value(v) -> pb.Value:
     if isinstance(v, bool):

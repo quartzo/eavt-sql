@@ -8,7 +8,7 @@ pub enum BoundValue {
     Float(f64),
     Str(String),
     Attr(String),
-    ResolvedAttr(u32, String, bool), // (attr_id, attr_name, is_ref) — pre-resolved by compiler
+    ResolvedAttr(u32, String, bool, bool), // (attr_id, attr_name, is_ref, is_indexed) — pre-resolved by compiler
     Var(String),
     Missing(String),
     Param(u32),
@@ -21,8 +21,8 @@ impl std::fmt::Display for BoundValue {
             BoundValue::Float(fl) => write!(f, "{}", fl),
             BoundValue::Str(s) => write!(f, "\"{}\"", s),
             BoundValue::Attr(s) => write!(f, "Attr({})", s),
-            BoundValue::ResolvedAttr(id, name, is_ref) => {
-                write!(f, "Attr({}, id={}, ref={})", name, id, is_ref)
+            BoundValue::ResolvedAttr(id, name, is_ref, is_indexed) => {
+                write!(f, "Attr({}, id={}, ref={}, idx={})", name, id, is_ref, is_indexed)
             }
             BoundValue::Var(s) => write!(f, "?{}", s),
             BoundValue::Missing(_) => write!(f, "_"),
@@ -37,7 +37,7 @@ impl BoundValue {
             BoundValue::Int(n) => Some(Value::Int64(*n)),
             BoundValue::Float(f) => Some(Value::Float64(*f)),
             BoundValue::Str(s) | BoundValue::Attr(s) => Some(Value::text(s.clone())),
-            BoundValue::ResolvedAttr(_, name, _) => Some(Value::text(name.clone())),
+            BoundValue::ResolvedAttr(_, name, _, _) => Some(Value::text(name.clone())),
             _ => None,
         }
     }

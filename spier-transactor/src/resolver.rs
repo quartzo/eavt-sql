@@ -3,10 +3,10 @@ use std::collections::{HashMap, HashSet};
 // Re-export constants and pure functions from resolver_consts
 pub use crate::resolver_consts::{
     make_entity_id, normalize_attr, partition_of, seq_of, BOOTSTRAP_FIRST_USER_ID,
-    DB_CARDINALITY_AID, DB_CARDINALITY_MANY, DB_CARDINALITY_ONE, DB_IDENT_AID, DB_PART_ID_AID,
-    DB_TX_INSTANT_AID, DB_TYPE_BLOB, DB_TYPE_BOOLEAN, DB_TYPE_BYTES, DB_TYPE_FLOAT,
-    DB_TYPE_INSTANT, DB_TYPE_KEYWORD, DB_TYPE_LONG, DB_TYPE_REF, DB_TYPE_STRING, DB_UNIQUE_AID,
-    DB_UNIQUE_VALUE, DB_VALUE_TYPE_AID, PART_DB, PART_TX, PART_USER,
+    DB_CARDINALITY_AID, DB_CARDINALITY_MANY, DB_CARDINALITY_ONE, DB_IDENT_AID, DB_INDEX_AID,
+    DB_PART_ID_AID, DB_TX_INSTANT_AID, DB_TYPE_BLOB, DB_TYPE_BOOLEAN, DB_TYPE_BYTES,
+    DB_TYPE_FLOAT, DB_TYPE_INSTANT, DB_TYPE_KEYWORD, DB_TYPE_LONG, DB_TYPE_REF, DB_TYPE_STRING,
+    DB_UNIQUE_AID, DB_UNIQUE_VALUE, DB_VALUE_TYPE_AID, PART_DB, PART_TX, PART_USER,
 };
 
 const FIRST_CUSTOM_PARTITION: u64 = 64;
@@ -54,6 +54,7 @@ pub struct Resolver {
     declared: HashSet<u32>,
     value_types: HashMap<u32, u32>,
     unique_attrs: HashSet<u32>,
+    indexed_attrs: HashSet<u32>,
 }
 
 impl Resolver {
@@ -69,6 +70,7 @@ impl Resolver {
             declared: HashSet::new(),
             value_types: HashMap::new(),
             unique_attrs: HashSet::new(),
+            indexed_attrs: HashSet::new(),
         };
         for &(name, aid) in BOOTSTRAP_SCHEMA {
             r.attrs.insert(name.to_string(), aid);
@@ -84,6 +86,9 @@ impl Resolver {
         r.value_types.insert(DB_IDENT_AID, DB_TYPE_STRING);
         r.value_types.insert(DB_PART_ID_AID, DB_TYPE_LONG);
         r.value_types.insert(DB_TX_INSTANT_AID, DB_TYPE_INSTANT);
+
+        // db.ident is indexed so lookup_entity("db.ident", name) works for schema entities
+        r.indexed_attrs.insert(DB_IDENT_AID);
 
         r.partitions.insert(
             PART_DB,
@@ -265,6 +270,18 @@ impl Resolver {
         }
     }
 
+    pub fn set_indexed(&mut self, aid: u32, indexed: bool) {
+        if indexed {
+            self.indexed_attrs.insert(aid);
+        } else {
+            self.indexed_attrs.remove(&aid);
+        }
+    }
+
+    pub fn is_indexed(&self, aid: u32) -> bool {
+        self.unique_attrs.contains(&aid) || self.indexed_attrs.contains(&aid)
+    }
+
     pub fn next_ent_id(&self) -> u64 {
         self.partitions
             .get(&PART_DB)
@@ -344,6 +361,7 @@ impl Resolver {
         value_type: u32,
         many: bool,
         unique: bool,
+        indexed: bool,
     ) {
         let aid = eid as u32;
         self.attrs.insert(name.clone(), aid);
@@ -355,6 +373,9 @@ impl Resolver {
         }
         if unique {
             self.unique_attrs.insert(aid);
+        }
+        if indexed {
+            self.indexed_attrs.insert(aid);
         }
         if let Some(counter) = self.partitions.get_mut(&partition_of(eid)) {
             if seq_of(eid) >= counter.next_seq {
