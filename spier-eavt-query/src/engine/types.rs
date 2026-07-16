@@ -21,7 +21,7 @@ pub struct QueryContext {
 }
 
 #[allow(dead_code)]
-pub trait VMEngine: Send + Sync {
+pub trait EngineOps: Send + Sync {
     fn resolve_entity(&self, name_or_id: &Value) -> u64;
     fn lookup_attr(&self, name: &str) -> Option<u32>;
     fn attr_name(&self, aid: u32) -> String;

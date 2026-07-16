@@ -37,8 +37,8 @@ spier-storage-traits/              # Storage-layer trait abstractions
 spier-value/                       # Core Value type + query codecs
   lib.rs                           # Value, ValueType, tag constants
   query_codec.rs                   # encode_values / decode_values / decode_rows
-spier-query-ir/                    # VM instruction formats
-  opcodes.rs                       # OpCode, Instruction, InstructionData, VMProgram
+spier-query-ir/                    # Program IR + range-op constants
+  opcodes.rs                       # Program enum (Scheme, SelectScheme), ProgramHandle, SelectSchemeMeta
   spec_kind.rs                     # SpecKind
 spier-blobstore-{memory,file,s3}/  # BlobStore backends (implement BlobStoreEngine)
 spier-journal-file/                # JournalEngine backend
@@ -61,7 +61,7 @@ spier-planner/src/                 # PlannerEngine trait + QueryPlanSt
 spier-compiler/src/                # CompilerEngine trait + CompileResultSt + scheme_compile (UPSERT→Scheme)
 spier-sql-frontend/src/            # SqlFrontendEngine trait
 spier-eavt-query/src/              # QueryEngine + VMResultStream + SessionHandle
-  engine/                          # vm, scanner, triejoin, opcodes, query_engine_inner, session, scheme
+  engine/                          # types, scanner, opcodes, query_engine_inner, scheme
   lib.rs                           # QueryState::open(config) -> impl QueryEngine
 spier-sql-parse-py/                # PyO3 bindings for spier-sql-parse
 spier-transactor-py/               # PyO3 bindings for spier-transactor
@@ -106,11 +106,11 @@ BlobStore (Memory / File / S3)
     → KVStore (single MemTable instance + GenericPageStore, snapshot flush)
       │  background poller: auto-flush by threshold + auto-GC by age
       → Transactor/EavtEngine (EAVT: save/retract + resolver + eager constraints)
-        → Query Engine (orchestrates two-stage compilation + VM)
+        → Query Engine (orchestrates two-stage compilation + Scheme IR evaluation)
           → SQL Frontend (parse + datalog IR)
           → resolve_ir (uses CompileStats, not TransactorEngine, for schema/cardinality)
-          → Compiler (plan + codegen)
-            → VM (triejoin, leapfrog, scanner, streaming via thread + bounded queue)
+          → Compiler (plan + Scheme codegen)
+            → Scheme IR (stack-based evaluator with yield/resume, streaming via SchemeSession)
 ```
 
 ### Trait-Based Boundaries
@@ -181,15 +181,21 @@ A multi-row UPDATE/DELETE compiles to a triejoin scan interleaved with `ExecInse
 Therefore a multi-datom UPDATE/DELETE is **not atomic**. Statement-level atomicity would
 require adding a transaction mechanism.
 
-### VM Result Streaming (Pull-Based Cursor)
+### Scheme IR Execution (Pull-Based Cursor)
 
-The VM is resumable: `VM::run_batch(out, max_rows) -> bool` runs until `max_rows`
-rows are produced or the program halts. `run()` loops `run_batch` to completion.
+Programs are executed through the stack-based Scheme evaluator with yield/resume
+semantics. For SELECT/UPDATE/DELETE, the triejoin skeleton produces result rows
+via `result-row` forms; the evaluator yields after each row.
 
-A `SessionHandle` (`Arc<RefCell<dyn VMResultStream>>`) wraps a `VMSession` that owns the
-resumable VM. The caller pulls batches via `session_next_batch(handle, max_rows) -> Vec<u8>`.
-`run_vm` (batch) remains as a convenience wrapper. DML (UPDATE/DELETE) emits
-`ResultRow(r_ent)` inside the triejoin leaf — the cursor streams changed eids.
+A `SessionHandle` (`Arc<RefCell<dyn VMResultStream>>`) wraps a `SchemeSession` or
+`SelectSchemeSession` that owns the resumable evaluator. The caller pulls batches via
+`session_next_batch(handle, max_rows) -> Vec<u8>`. `execute` (batch) remains as a
+convenience wrapper. DML (UPDATE/DELETE) emits `(result-row eid)` inside the triejoin
+leaf — the cursor streams changed eids.
+
+The evaluator per-forms a single step (`EvalStep`) then yields (`YieldState::Return`
+or `YieldState::Suspend`). `next_batch` resumes from the suspension point until
+`max_rows` rows are produced or the program completes.
 
 ### Cursor Transport
 
@@ -219,18 +225,20 @@ exhausted (the underlying `MergedInner` does not clear `cur_key` when invalidate
 - **S3 mode**: blobs on S3, journal file on local disk
 - **Python layer**: PyO3 bindings per layer (`spier-sql-parse-py`, `spier-transactor-py`, `spier-eavt-query-py`). The Python package `src/eavt_sql/` wraps these bindings in a typed API.
 
-### Scheme IR (UPSERT path)
+### Scheme IR (Unified Compilation Target)
 
-UPSERT compiles to Scheme S-expressions instead of VM bytecode. The full
-reference is at `docs/scheme-ir.md`.
+All SQL statements compile to Scheme S-expressions — there is no VM bytecode.
+The full reference is at `docs/scheme-ir.md`.
 
 Key points:
-- `spier-scheme` crate: zero-dep AST + parser + printer + tree-walking evaluator
+- `spier-scheme` crate: zero-dep AST + parser + printer + stack-based evaluator with yield/resume
 - 10 special forms: `let*`, `let`, `when`, `if`, `begin`, `set!`, `dbg`, `trace`, `log`, `assert`
-- 7 host functions: `alloc-entity`, `tx-entity`, `param`, `lookup-entity`, `lookup-value`, `save`, `result`
-- `CompiledProgram::Scheme(SchemeProgram)` coexists with `CompiledProgram::Vm`
-- EXPLAIN and `compile_sql_json` show S-expressions for UPSERT
-- `SchemeSession` implements `VMResultStream` for cursor-based execution
+- `Program::Scheme(SchemeProgram)` — UPSERT, ATTRIBUTE, PARTITION, direct DELETE
+- `Program::SelectScheme(SchemeProgram, SelectSchemeMeta)` — SELECT, UPDATE, DELETE with scan
+- Host functions per operation type: `SchemeHostFns` (7 functions for DML) and `SelectSchemeHostFns` (18 functions for scanning)
+- EXPLAIN and `compile_sql_json` show S-expressions for all statement types
+- `SchemeSession` and `SelectSchemeSession` implement `VMResultStream` for cursor-based execution
+- `EvalStep` + `YieldState` streaming model: evaluate one step, yield row, resume from suspension
 - Nullable alias guard: `(when alias ...)` wraps result when entity refs use `eid()`
 
 ## Conventions

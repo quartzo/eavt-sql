@@ -106,7 +106,7 @@ impl PyEngine {
         as_of_us: u64,
     ) -> PyResult<Vec<u8>> {
         let prog = program.borrow().inner.clone();
-        py.allow_threads(|| self.inner.run_vm(prog, params, limit, as_of_us))
+        py.allow_threads(|| self.inner.execute(prog, params, limit, as_of_us))
             .map_err(to_string_err)
     }
 
@@ -120,7 +120,7 @@ impl PyEngine {
         as_of_us: u64,
     ) -> PyResult<PySessionHandle> {
         let prog = program.borrow().inner.clone();
-        py.allow_threads(|| self.inner.run_vm_cursor(prog, params, limit, as_of_us))
+        py.allow_threads(|| self.inner.open_cursor(prog, params, limit, as_of_us))
             .map(|inner| PySessionHandle { inner })
             .map_err(to_string_err)
     }

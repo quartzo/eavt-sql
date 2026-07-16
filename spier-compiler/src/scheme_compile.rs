@@ -4,8 +4,64 @@ use spier_datalog::BoundValue;
 use spier_planner::{PlanValue, QueryPlanResult};
 use spier_query_ir::SelectSchemeMeta;
 use spier_scheme::{SchemeProgram, SExpr};
-use spier_sql_parse::{RustLiteral, RustUpsertStmt, RustValue, UpsertEntityRef};
+use spier_sql_parse::{RustConditionRight, RustDeleteWhereStmt, RustLiteral, RustUpsertStmt, RustValue, UpsertEntityRef};
 use spier_value::Value;
+
+pub(crate) fn resolve_delete_pairs(
+    stmt: &RustDeleteWhereStmt,
+    params: &[Value],
+) -> Result<Vec<(String, Value)>, String> {
+    let resolve_right = |right: &RustConditionRight, params: &[Value]| -> Result<Value, String> {
+        match right {
+            RustConditionRight::Param(idx) => {
+                let i = *idx as usize;
+                if i == 0 || i > params.len() {
+                    return Err(format!("parameter %{} out of range", idx));
+                }
+                Ok(params[i - 1].clone())
+            }
+            RustConditionRight::Literal(RustLiteral::Int(n)) => Ok(Value::Int64(*n)),
+            RustConditionRight::Literal(RustLiteral::Float(f)) => Ok(Value::Float64(*f)),
+            RustConditionRight::Literal(RustLiteral::Str(s)) => Ok(Value::text(s.clone())),
+            RustConditionRight::Literal(RustLiteral::Bool(b)) => Ok(Value::Bool(*b as u8)),
+            RustConditionRight::Literal(RustLiteral::Bytes(b)) => {
+                Ok(Value::Bytes(b.clone().into()))
+            }
+            _ => Err("unsupported condition right in delete".to_string()),
+        }
+    };
+
+    let mut pairs = Vec::new();
+    for cond in &stmt.conditions {
+        if cond.left.field != "eid" {
+            let val = resolve_right(&cond.right, params)?;
+            pairs.push((cond.left.field.clone(), val));
+        }
+    }
+    Ok(pairs)
+}
+
+pub(crate) fn resolve_delete_entity(
+    stmt: &RustDeleteWhereStmt,
+    params: &[Value],
+) -> Result<Value, String> {
+    for cond in &stmt.conditions {
+        if cond.left.field == "eid" {
+            return match &cond.right {
+                RustConditionRight::Param(idx) => {
+                    let i = *idx as usize;
+                    if i == 0 || i > params.len() {
+                        return Err(format!("parameter %{} out of range", idx));
+                    }
+                    Ok(params[i - 1].clone())
+                }
+                RustConditionRight::Literal(RustLiteral::Int(n)) => Ok(Value::Int64(*n)),
+                _ => Err("entity must be integer in DELETE WHERE".to_string()),
+            };
+        }
+    }
+    Err("DELETE direct requires eid condition".to_string())
+}
 
 pub fn compile_upsert_scheme(
     stmt: &RustUpsertStmt,

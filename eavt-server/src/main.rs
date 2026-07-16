@@ -58,7 +58,7 @@ fn count_placeholders(sql: &str) -> usize {
 /// Build the encoded dummy params buffer used during compile_sql.
 /// Mirrors the Python `PreparedStatement.__init__` which encodes
 /// `Value::Int64(0)` for every `%N` placeholder (the actual values
-/// arrive at `run_vm` time; only the arity matters for compilation).
+/// arrive at `execute` time; only the arity matters for compilation).
 fn dummy_params(num: usize) -> Vec<u8> {
     query_codec::encode_values(&vec![Value::Int64(0); num])
 }
@@ -137,14 +137,14 @@ fn decorate_dump_value(
     v.clone()
 }
 
-fn run_vm_impl(
+fn execute_impl(
     client: &QueryState,
     prog: &ProgramHandle,
     params_bytes: &[u8],
     limit: u64,
     as_of_us: u64,
 ) -> Result<(usize, Vec<spier_value::Value>), String> {
-    let result_bytes = client.run_vm(prog.clone(), params_bytes, limit, as_of_us)?;
+    let result_bytes = client.execute(prog.clone(), params_bytes, limit, as_of_us)?;
     if result_bytes.is_empty() {
         return Ok((0, Vec::new()));
     }
@@ -169,7 +169,7 @@ fn run_sql(
     let prog = client.compile_sql(query, &params_bytes)?;
     let limit_val = limit.map(|l| l as u64).unwrap_or(U64_MAX);
     let as_of_val = as_of_us.unwrap_or(U64_MAX);
-    let (num_cols, values) = run_vm_impl(client, &prog, &params_bytes, limit_val, as_of_val)?;
+    let (num_cols, values) = execute_impl(client, &prog, &params_bytes, limit_val, as_of_val)?;
     // prog (ProgramHandle) drops here — Arc refcount handles cleanup, no free_program.
     Ok((num_cols, values))
 }
@@ -206,7 +206,7 @@ impl EavtService for EavtServer {
         std::thread::Builder::new()
             .name("vm-cursor".into())
             .spawn(move || {
-                let session = match client.run_vm_cursor(prog, &params_bytes, limit_val, as_of_val)
+                let session = match client.open_cursor(prog, &params_bytes, limit_val, as_of_val)
                 {
                     Ok(s) => s,
                     Err(e) => {
@@ -559,7 +559,7 @@ impl EavtService for EavtServer {
         let limit_val = req.limit.map(|v| v as u64).unwrap_or(U64_MAX);
         let as_of_val = req.as_of_us.map(|v| v as u64).unwrap_or(U64_MAX);
         let (num_cols, values) =
-            run_vm_impl(self.client.as_ref(), &prog, &params_bytes, limit_val, as_of_val)
+            execute_impl(self.client.as_ref(), &prog, &params_bytes, limit_val, as_of_val)
                 .map_err(Status::internal)?;
         let rows: Vec<eavt::SqlRow> = if num_cols > 0 {
             values

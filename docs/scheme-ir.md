@@ -3,8 +3,8 @@
 ## 1. Overview
 
 The Scheme IR is an S-expression-based intermediate representation used to compile
-and execute DML statements (currently UPSERT). It replaces the VM bytecode path
-for these operations with a textual, inspectable, and debuggable format.
+and execute all SQL statements. It is the unified compilation target — there is no
+VM bytecode path.
 
 ### Design Goals
 
@@ -12,15 +12,15 @@ for these operations with a textual, inspectable, and debuggable format.
 - **Debuggability**: `EXPLAIN` and `compile_sql_json` show the full program as text.
 - **Serializability**: programs can be round-tripped through `parse`/`write_scheme`.
 - **Extensibility**: host functions bridge Scheme to the transactor without changing the evaluator.
-- **Coexistence**: Scheme runs alongside the VM — UPSERT uses Scheme, SELECT/UPDATE/DELETE use VM.
+- **Unified**: all SQL statements (UPSERT, SELECT, UPDATE, DELETE, ATTRIBUTE, PARTITION) compile to Scheme.
 
 ### Crate Structure
 
 | Crate | Role | Dependencies |
 |-------|------|-------------|
 | `spier-scheme` | AST, parser, printer, evaluator, HostFns trait | zero external |
-| `spier-compiler` | `compile_upsert_scheme()` — SQL AST → `SchemeProgram` | `spier-scheme`, `spier-sql-parse`, `spier-value` |
-| `spier-eavt-query` | `SchemeSession` + `SchemeHostFns` — runtime execution | `spier-scheme`, `spier-value`, `spier-transactor` |
+| `spier-compiler` | `compile_upsert_scheme()`, `compile_select_scheme()`, etc. — SQL AST → `SchemeProgram` | `spier-scheme`, `spier-sql-parse`, `spier-value` |
+| `spier-eavt-query` | `SchemeSession`, `SelectSchemeSession`, `SchemeHostFns`, `SelectSchemeHostFns` — runtime execution | `spier-scheme`, `spier-value`, `spier-transactor` |
 
 ---
 
@@ -518,10 +518,31 @@ UPSERT AS D1 = %1 SET person.age = val(eid('company.name', 'ACME'), 'company.rev
 
 ## 7. Scheme Execution Runtime
 
-### 7.1 SchemeSession
+### 7.1 Streaming Model: EvalStep + YieldState
 
-`SchemeSession` implements `VMResultStream` and wraps a `SchemeProgram` for
-execution against the transactor.
+The evaluator operates one step at a time via `EvalStep` and yields control
+with `YieldState`:
+
+```rust
+pub enum EvalStep {
+    Done(SExpr),           // evaluation complete
+    Yield(SExpr, Box<EvalStep>),  // yield value, resume with next step
+}
+
+pub enum YieldState {
+    Return(SExpr),         // final result (no more to yield)
+    Suspend(SExpr, Box<dyn FnOnce() -> EvalStep>),  // yield value, continuation
+}
+```
+
+The evaluator per-forms a single step (`EvalStep`) then yields (`YieldState::Return`
+or `YieldState::Suspend`). `next_batch` resumes from the suspension point until
+`max_rows` rows are produced or the program completes.
+
+### 7.2 SchemeSession (UPSERT / DML)
+
+`SchemeSession` implements `VMResultStream` for non-streaming DML (UPSERT,
+ATTRIBUTE, PARTITION, direct DELETE).
 
 ```rust
 pub struct SchemeSession {
@@ -540,7 +561,7 @@ pub struct SchemeSession {
 SchemeSession::new(program, engine, params, tx, as_of_tx)
 ```
 
-### 7.2 VMResultStream Implementation
+### 7.3 VMResultStream Implementation (SchemeSession)
 
 `SchemeSession::next_batch(out, max_rows) -> Result<bool, String>`:
 
@@ -560,7 +581,7 @@ SchemeSession::new(program, engine, params, tx, as_of_tx)
 [encoded total_values]
 ```
 
-### 7.3 SchemeHostFns Architecture
+### 7.4 SchemeHostFns Architecture
 
 ```rust
 struct SchemeHostFns<'a> {
@@ -574,14 +595,14 @@ struct SchemeHostFns<'a> {
 Implements `spier_scheme::HostFns`. The 7 host functions (section 5.3) are
 dispatched in `call()`.
 
-### 7.4 Integration in `spier-eavt-query`
+### 7.5 Integration in `spier-eavt-query`
 
-`CompiledProgram::Scheme` is handled in:
+`Program::Scheme` is handled in:
 
 | Function | Behavior |
 |----------|----------|
-| `run_vm` | Allocates tx, creates `SchemeSession`, calls `next_batch`, returns packed bytes |
-| `run_vm_cursor` | Creates `SchemeSession`, wraps in `Arc<RefCell<dyn VMResultStream>>` |
+| `execute` | Allocates tx, creates `SchemeSession`, calls `next_batch`, returns packed bytes |
+| `open_cursor` | Creates `SchemeSession` or `SelectSchemeSession`, wraps in `Arc<RefCell<dyn VMResultStream>>` |
 | `explain` | Returns `spier_scheme::write_scheme(&p.body)` (the S-expression text) |
 | `compile_sql_json` | Returns `spier_scheme::write_scheme(&p.body)` |
 
@@ -589,16 +610,16 @@ dispatched in `call()`.
 
 ## 8. Integration Points
 
-### 8.1 CompiledProgram Enum
+### 8.1 Program Enum
 
 ```rust
-pub enum CompiledProgram {
-    Vm(Arc<VMProgram>),
+pub enum Program {
     Scheme(SchemeProgram),
+    SelectScheme(SchemeProgram, SelectSchemeMeta),
 }
 ```
 
-Stored as `Arc<CompiledProgram>` in `ProgramHandle`.
+Stored as `Arc<Program>` in `ProgramHandle`.
 
 ### 8.2 Compilation Dispatch
 
@@ -607,22 +628,27 @@ In `compile_dml_direct`:
 ```rust
 RustStmt::Upsert(upsert_stmt) => {
     let scheme = scheme_compile::compile_upsert_scheme(&upsert_stmt, &params)?;
-    Ok(CompiledProgram::Scheme(scheme))
+    Ok(Program::Scheme(scheme))
 }
 ```
 
-All other statement types produce `CompiledProgram::Vm(...)`.
+SELECT/UPDATE/DELETE produce `Program::SelectScheme(...)` via `compile_select_scheme()`,
+`compile_update_scheme()`, `compile_delete_scheme()`.
 
 ### 8.3 Execution Dispatch
 
-In `do_compile`, UPSERT goes through `compile_dml_direct` → `CompiledProgram::Scheme`.
-The `run_vm` / `run_vm_cursor` functions match on the enum:
+In `do_compile`, UPSERT goes through `compile_dml_direct` → `Program::Scheme`.
+The `execute` / `open_cursor` functions match on the enum:
 
 ```rust
-CompiledProgram::Scheme(scheme_prog) => {
-    // ... allocate tx ...
+Program::Scheme(scheme_prog) => {
     let mut session = SchemeSession::new(scheme_prog, engine, params, tx, as_of_tx);
     // ... call next_batch or wrap in VMResultStream ...
+}
+Program::SelectScheme(scheme_prog, meta) => {
+    let host = SelectSchemeHostFns::new(engine, params, tx, as_of_tx, ...);
+    let mut session = SelectSchemeSession::new(scheme_prog, host);
+    // ...
 }
 ```
 
@@ -733,11 +759,216 @@ the entire statement produces no result.
 
 ---
 
-## 11. Limitations
+## 11. SELECT via Scheme
+
+SELECT compiles to `Program::SelectScheme(SchemeProgram, SelectSchemeMeta)` with
+a triejoin skeleton and host functions for scanning.
+
+### 11.1 Triejoin Skeleton Structure
+
+```
+(begin
+  ; Scanner setup
+  (scanner-open sid cf-id history?)
+  (prefix-push sid value pos-idx)
+
+  ; Range constraints per depth
+  (range-op depth op-int val)
+  (range-branch depth)
+
+  ; Depth nesting (innermost to outermost)
+  (depth-run depth ((sid0 pos0) (sid1 pos1)) (lambda () leaf-body))
+
+  ; Probe guard (optional)
+  (when (probe-begin e a v) ...)
+)
+```
+
+### 11.2 Projected Result Row
+
+```scheme
+(result-row (bind-get vid) (attr-name (bind-get aid-vid)) (resolve-val (bind-get v-vid)) ...)
+```
+
+Key projection helpers:
+- `bind-get` — get the value bound at a variable index in this row
+- `attr-name` — resolve attribute ID to its name string
+- `resolve-val` — decode a raw value using the attribute's type
+- `probe-get-t` — get the t value from the current probe match
+- `probe-begin` — start a fully-bound probe lookup (eid, attr, value)
+
+### 11.3 Example: Simple SELECT
+
+```sql
+SELECT eid, company.name
+FROM company
+WHERE company.ceo = %1
+```
+
+```scheme
+(begin
+  (scanner-open 0 1 false)
+  (prefix-push 0 (intern-a "company.ceo") 1)
+  (range-op 0 0 (param 1))
+  (depth-run 0 ((0 0))
+    (lambda ()
+      (result-row (bind-get 0) (attr-name (bind-get 2)))))
+)
+```
+
+---
+
+## 12. DELETE via Scheme
+
+DELETE compiles to a triejoin skeleton identical to SELECT, but with `retract`
+calls in the leaf body and a `result-row` yielding the entity ID.
+
+```scheme
+(begin
+  ; ... same scanner + range setup as SELECT ...
+  (depth-run 0 ((0 0))
+    (lambda ()
+      (begin
+        (retract (bind-get 0) "person.name" "Alice")
+        (result-row (bind-get 0)))))
+)
+```
+
+Direct DELETE (eid condition) compiles to `Program::Scheme` without scanning:
+
+```scheme
+(begin
+  (retract 42 "person.name" "Alice")
+  (result 42))
+```
+
+---
+
+## 13. UPDATE via Scheme
+
+UPDATE compiles to a triejoin skeleton with `save` calls in the leaf body
+and a `result-row` yielding the entity ID.
+
+```scheme
+(begin
+  ; ... same scanner + range setup as SELECT ...
+  (depth-run 1 ((0 1))
+    (lambda ()
+      (begin
+        (save (bind-get 1) "person.age" 30)
+        (save (bind-get 1) "person.city" "NYC")
+        (result-row (bind-get 1)))))
+)
+```
+
+---
+
+## 14. ATTRIBUTE/PARTITION via Scheme
+
+These are direct DML statements compiled to `Program::Scheme`.
+
+### ATTRIBUTE
+
+```scheme
+(begin
+  (declare-attr "person.age" "LONG" #f #f)
+  (result "person.age" "LONG"))
+```
+
+### PARTITION
+
+```scheme
+(let* ((pid (declare-partition "my-partition")))
+  (result pid))
+```
+
+---
+
+## 15. SelectSchemeHostFns Reference (18 functions)
+
+These host functions are used by `SelectSchemeSession` for scanning operations.
+
+| # | Function | Signature | Description |
+|---|----------|-----------|-------------|
+| 1 | `scanner-open` | `(scanner-open sid cf-id history?)` | Open a scanner on a column family |
+| 2 | `prefix-push` | `(prefix-push sid value pos-idx)` | Add a bound prefix value to scanner |
+| 3 | `range-op` | `(range-op depth op-int val)` | Add a range constraint at depth |
+| 4 | `range-branch` | `(range-branch depth)` | Create an OR branch in the range constraints |
+| 5 | `depth-run` | `(depth-run depth scanners lambda)` | Nest triejoin at this depth |
+| 6 | `bind-get` | `(bind-get vid)` | Get the current binding for variable index |
+| 7 | `result-row` | `(result-row val...)` | Emit a result row (yield) |
+| 8 | `save` | `(save eid attr value)` | Persist one datom (used in UPDATE) |
+| 9 | `retract` | `(retract eid attr value)` | Retract one datom (used in DELETE) |
+| 10 | `alloc-entity` | `(alloc-entity [partition])` | Allocate entity ID in partition |
+| 11 | `tx-entity` | `(tx-entity)` | Return current transaction entity ID |
+| 12 | `param` | `(param idx)` | Get parameter by 1-based index |
+| 13 | `lookup-entity` | `(lookup-entity attr value)` | Look up entity by UNIQUE attribute |
+| 14 | `lookup-value` | `(lookup-value eid attr)` | Get attribute value for an entity |
+| 15 | `intern-a` | `(intern-a name)` | Resolve attribute name to ID |
+| 16 | `attr-name` | `(attr-name aid)` | Resolve attribute ID to name |
+| 17 | `resolve-val` | `(resolve-val raw)` | Decode raw value using attribute type |
+| 18 | `probe-begin` | `(probe-begin e a v)` | Start a fully-bound probe lookup |
+| 19 | `probe-get-t` | `(probe-get-t)` | Get the t value from probe match |
+
+Note: `scanner-open`, `prefix-push`, `range-op`, `range-branch`, `depth-run`,
+`bind-get`, `result-row`, `intern-a`, `attr-name`, `resolve-val`, `probe-begin`,
+`probe-get-t` are specific to `SelectSchemeSession`. `save`, `retract`,
+`alloc-entity`, `tx-entity`, `param`, `lookup-entity`, `lookup-value` are
+shared with `SchemeHostFns`.
+
+---
+
+## 16. Streaming Model (EvalStep / YieldState / next_batch)
+
+### 16.1 EvalStep Enum
+
+```rust
+pub enum EvalStep {
+    Done(SExpr),
+    Yield(SExpr, Box<EvalStep>),
+}
+```
+
+Functions like `result-row` produce `EvalStep::Yield(value, continuation)`,
+allowing the evaluator to suspend and resume.
+
+### 16.2 YieldState Enum
+
+```rust
+pub enum YieldState {
+    Return(SExpr),
+    Suspend(SExpr, Box<dyn FnOnce() -> EvalStep>),
+}
+```
+
+- `Return(value)` — evaluation complete, this is the final result.
+- `Suspend(value, continuation)` — yield `value`, then the caller can resume
+  with `continuation()` to get the next `EvalStep`.
+
+### 16.3 next_batch Flow
+
+`SelectSchemeSession::next_batch(out, max_rows)`:
+
+1. Resume the evaluator from its suspension point (or start fresh).
+2. For each `EvalStep::Yield(row, next)`, decode the `result-row` contents,
+   encode them into the output buffer, and store `next` as the continuation.
+3. When `max_rows` rows are collected or `EvalStep::Done` is reached, return
+   the batch.
+4. On the next call, resume from the stored continuation.
+
+### 16.4 Cursor Transport
+
+`open_cursor` returns a `SessionHandle` (`Arc<RefCell<dyn VMResultStream>>`).
+The caller calls `session_next_batch(handle, max_rows)` repeatedly until
+empty batch is returned. Cleanup is automatic via Arc refcount + Drop.
+
+---
+
+## 17. Limitations
 
 ### Current Scope
 
-- Only **UPSERT** compiles to Scheme. SELECT, UPDATE, DELETE use VM bytecode.
+- All SQL statements compile to Scheme IR (no VM bytecode).
 - `Bytes` literal values are not supported in UPSERT compilation.
 - The evaluator is single-threaded and synchronous.
 - No user-defined functions — all functions are host-provided.
@@ -745,6 +976,5 @@ the entire statement produces no result.
 ### Future Extensions
 
 - Debug-instrumented scripts via gRPC (client edits Scheme, sends back for execution).
-- SELECT/UPDATE/DELETE compilation to Scheme.
 - Prepared statement cache for SchemeProgram (immutable, cloneable).
 - Custom `SchemeTracer` implementations for structured logging.

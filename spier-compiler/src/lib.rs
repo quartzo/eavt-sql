@@ -1,4 +1,3 @@
-mod compiler;
 mod datalog;
 mod scheme_compile;
 
@@ -6,7 +5,7 @@ pub use spier_datalog::CompileStats;
 
 use spier_datalog::DatalogNumIRSt;
 use spier_planner::{Planner, PlannerEngine, QueryPlanSt};
-use spier_query_ir::CompiledProgram;
+use spier_query_ir::Program;
 use spier_sql_parse::{RustStmt, RustStmtSt};
 use spier_value::query_codec::decode_values;
 
@@ -16,7 +15,7 @@ fn select_scheme_result(
     plan: &spier_planner::QueryPlanResult,
 ) -> CompileResultSt {
     CompileResultSt {
-        program: CompiledProgram::SelectScheme(scheme_program, meta),
+        program: Program::SelectScheme(scheme_program, meta),
         traces: plan.plan_traces.clone(),
     }
 }
@@ -25,7 +24,7 @@ fn select_scheme_result(
 /// Carries the compiled program and plan traces (for EXPLAIN).
 #[derive(Clone)]
 pub struct CompileResultSt {
-    pub program: CompiledProgram,
+    pub program: Program,
     pub traces: Vec<spier_planner::PlanTrace>,
 }
 
@@ -143,30 +142,30 @@ impl CompilerEngine for Compiler {
             RustStmt::Upsert(upsert_stmt) => {
                 let scheme = scheme_compile::compile_upsert_scheme(upsert_stmt, &params)?;
                 Ok(CompileResultSt {
-                    program: CompiledProgram::Scheme(scheme),
+                    program: Program::Scheme(scheme),
                     traces: Vec::new(),
                 })
             }
             RustStmt::Attribute(attr_stmt) => {
                 let scheme = scheme_compile::compile_attribute_scheme(attr_stmt);
                 Ok(CompileResultSt {
-                    program: CompiledProgram::Scheme(scheme),
+                    program: Program::Scheme(scheme),
                     traces: Vec::new(),
                 })
             }
             RustStmt::Partition(part_stmt) => {
                 let scheme = scheme_compile::compile_partition_scheme(part_stmt);
                 Ok(CompileResultSt {
-                    program: CompiledProgram::Scheme(scheme),
+                    program: Program::Scheme(scheme),
                     traces: Vec::new(),
                 })
             }
             RustStmt::Delete(delete_stmt) => {
-                let pairs = compiler::resolve_delete_pairs(delete_stmt, &params)?;
-                let entity_val = compiler::resolve_delete_entity(delete_stmt, &params)?;
+                let pairs = scheme_compile::resolve_delete_pairs(delete_stmt, &params)?;
+                let entity_val = scheme_compile::resolve_delete_entity(delete_stmt, &params)?;
                 let scheme = scheme_compile::compile_delete_direct_scheme(&entity_val, &pairs);
                 Ok(CompileResultSt {
-                    program: CompiledProgram::Scheme(scheme),
+                    program: Program::Scheme(scheme),
                     traces: Vec::new(),
                 })
             }

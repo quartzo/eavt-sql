@@ -10,7 +10,7 @@ use spier_transactor::TransactorState;
 use spier_value::Value;
 
 use crate::engine::scanner::ValueScanner;
-use crate::engine::vm::{BoundPart, EngineError, QueryContext, RawDatomView, VMEngine};
+use crate::engine::types::{BoundPart, EngineError, EngineOps, QueryContext, RawDatomView};
 
 fn cf_name_to_id() -> HashMap<String, usize> {
     spier_transactor::constants::cf_name_map()
@@ -293,7 +293,7 @@ impl QueryEngineInner {
 
 }
 
-impl VMEngine for QueryEngineInner {
+impl EngineOps for QueryEngineInner {
     fn resolve_entity(&self, name_or_id: &Value) -> u64 {
         match name_or_id {
             Value::Int64(n) => *n as u64,

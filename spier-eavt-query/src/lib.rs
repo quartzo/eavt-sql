@@ -35,14 +35,14 @@ unsafe impl Send for SessionHandle {}
 
 pub trait QueryEngine: Send + Sync {
     fn compile_sql(&self, sql: &str, sql_params: &[u8]) -> Result<ProgramHandle, String>;
-    fn run_vm(
+    fn execute(
         &self,
         program: ProgramHandle,
         sql_params: &[u8],
         limit: u64,
         as_of_us: u64,
     ) -> Result<Vec<u8>, String>;
-    fn run_vm_cursor(
+    fn open_cursor(
         &self,
         program: ProgramHandle,
         sql_params: &[u8],
@@ -88,7 +88,7 @@ pub trait QueryEngine: Send + Sync {
     fn internal_status(&self, target: &str) -> Result<String, String>;
 }
 use engine::query_engine_inner::QueryEngineInner;
-use engine::vm::VMEngine;
+use engine::types::EngineOps;
 use spier_compiler::Compiler;
 use spier_sql_frontend::SqlFrontend;
 
@@ -310,7 +310,7 @@ impl QueryEngine for QueryState {
         })
     }
 
-    fn run_vm(
+    fn execute(
         &self,
         program: ProgramHandle,
         sql_params: &[u8],
@@ -338,7 +338,7 @@ impl QueryEngine for QueryState {
         let as_of_tx = as_of_opt.and_then(|us| engine.tx().resolve_as_of(us).ok().flatten());
 
         match &*program.program {
-            spier_query_ir::CompiledProgram::Scheme(scheme_prog) => {
+            spier_query_ir::Program::Scheme(scheme_prog) => {
                 let mut session = engine::scheme::SchemeSession::new(
                     scheme_prog.clone(),
                     Arc::clone(engine),
@@ -350,7 +350,7 @@ impl QueryEngine for QueryState {
                 session.next_batch(&mut out, 1)?;
                 Ok(out)
             }
-            spier_query_ir::CompiledProgram::SelectScheme(scheme_prog, meta) => {
+            spier_query_ir::Program::SelectScheme(scheme_prog, meta) => {
                 let mut session = build_select_scheme_session(
                     engine, scheme_prog, meta, vm_params, t, as_of_tx,
                 );
@@ -361,7 +361,7 @@ impl QueryEngine for QueryState {
         }
     }
 
-    fn run_vm_cursor(
+    fn open_cursor(
         &self,
         program: ProgramHandle,
         sql_params: &[u8],
@@ -381,7 +381,7 @@ impl QueryEngine for QueryState {
         let as_of_tx = as_of_us_opt.and_then(|us| engine.tx().resolve_as_of(us).ok().flatten());
 
         let session: Arc<RefCell<dyn VMResultStream>> = match &*program.program {
-            spier_query_ir::CompiledProgram::Scheme(scheme_prog) => {
+            spier_query_ir::Program::Scheme(scheme_prog) => {
                 Arc::new(RefCell::new(engine::scheme::SchemeSession::new(
                     scheme_prog.clone(),
                     Arc::clone(engine),
@@ -390,7 +390,7 @@ impl QueryEngine for QueryState {
                     as_of_tx,
                 )))
             }
-            spier_query_ir::CompiledProgram::SelectScheme(scheme_prog, meta) => {
+            spier_query_ir::Program::SelectScheme(scheme_prog, meta) => {
                 Arc::new(RefCell::new(build_select_scheme_session(
                     engine, scheme_prog, meta, vm_params, t, as_of_tx,
                 )))
@@ -424,8 +424,8 @@ impl QueryEngine for QueryState {
         out.push_str(&format!(
             "\n{}",
             match &result.program {
-                spier_query_ir::CompiledProgram::Scheme(p)
-                | spier_query_ir::CompiledProgram::SelectScheme(p, _) => {
+                spier_query_ir::Program::Scheme(p)
+                | spier_query_ir::Program::SelectScheme(p, _) => {
                     spier_scheme::write_scheme(&p.body)
                 }
             }
@@ -459,8 +459,8 @@ impl QueryEngine for QueryState {
 
         let (result, _) = do_compile(frontend, compiler, engine.as_ref(), sql, sql_params)?;
         Ok(match result.program {
-            spier_query_ir::CompiledProgram::Scheme(p)
-            | spier_query_ir::CompiledProgram::SelectScheme(p, _) => {
+            spier_query_ir::Program::Scheme(p)
+            | spier_query_ir::Program::SelectScheme(p, _) => {
                 spier_scheme::write_scheme(&p.body)
             }
         })
