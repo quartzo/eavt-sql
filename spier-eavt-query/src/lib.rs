@@ -426,7 +426,7 @@ impl QueryEngine for QueryState {
             match &result.program {
                 spier_query_ir::Program::Scheme(p)
                 | spier_query_ir::Program::SelectScheme(p, _) => {
-                    spier_scheme::write_scheme(&p.body)
+                    spier_scheme::write_scheme_pretty(&p.body)
                 }
             }
         ));

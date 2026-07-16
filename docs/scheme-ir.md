@@ -63,8 +63,9 @@ Each variant renders to text as follows:
 
 String escaping: `\n` → newline, `\t` → tab, `\\` → backslash, `\"` → double quote.
 
-Pretty-printing (`write_scheme_pretty`): if a list has >3 items or contains any
-nested list, it is rendered with line breaks and indentation (2-space indent per level).
+Pretty-printing (`write_scheme_pretty`): uses a Wadler/Leijen-style algorithm with
+`MAX_WIDTH=100`. Sub-expressions that fit within the remaining line budget are
+rendered inline; otherwise they break onto a new line (2-space indent per level).
 
 ### 2.3 Parsing Rules
 
@@ -603,8 +604,8 @@ dispatched in `call()`.
 |----------|----------|
 | `execute` | Allocates tx, creates `SchemeSession`, calls `next_batch`, returns packed bytes |
 | `open_cursor` | Creates `SchemeSession` or `SelectSchemeSession`, wraps in `Arc<RefCell<dyn VMResultStream>>` |
-| `explain` | Returns `spier_scheme::write_scheme(&p.body)` (the S-expression text) |
-| `compile_sql_json` | Returns `spier_scheme::write_scheme(&p.body)` |
+| `explain` | Returns `spier_scheme::write_scheme_pretty(&p.body)` (pretty-printed S-expression) |
+| `compile_sql_json` | Returns `spier_scheme::write_scheme(&p.body)` (compact S-expression) |
 
 ---
 

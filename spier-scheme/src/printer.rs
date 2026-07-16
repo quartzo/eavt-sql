@@ -59,26 +59,55 @@ fn write_expr(out: &mut String, expr: &SExpr) {
     }
 }
 
-fn write_expr_pretty(out: &mut String, expr: &SExpr, indent: usize) {
+const MAX_WIDTH: usize = 100;
+
+fn write_expr_pretty(out: &mut String, expr: &SExpr, indent: usize) -> usize {
     match expr {
-        SExpr::List(items) if !items.is_empty() && is_long_list(items) => {
+        SExpr::List(items) if !items.is_empty() => {
+            let compact = compact_str(expr);
+            if indent + compact.len() <= MAX_WIDTH {
+                out.push_str(&compact);
+                return indent + compact.len();
+            }
+
             out.push('(');
-            write_expr_pretty(out, &items[0], indent + 2);
+            let head_str = compact_str(&items[0]);
+            out.push_str(&head_str);
+            let mut col = indent + 1 + head_str.len();
+            let child_indent = indent + 2;
+            let mut any_broken = false;
             for item in &items[1..] {
+                if !any_broken {
+                    let ic = compact_str(item);
+                    if col + 1 + ic.len() <= MAX_WIDTH {
+                        out.push(' ');
+                        out.push_str(&ic);
+                        col += 1 + ic.len();
+                        continue;
+                    }
+                    any_broken = true;
+                }
                 out.push('\n');
-                for _ in 0..indent + 2 {
+                for _ in 0..child_indent {
                     out.push(' ');
                 }
-                write_expr_pretty(out, item, indent + 2);
+                col = write_expr_pretty(out, item, child_indent);
             }
             out.push(')');
+            col + 1
         }
-        _ => write_expr(out, expr),
+        _ => {
+            let c = compact_str(expr);
+            out.push_str(&c);
+            indent + c.len()
+        }
     }
 }
 
-fn is_long_list(items: &[SExpr]) -> bool {
-    items.len() > 3 || items.iter().any(|e| matches!(e, SExpr::List(_) if true))
+fn compact_str(expr: &SExpr) -> String {
+    let mut s = String::new();
+    write_expr(&mut s, expr);
+    s
 }
 
 fn escape_str(s: &str) -> String {
