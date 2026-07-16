@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use spier_datalog::BoundValue;
 use spier_planner::{PlanValue, QueryPlanResult};
@@ -258,7 +258,8 @@ pub fn compile_select_scheme(
             SExpr::Bool(false),
         ])
     } else {
-        build_projection(plan, &build_var_id_map(plan), total_proj_len, &constant_indices)
+        let (_, var_id_map) = build_var_names_and_id_map(plan);
+        build_projection(plan, &var_id_map, total_proj_len, &constant_indices)
     };
 
     build_triejoin_scheme(plan, &find_vars, leaf_body)
@@ -272,7 +273,7 @@ pub fn compile_delete_scheme(
 ) -> Result<(SchemeProgram, SelectSchemeMeta), String> {
     use spier_sql_parse::{RustConditionRight, RustLiteral};
 
-    let var_id_map = build_var_id_map(plan);
+    let (_, var_id_map) = build_var_names_and_id_map(plan);
     let e_var_id = var_id_map.get(target_evar).copied().unwrap_or(0);
 
     let eid_get = SExpr::List(vec![SExpr::Symbol("bind-get".into()), SExpr::Int(e_var_id as i64)]);
@@ -322,7 +323,7 @@ pub fn compile_delete_scheme(
     build_triejoin_scheme(plan, find_vars, leaf_body)
 }
 
-fn build_var_id_map(plan: &QueryPlanResult) -> HashMap<String, usize> {
+fn build_var_names_and_id_map(plan: &QueryPlanResult) -> (Vec<String>, HashMap<String, usize>) {
     let mut var_names_list: Vec<String> = plan.ordered_vars.clone();
     for tn in &plan.t_lookup_vars {
         if !var_names_list.contains(tn) {
@@ -336,38 +337,23 @@ fn build_var_id_map(plan: &QueryPlanResult) -> HashMap<String, usize> {
             }
         }
     }
-    var_names_list
+    let var_id_map = var_names_list
         .iter()
         .enumerate()
         .map(|(i, n)| (n.clone(), i))
-        .collect()
+        .collect();
+    (var_names_list, var_id_map)
 }
 
 fn build_triejoin_scheme(
     plan: &QueryPlanResult,
-    find_vars: &[String],
+    _find_vars: &[String],
     leaf_body: SExpr,
 ) -> Result<(SchemeProgram, SelectSchemeMeta), String> {
     let ordered_vars = &plan.ordered_vars;
     let num_depths = ordered_vars.len();
 
-    let var_names_list: Vec<String> = {
-        let mut v = plan.ordered_vars.clone();
-        for tn in &plan.t_lookup_vars {
-            if !v.contains(tn) { v.push(tn.clone()); }
-        }
-        for ip in &plan.iter_plans {
-            for (name, _) in &ip.trailing_bindings {
-                if !v.contains(name) { v.push(name.clone()); }
-            }
-        }
-        v
-    };
-    let var_id_map: HashMap<String, usize> = var_names_list
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.clone(), i))
-        .collect();
+    let (var_names_list, var_id_map) = build_var_names_and_id_map(plan);
     let depth_var_pairs: Vec<(usize, usize)> = ordered_vars
         .iter()
         .enumerate()

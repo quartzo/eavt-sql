@@ -363,6 +363,9 @@ impl QueryEngine for QueryState {
             Some(as_of_us)
         };
 
+        let t = engine.allocate_t_and_write_tx();
+        let as_of_tx = as_of_opt.and_then(|us| engine.tx().resolve_as_of(us).ok().flatten());
+
         match &*program.program {
             spier_query_ir::CompiledProgram::Vm(p) => {
                 let rows = engine.run_vm(Arc::clone(p), vm_params, limit_opt, as_of_opt);
@@ -384,8 +387,6 @@ impl QueryEngine for QueryState {
                 }
             }
             spier_query_ir::CompiledProgram::Scheme(scheme_prog) => {
-                let t = engine.allocate_t_and_write_tx();
-                let as_of_tx = as_of_opt.and_then(|us| engine.tx().resolve_as_of(us).ok().flatten());
                 let mut session = engine::scheme::SchemeSession::new(
                     scheme_prog.clone(),
                     Arc::clone(engine),
@@ -398,20 +399,8 @@ impl QueryEngine for QueryState {
                 Ok(out)
             }
             spier_query_ir::CompiledProgram::SelectScheme(scheme_prog, meta) => {
-                let t = engine.allocate_t_and_write_tx();
-                let as_of_tx = as_of_opt.and_then(|us| engine.tx().resolve_as_of(us).ok().flatten());
-                let host = engine::scheme::SelectSchemeHostFns::new(
-                    Arc::clone(engine),
-                    vm_params,
-                    t,
-                    as_of_tx,
-                    meta.num_vars,
-                    &meta.depth_var_pairs,
-                    &meta.same_var_constraints,
-                );
-                let mut session = engine::scheme::SelectSchemeSession::new(
-                    scheme_prog.clone(),
-                    host,
+                let mut session = build_select_scheme_session(
+                    engine, scheme_prog, meta, vm_params, t, as_of_tx,
                 );
                 let mut out = Vec::new();
                 session.next_batch(&mut out, usize::MAX)?;
@@ -467,18 +456,8 @@ impl QueryEngine for QueryState {
                 )))
             }
             spier_query_ir::CompiledProgram::SelectScheme(scheme_prog, meta) => {
-                let host = engine::scheme::SelectSchemeHostFns::new(
-                    Arc::clone(engine),
-                    vm_params,
-                    t,
-                    as_of_tx,
-                    meta.num_vars,
-                    &meta.depth_var_pairs,
-                    &meta.same_var_constraints,
-                );
-                Arc::new(RefCell::new(engine::scheme::SelectSchemeSession::new(
-                    scheme_prog.clone(),
-                    host,
+                Arc::new(RefCell::new(build_select_scheme_session(
+                    engine, scheme_prog, meta, vm_params, t, as_of_tx,
                 )))
             }
         };
@@ -815,4 +794,24 @@ impl QueryEngine for QueryState {
         let engine = inner.engine.as_ref().ok_or("engine not open")?;
         engine.tx().internal_status(target)
     }
+}
+
+fn build_select_scheme_session(
+    engine: &Arc<engine::query_engine_inner::QueryEngineInner>,
+    scheme_prog: &spier_scheme::SchemeProgram,
+    meta: &spier_query_ir::SelectSchemeMeta,
+    vm_params: Vec<spier_value::Value>,
+    t: u64,
+    as_of_tx: Option<u64>,
+) -> engine::scheme::SelectSchemeSession {
+    let host = engine::scheme::SelectSchemeHostFns::new(
+        Arc::clone(engine),
+        vm_params,
+        t,
+        as_of_tx,
+        meta.num_vars,
+        &meta.depth_var_pairs,
+        &meta.same_var_constraints,
+    );
+    engine::scheme::SelectSchemeSession::new(scheme_prog.clone(), host)
 }
