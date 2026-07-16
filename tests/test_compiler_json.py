@@ -123,10 +123,16 @@ class TestInstructionStructure:
         ops = opcodes(program)
         assert "DeclarePartition" in ops
 
-    def test_upsert_has_exec_insert(self, engine):
-        program = engine.compile_sql_json(
-            "UPSERT AS D1 SET company.name = 'Test Co'"
+    def test_upsert_compiles_to_scheme(self, engine):
+        """UPSERT now compiles to a Scheme program, not VM bytecode."""
+        from eavt_sql.query_codec import encode_values
+        params_bytes = encode_values([])
+        raw = engine._handle.compile_sql_json(
+            "UPSERT AS D1 SET company.name = 'Test Co'", params_bytes
         )
-        ops = opcodes(program)
-        assert "ExecInsert" in ops
-        assert "Halt" in ops
+        program = str(raw)
+        assert program.startswith("("), \
+            "UPSERT should produce Scheme S-expression text"
+        assert "alloc-entity" in program
+        assert "save" in program
+        assert "company.name" in program

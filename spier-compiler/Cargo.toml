@@ -8,5 +8,6 @@ description = "SQL compiler (SQL → VMProgram)"
 spier-datalog = { path = "../spier-datalog" }
 spier-planner = { path = "../spier-planner" }
 spier-query-ir = { path = "../spier-query-ir" }
+spier-scheme = { path = "../spier-scheme" }
 spier-sql-parse = { path = "../spier-sql-parse" }
 spier-value = { path = "../spier-value" }

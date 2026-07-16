@@ -1059,7 +1059,7 @@ def test_explain_insert_auto_entity():
     list(engine.sql("ATTRIBUTE ns.attr STRING ONE"))
     rows = list(engine.sql("EXPLAIN UPSERT SET ns.attr = %1", "hello"))
     text = "\n".join(row[0] for row in rows)
-    assert "ALLOC_ENT" in text
+    assert "alloc-entity" in text
     engine.close()
 
 
@@ -1071,8 +1071,8 @@ def test_explain_insert_multi_entity():
         "EXPLAIN UPSERT AS D1 SET ns.a = %1, AS D2 SET ns.b = d1", "x"
     ))
     text = "\n".join(row[0] for row in rows)
-    assert text.count("ALLOC_ENT") == 2
-    assert "EXEC_INSERT" in text
+    assert text.count("alloc-entity") == 2
+    assert "save" in text
     engine.close()
 
 
@@ -1164,7 +1164,7 @@ def test_explain_insert():
     list(engine.sql("ATTRIBUTE ns.attr STRING ONE"))
     rows = list(engine.sql("EXPLAIN UPSERT SET ns.attr = %1", "hello"))
     text = "\n".join(row[0] for row in rows)
-    assert "EXEC_INSERT" in text
+    assert "save" in text
     engine.close()
 
 

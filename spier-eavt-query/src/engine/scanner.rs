@@ -79,7 +79,6 @@ pub struct V2Scanner {
     at_end: bool,
     history_mode: bool,
     pub depth_positions: std::collections::HashMap<usize, usize>,
-    filter_values: Vec<(usize, Value)>,
 }
 
 impl V2Scanner {
@@ -102,7 +101,6 @@ impl V2Scanner {
             at_end: true,
             history_mode: false,
             depth_positions: std::collections::HashMap::new(),
-            filter_values: Vec::new(),
         }
     }
 
@@ -135,14 +133,6 @@ impl V2Scanner {
         } else {
             self.prefix_values.push((pos_name, val.clone()));
             self.positions_filled += 1;
-        }
-    }
-
-    pub fn push_filter_at(&mut self, pos_in_idx: usize, val: &Value) {
-        if let Some(existing) = self.filter_values.iter_mut().find(|(p, _)| *p == pos_in_idx) {
-            existing.1 = val.clone();
-        } else {
-            self.filter_values.push((pos_in_idx, val.clone()));
         }
     }
 

@@ -1,19 +1,21 @@
 mod compiler;
 mod datalog;
+mod scheme_compile;
 
 pub use spier_datalog::CompileStats;
 
 use spier_datalog::DatalogNumIRSt;
 use spier_planner::{Planner, PlannerEngine, QueryPlanSt};
-use spier_query_ir::VMProgram;
+use spier_query_ir::CompiledProgram;
 use spier_sql_parse::{RustStmt, RustStmtSt};
+use std::sync::Arc;
 use spier_value::query_codec::decode_values;
 
 /// Compiler output — crosses FFI as 1 boxed pointer.
 /// Carries the compiled program and plan traces (for EXPLAIN).
 #[derive(Clone)]
 pub struct CompileResultSt {
-    pub program: VMProgram,
+    pub program: CompiledProgram,
     pub traces: Vec<spier_planner::PlanTrace>,
 }
 
@@ -60,7 +62,7 @@ impl CompilerEngine for Compiler {
         let plan_st = self.plan(num_ir)?;
         let result = compiler::compile_from_plan(&plan_st.plan)?;
         Ok(CompileResultSt {
-            program: result.program,
+            program: CompiledProgram::Vm(Arc::new(result.program)),
             traces: result.traces,
         })
     }
@@ -112,7 +114,7 @@ impl CompilerEngine for Compiler {
                     &target_evar,
                 )?;
                 Ok(CompileResultSt {
-                    program,
+                    program: CompiledProgram::Vm(Arc::new(program)),
                     traces: plan.plan_traces.clone(),
                 })
             }
@@ -134,7 +136,7 @@ impl CompilerEngine for Compiler {
                     &retract_pairs,
                 )?;
                 Ok(CompileResultSt {
-                    program,
+                    program: CompiledProgram::Vm(Arc::new(program)),
                     traces: plan.plan_traces.clone(),
                 })
             }
@@ -149,14 +151,23 @@ impl CompilerEngine for Compiler {
     ) -> Result<CompileResultSt, String> {
         let params = decode_values(sql_params)?;
         let program = match &stmt.stmt {
-            RustStmt::Upsert(upsert_stmt) => compiler::compile_upsert(upsert_stmt, &params)?,
-            RustStmt::Attribute(attr_stmt) => compiler::compile_rust_attribute(attr_stmt),
-            RustStmt::Partition(part_stmt) => compiler::compile_rust_partition(part_stmt),
+            RustStmt::Upsert(upsert_stmt) => {
+                let scheme = scheme_compile::compile_upsert_scheme(upsert_stmt, &params)?;
+                return Ok(CompileResultSt {
+                    program: CompiledProgram::Scheme(scheme),
+                    traces: Vec::new(),
+                });
+            }
+            RustStmt::Attribute(attr_stmt) => {
+                CompiledProgram::Vm(Arc::new(compiler::compile_rust_attribute(attr_stmt)))
+            }
+            RustStmt::Partition(part_stmt) => {
+                CompiledProgram::Vm(Arc::new(compiler::compile_rust_partition(part_stmt)))
+            }
             RustStmt::Delete(delete_stmt) => {
-                // Direct DELETE (with eid condition, no scan needed)
                 let pairs = compiler::resolve_delete_pairs(delete_stmt, &params)?;
                 let entity_val = compiler::resolve_delete_entity(delete_stmt, &params)?;
-                compiler::compile_rust_delete_direct(&entity_val, &pairs)?
+                CompiledProgram::Vm(Arc::new(compiler::compile_rust_delete_direct(&entity_val, &pairs)?))
             }
             _ => {
                 return Err(

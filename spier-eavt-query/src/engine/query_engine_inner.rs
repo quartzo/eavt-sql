@@ -181,60 +181,6 @@ impl QueryEngineInner {
         self.tx.journal_size().unwrap_or(0)
     }
 
-    pub fn collect_active_deduped(
-        &self,
-        cf: &str,
-        prefix: &[u8],
-        as_of_us: Option<u64>,
-    ) -> Vec<RawDatomView> {
-        let as_of_tx = as_of_us.and_then(|us| self.tx.resolve_as_of(us).ok().flatten());
-        let cf_id = self.cf_id(cf);
-        let prefix = prefix.to_vec();
-        let attr_type = self.attr_type_from_prefix(cf, &prefix);
-        let cursor = match self.tx.open_cursor_direct(cf_id as u32, &prefix) {
-            Ok(h) => h.cursor,
-            Err(_) => invalid_cursor_handle().cursor,
-        };
-        let mut scanner = ValueScanner::new(cursor, prefix.clone(), cf, "v", as_of_tx, attr_type);
-
-        let mut prev_eav_key: Option<Vec<u8>> = None;
-        let mut best: Option<RawDatomView> = None;
-        let mut results = Vec::new();
-        while !scanner.at_end() {
-            if let Some(key) = scanner.current_key() {
-                let eav_key = key[..key.len() - 8].to_vec();
-                let raw = keys::unpack_key_with_vt(cf, key, |aid| self.value_type_for_cached(aid));
-                if Some(&eav_key) != prev_eav_key.as_ref() {
-                    if let Some(b) = best.take() {
-                        if !b.retracted {
-                            results.push(b);
-                        }
-                    }
-                    prev_eav_key = Some(eav_key);
-                    best = Some(RawDatomView {
-                        e: raw.e,
-                        a: raw.a,
-                        v: raw.v,
-                        t: raw.t,
-                        retracted: raw.retracted,
-                    });
-                } else if let Some(ref mut b) = best {
-                    if raw.t > b.t {
-                        b.t = raw.t;
-                        b.retracted = raw.retracted;
-                    }
-                }
-            }
-            scanner.next();
-        }
-        if let Some(b) = best {
-            if !b.retracted {
-                results.push(b);
-            }
-        }
-        results
-    }
-
     fn value_type_for_cached(&self, aid: u32) -> Option<u32> {
         if let Ok(cache) = self.vt_cache.read() {
             if let Some(vt) = cache.get(&aid) {
@@ -414,8 +360,6 @@ impl VMEngine for QueryEngineInner {
                 let raw = keys::unpack_key_with_vt(cf, key, |aid| self.value_type_for_cached(aid));
                 if !raw.retracted {
                     results.push(RawDatomView {
-                        e: raw.e,
-                        a: raw.a,
                         v: raw.v,
                         t: raw.t,
                         retracted: raw.retracted,

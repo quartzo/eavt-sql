@@ -5,4 +5,5 @@ edition = "2021"
 description = "VM opcodes, instruction formats, and program handles"
 
 [dependencies]
+spier-scheme = { path = "../spier-scheme" }
 spier-value = { path = "../spier-value" }

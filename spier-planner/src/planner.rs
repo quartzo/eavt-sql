@@ -327,7 +327,7 @@ fn explore_ordering_depth(
 fn build_iter_plan(
     pattern: &Pattern,
     idx_name: &str,
-    mut bound_ints: HashMap<String, PlanValue>,
+    bound_ints: HashMap<String, PlanValue>,
     global_var_order: &[String],
 ) -> IterPlanData {
     let idx_entry = INDEX_ORDERS.iter().find(|(n, _)| *n == idx_name).unwrap();

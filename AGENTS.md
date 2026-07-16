@@ -50,6 +50,7 @@ spier-transactor/src/              # TransactorEngine implementation (EAVT + res
   resolver_consts.rs               # Bootstrap / partition constants
   keys.rs                          # EAVT key format helpers
   lib.rs                           # TransactorEngine trait + TransactorState::open
+spier-scheme/                      # Scheme IR: AST + parser + printer + evaluator (zero deps)
 spier-sql-parse/src/               # SQL parser library + SqlParseEngine trait + AST
 spier-datalog/src/                 # DatalogEngine trait + DatalogIR + resolve_ir
   ast.rs                           # Datalog IR AST types
@@ -57,10 +58,10 @@ spier-datalog/src/                 # DatalogEngine trait + DatalogIR + resolve_i
   resolve.rs                       # resolve_ir / compute_plan_stats
   stats.rs                         # CompileStats trait
 spier-planner/src/                 # PlannerEngine trait + QueryPlanSt
-spier-compiler/src/                # CompilerEngine trait + CompileResultSt
+spier-compiler/src/                # CompilerEngine trait + CompileResultSt + scheme_compile (UPSERT→Scheme)
 spier-sql-frontend/src/            # SqlFrontendEngine trait
 spier-eavt-query/src/              # QueryEngine + VMResultStream + SessionHandle
-  engine/                          # vm, scanner, triejoin, opcodes, query_engine_inner, session
+  engine/                          # vm, scanner, triejoin, opcodes, query_engine_inner, session, scheme
   lib.rs                           # QueryState::open(config) -> impl QueryEngine
 spier-sql-parse-py/                # PyO3 bindings for spier-sql-parse
 spier-transactor-py/               # PyO3 bindings for spier-transactor
@@ -217,6 +218,20 @@ exhausted (the underlying `MergedInner` does not clear `cur_key` when invalidate
 - **Recovery**: on open, replay journal into MemTable
 - **S3 mode**: blobs on S3, journal file on local disk
 - **Python layer**: PyO3 bindings per layer (`spier-sql-parse-py`, `spier-transactor-py`, `spier-eavt-query-py`). The Python package `src/eavt_sql/` wraps these bindings in a typed API.
+
+### Scheme IR (UPSERT path)
+
+UPSERT compiles to Scheme S-expressions instead of VM bytecode. The full
+reference is at `docs/scheme-ir.md`.
+
+Key points:
+- `spier-scheme` crate: zero-dep AST + parser + printer + tree-walking evaluator
+- 10 special forms: `let*`, `let`, `when`, `if`, `begin`, `set!`, `dbg`, `trace`, `log`, `assert`
+- 7 host functions: `alloc-entity`, `tx-entity`, `param`, `lookup-entity`, `lookup-value`, `save`, `result`
+- `CompiledProgram::Scheme(SchemeProgram)` coexists with `CompiledProgram::Vm`
+- EXPLAIN and `compile_sql_json` show S-expressions for UPSERT
+- `SchemeSession` implements `VMResultStream` for cursor-based execution
+- Nullable alias guard: `(when alias ...)` wraps result when entity refs use `eid()`
 
 ## Conventions
 

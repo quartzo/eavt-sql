@@ -1680,6 +1680,7 @@ dependencies = [
  "spier-datalog",
  "spier-planner",
  "spier-query-ir",
+ "spier-scheme",
  "spier-sql-parse",
  "spier-value",
 ]
@@ -1701,6 +1702,7 @@ dependencies = [
  "spier-compiler",
  "spier-datalog",
  "spier-query-ir",
+ "spier-scheme",
  "spier-sql-frontend",
  "spier-sql-parse",
  "spier-storage-traits",
@@ -1775,8 +1777,13 @@ dependencies = [
 name = "spier-query-ir"
 version = "0.1.0"
 dependencies = [
+ "spier-scheme",
  "spier-value",
 ]
+
+[[package]]
+name = "spier-scheme"
+version = "0.1.0"
 
 [[package]]
 name = "spier-sql-frontend"

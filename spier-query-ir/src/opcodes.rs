@@ -19,7 +19,6 @@ pub enum OpCode {
     ResolveVal = 52,
     CursorDeclare = 62,
     CursorBind = 63,
-    CursorClose = 66,
     DepthOpen = 70,
     DepthUp = 71,
     LeapInit = 72,
@@ -222,12 +221,19 @@ pub struct VMProgram {
     pub history: bool,
 }
 
-/// Shared, refcounted handle to a compiled `VMProgram`.
+/// A compiled program: either a VM bytecode program or a Scheme AST program.
+#[derive(Clone)]
+pub enum CompiledProgram {
+    Vm(Arc<VMProgram>),
+    Scheme(spier_scheme::SchemeProgram),
+}
+
+/// Shared, refcounted handle to a compiled program.
 ///
 /// Cloning is a cheap `Arc` clone, so it is safe to pass as a by-value
 /// parameter on every `run_vm` call (e.g. prepared statements). There is no
 /// `free_program` — the `Arc` refcount + `Drop` handle cleanup automatically.
 #[derive(Clone)]
 pub struct ProgramHandle {
-    pub program: Arc<VMProgram>,
+    pub program: Arc<CompiledProgram>,
 }

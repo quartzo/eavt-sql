@@ -955,51 +955,6 @@ fn expand_star(mut sel: RustSelectStmt) -> RustSelectStmt {
 
 // ── Public entry point ──────────────────────────────────────────────
 
-fn eliminate_dead_e_vars(
-    patterns: &mut [DatalogPattern],
-    find_vars: &[FindVar],
-    range_bounds: &HashMap<String, Vec<Vec<(String, BoundValue)>>>,
-) {
-    let mut e_count: HashMap<String, usize> = HashMap::new();
-    let mut other_count: HashMap<String, usize> = HashMap::new();
-
-    for fv in find_vars {
-        let name = match fv {
-            FindVar::Var(n) | FindVar::Const(n, _) => n,
-        };
-        *other_count.entry(name.clone()).or_default() += 1;
-    }
-    for name in range_bounds.keys() {
-        *other_count.entry(name.clone()).or_default() += 1;
-    }
-    for p in patterns.iter() {
-        if let DatalogSlot::Var(name) = &p.e {
-            *e_count.entry(name.clone()).or_default() += 1;
-        }
-        for slot in [&p.a, &p.v, &p.t, &p.added] {
-            if let DatalogSlot::Var(name) = slot {
-                *other_count.entry(name.clone()).or_default() += 1;
-            }
-        }
-    }
-
-    for p in patterns.iter_mut() {
-        let dead = match &p.e {
-            DatalogSlot::Var(name) => {
-                let has_other_var =
-                    p.a.is_var() || p.v.is_var() || p.t.is_var() || p.added.is_var();
-                e_count.get(name).copied().unwrap_or(0) == 1
-                    && other_count.get(name).copied().unwrap_or(0) == 0
-                    && has_other_var
-            }
-            _ => false,
-        };
-        if dead {
-            p.e = DatalogSlot::Missing;
-        }
-    }
-}
-
 pub fn build_datalog_ir(stmt: RustStmt, params: &[Value]) -> Result<DatalogIR, String> {
     let sel = match stmt {
         RustStmt::Select(s) | RustStmt::DatalogSelect(s) => s,
@@ -1007,7 +962,7 @@ pub fn build_datalog_ir(stmt: RustStmt, params: &[Value]) -> Result<DatalogIR, S
     };
     let sel = expand_star(sel);
     let ir = build_plan_ir(&sel, params)?;
-    let mut patterns = build_where_patterns(&ir.aliases, ir.star, ir.has_conditions);
+    let patterns = build_where_patterns(&ir.aliases, ir.star, ir.has_conditions);
     let find_vars = ir.find_vars;
 
     let mut range_bounds: HashMap<String, Vec<Vec<(String, BoundValue)>>> = HashMap::new();

@@ -69,8 +69,6 @@ pub trait VMEngine: Send + Sync {
 
 #[derive(Clone)]
 pub struct RawDatomView {
-    pub e: u64,
-    pub a: u32,
     pub v: Value,
     pub t: u64,
     pub retracted: bool,
@@ -1361,7 +1359,6 @@ impl VM {
 
                 OpCode::CursorDeclare
                 | OpCode::CursorBind
-                | OpCode::CursorClose
                 | OpCode::DepthOpen
                 | OpCode::RangeAdd => {
                     // v1 opcodes — replaced by RangeOp / v2 scanner system

@@ -363,22 +363,40 @@ impl QueryEngine for QueryState {
             Some(as_of_us)
         };
 
-        let rows = engine.run_vm(program.program, vm_params, limit_opt, as_of_opt);
-        match rows {
-            Ok(rows) => {
-                let num_cols = rows.first().map(|r| r.len()).unwrap_or(0);
-                let total_values: usize = rows.iter().map(|r| r.len()).sum();
-                let mut out = Vec::with_capacity(total_values * 12 + 8);
-                out.extend_from_slice(&(num_cols as u32).to_be_bytes());
-                out.extend_from_slice(&(total_values as u32).to_be_bytes());
-                for row in &rows {
-                    for v in row {
-                        query_codec::encode_one(&mut out, v);
+        match &*program.program {
+            spier_query_ir::CompiledProgram::Vm(p) => {
+                let rows = engine.run_vm(Arc::clone(p), vm_params, limit_opt, as_of_opt);
+                match rows {
+                    Ok(rows) => {
+                        let num_cols = rows.first().map(|r| r.len()).unwrap_or(0);
+                        let total_values: usize = rows.iter().map(|r| r.len()).sum();
+                        let mut out = Vec::with_capacity(total_values * 12 + 8);
+                        out.extend_from_slice(&(num_cols as u32).to_be_bytes());
+                        out.extend_from_slice(&(total_values as u32).to_be_bytes());
+                        for row in &rows {
+                            for v in row {
+                                query_codec::encode_one(&mut out, v);
+                            }
+                        }
+                        Ok(out)
                     }
+                    Err(e) => Err(e.0),
                 }
+            }
+            spier_query_ir::CompiledProgram::Scheme(scheme_prog) => {
+                let t = engine.allocate_t_and_write_tx();
+                let as_of_tx = as_of_opt.and_then(|us| engine.tx().resolve_as_of(us).ok().flatten());
+                let mut session = engine::scheme::SchemeSession::new(
+                    scheme_prog.clone(),
+                    Arc::clone(engine),
+                    vm_params,
+                    t,
+                    as_of_tx,
+                );
+                let mut out = Vec::new();
+                session.next_batch(&mut out, 1)?;
                 Ok(out)
             }
-            Err(e) => Err(e.0),
         }
     }
 
@@ -406,20 +424,31 @@ impl QueryEngine for QueryState {
 
         let t = engine.allocate_t_and_write_tx();
         let as_of_tx = as_of_us_opt.and_then(|us| engine.tx().resolve_as_of(us).ok().flatten());
-        crate::engine::opcodes::reset_scanner_stats();
 
-        let session = engine::session::VMSession::new(
-            program.program,
-            Arc::clone(engine) as Arc<dyn engine::vm::VMEngine + Send + Sync>,
-            vm_params,
-            limit_opt,
-            t,
-            as_of_tx,
-        );
+        let session: Arc<RefCell<dyn VMResultStream>> = match &*program.program {
+            spier_query_ir::CompiledProgram::Vm(p) => {
+                crate::engine::opcodes::reset_scanner_stats();
+                Arc::new(RefCell::new(engine::session::VMSession::new(
+                    Arc::clone(p),
+                    Arc::clone(engine) as Arc<dyn engine::vm::VMEngine + Send + Sync>,
+                    vm_params,
+                    limit_opt,
+                    t,
+                    as_of_tx,
+                )))
+            }
+            spier_query_ir::CompiledProgram::Scheme(scheme_prog) => {
+                Arc::new(RefCell::new(engine::scheme::SchemeSession::new(
+                    scheme_prog.clone(),
+                    Arc::clone(engine),
+                    vm_params,
+                    t,
+                    as_of_tx,
+                )))
+            }
+        };
 
-        Ok(SessionHandle {
-            session: Arc::new(std::cell::RefCell::new(session)),
-        })
+        Ok(SessionHandle { session })
     }
 
     fn session_next_batch(&self, session: SessionHandle, max_rows: u64) -> Result<Vec<u8>, String> {
@@ -443,7 +472,15 @@ impl QueryEngine for QueryState {
         for t in &result.traces {
             out.push_str(&format!("{t}\n"));
         }
-        out.push_str(&format!("\n{}", disassemble(&result.program)));
+        out.push_str(&format!(
+            "\n{}",
+            match &result.program {
+                spier_query_ir::CompiledProgram::Vm(p) => disassemble(p),
+                spier_query_ir::CompiledProgram::Scheme(p) => {
+                    spier_scheme::write_scheme(&p.body)
+                }
+            }
+        ));
         Ok(out)
     }
 
@@ -472,7 +509,12 @@ impl QueryEngine for QueryState {
         let compiler = inner.compiler.as_ref().ok_or("compiler not loaded")?;
 
         let (result, _) = do_compile(frontend, compiler, engine.as_ref(), sql, sql_params)?;
-        Ok(result.program.to_json())
+        Ok(match result.program {
+            spier_query_ir::CompiledProgram::Vm(p) => p.to_json(),
+            spier_query_ir::CompiledProgram::Scheme(p) => {
+                spier_scheme::write_scheme(&p.body)
+            }
+        })
     }
 
     fn scan_datoms(&self, as_of_us: u64) -> Result<Vec<u8>, String> {
