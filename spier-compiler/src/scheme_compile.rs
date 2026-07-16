@@ -340,7 +340,7 @@ pub fn compile_select_scheme(
         }
     }
 
-    let leaf_body = if plan.exists_mode {
+    let leaf_body = if plan.exists_mode && constant_indices.is_empty() {
         SExpr::List(vec![
             SExpr::Symbol("result-row".into()),
             SExpr::Int(1),
