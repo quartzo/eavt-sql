@@ -35,7 +35,8 @@ generation step.
 |-------|----------------|------------|
 | `spier-storage-traits` | Storage-layer trait abstractions + `CfStats`/`DbStats`/`GcFullResult` | — |
 | `spier-value` | Core `Value`/`ValueType` + tags + `query_codec` | chrono |
-| `spier-query-ir` | VM opcodes, `Instruction`, `VMProgram`, `SpecKind` | `spier-value` |
+| `spier-query-ir` | `Program` enum, `SelectSchemeMeta`, `SpecKind`, range op constants | `spier-scheme`, `spier-value` |
+| `spier-scheme` | Scheme IR AST, parser, printer, stack-based evaluator with yield/resume | — |
 | `spier-blobstore-memory` | In-memory `BlobStoreEngine` | `spier-storage-traits` |
 | `spier-blobstore-file` | File-backed `BlobStoreEngine` (zstd pages) | `spier-storage-traits` |
 | `spier-blobstore-s3` | S3-backed `BlobStoreEngine` | `spier-storage-traits` |
@@ -46,9 +47,9 @@ generation step.
 | `spier-sql-parse` | SQL lexer + parser | serde |
 | `spier-datalog` | SQL AST → Datalog IR + `resolve_ir` + `CompileStats` | `spier-sql-parse`, `spier-value` |
 | `spier-planner` | Cost-based join ordering + index selection | `spier-datalog`, `spier-query-ir`, `spier-value` |
-| `spier-compiler` | Plan → VM bytecode | `spier-datalog`, `spier-planner`, `spier-query-ir`, `spier-sql-parse`, `spier-value` |
+| `spier-compiler` | Plan → Scheme IR | `spier-datalog`, `spier-planner`, `spier-query-ir`, `spier-scheme`, `spier-sql-parse`, `spier-value` |
 | `spier-sql-frontend` | Stage 1: parse + datalog IR | `spier-sql-parse`, `spier-datalog` |
-| `spier-eavt-query` | Orchestrates pipeline + runs the triejoin VM | all of the above |
+| `spier-eavt-query` | Orchestrates pipeline + runs the Scheme IR evaluator | all of the above |
 | `spier-sql-parse-py` | PyO3 bindings for `spier-sql-parse` | pyo3, `spier-sql-parse` |
 | `spier-transactor-py` | PyO3 bindings for `spier-transactor` | pyo3, `spier-transactor`, `spier-journal-file`, `spier-storage-traits`, `spier-value` |
 | `spier-eavt-query-py` | PyO3 bindings for `spier-eavt-query` | pyo3, `spier-eavt-query`, `spier-query-ir`, `spier-transactor`, `spier-value` |
@@ -61,7 +62,7 @@ generation step.
 Host (Python PyO3 / gRPC)
   │  QueryEngine trait
   ▼
-spier-eavt-query — VM, triejoin, orchestration
+spier-eavt-query — Scheme IR evaluator, triejoin, orchestration
   │
   ├─ SqlFrontendEngine trait ──► spier-sql-frontend — parse + datalog
   │     ├─ SqlParseEngine trait ──► spier-sql-parse — lexer + parser
@@ -87,7 +88,7 @@ SQL text
   → spier-sql-frontend  (SqlFrontendEngine)  → RustStmt (AST) + DatalogIR
   → resolve_ir          (spier-datalog)       → DatalogIR with resolved attrs
   → compute_plan_stats  (spier-datalog)       → PlanStats
-  → spier-compiler      (CompilerEngine)      → CompileResultSt { VMProgram, traces }
+  → spier-compiler      (CompilerEngine)      → CompileResultSt { Program, traces }
 ```
 
 `spier-eavt-query` is the orchestration hub:

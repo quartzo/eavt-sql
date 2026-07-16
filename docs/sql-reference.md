@@ -240,7 +240,7 @@ name = engine.sql1("SELECT d1.company.name WHERE d1.eid = %1", 1000)
 
 ### `EXPLAIN` (via `engine.sql`)
 
-Returns the query plan traces and compiled VM bytecode.
+Returns the query plan traces and compiled Scheme program.
 
 ```python
 rows = list(engine.sql("EXPLAIN SELECT d2.person.name WHERE d1.eid = %1 AND d1.company.partner = d2.eid", 1000))
@@ -249,7 +249,7 @@ print("\n".join(row[0] for row in rows))
 
 Output includes:
 - **Plan traces**: all evaluated variable orderings with cost breakdowns
-- **Disassembly**: compiled VM bytecode (opcode listing)
+- **Disassembly**: compiled Scheme IR (S-expression)
 
 ## Examples
 
@@ -751,7 +751,7 @@ class SqlResult:
 
 ## EXPLAIN
 
-Shows the query plan and compiled VM bytecode without running the query.
+Shows the query plan and compiled Scheme program without running the query.
 
 ```
 EXPLAIN SELECT ...
@@ -764,14 +764,13 @@ rows = list(engine.sql("EXPLAIN SELECT d1.company.name WHERE d1.eid = %1", 1000)
 print("\n".join(row[0] for row in rows))
 ```
 
-For SELECT, shows plan traces (evaluated orderings with cost) followed by bytecode disassembly.
+For SELECT, shows plan traces (evaluated orderings with cost) followed by Scheme IR.
 For non-SELECT statements, returns a descriptive message.
 
 ## Roadmap (future)
 
 - `ORDER BY` — result ordering
 - `GROUP BY` / `COUNT` — aggregations
-- Replace SELECT bytecode with plan interpreter
 
 ## REPL (Interactive)
 
