@@ -323,6 +323,77 @@ pub fn compile_delete_scheme(
     build_triejoin_scheme(plan, find_vars, leaf_body)
 }
 
+pub fn compile_update_scheme(
+    plan: &QueryPlanResult,
+    find_vars: &[String],
+    update_stmt: &spier_sql_parse::RustUpdateStmt,
+) -> Result<(SchemeProgram, SelectSchemeMeta), String> {
+    use spier_sql_parse::{RustLiteral, RustValue};
+
+    let (_, var_id_map) = build_var_names_and_id_map(plan);
+
+    let mut leaf_stmts: Vec<SExpr> = Vec::new();
+    let mut first_eid_get: Option<SExpr> = None;
+
+    for clause in &update_stmt.clauses {
+        let clause_evar = format!("_e_{}", clause.alias.to_lowercase());
+        let e_var_id = var_id_map.get(&clause_evar).copied().unwrap_or(0);
+        let eid_get = SExpr::List(vec![
+            SExpr::Symbol("bind-get".into()),
+            SExpr::Int(e_var_id as i64),
+        ]);
+        if first_eid_get.is_none() {
+            first_eid_get = Some(eid_get.clone());
+        }
+
+        for iv in &clause.values {
+            let val_sexpr = match &iv.value {
+                RustValue::Literal(RustLiteral::Int(n)) => SExpr::Int(*n),
+                RustValue::Literal(RustLiteral::Float(f)) => SExpr::Float(*f),
+                RustValue::Literal(RustLiteral::Str(s)) => SExpr::Str(s.clone()),
+                RustValue::Literal(RustLiteral::Bool(b)) => SExpr::Bool(*b),
+                RustValue::Literal(RustLiteral::Bytes(b)) => SExpr::Bytes(b.clone()),
+                RustValue::Param(idx) => SExpr::List(vec![
+                    SExpr::Symbol("param".into()),
+                    SExpr::Int(*idx as i64),
+                ]),
+                RustValue::AliasRef(name) => {
+                    let ref_evar = format!("_e_{}", name.to_lowercase());
+                    let ref_vid = var_id_map.get(&ref_evar).copied().unwrap_or(0);
+                    SExpr::List(vec![
+                        SExpr::Symbol("bind-get".into()),
+                        SExpr::Int(ref_vid as i64),
+                    ])
+                }
+                _ => SExpr::Int(0),
+            };
+            leaf_stmts.push(SExpr::List(vec![
+                SExpr::Symbol("save".into()),
+                eid_get.clone(),
+                SExpr::Str(iv.attr.clone()),
+                val_sexpr,
+            ]));
+        }
+    }
+
+    leaf_stmts.push(SExpr::List(vec![
+        SExpr::Symbol("result-row".into()),
+        first_eid_get.unwrap_or(SExpr::Int(0)),
+    ]));
+
+    let leaf_body = if leaf_stmts.len() == 1 {
+        leaf_stmts.remove(0)
+    } else {
+        SExpr::List({
+            let mut v = vec![SExpr::Symbol("begin".into())];
+            v.extend(leaf_stmts);
+            v
+        })
+    };
+
+    build_triejoin_scheme(plan, find_vars, leaf_body)
+}
+
 fn build_var_names_and_id_map(plan: &QueryPlanResult) -> (Vec<String>, HashMap<String, usize>) {
     let mut var_names_list: Vec<String> = plan.ordered_vars.clone();
     for tn in &plan.t_lookup_vars {

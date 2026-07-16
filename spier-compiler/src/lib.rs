@@ -120,30 +120,39 @@ impl CompilerEngine for Compiler {
 
         match stmt.stmt {
             RustStmt::Update(ref update_stmt) => {
-                let first_alias = update_stmt
-                    .clauses
-                    .first()
-                    .map(|c| c.alias.clone())
-                    .unwrap_or_else(|| "D1".to_string());
-                let all_set_values: Vec<(String, Vec<spier_sql_parse::RustInsertValue>)> =
-                    update_stmt
+                if scheme_select_enabled() {
+                    let (scheme_program, meta) = scheme_compile::compile_update_scheme(
+                        plan,
+                        &find_vars,
+                        update_stmt,
+                    )?;
+                    Ok(select_scheme_result(scheme_program, meta, plan))
+                } else {
+                    let first_alias = update_stmt
                         .clauses
-                        .iter()
-                        .map(|c| (c.alias.clone(), c.values.clone()))
-                        .collect();
-                let target_evar = format!("_e_{}", first_alias.to_lowercase());
+                        .first()
+                        .map(|c| c.alias.clone())
+                        .unwrap_or_else(|| "D1".to_string());
+                    let all_set_values: Vec<(String, Vec<spier_sql_parse::RustInsertValue>)> =
+                        update_stmt
+                            .clauses
+                            .iter()
+                            .map(|c| (c.alias.clone(), c.values.clone()))
+                            .collect();
+                    let target_evar = format!("_e_{}", first_alias.to_lowercase());
 
-                let program = compiler::compile_triejoin_update(
-                    plan,
-                    &plan.range_bounds,
-                    &find_vars,
-                    &all_set_values,
-                    &target_evar,
-                )?;
-                Ok(CompileResultSt {
-                    program: CompiledProgram::Vm(Arc::new(program)),
-                    traces: plan.plan_traces.clone(),
-                })
+                    let program = compiler::compile_triejoin_update(
+                        plan,
+                        &plan.range_bounds,
+                        &find_vars,
+                        &all_set_values,
+                        &target_evar,
+                    )?;
+                    Ok(CompileResultSt {
+                        program: CompiledProgram::Vm(Arc::new(program)),
+                        traces: plan.plan_traces.clone(),
+                    })
+                }
             }
             RustStmt::Delete(ref delete_stmt) => {
                 let first_alias = delete_stmt

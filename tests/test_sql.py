@@ -2504,3 +2504,42 @@ def test_delete_scan_explain_without_params():
     assert "bench.value" in text
     engine.close()
 
+
+def test_update_scan_with_param():
+    """UPDATE scan via Scheme path — params stay symbolic, resolved at runtime."""
+    engine = EAVTEngine(":memory:")
+    list(engine.sql("ATTRIBUTE person.name STRING ONE"))
+    list(engine.sql("ATTRIBUTE person.age LONG ONE"))
+    list(engine.sql("UPSERT SET person.name = 'Alice', person.age = 30"))
+    list(engine.sql("UPSERT SET person.name = 'Bob', person.age = 25"))
+
+    updated = list(engine.sql(
+        "UPDATE SET person.age = %1 WHERE d1.person.name = %2",
+        99, "Alice",
+    ))
+    assert len(updated) == 1
+
+    rows = list(engine.sql("SELECT d1.person.age WHERE d1.person.name = 'Alice'"))
+    assert rows == [(99,)]
+
+    # Bob should be unchanged
+    rows = list(engine.sql("SELECT d1.person.age WHERE d1.person.name = 'Bob'"))
+    assert rows == [(25,)]
+    engine.close()
+
+
+@skip_if_not_scheme
+def test_update_scan_explain_without_params():
+    """EXPLAIN UPDATE with params should work without providing param values
+    (params stay symbolic in Scheme path)."""
+    engine = EAVTEngine(":memory:")
+    list(engine.sql("ATTRIBUTE person.name STRING ONE"))
+    list(engine.sql("ATTRIBUTE person.age LONG ONE"))
+    rows = list(engine.sql(
+        "EXPLAIN UPDATE SET person.age = %1 WHERE d1.person.name = %2"
+    ))
+    text = "\n".join(row[0] for row in rows)
+    assert "save" in text or "EXEC_INSERT" in text
+    assert "person.age" in text
+    engine.close()
+
