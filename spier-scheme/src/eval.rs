@@ -287,7 +287,7 @@ fn run_eval(
             Frame::Eval(e) => {
                 match eval_frame(&e, env, host, tracer, state)? {
                     EvalResult::Value(v) => {
-                        match process_value(v, host, state)? {
+                        match process_value(v, env, host, state)? {
                             EvalResult::Value(final_val) => return Ok(EvalStep::Done(final_val)),
                             EvalResult::Yield(row) => return Ok(EvalStep::Yield(row)),
                             EvalResult::Pushed => {}
@@ -303,7 +303,7 @@ fn run_eval(
                         state.stack.push(Frame::Eval(expr.clone()));
                     }
                 } else {
-                    match process_value(SExpr::Void, host, state)? {
+                    match process_value(SExpr::Void, env, host, state)? {
                         EvalResult::Value(v) => return Ok(EvalStep::Done(v)),
                         EvalResult::Yield(row) => return Ok(EvalStep::Yield(row)),
                         EvalResult::Pushed => {}
@@ -323,7 +323,7 @@ fn run_eval(
                 match branch {
                     Some(e) => state.stack.push(Frame::Eval(e)),
                     None => {
-                        match process_value(SExpr::Void, host, state)? {
+                        match process_value(SExpr::Void, env, host, state)? {
                             EvalResult::Value(v) => return Ok(EvalStep::Done(v)),
                             EvalResult::Yield(row) => return Ok(EvalStep::Yield(row)),
                             EvalResult::Pushed => {}
@@ -365,7 +365,7 @@ fn run_eval(
                         } else {
                             hc(host, "depth-cleanup", &[SExpr::Int(depth)])?;
                             state.depth_runs.pop();
-                            match process_value(SExpr::Void, host, state)? {
+                            match process_value(SExpr::Void, env, host, state)? {
                                 EvalResult::Value(v) => return Ok(EvalStep::Done(v)),
                                 EvalResult::Yield(row) => return Ok(EvalStep::Yield(row)),
                                 EvalResult::Pushed => {}
@@ -394,7 +394,7 @@ fn run_eval(
                         SExpr::Symbol(ref name) if host.is_native(name) => {
                             match hc(host, name, &args)? {
                                 EvalResult::Value(v) => {
-                                    match process_value(v, host, state)? {
+                                    match process_value(v, env, host, state)? {
                                         EvalResult::Value(final_val) => return Ok(EvalStep::Done(final_val)),
                                         EvalResult::Yield(row) => return Ok(EvalStep::Yield(row)),
                                         EvalResult::Pushed => {}
@@ -416,7 +416,7 @@ fn run_eval(
             Frame::LetBindings {
                 op,
                 pairs,
-                mut names,
+                names,
                 vals,
                 current,
                 body,
@@ -425,7 +425,7 @@ fn run_eval(
                     let pair = &pairs[current];
                     match pair {
                         SExpr::List(pair_items) if pair_items.len() == 2 => {
-                            let name = match &pair_items[0] {
+                            let _name = match &pair_items[0] {
                                 SExpr::Symbol(s) => s.clone(),
                                 _ => {
                                     return Err(EvalError::Type {
@@ -435,13 +435,12 @@ fn run_eval(
                                 }
                             };
                             let next_expr = pair_items[1].clone();
-                            names.push(name);
                             state.stack.push(Frame::LetBindings {
                                 op,
                                 pairs,
                                 names,
                                 vals,
-                                current: current + 1,
+                                current,
                                 body,
                             });
                             state.stack.push(Frame::Eval(next_expr));
@@ -457,7 +456,7 @@ fn run_eval(
                         env.define(name, val);
                     }
                     if body.is_empty() {
-                        match process_value(SExpr::Void, host, state)? {
+                        match process_value(SExpr::Void, env, host, state)? {
                             EvalResult::Value(v) => return Ok(EvalStep::Done(v)),
                             EvalResult::Yield(row) => return Ok(EvalStep::Yield(row)),
                             EvalResult::Pushed => {}
@@ -611,10 +610,6 @@ fn eval_special_form_frame(
             };
             if op == "let*" {
                 if !pairs.is_empty() {
-                    let first_expr = match &pairs[0] {
-                        SExpr::List(pair_items) if pair_items.len() == 2 => pair_items[1].clone(),
-                        _ => unreachable!(),
-                    };
                     state.stack.push(Frame::LetBindings {
                         op: op.to_string(),
                         pairs,
@@ -623,7 +618,6 @@ fn eval_special_form_frame(
                         current: 0,
                         body: items[2..].to_vec(),
                     });
-                    state.stack.push(Frame::Eval(first_expr));
                 } else {
                     for expr in items[2..].iter().rev() {
                         state.stack.push(Frame::Eval(expr.clone()));
@@ -766,6 +760,7 @@ fn eval_special_form_frame(
 /// Pop the top frame, apply the value, push result or new frames.
 fn process_value(
     val: SExpr,
+    env: &mut Environment,
     host: &mut dyn HostFns,
     state: &mut YieldState,
 ) -> Result<EvalResult, EvalError> {
@@ -828,7 +823,7 @@ fn process_value(
                     match func {
                         SExpr::Symbol(ref name) if host.is_native(name) => {
                             match hc(host, name, &new_args)? {
-                                EvalResult::Value(v) => process_value(v, host, state),
+                                EvalResult::Value(v) => process_value(v, env, host, state),
                                 EvalResult::Yield(row) => Ok(EvalResult::Yield(row)),
                                 EvalResult::Pushed => Ok(EvalResult::Pushed),
                             }
@@ -929,7 +924,6 @@ fn process_value(
                                 });
                             }
                         };
-                        let next_expr = pair_items[1].clone();
                         let mut new_names = names;
                         let mut new_vals = vals;
                         new_names.push(name);
@@ -942,13 +936,24 @@ fn process_value(
                             current: current + 1,
                             body,
                         });
-                        state.stack.push(Frame::Eval(next_expr));
                         Ok(EvalResult::Pushed)
                     }
                     _ => unreachable!(),
                 }
             } else {
-                Ok(EvalResult::Value(val))
+                for (name, val) in names.into_iter().zip(vals) {
+                    env.define(name, val);
+                }
+                if body.is_empty() {
+                    Ok(EvalResult::Value(val))
+                } else {
+                    let last = body.len() - 1;
+                    for expr in body[..last].iter().rev() {
+                        state.stack.push(Frame::Eval(expr.clone()));
+                    }
+                    state.stack.push(Frame::Eval(body[last].clone()));
+                    Ok(EvalResult::Pushed)
+                }
             }
         }
         Frame::Eval(e) => {
@@ -1019,7 +1024,9 @@ fn eval_depth_run_frame(
     for config in &scanner_configs {
         if let SExpr::List(pair) = config {
             if pair.len() == 2 {
-                let sid = sexpr_to_int(&pair[0])?;
+                // Evaluate the scanner reference (e.g. s0 → Int(sid) via env lookup)
+                let sid_val = eval_recursive(&pair[0], _env, _host, _tracer)?;
+                let sid = sexpr_to_int(&sid_val)?;
                 let pos_idx = sexpr_to_int(&pair[1])?;
                 expect_done(
                     _host,
@@ -1222,7 +1229,8 @@ fn eval_depth_run_recursive(
         for config in &scanner_configs {
             match config {
                 SExpr::List(pair) if pair.len() == 2 => {
-                    let sid = sexpr_to_int(&pair[0])?;
+                    let sid_val = eval_recursive(&pair[0], env, host, tracer)?;
+                    let sid = sexpr_to_int(&sid_val)?;
                     let pos_idx = sexpr_to_int(&pair[1])?;
                     expect_done(
                         host,
@@ -2092,5 +2100,49 @@ mod tests {
         assert!(r.is_ok());
         assert_eq!(host.rows.len(), 3);
         assert_eq!(leap_next_count.get(), 3);
+    }
+
+    #[test]
+    fn let_with_returning_host_fn() {
+        // Test that let* correctly binds a value returned by a host function
+        struct SidHost {
+            next: i64,
+        }
+        impl HostFns for SidHost {
+            fn is_native(&self, name: &str) -> bool {
+                name == "scanner-open" || name == "result-row"
+            }
+            fn call(&mut self, name: &str, args: &[SExpr]) -> Result<EvalStep, EvalError> {
+                match name {
+                    "scanner-open" => {
+                        let sid = self.next;
+                        self.next += 1;
+                        Ok(EvalStep::Done(SExpr::Int(sid)))
+                    }
+                    "result-row" => {
+                        Ok(EvalStep::Done(args[0].clone()))
+                    }
+                    _ => Err(EvalError::NotFound(name.into())),
+                }
+            }
+        }
+
+        // (let* ((s0 (scanner-open))) (result-row s0))
+        // s0 should be 0
+        let input = "(let* ((s0 (scanner-open))) (result-row s0))";
+        let expr = parse(input).unwrap();
+        let mut env = Environment::new();
+        let mut host = SidHost { next: 0 };
+        let result = eval(&expr, &mut env, &mut host, &NullTracer).unwrap();
+        assert_eq!(result, SExpr::Int(0));
+
+        // (let* ((s0 (scanner-open)) (s1 (scanner-open))) (result-row s1))
+        // s1 should be 1
+        let input = "(let* ((s0 (scanner-open)) (s1 (scanner-open))) (result-row s1))";
+        let expr = parse(input).unwrap();
+        let mut env = Environment::new();
+        let mut host = SidHost { next: 0 };
+        let result = eval(&expr, &mut env, &mut host, &NullTracer).unwrap();
+        assert_eq!(result, SExpr::Int(1));
     }
 }

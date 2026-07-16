@@ -616,20 +616,21 @@ fn build_triejoin_scheme(
     let mut stmts: Vec<SExpr> = Vec::new();
     let mut prefix_stmts: Vec<SExpr> = Vec::new();
 
+    // Build let* bindings for scanners: (s0 (scanner-open INDEX_NAME [history]))
+    let mut scanner_bindings: Vec<SExpr> = Vec::new();
     for (ip_idx, ip) in plan.iter_plans.iter().enumerate() {
-        let cf_id: i64 = match ip.index_name.to_ascii_uppercase().as_str() {
-            "EAVT" => 0,
-            "AEVT" => 1,
-            "AVET" => 2,
-            "VAET" => 3,
-            _ => 0,
-        };
-        let sid = ip_idx as i64;
-        stmts.push(SExpr::List(vec![
+        let scanner_name = format!("s{ip_idx}");
+        let index_name = ip.index_name.to_ascii_uppercase();
+        let mut open_args = vec![
             SExpr::Symbol("scanner-open".into()),
-            SExpr::Int(sid),
-            SExpr::Int(cf_id),
-            SExpr::Bool(plan.history),
+            SExpr::Str(index_name),
+        ];
+        if plan.history {
+            open_args.push(SExpr::Bool(true));
+        }
+        scanner_bindings.push(SExpr::List(vec![
+            SExpr::Symbol(scanner_name.clone()),
+            SExpr::List(open_args),
         ]));
 
         let v2_order: Vec<&str> = ip.idx_order.iter().map(|s| s.as_str()).collect();
@@ -650,7 +651,7 @@ fn build_triejoin_scheme(
                 };
                 prefix_stmts.push(SExpr::List(vec![
                     SExpr::Symbol("prefix-push".into()),
-                    SExpr::Int(sid),
+                    SExpr::Symbol(format!("s{ip_idx}")),
                     val_expr,
                     SExpr::Int(pos_idx as i64),
                 ]));
@@ -694,7 +695,7 @@ fn build_triejoin_scheme(
             .iter()
             .map(|&(sid, pos_idx)| {
                 SExpr::List(vec![
-                    SExpr::Int(sid as i64),
+                    SExpr::Symbol(format!("s{sid}")),
                     SExpr::Int(pos_idx as i64),
                 ])
             })
@@ -740,7 +741,8 @@ fn build_triejoin_scheme(
 
     stmts.push(body);
 
-    let full_body = if stmts.len() == 1 {
+    // Build the full body: (let* (scanner bindings) body)
+    let inner_body = if stmts.len() == 1 {
         stmts.remove(0)
     } else {
         SExpr::List({
@@ -748,6 +750,16 @@ fn build_triejoin_scheme(
             v.extend(stmts);
             v
         })
+    };
+
+    let full_body = if scanner_bindings.is_empty() {
+        inner_body
+    } else {
+        SExpr::List(vec![
+            SExpr::Symbol("let*".into()),
+            SExpr::List(scanner_bindings),
+            inner_body,
+        ])
     };
 
     // Compute same_var_constraints for the Scheme path.

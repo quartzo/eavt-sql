@@ -313,6 +313,7 @@ pub struct SelectSchemeHostFns {
     same_var_constraints: HashMap<usize, Vec<(usize, usize)>>,
     range_ops: HashMap<usize, Vec<Vec<(i32, Value)>>>,
     probe_found_t: Option<u64>,
+    next_sid: usize,
 }
 
 impl SelectSchemeHostFns {
@@ -341,6 +342,7 @@ impl SelectSchemeHostFns {
             same_var_constraints: svc,
             range_ops: HashMap::new(),
             probe_found_t: None,
+            next_sid: 0,
         }
     }
 
@@ -523,24 +525,25 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
             // -- Scanner lifecycle --
 
             "scanner-open" => {
-                let sid = expect_int(&args[0])? as usize;
-                let cf_id = expect_int(&args[1])? as u32;
-                let history = args.get(2).map_or(false, |a| matches!(a, SExpr::Bool(true)));
-                let (index_name, base_order): (&str, &[&str]) = match cf_id {
-                    0 => ("EAVT", &["e", "a", "v"]),
-                    1 => ("AEVT", &["a", "e", "v"]),
-                    2 => ("AVET", &["a", "v", "e"]),
-                    3 => ("VAET", &["v", "a", "e"]),
-                    _ => ("EAVT", &["e", "a", "v"]),
+                let index_name = expect_str(&args[0])?;
+                let history = args.get(1).map_or(false, |a| matches!(a, SExpr::Bool(true)));
+                let base_order : &[&str] = match index_name.to_ascii_uppercase().as_str() {
+                    "EAVT" => &["e", "a", "v"],
+                    "AEVT" => &["a", "e", "v"],
+                    "AVET" => &["a", "v", "e"],
+                    "VAET" => &["v", "a", "e"],
+                    _ => &["e", "a", "v"],
                 };
                 let idx_order: Vec<String> = base_order.iter()
                     .chain(["t", "added"].iter())
                     .map(|s| s.to_string())
                     .collect();
-                let mut scanner = V2Scanner::new(index_name, idx_order, self.ctx.as_of_tx, None);
+                let mut scanner = V2Scanner::new(&index_name, idx_order, self.ctx.as_of_tx, None);
                 if history { scanner.set_history_mode(); }
+                let sid = self.next_sid;
+                self.next_sid += 1;
                 self.scanners.insert(sid, scanner);
-                Ok(EvalStep::Done(SExpr::Void))
+                Ok(EvalStep::Done(SExpr::Int(sid as i64)))
             }
 
             "scanner-close" => {
