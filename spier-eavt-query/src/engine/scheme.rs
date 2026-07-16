@@ -570,8 +570,13 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
             "scanner-init" => {
                 let sid = expect_int(&args[0])? as usize;
                 let depth = expect_int(&args[1])? as usize;
-                let pos_idx = expect_int(&args[2])? as usize;
                 if let Some(scanner) = self.scanners.get_mut(&sid) {
+                    let pos_idx = if let Some(&existing) = scanner.depth_positions.get(&depth) {
+                        existing
+                    } else {
+                        scanner.next_free_pos()
+                    };
+                        scanner.idx_order, scanner.prefix_values, scanner.depth_positions);
                     if !scanner.is_open() {
                         if let Some(aid) = scanner.attr_id_from_prefix() {
                             let vt = self.engine.value_type_for(aid);

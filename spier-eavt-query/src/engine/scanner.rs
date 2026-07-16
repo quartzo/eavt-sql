@@ -70,7 +70,7 @@ pub struct V2Scanner {
     cursor: Arc<RefCell<dyn Cursor>>,
     index_name: String,
     pub(crate) idx_order: Vec<String>,
-    prefix_values: Vec<(String, Value)>,
+    pub(crate) prefix_values: Vec<(String, Value)>,
     prefix_bytes_cache: Vec<u8>,
     pub positions_filled: usize,
     as_of_tx: Option<u64>,
@@ -295,6 +295,20 @@ impl V2Scanner {
 
     pub fn bind_depth(&mut self, depth: usize, pos_idx: usize) {
         self.depth_positions.insert(depth, pos_idx);
+    }
+
+    /// Compute the first idx_order position not yet bound by prefix or depth.
+    pub fn next_free_pos(&self) -> usize {
+        let prefix_names: std::collections::HashSet<&str> =
+            self.prefix_values.iter().map(|(n, _)| n.as_str()).collect();
+        let bound_idxs: std::collections::HashSet<usize> =
+            self.depth_positions.values().copied().collect();
+        for (idx, name) in self.idx_order.iter().enumerate() {
+            if !prefix_names.contains(name.as_str()) && !bound_idxs.contains(&idx) {
+                return idx;
+            }
+        }
+        0
     }
 
     pub fn depth_position(&self, depth: usize) -> usize {

@@ -668,20 +668,12 @@ fn build_triejoin_scheme(
         .collect();
 
     let depth_groups = build_depth_groups(plan);
-    let depth_pos_map = build_depth_pos_map(plan);
 
-    let mut depth_scanners: Vec<Vec<(usize, usize)>> = Vec::new();
+    let mut depth_scanners: Vec<Vec<usize>> = Vec::new();
     for depth in 0..num_depths {
-        let cids = depth_groups.get(&depth).cloned().unwrap_or_default();
-        let mut scanners: Vec<(usize, usize)> = Vec::new();
-        for cid in cids {
-            let pos_idx = depth_pos_map
-                .get(&(cid, depth))
-                .copied()
-                .unwrap_or(0);
-            scanners.push((cid, pos_idx));
-        }
-        depth_scanners.push(scanners);
+        depth_scanners.push(
+            depth_groups.get(&depth).cloned().unwrap_or_default()
+        );
     }
 
     let mut body = leaf_body;
@@ -689,12 +681,7 @@ fn build_triejoin_scheme(
         let scanners = &depth_scanners[depth];
         let scanner_args: Vec<SExpr> = scanners
             .iter()
-            .map(|&(sid, pos_idx)| {
-                SExpr::List(vec![
-                    SExpr::Symbol(format!("s{sid}")),
-                    SExpr::Int(pos_idx as i64),
-                ])
-            })
+            .map(|&sid| SExpr::Symbol(format!("s{sid}")))
             .collect();
         let ranges = depth_ranges.get(&depth).cloned().unwrap_or(SExpr::List(vec![]));
         body = SExpr::List(vec![
@@ -806,21 +793,6 @@ fn build_depth_groups(plan: &QueryPlanResult) -> HashMap<usize, Vec<usize>> {
         }
     }
     depth_groups
-}
-
-fn build_depth_pos_map(plan: &QueryPlanResult) -> HashMap<(usize, usize), usize> {
-    let mut depth_pos_map: HashMap<(usize, usize), usize> = HashMap::new();
-    for (ip_idx, ip) in plan.iter_plans.iter().enumerate() {
-        for (depth, pos_name) in &ip.var_depths {
-            let pos_idx = ip
-                .idx_order
-                .iter()
-                .position(|s| s == pos_name)
-                .unwrap_or(0);
-            depth_pos_map.insert((ip_idx, *depth), pos_idx);
-        }
-    }
-    depth_pos_map
 }
 
 fn build_projection(

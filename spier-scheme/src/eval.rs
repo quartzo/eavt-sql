@@ -1022,19 +1022,13 @@ fn eval_depth_run_frame(
     };
 
     for config in &scanner_configs {
-        if let SExpr::List(pair) = config {
-            if pair.len() == 2 {
-                // Evaluate the scanner reference (e.g. s0 → Int(sid) via env lookup)
-                let sid_val = eval_recursive(&pair[0], _env, _host, _tracer)?;
-                let sid = sexpr_to_int(&sid_val)?;
-                let pos_idx = sexpr_to_int(&pair[1])?;
-                expect_done(
-                    _host,
-                    "scanner-init",
-                    &[SExpr::Int(sid), SExpr::Int(depth_id), SExpr::Int(pos_idx)],
-                )?;
-            }
-        }
+        let sid_val = eval_recursive(config, _env, _host, _tracer)?;
+        let sid = sexpr_to_int(&sid_val)?;
+        expect_done(
+            _host,
+            "scanner-init",
+            &[SExpr::Int(sid), SExpr::Int(depth_id)],
+        )?;
     }
 
     let ok = expect_done(_host, "scheme-leap-init", &[SExpr::Int(depth_id)])?;
@@ -1227,24 +1221,13 @@ fn eval_depth_run_recursive(
 
     loop {
         for config in &scanner_configs {
-            match config {
-                SExpr::List(pair) if pair.len() == 2 => {
-                    let sid_val = eval_recursive(&pair[0], env, host, tracer)?;
-                    let sid = sexpr_to_int(&sid_val)?;
-                    let pos_idx = sexpr_to_int(&pair[1])?;
-                    expect_done(
-                        host,
-                        "scanner-init",
-                        &[SExpr::Int(sid), SExpr::Int(depth_id), SExpr::Int(pos_idx)],
-                    )?;
-                }
-                _ => {
-                    return Err(EvalError::Type {
-                        expected: "(sid pos-idx) pair",
-                        got: format!("{config:?}"),
-                    });
-                }
-            }
+            let sid_val = eval_recursive(config, env, host, tracer)?;
+            let sid = sexpr_to_int(&sid_val)?;
+            expect_done(
+                host,
+                "scanner-init",
+                &[SExpr::Int(sid), SExpr::Int(depth_id)],
+            )?;
         }
 
         let ok = expect_done(host, "scheme-leap-init", &[SExpr::Int(depth_id)])?;
