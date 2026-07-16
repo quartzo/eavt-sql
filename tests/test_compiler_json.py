@@ -14,11 +14,7 @@ import pytest
 
 from eavt_sql.engine import EAVTEngine
 
-_scheme_select = os.environ.get("EAVT_SCHEME_SELECT")
-skip_if_scheme = pytest.mark.skipif(
-    _scheme_select is not None,
-    reason="EXPLAIN format is Scheme S-expr when EAVT_SCHEME_SELECT is set",
-)
+skip_if_scheme = pytest.mark.skip(reason="EXPLAIN is Scheme S-expr (VM bytecode removed)")
 
 
 @pytest.fixture

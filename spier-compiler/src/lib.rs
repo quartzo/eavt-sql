@@ -8,12 +8,7 @@ use spier_datalog::DatalogNumIRSt;
 use spier_planner::{Planner, PlannerEngine, QueryPlanSt};
 use spier_query_ir::CompiledProgram;
 use spier_sql_parse::{RustStmt, RustStmtSt};
-use std::sync::Arc;
 use spier_value::query_codec::decode_values;
-
-fn scheme_select_enabled() -> bool {
-    std::env::var("EAVT_SCHEME_SELECT").is_ok()
-}
 
 fn select_scheme_result(
     scheme_program: spier_scheme::SchemeProgram,
@@ -76,22 +71,13 @@ impl CompilerEngine for Compiler {
     fn compile_select(&self, num_ir: DatalogNumIRSt) -> Result<CompileResultSt, String> {
         let plan_st = self.plan(num_ir)?;
         let plan = &plan_st.plan;
-
-        if scheme_select_enabled() && !plan.join_patterns.is_empty() {
-            let total_proj_len = plan.find_vars.len();
-            let (scheme_program, meta) = scheme_compile::compile_select_scheme(
-                plan,
-                total_proj_len,
-                &plan.find_vars,
-            )?;
-            Ok(select_scheme_result(scheme_program, meta, plan))
-        } else {
-            let result = compiler::compile_from_plan(plan)?;
-            Ok(CompileResultSt {
-                program: CompiledProgram::Vm(Arc::new(result.program)),
-                traces: result.traces,
-            })
-        }
+        let total_proj_len = plan.find_vars.len();
+        let (scheme_program, meta) = scheme_compile::compile_select_scheme(
+            plan,
+            total_proj_len,
+            &plan.find_vars,
+        )?;
+        Ok(select_scheme_result(scheme_program, meta, plan))
     }
 
     fn compile_dml_scan(
@@ -120,39 +106,12 @@ impl CompilerEngine for Compiler {
 
         match stmt.stmt {
             RustStmt::Update(ref update_stmt) => {
-                if scheme_select_enabled() {
-                    let (scheme_program, meta) = scheme_compile::compile_update_scheme(
-                        plan,
-                        &find_vars,
-                        update_stmt,
-                    )?;
-                    Ok(select_scheme_result(scheme_program, meta, plan))
-                } else {
-                    let first_alias = update_stmt
-                        .clauses
-                        .first()
-                        .map(|c| c.alias.clone())
-                        .unwrap_or_else(|| "D1".to_string());
-                    let all_set_values: Vec<(String, Vec<spier_sql_parse::RustInsertValue>)> =
-                        update_stmt
-                            .clauses
-                            .iter()
-                            .map(|c| (c.alias.clone(), c.values.clone()))
-                            .collect();
-                    let target_evar = format!("_e_{}", first_alias.to_lowercase());
-
-                    let program = compiler::compile_triejoin_update(
-                        plan,
-                        &plan.range_bounds,
-                        &find_vars,
-                        &all_set_values,
-                        &target_evar,
-                    )?;
-                    Ok(CompileResultSt {
-                        program: CompiledProgram::Vm(Arc::new(program)),
-                        traces: plan.plan_traces.clone(),
-                    })
-                }
+                let (scheme_program, meta) = scheme_compile::compile_update_scheme(
+                    plan,
+                    &find_vars,
+                    update_stmt,
+                )?;
+                Ok(select_scheme_result(scheme_program, meta, plan))
             }
             RustStmt::Delete(ref delete_stmt) => {
                 let first_alias = delete_stmt
@@ -162,28 +121,13 @@ impl CompilerEngine for Compiler {
                     .unwrap_or_else(|| "D1".to_string());
                 let target_evar = format!("_e_{}", first_alias.to_lowercase());
 
-                if scheme_select_enabled() {
-                    let (scheme_program, meta) = scheme_compile::compile_delete_scheme(
-                        plan,
-                        &find_vars,
-                        &target_evar,
-                        delete_stmt,
-                    )?;
-                    Ok(select_scheme_result(scheme_program, meta, plan))
-                } else {
-                    let retract_pairs = compiler::resolve_delete_pairs(delete_stmt, &params)?;
-                    let program = compiler::compile_triejoin_delete(
-                        plan,
-                        &plan.range_bounds,
-                        &find_vars,
-                        &target_evar,
-                        &retract_pairs,
-                    )?;
-                    Ok(CompileResultSt {
-                        program: CompiledProgram::Vm(Arc::new(program)),
-                        traces: plan.plan_traces.clone(),
-                    })
-                }
+                let (scheme_program, meta) = scheme_compile::compile_delete_scheme(
+                    plan,
+                    &find_vars,
+                    &target_evar,
+                    delete_stmt,
+                )?;
+                Ok(select_scheme_result(scheme_program, meta, plan))
             }
             _ => Err("compile_dml_scan only supports UPDATE/DELETE".to_string()),
         }
@@ -195,49 +139,41 @@ impl CompilerEngine for Compiler {
         sql_params: &[u8],
     ) -> Result<CompileResultSt, String> {
         let params = decode_values(sql_params)?;
-        let program = match &stmt.stmt {
+        match &stmt.stmt {
             RustStmt::Upsert(upsert_stmt) => {
                 let scheme = scheme_compile::compile_upsert_scheme(upsert_stmt, &params)?;
-                return Ok(CompileResultSt {
+                Ok(CompileResultSt {
                     program: CompiledProgram::Scheme(scheme),
                     traces: Vec::new(),
-                });
+                })
             }
             RustStmt::Attribute(attr_stmt) => {
-                if scheme_select_enabled() {
-                    let scheme = scheme_compile::compile_attribute_scheme(attr_stmt);
-                    return Ok(CompileResultSt {
-                        program: CompiledProgram::Scheme(scheme),
-                        traces: Vec::new(),
-                    });
-                }
-                CompiledProgram::Vm(Arc::new(compiler::compile_rust_attribute(attr_stmt)))
+                let scheme = scheme_compile::compile_attribute_scheme(attr_stmt);
+                Ok(CompileResultSt {
+                    program: CompiledProgram::Scheme(scheme),
+                    traces: Vec::new(),
+                })
             }
             RustStmt::Partition(part_stmt) => {
-                if scheme_select_enabled() {
-                    let scheme = scheme_compile::compile_partition_scheme(part_stmt);
-                    return Ok(CompileResultSt {
-                        program: CompiledProgram::Scheme(scheme),
-                        traces: Vec::new(),
-                    });
-                }
-                CompiledProgram::Vm(Arc::new(compiler::compile_rust_partition(part_stmt)))
+                let scheme = scheme_compile::compile_partition_scheme(part_stmt);
+                Ok(CompileResultSt {
+                    program: CompiledProgram::Scheme(scheme),
+                    traces: Vec::new(),
+                })
             }
             RustStmt::Delete(delete_stmt) => {
                 let pairs = compiler::resolve_delete_pairs(delete_stmt, &params)?;
                 let entity_val = compiler::resolve_delete_entity(delete_stmt, &params)?;
-                CompiledProgram::Vm(Arc::new(compiler::compile_rust_delete_direct(&entity_val, &pairs)?))
+                let scheme = scheme_compile::compile_delete_direct_scheme(&entity_val, &pairs);
+                Ok(CompileResultSt {
+                    program: CompiledProgram::Scheme(scheme),
+                    traces: Vec::new(),
+                })
             }
-            _ => {
-                return Err(
-                    "compile_dml_direct only supports UPSERT/Attribute/Partition/Delete-direct"
-                        .to_string(),
-                )
-            }
-        };
-        Ok(CompileResultSt {
-            program,
-            traces: Vec::new(),
-        })
+            _ => Err(
+                "compile_dml_direct only supports UPSERT/Attribute/Partition/Delete-direct"
+                    .to_string(),
+            ),
+        }
     }
 }

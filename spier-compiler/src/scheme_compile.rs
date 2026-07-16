@@ -105,6 +105,52 @@ pub fn compile_upsert_scheme(
     Ok(SchemeProgram::new(body).with_param_count(param_count))
 }
 
+pub fn compile_delete_direct_scheme(
+    entity_val: &spier_value::Value,
+    retract_pairs: &[(String, spier_value::Value)],
+) -> SchemeProgram {
+    let eid_sexpr = match entity_val {
+        spier_value::Value::Int64(n) => SExpr::Int(*n),
+        _ => SExpr::Int(0),
+    };
+
+    let mut stmts: Vec<SExpr> = Vec::new();
+    for (attr, val) in retract_pairs {
+        let val_sexpr = match val {
+            spier_value::Value::Int64(n) => SExpr::Int(*n),
+            spier_value::Value::Float64(f) => SExpr::Float(*f),
+            spier_value::Value::Text(s) => SExpr::Str(s.clone()),
+            spier_value::Value::Bool(b) => SExpr::Bool(*b != 0),
+            spier_value::Value::Timestamp(t) => SExpr::Int(*t),
+            spier_value::Value::Bytes(b) => SExpr::Bytes(b.clone()),
+            _ => SExpr::Int(0),
+        };
+        stmts.push(SExpr::List(vec![
+            SExpr::Symbol("retract".into()),
+            eid_sexpr.clone(),
+            SExpr::Str(attr.clone()),
+            val_sexpr,
+        ]));
+    }
+
+    stmts.push(SExpr::List(vec![
+        SExpr::Symbol("result".into()),
+        eid_sexpr,
+    ]));
+
+    let body = if stmts.len() == 1 {
+        stmts.remove(0)
+    } else {
+        SExpr::List({
+            let mut v = vec![SExpr::Symbol("begin".into())];
+            v.extend(stmts);
+            v
+        })
+    };
+
+    SchemeProgram::new(body).with_param_count(0)
+}
+
 pub fn compile_attribute_scheme(stmt: &spier_sql_parse::RustAttributeStmt) -> SchemeProgram {
     let attr = SExpr::Str(stmt.attr.clone());
     let vt = SExpr::Str(stmt.value_type.clone());
@@ -298,11 +344,11 @@ pub fn compile_select_scheme(
         SExpr::List(vec![
             SExpr::Symbol("result-row".into()),
             SExpr::Int(1),
-            SExpr::Bool(false),
         ])
     } else {
         let (_, var_id_map) = build_var_names_and_id_map(plan);
-        build_projection(plan, &var_id_map, total_proj_len, &constant_indices)
+        let probe_only = plan.ordered_vars.is_empty();
+        build_projection(plan, &var_id_map, total_proj_len, &constant_indices, probe_only)
     };
 
     build_triejoin_scheme(plan, &find_vars, leaf_body)
@@ -694,6 +740,7 @@ fn build_projection(
     var_id_map: &HashMap<String, usize>,
     total_proj_len: usize,
     constant_indices: &HashMap<usize, PlanValue>,
+    probe_only: bool,
 ) -> SExpr {
     let mut proj_args: Vec<SExpr> = Vec::new();
     let mut fv_idx = 0;
@@ -722,7 +769,13 @@ fn build_projection(
                 SExpr::Int(vid as i64),
             ]);
             if t_vars.contains(var_name) {
-                proj_args.push(bind);
+                if probe_only {
+                    proj_args.push(SExpr::List(vec![
+                        SExpr::Symbol("probe-get-t".into()),
+                    ]));
+                } else {
+                    proj_args.push(bind);
+                }
             } else if plan.attr_vars.contains(var_name) {
                 proj_args.push(SExpr::List(vec![
                     SExpr::Symbol("attr-name".into()),

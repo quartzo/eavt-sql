@@ -114,6 +114,7 @@ impl<'a> spier_scheme::HostFns for SchemeHostFns<'a> {
                 | "lookup-entity"
                 | "lookup-value"
                 | "save"
+                | "retract"
                 | "result"
                 | "declare-attr"
                 | "declare-partition"
@@ -215,6 +216,17 @@ impl<'a> spier_scheme::HostFns for SchemeHostFns<'a> {
                     .map_err(spier_scheme::EvalError::Host)?;
                 Ok(EvalStep::Done(SExpr::Void))
             }
+            "retract" => {
+                let eid = expect_int(&args[0])? as u64;
+                let attr = expect_str(&args[1])?;
+                let val = sexpr_to_value(&args[2]).map_err(spier_scheme::EvalError::Host)?;
+                self.engine
+                    .retract(&Value::entity_id(eid), &attr, &val, &QueryContext {
+                        as_of_tx: if self.as_of_tx == u64::MAX { None } else { Some(self.as_of_tx) },
+                        current_t: self.tx,
+                    });
+                Ok(EvalStep::Done(SExpr::Void))
+            }
             "result" => {
                 let mut items = vec![SExpr::Symbol("result".into())];
                 items.extend_from_slice(args);
@@ -300,6 +312,7 @@ pub struct SelectSchemeHostFns {
     vars: Vec<Option<Value>>,
     same_var_constraints: HashMap<usize, Vec<(usize, usize)>>,
     range_ops: HashMap<usize, Vec<Vec<(i32, Value)>>>,
+    probe_found_t: Option<u64>,
 }
 
 impl SelectSchemeHostFns {
@@ -327,6 +340,7 @@ impl SelectSchemeHostFns {
             vars: vec![None; num_vars],
             same_var_constraints: svc,
             range_ops: HashMap::new(),
+            probe_found_t: None,
         }
     }
 
@@ -499,7 +513,7 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                 | "scheme-leap-init" | "scheme-leap-next" | "depth-cleanup"
                 | "bind-get" | "bind-set" | "intern-a" | "param"
                 | "result-row" | "range-op" | "range-branch"
-                | "resolve-val" | "attr-name" | "probe-begin" | "save" | "retract"
+                | "resolve-val" | "attr-name" | "probe-begin" | "probe-get-t" | "save" | "retract"
         )
     }
 
@@ -763,10 +777,28 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                     BoundPart::Attr(a_val),
                 ];
                 let datoms = self.engine.probe_collect("EAVT", &bound, &self.ctx);
+                let mut found_t: Option<u64> = None;
                 let found = datoms.iter().any(|d| {
-                    !d.retracted && probe_value_matches(&d.v, &v_probe)
+                    if d.retracted { return false; }
+                    if !probe_value_matches(&d.v, &v_probe) { return false; }
+                    found_t = Some(d.t);
+                    true
                 });
+                self.probe_found_t = found_t;
                 Ok(EvalStep::Done(SExpr::Bool(found)))
+            }
+
+            "probe-get-t" => {
+                match self.probe_found_t {
+                    Some(t) => {
+                        let tx_eid = spier_transactor::resolver_consts::make_entity_id(
+                            spier_transactor::resolver_consts::PART_TX,
+                            t,
+                        );
+                        Ok(EvalStep::Done(SExpr::Int(tx_eid as i64)))
+                    }
+                    None => Ok(EvalStep::Done(SExpr::Void)),
+                }
             }
 
             // -- DML: save / retract --

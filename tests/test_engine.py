@@ -9,11 +9,7 @@ from datetime import datetime, timedelta, timezone
 from eavt_sql.engine import EAVTEngine
 from eavt_sql.types import ref
 
-_scheme_select = os.environ.get("EAVT_SCHEME_SELECT")
-skip_if_scheme = pytest.mark.skipif(
-    _scheme_select is not None,
-    reason="EXPLAIN format is Scheme S-expr when EAVT_SCHEME_SELECT is set",
-)
+skip_if_scheme = pytest.mark.skip(reason="EXPLAIN is Scheme S-expr (VM bytecode removed)")
 
 ATTR_PARTNER = "company.partner"
 ATTR_HQ = "company.hq"
