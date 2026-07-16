@@ -105,6 +105,49 @@ pub fn compile_upsert_scheme(
     Ok(SchemeProgram::new(body).with_param_count(param_count))
 }
 
+pub fn compile_attribute_scheme(stmt: &spier_sql_parse::RustAttributeStmt) -> SchemeProgram {
+    let attr = SExpr::Str(stmt.attr.clone());
+    let vt = SExpr::Str(stmt.value_type.clone());
+    let many = SExpr::Bool(stmt.many);
+    let unique = SExpr::Bool(stmt.unique);
+    let body = SExpr::List(vec![
+        SExpr::Symbol("begin".into()),
+        SExpr::List(vec![
+            SExpr::Symbol("declare-attr".into()),
+            attr.clone(),
+            vt.clone(),
+            many,
+            unique,
+        ]),
+        SExpr::List(vec![
+            SExpr::Symbol("result".into()),
+            attr,
+            vt,
+        ]),
+    ]);
+    SchemeProgram::new(body).with_param_count(0)
+}
+
+pub fn compile_partition_scheme(stmt: &spier_sql_parse::RustPartitionStmt) -> SchemeProgram {
+    let body = SExpr::List(vec![
+        SExpr::Symbol("let*".into()),
+        SExpr::List(vec![
+            SExpr::List(vec![
+                SExpr::Symbol("pid".into()),
+                SExpr::List(vec![
+                    SExpr::Symbol("declare-partition".into()),
+                    SExpr::Str(stmt.name.clone()),
+                ]),
+            ]),
+        ]),
+        SExpr::List(vec![
+            SExpr::Symbol("result".into()),
+            SExpr::Symbol("pid".into()),
+        ]),
+    ]);
+    SchemeProgram::new(body).with_param_count(0)
+}
+
 fn compile_entity_ref(
     entity_ref: &UpsertEntityRef,
     params: &[spier_value::Value],

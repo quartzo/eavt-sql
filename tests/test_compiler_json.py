@@ -125,6 +125,7 @@ class TestInstructionStructure:
         )
         assert program["num_registers"] > 0
 
+    @skip_if_scheme
     def test_attribute_compiles(self, engine):
         program = engine.compile_sql_json(
             "ATTRIBUTE company.revenue FLOAT ONE"
@@ -132,6 +133,7 @@ class TestInstructionStructure:
         ops = opcodes(program)
         assert "ExecAttribute" in ops
 
+    @skip_if_scheme
     def test_partition_compiles(self, engine):
         program = engine.compile_sql_json(
             "PARTITION my_partition"

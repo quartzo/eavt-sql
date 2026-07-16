@@ -1189,6 +1189,7 @@ def test_explain_insert():
     engine.close()
 
 
+@skip_if_scheme
 def test_explain_attribute():
     engine = EAVTEngine(":memory:")
     rows = list(engine.sql("EXPLAIN ATTRIBUTE ns.attr STRING MANY"))

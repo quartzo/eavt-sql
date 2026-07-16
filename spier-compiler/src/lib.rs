@@ -204,9 +204,23 @@ impl CompilerEngine for Compiler {
                 });
             }
             RustStmt::Attribute(attr_stmt) => {
+                if scheme_select_enabled() {
+                    let scheme = scheme_compile::compile_attribute_scheme(attr_stmt);
+                    return Ok(CompileResultSt {
+                        program: CompiledProgram::Scheme(scheme),
+                        traces: Vec::new(),
+                    });
+                }
                 CompiledProgram::Vm(Arc::new(compiler::compile_rust_attribute(attr_stmt)))
             }
             RustStmt::Partition(part_stmt) => {
+                if scheme_select_enabled() {
+                    let scheme = scheme_compile::compile_partition_scheme(part_stmt);
+                    return Ok(CompileResultSt {
+                        program: CompiledProgram::Scheme(scheme),
+                        traces: Vec::new(),
+                    });
+                }
                 CompiledProgram::Vm(Arc::new(compiler::compile_rust_partition(part_stmt)))
             }
             RustStmt::Delete(delete_stmt) => {

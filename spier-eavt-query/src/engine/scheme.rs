@@ -59,16 +59,22 @@ impl VMResultStream for SchemeSession {
 
         match result {
             SExpr::List(items)
-                if items.len() >= 3
+                if items.len() >= 2
                     && matches!(items[0], SExpr::Symbol(ref s) if s == "result") =>
             {
-                let eid = sexpr_to_value(&items[1])?;
-                let total = sexpr_to_value(&items[2])?;
-                out.extend_from_slice(&2u32.to_be_bytes());
-                query_codec::encode_one(out, &eid);
-                query_codec::encode_one(out, &total);
+                let cols = &items[1..];
+                out.extend_from_slice(&(cols.len() as u32).to_be_bytes());
+                for item in cols {
+                    let val = sexpr_to_value(item)?;
+                    query_codec::encode_one(out, &val);
+                }
             }
-            _ => {}
+            SExpr::Void => {
+                out.extend_from_slice(&0u32.to_be_bytes());
+            }
+            _ => {
+                out.extend_from_slice(&0u32.to_be_bytes());
+            }
         }
 
         self.done = true;
@@ -109,6 +115,8 @@ impl<'a> spier_scheme::HostFns for SchemeHostFns<'a> {
                 | "lookup-value"
                 | "save"
                 | "result"
+                | "declare-attr"
+                | "declare-partition"
         )
     }
 
@@ -211,6 +219,29 @@ impl<'a> spier_scheme::HostFns for SchemeHostFns<'a> {
                 let mut items = vec![SExpr::Symbol("result".into())];
                 items.extend_from_slice(args);
                 Ok(EvalStep::Done(SExpr::List(items)))
+            }
+            "declare-attr" => {
+                let attr = expect_str(&args[0])?;
+                let vt_name = expect_str(&args[1])?;
+                let many = args.get(2).map_or(false, |a| matches!(a, SExpr::Bool(true)));
+                let unique = args.get(3).map_or(false, |a| matches!(a, SExpr::Bool(true)));
+                let ctx = QueryContext {
+                    as_of_tx: if self.as_of_tx == u64::MAX { None } else { Some(self.as_of_tx) },
+                    current_t: self.tx,
+                };
+                self.engine
+                    .declare_attr_from_sql(&attr, &vt_name, many, unique, &ctx)
+                    .map_err(|e| spier_scheme::EvalError::Host(e.0))?;
+                Ok(EvalStep::Done(SExpr::Void))
+            }
+            "declare-partition" => {
+                let name = expect_str(&args[0])?;
+                let ctx = QueryContext {
+                    as_of_tx: if self.as_of_tx == u64::MAX { None } else { Some(self.as_of_tx) },
+                    current_t: self.tx,
+                };
+                let pid = self.engine.declare_partition(&name, &ctx).unwrap_or(0);
+                Ok(EvalStep::Done(SExpr::Int(pid as i64)))
             }
             _ => Err(spier_scheme::EvalError::NotFound(name.into())),
         }
