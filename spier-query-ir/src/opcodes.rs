@@ -221,11 +221,20 @@ pub struct VMProgram {
     pub history: bool,
 }
 
+/// Metadata for a Scheme-based SELECT program.
+#[derive(Clone)]
+pub struct SelectSchemeMeta {
+    pub num_vars: usize,
+    pub depth_var_pairs: Vec<(usize, usize)>,
+    pub same_var_constraints: Vec<(i32, Vec<(usize, usize)>)>,
+}
+
 /// A compiled program: either a VM bytecode program or a Scheme AST program.
 #[derive(Clone)]
 pub enum CompiledProgram {
     Vm(Arc<VMProgram>),
     Scheme(spier_scheme::SchemeProgram),
+    SelectScheme(spier_scheme::SchemeProgram, SelectSchemeMeta),
 }
 
 /// Shared, refcounted handle to a compiled program.

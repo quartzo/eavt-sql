@@ -8,6 +8,7 @@ use spier_datalog::DatalogNumIRSt;
 use spier_planner::{Planner, PlannerEngine, QueryPlanSt};
 use spier_query_ir::CompiledProgram;
 use spier_sql_parse::{RustStmt, RustStmtSt};
+use std::collections::HashMap;
 use std::sync::Arc;
 use spier_value::query_codec::decode_values;
 
@@ -60,11 +61,55 @@ impl Default for Compiler {
 impl CompilerEngine for Compiler {
     fn compile_select(&self, num_ir: DatalogNumIRSt) -> Result<CompileResultSt, String> {
         let plan_st = self.plan(num_ir)?;
-        let result = compiler::compile_from_plan(&plan_st.plan)?;
-        Ok(CompileResultSt {
-            program: CompiledProgram::Vm(Arc::new(result.program)),
-            traces: result.traces,
-        })
+        let plan = &plan_st.plan;
+        let use_scheme = std::env::var("EAVT_SCHEME_SELECT").is_ok();
+
+        if use_scheme && !plan.join_patterns.is_empty() {
+            let mut find_vars: Vec<String> = Vec::new();
+            let mut constant_indices: HashMap<usize, spier_planner::PlanValue> = HashMap::new();
+            for (i, fv) in plan.find_vars.iter().enumerate() {
+                match fv {
+                    spier_datalog::FindVar::Var(name) => find_vars.push(name.clone()),
+                    spier_datalog::FindVar::Const(name, bv) => {
+                        find_vars.push(name.clone());
+                        if let Some(pv) = spier_planner::PlanValue::from_bound_value(bv) {
+                            constant_indices.insert(i, pv);
+                        }
+                    }
+                }
+            }
+            let total_proj_len = plan.find_vars.len();
+
+            let fv_pass: Vec<String> = if plan.exists_mode && find_vars.is_empty() {
+                Vec::new()
+            } else {
+                let where_names: std::collections::HashSet<String> =
+                    plan.var_order.iter().cloned().collect();
+                find_vars
+                    .iter()
+                    .filter(|name| {
+                        where_names.contains(*name) || name.starts_with("_added_")
+                    })
+                    .cloned()
+                    .collect()
+            };
+
+            let (scheme_program, meta) = scheme_compile::compile_select_scheme(
+                plan,
+                total_proj_len,
+                &plan.find_vars,
+            )?;
+            Ok(CompileResultSt {
+                program: CompiledProgram::SelectScheme(scheme_program, meta),
+                traces: plan.plan_traces.clone(),
+            })
+        } else {
+            let result = compiler::compile_from_plan(plan)?;
+            Ok(CompileResultSt {
+                program: CompiledProgram::Vm(Arc::new(result.program)),
+                traces: result.traces,
+            })
+        }
     }
 
     fn compile_dml_scan(

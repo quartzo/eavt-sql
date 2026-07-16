@@ -11,6 +11,11 @@ pub enum SExpr {
     Bytes(Vec<u8>),
     Symbol(String),
     List(Vec<SExpr>),
+    Closure {
+        params: Vec<String>,
+        body: Vec<SExpr>,
+        env: std::collections::HashMap<String, SExpr>,
+    },
 }
 
 #[derive(Debug, Clone)]

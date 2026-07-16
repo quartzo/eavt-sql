@@ -1,11 +1,13 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use spier_scheme::{Environment, SchemeProgram, SExpr, eval};
+use spier_scheme::{Environment, EvalStep, SchemeProgram, SExpr, YieldState, eval};
 use spier_value::query_codec;
 use spier_value::Value;
 
 use crate::engine::query_engine_inner::QueryEngineInner;
-use crate::engine::vm::{QueryContext, VMEngine};
+use crate::engine::scanner::V2Scanner;
+use crate::engine::vm::{ops_to_intervals, merge_intervals, BoundPart, QueryContext, RangeSpec, RANGE_LO_OPEN, RANGE_HI_OPEN, VMEngine, probe_value_matches};
 use crate::VMResultStream;
 
 pub struct SchemeSession {
@@ -110,7 +112,7 @@ impl<'a> spier_scheme::HostFns for SchemeHostFns<'a> {
         )
     }
 
-    fn call(&mut self, name: &str, args: &[SExpr]) -> Result<SExpr, spier_scheme::EvalError> {
+    fn call(&mut self, name: &str, args: &[SExpr]) -> Result<EvalStep, spier_scheme::EvalError> {
         match name {
             "alloc-entity" => {
                 let partition = if args.is_empty() {
@@ -123,9 +125,9 @@ impl<'a> spier_scheme::HostFns for SchemeHostFns<'a> {
                     .tx()
                     .allocate_in_partition(partition)
                     .map_err(spier_scheme::EvalError::Host)?;
-                Ok(SExpr::Int(eid as i64))
+                Ok(EvalStep::Done(SExpr::Int(eid as i64)))
             }
-            "tx-entity" => Ok(SExpr::Int(self.tx as i64)),
+            "tx-entity" => Ok(EvalStep::Done(SExpr::Int(self.tx as i64))),
             "param" => {
                 if args.len() != 1 {
                     return Err(spier_scheme::EvalError::Arity {
@@ -141,7 +143,7 @@ impl<'a> spier_scheme::HostFns for SchemeHostFns<'a> {
                         self.params.len()
                     )));
                 }
-                value_to_sexpr(&self.params[idx - 1])
+                Ok(EvalStep::Done(value_to_sexpr(&self.params[idx - 1])?))
             }
             "lookup-entity" => {
                 if args.len() != 2 {
@@ -162,8 +164,8 @@ impl<'a> spier_scheme::HostFns for SchemeHostFns<'a> {
                     )));
                 }
                 match self.engine.tx().lookup_entity(&attr, val) {
-                    Ok(Some(eid)) => Ok(SExpr::Int(eid as i64)),
-                    Ok(None) => Ok(SExpr::Void),
+                    Ok(Some(eid)) => Ok(EvalStep::Done(SExpr::Int(eid as i64))),
+                    Ok(None) => Ok(EvalStep::Done(SExpr::Void)),
                     Err(e) => Err(spier_scheme::EvalError::Host(e)),
                 }
             }
@@ -185,8 +187,8 @@ impl<'a> spier_scheme::HostFns for SchemeHostFns<'a> {
                     current_t: self.tx,
                 };
                 match self.engine.lookup_value(eid, &attr, &ctx) {
-                    Some(v) => value_to_sexpr(&v),
-                    None => Ok(SExpr::Void),
+                    Some(v) => Ok(EvalStep::Done(value_to_sexpr(&v)?)),
+                    None => Ok(EvalStep::Done(SExpr::Void)),
                 }
             }
             "save" => {
@@ -203,12 +205,12 @@ impl<'a> spier_scheme::HostFns for SchemeHostFns<'a> {
                     .tx()
                     .eavt_save(eid, &attr, val, self.tx, self.as_of_tx)
                     .map_err(spier_scheme::EvalError::Host)?;
-                Ok(SExpr::Void)
+                Ok(EvalStep::Done(SExpr::Void))
             }
             "result" => {
                 let mut items = vec![SExpr::Symbol("result".into())];
                 items.extend_from_slice(args);
-                Ok(SExpr::List(items))
+                Ok(EvalStep::Done(SExpr::List(items)))
             }
             _ => Err(spier_scheme::EvalError::NotFound(name.into())),
         }
@@ -249,5 +251,576 @@ fn value_to_sexpr(val: &Value) -> Result<SExpr, spier_scheme::EvalError> {
             expected: "concrete value",
             got: format!("unknown(tag={tag})"),
         }),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SelectSchemeHostFns — triejoin host functions for SELECT queries
+// ---------------------------------------------------------------------------
+
+pub struct SelectSchemeHostFns {
+    engine: Arc<QueryEngineInner>,
+    params: Vec<Value>,
+    ctx: QueryContext,
+
+    scanners: HashMap<usize, V2Scanner>,
+    depth_cursors: HashMap<usize, Vec<usize>>,
+    depth_var: HashMap<usize, usize>,
+    vars: Vec<Option<Value>>,
+    same_var_constraints: HashMap<usize, Vec<(usize, usize)>>,
+    range_ops: HashMap<usize, Vec<Vec<(i32, Value)>>>,
+}
+
+impl SelectSchemeHostFns {
+    pub fn new(
+        engine: Arc<QueryEngineInner>,
+        params: Vec<Value>,
+        tx: u64,
+        as_of_tx: Option<u64>,
+        num_vars: usize,
+        depth_var_pairs: &[(usize, usize)],
+        same_var_constraints: &[(i32, Vec<(usize, usize)>)],
+    ) -> Self {
+        let depth_var: HashMap<usize, usize> = depth_var_pairs.iter().map(|&(d, v)| (d, v)).collect();
+        let svc: HashMap<usize, Vec<(usize, usize)>> = same_var_constraints
+            .iter()
+            .map(|(sid, pairs)| (*sid as usize, pairs.clone()))
+            .collect();
+        Self {
+            engine,
+            params,
+            ctx: QueryContext { as_of_tx, current_t: tx },
+            scanners: HashMap::new(),
+            depth_cursors: HashMap::new(),
+            depth_var,
+            vars: vec![None; num_vars],
+            same_var_constraints: svc,
+            range_ops: HashMap::new(),
+        }
+    }
+
+    // -- Leapfrog internals (ported from VM) --
+
+    fn leap_converge(&mut self, depth: usize, sids: &[usize]) -> bool {
+        let max_iters = sids.len() * 2 + 1;
+        for _ in 0..max_iters {
+            let mut max_val: Option<Value> = None;
+            let mut all_equal = true;
+            for &sid in sids {
+                if let Some(scanner) = self.scanners.get(&sid) {
+                    let pos = scanner.depth_position(depth);
+                    if let Some(v) = scanner.extract_value(pos) {
+                        match &max_val {
+                            None => max_val = Some(v),
+                            Some(mv) if v != *mv => {
+                                all_equal = false;
+                                if v > *mv { max_val = Some(v); }
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            }
+            if all_equal { return true; }
+            if let Some(ref mv) = max_val {
+                for &sid in sids {
+                    let needs_seek = if let Some(scanner) = self.scanners.get(&sid) {
+                        let pos = scanner.depth_position(depth);
+                        matches!(scanner.extract_value(pos), Some(v) if v < *mv)
+                    } else { false };
+                    if needs_seek {
+                        if let Some(scanner) = self.scanners.get_mut(&sid) {
+                            let pos = scanner.depth_position(depth);
+                            scanner.seek_to_value(pos, mv);
+                            if scanner.at_end() { return false; }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn check_same_var(&self, _depth: usize, sids: &[usize]) -> bool {
+        for &sid in sids {
+            if let Some(pairs) = self.same_var_constraints.get(&sid) {
+                if let Some(scanner) = self.scanners.get(&sid) {
+                    if !scanner.check_same_var_pairs(pairs) { return false; }
+                }
+            }
+        }
+        true
+    }
+
+    fn leap_init_full(&mut self, depth: usize, sids: &[usize]) -> bool {
+        for _ in 0..100 {
+            if !self.leap_init_with_ranges(depth, sids) { return false; }
+            if self.check_same_var(depth, sids) { return true; }
+            let mut advanced = false;
+            for &sid in sids {
+                if self.same_var_constraints.contains_key(&sid) {
+                    if let Some(scanner) = self.scanners.get_mut(&sid) {
+                        let pos = scanner.depth_position(depth);
+                        scanner.leap_next_at(pos);
+                        if scanner.at_end() { return false; }
+                        advanced = true;
+                        break;
+                    }
+                }
+            }
+            if !advanced { return true; }
+            if !self.leap_converge(depth, sids) { return false; }
+        }
+        false
+    }
+
+    fn leap_init_with_ranges(&mut self, depth: usize, sids: &[usize]) -> bool {
+        if !self.leap_converge(depth, sids) { return false; }
+        let raw_ops = match self.range_ops.get(&depth) {
+            Some(r) => r.clone(),
+            None => return true,
+        };
+        if raw_ops.is_empty() { return true; }
+
+        let mut all_intervals: Vec<(Option<Value>, Option<Value>, i32)> = Vec::new();
+        for branch in &raw_ops {
+            all_intervals.extend(ops_to_intervals(branch));
+        }
+        let range_specs: Vec<RangeSpec> = merge_intervals(all_intervals)
+            .into_iter()
+            .map(|(lo, hi, flags)| RangeSpec { lo, hi, flags })
+            .collect();
+
+        if range_specs.is_empty() { return false; }
+
+        let max_iter = range_specs.len() + 2;
+        for _ in 0..max_iter {
+            let cur = {
+                let sid = sids[0];
+                let scanner = match self.scanners.get(&sid) {
+                    Some(s) => s,
+                    None => return false,
+                };
+                let pos = scanner.depth_position(depth);
+                match scanner.extract_value(pos) {
+                    Some(v) => v,
+                    None => return false,
+                }
+            };
+            let mut any_applied = false;
+            for spec in &range_specs {
+                if let Some(ref hi) = spec.hi {
+                    let hi_open = spec.flags & RANGE_HI_OPEN != 0;
+                    let past_hi = if hi_open { &cur >= hi } else { &cur > hi };
+                    if past_hi { continue; }
+                }
+                if let Some(ref lo) = spec.lo {
+                    let lo_open = spec.flags & RANGE_LO_OPEN != 0;
+                    let before_lo = if lo_open { &cur <= lo } else { &cur < lo };
+                    if before_lo {
+                        if std::mem::discriminant(&cur) != std::mem::discriminant(lo) { return false; }
+                        for &sid in sids {
+                            if let Some(scanner) = self.scanners.get_mut(&sid) {
+                                let pos = scanner.depth_position(depth);
+                                scanner.seek_to_value(pos, lo);
+                            }
+                        }
+                        if !self.leap_converge(depth, sids) { return false; }
+                        if lo_open {
+                            let at_lo = if let Some(scanner) = self.scanners.get(&sids[0]) {
+                                let pos = scanner.depth_position(depth);
+                                scanner.extract_value(pos).map_or(false, |v| &v == lo)
+                            } else { false };
+                            if at_lo {
+                                for &sid in sids {
+                                    if let Some(scanner) = self.scanners.get_mut(&sid) {
+                                        let pos = scanner.depth_position(depth);
+                                        scanner.advance_to_active_at(pos);
+                                    }
+                                }
+                                if !self.leap_converge(depth, sids) { return false; }
+                            }
+                        }
+                        any_applied = true;
+                        break;
+                    } else {
+                        return true;
+                    }
+                } else {
+                    return true;
+                }
+            }
+            if !any_applied { return false; }
+        }
+        false
+    }
+}
+
+impl spier_scheme::HostFns for SelectSchemeHostFns {
+    fn is_native(&self, name: &str) -> bool {
+        matches!(
+            name,
+            "scanner-open" | "scanner-close" | "prefix-push" | "scanner-init"
+                | "scheme-leap-init" | "scheme-leap-next" | "depth-cleanup"
+                | "bind-get" | "bind-set" | "intern-a" | "param"
+                | "result-row" | "range-op" | "range-branch"
+                | "resolve-val" | "attr-name" | "probe-begin"
+        )
+    }
+
+    fn call(&mut self, name: &str, args: &[SExpr]) -> Result<EvalStep, spier_scheme::EvalError> {
+        let he = spier_scheme::EvalError::Host;
+        match name {
+            // -- Scanner lifecycle --
+
+            "scanner-open" => {
+                let sid = expect_int(&args[0])? as usize;
+                let cf_id = expect_int(&args[1])? as u32;
+                let history = args.get(2).map_or(false, |a| matches!(a, SExpr::Bool(true)));
+                let (index_name, base_order): (&str, &[&str]) = match cf_id {
+                    0 => ("EAVT", &["e", "a", "v"]),
+                    1 => ("AEVT", &["a", "e", "v"]),
+                    2 => ("AVET", &["a", "v", "e"]),
+                    3 => ("VAET", &["v", "a", "e"]),
+                    _ => ("EAVT", &["e", "a", "v"]),
+                };
+                let idx_order: Vec<String> = base_order.iter()
+                    .chain(["t", "added"].iter())
+                    .map(|s| s.to_string())
+                    .collect();
+                let mut scanner = V2Scanner::new(index_name, idx_order, self.ctx.as_of_tx, None);
+                if history { scanner.set_history_mode(); }
+                self.scanners.insert(sid, scanner);
+                Ok(EvalStep::Done(SExpr::Void))
+            }
+
+            "scanner-close" => {
+                let sid = expect_int(&args[0])? as usize;
+                self.scanners.remove(&sid);
+                Ok(EvalStep::Done(SExpr::Void))
+            }
+
+            "prefix-push" => {
+                let sid = expect_int(&args[0])? as usize;
+                let val = sexpr_to_value(&args[1]).map_err(|e| he(e))?;
+                let pos_idx = expect_int(&args[2])? as usize;
+                if let Some(scanner) = self.scanners.get_mut(&sid) {
+                    scanner.push_prefix_at(pos_idx, &val);
+                }
+                Ok(EvalStep::Done(SExpr::Void))
+            }
+
+            // -- DepthEnter (called by depth-run) --
+
+            "scanner-init" => {
+                let sid = expect_int(&args[0])? as usize;
+                let depth = expect_int(&args[1])? as usize;
+                let pos_idx = expect_int(&args[2])? as usize;
+                if let Some(scanner) = self.scanners.get_mut(&sid) {
+                    if !scanner.is_open() {
+                        if let Some(aid) = scanner.attr_id_from_prefix() {
+                            let vt = self.engine.value_type_for(aid);
+                            scanner.set_value_attr_type(vt);
+                        }
+                        scanner.build_prefix_bytes();
+                        let cf_id = match scanner.index_name() {
+                            "EAVT" => 0u32, "AEVT" => 1, "AVET" => 2, "VAET" => 3, _ => 0,
+                        };
+                        let prefix = scanner.prefix_bytes().to_vec();
+                        let cursor = match self.engine.open_raw_cursor(cf_id, &prefix) {
+                            Ok(c) => c,
+                            Err(_) => Arc::new(std::cell::RefCell::new(
+                                crate::engine::scanner::InvalidCursor,
+                            )),
+                        };
+                        scanner.set_cursor(cursor);
+                        scanner.advance_to_active_at(pos_idx);
+                        if scanner.value_attr_type().is_none() {
+                            if let Some(aid) = scanner.attr_id_from_key() {
+                                let vt = self.engine.value_type_for(aid);
+                                scanner.set_value_attr_type(vt);
+                            }
+                        }
+                    } else if scanner.depth_positions.keys().min().map_or(true, |md| *md >= depth) {
+                        scanner.seek_to_prefix_start();
+                        scanner.advance_to_active_at(pos_idx);
+                    }
+                    scanner.clear_at_end();
+                    if scanner.prefix_values_is_empty() {
+                        if let Some(aid) = scanner.attr_id_from_key() {
+                            let vt = self.engine.value_type_for(aid);
+                            scanner.set_value_attr_type(vt);
+                        }
+                    }
+                    scanner.bind_depth(depth, pos_idx);
+                }
+                self.depth_cursors.entry(depth).or_default().push(sid);
+                if let Some(&var_id) = self.depth_var.get(&depth) {
+                    if let Some(scanner) = self.scanners.get(&sid) {
+                        let pos = scanner.depth_position(depth);
+                        if let Some(val) = scanner.extract_value(pos) {
+                            self.vars[var_id] = Some(val);
+                        }
+                    }
+                }
+                Ok(EvalStep::Done(SExpr::Void))
+            }
+
+            // -- Leapfrog --
+
+            "scheme-leap-init" => {
+                let depth = expect_int(&args[0])? as usize;
+                let sids = self.depth_cursors.get(&depth).cloned().unwrap_or_default();
+                let ok = self.leap_init_full(depth, &sids);
+                if ok {
+                    if let Some(&var_id) = self.depth_var.get(&depth) {
+                        if let Some(&sid) = sids.first() {
+                            if let Some(scanner) = self.scanners.get(&sid) {
+                                let pos = scanner.depth_position(depth);
+                                if let Some(val) = scanner.extract_value(pos) {
+                                    self.vars[var_id] = Some(val);
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(EvalStep::Done(SExpr::Bool(ok)))
+            }
+
+            "scheme-leap-next" => {
+                let depth = expect_int(&args[0])? as usize;
+                let sids = self.depth_cursors.get(&depth).cloned().unwrap_or_default();
+                if sids.is_empty() { return Ok(EvalStep::Done(SExpr::Bool(false))); }
+                // Find scanner with minimum value at this depth
+                let mut min_sid = sids[0];
+                let mut min_val: Option<Value> = None;
+                for &sid in &sids {
+                    if let Some(scanner) = self.scanners.get(&sid) {
+                        let pos = scanner.depth_position(depth);
+                        let val = scanner.extract_value(pos);
+                        match &min_val {
+                            None => { min_val = val.clone(); min_sid = sid; }
+                            Some(mv) => {
+                                if let Some(ref v) = val {
+                                    if v < mv { min_val = Some(v.clone()); min_sid = sid; }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Advance the min scanner
+                if let Some(scanner) = self.scanners.get_mut(&min_sid) {
+                    let pos = scanner.depth_position(depth);
+                    scanner.leap_next_at(pos);
+                    if scanner.at_end() { return Ok(EvalStep::Done(SExpr::Bool(false))); }
+                    // Check parent value consistency
+                    if depth > 0 {
+                        if let Some(&ppos) = scanner.depth_positions.get(&(depth - 1)) {
+                            let parent_val = scanner.extract_value(ppos);
+                            let bound_val = self.depth_var.get(&(depth - 1))
+                                .and_then(|&vid| self.vars.get(vid).cloned())
+                                .flatten();
+                            if parent_val != bound_val { return Ok(EvalStep::Done(SExpr::Bool(false))); }
+                        }
+                    }
+                }
+                // Re-converge after advance
+                if !self.leap_init_full(depth, &sids) { return Ok(EvalStep::Done(SExpr::Bool(false))); }
+                if let Some(&var_id) = self.depth_var.get(&depth) {
+                    if let Some(scanner) = self.scanners.get(&min_sid) {
+                        let pos = scanner.depth_position(depth);
+                        if let Some(val) = scanner.extract_value(pos) {
+                            self.vars[var_id] = Some(val);
+                        }
+                    }
+                }
+                Ok(EvalStep::Done(SExpr::Bool(true)))
+            }
+
+            "depth-cleanup" => {
+                let depth = expect_int(&args[0])? as usize;
+                if let Some(sids) = self.depth_cursors.remove(&depth) {
+                    for sid in sids {
+                        if let Some(scanner) = self.scanners.get_mut(&sid) {
+                            scanner.unbind_depth(depth);
+                        }
+                    }
+                }
+                Ok(EvalStep::Done(SExpr::Void))
+            }
+
+            // -- Variable access --
+
+            "bind-get" => {
+                let var_id = expect_int(&args[0])? as usize;
+                match self.vars.get(var_id).and_then(|v| v.as_ref()) {
+                    Some(val) => Ok(EvalStep::Done(value_to_sexpr(val).map_err(|e| he(e.to_string()))?)),
+                    None => Ok(EvalStep::Done(SExpr::Void)),
+                }
+            }
+
+            "bind-set" => {
+                let var_id = expect_int(&args[0])? as usize;
+                let val = sexpr_to_value(&args[1]).map_err(|e| he(e.to_string()))?;
+                if var_id < self.vars.len() {
+                    self.vars[var_id] = Some(val);
+                }
+                Ok(EvalStep::Done(SExpr::Void))
+            }
+
+            // -- Attribute / param access --
+
+            "intern-a" => {
+                let name = expect_str(&args[0])?;
+                let aid = self.engine.tx().lookup_attr(&name)
+                    .map_err(|e| he(e))?
+                    .ok_or_else(|| he(format!("undeclared attribute '{name}'")))?;
+                Ok(EvalStep::Done(SExpr::Int(aid as i64)))
+            }
+
+            "attr-name" => {
+                let aid = expect_int(&args[0])? as u32;
+                let name = self.engine.tx().attr_name(aid).map_err(|e| he(e))?;
+                Ok(EvalStep::Done(SExpr::Str(name)))
+            }
+
+            "param" => {
+                let idx = expect_int(&args[0])? as usize;
+                if idx == 0 || idx > self.params.len() {
+                    return Err(he(format!("param index {idx} out of range (1..{})", self.params.len())));
+                }
+                Ok(EvalStep::Done(value_to_sexpr(&self.params[idx - 1]).map_err(|e| he(e.to_string()))?))
+            }
+
+            "resolve-val" => {
+                // For now just pass through (value already decoded by scanner)
+                Ok(EvalStep::Done(args[0].clone()))
+            }
+
+            // -- Range constraints --
+
+            "range-op" => {
+                let depth = expect_int(&args[0])? as usize;
+                let op: i32 = expect_int(&args[1])?.try_into().map_err(|_| he("range op out of i32 range".to_string()))?;
+                let val = sexpr_to_value(&args[2]).map_err(|e| he(e.to_string()))?;
+                let branches = self.range_ops.entry(depth).or_default();
+                if branches.is_empty() { branches.push(vec![]); }
+                branches.last_mut().unwrap().push((op, val));
+                Ok(EvalStep::Done(SExpr::Void))
+            }
+
+            "range-branch" => {
+                let depth = expect_int(&args[0])? as usize;
+                let branches = self.range_ops.entry(depth).or_default();
+                if branches.is_empty() { branches.push(vec![]); }
+                branches.push(vec![]);
+                Ok(EvalStep::Done(SExpr::Void))
+            }
+
+            // -- Probe (point lookup before scan) --
+
+            "probe-begin" => {
+                let e_val = expect_int(&args[0])? as u64;
+                let a_val = expect_int(&args[1])? as u32;
+                let v_probe = sexpr_to_value(&args[2]).map_err(|e| he(e))?;
+                let bound = [
+                    BoundPart::Int(e_val),
+                    BoundPart::Attr(a_val),
+                ];
+                let datoms = self.engine.probe_collect("EAVT", &bound, &self.ctx);
+                let found = datoms.iter().any(|d| {
+                    !d.retracted && probe_value_matches(&d.v, &v_probe)
+                });
+                Ok(EvalStep::Done(SExpr::Bool(found)))
+            }
+
+            // -- Result emission --
+
+            "result-row" => {
+                let mut row = Vec::with_capacity(args.len());
+                for arg in args {
+                    row.push(sexpr_to_value(arg).map_err(|e| he(e))?);
+                }
+                // Yield the row as a Scheme list — no internal buffer
+                let sexpr_row = SExpr::List(
+                    row.into_iter().map(|v| value_to_sexpr(&v).unwrap_or(SExpr::Void)).collect()
+                );
+                Ok(EvalStep::Yield(sexpr_row))
+            }
+
+            _ => Err(spier_scheme::EvalError::NotFound(name.into())),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SelectSchemeSession — streaming cursor for Scheme-based SELECT queries
+// ---------------------------------------------------------------------------
+
+pub struct SelectSchemeSession {
+    program: SchemeProgram,
+    env: Environment,
+    host: SelectSchemeHostFns,
+    state: YieldState,
+    done: bool,
+}
+
+impl SelectSchemeSession {
+    pub fn new(program: SchemeProgram, host: SelectSchemeHostFns) -> Self {
+        Self {
+            program,
+            env: Environment::new(),
+            host,
+            state: YieldState::default(),
+            done: false,
+        }
+    }
+}
+
+impl VMResultStream for SelectSchemeSession {
+    fn next_batch(&mut self, out: &mut Vec<u8>, max_rows: usize) -> Result<bool, String> {
+        if self.done || max_rows == 0 {
+            return Ok(false);
+        }
+
+        let tracer = spier_scheme::NullTracer;
+        let mut rows_written = 0usize;
+
+        loop {
+            let step = spier_scheme::eval_with_yield(
+                &self.program.body,
+                &mut self.env,
+                &mut self.host,
+                &tracer,
+                Some(&mut self.state),
+            )
+            .map_err(|e| format!("scheme eval error: {e}"))?;
+
+            match step {
+                EvalStep::Yield(sexpr_row) => {
+                    // Extract values from the row list
+                    if let SExpr::List(items) = sexpr_row {
+                        out.extend_from_slice(&(items.len() as u32).to_be_bytes());
+                        for item in &items {
+                            let val = sexpr_to_value(item)
+                                .map_err(|e| format!("scheme row value error: {e}"))?;
+                            query_codec::encode_one(out, &val);
+                        }
+                        rows_written += 1;
+                        if rows_written >= max_rows {
+                            return Ok(true);
+                        }
+                    }
+                }
+                EvalStep::Done(_) => {
+                    self.done = true;
+                    return Ok(false);
+                }
+            }
+        }
     }
 }

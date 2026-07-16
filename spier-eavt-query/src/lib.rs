@@ -397,6 +397,26 @@ impl QueryEngine for QueryState {
                 session.next_batch(&mut out, 1)?;
                 Ok(out)
             }
+            spier_query_ir::CompiledProgram::SelectScheme(scheme_prog, meta) => {
+                let t = engine.allocate_t_and_write_tx();
+                let as_of_tx = as_of_opt.and_then(|us| engine.tx().resolve_as_of(us).ok().flatten());
+                let host = engine::scheme::SelectSchemeHostFns::new(
+                    Arc::clone(engine),
+                    vm_params,
+                    t,
+                    as_of_tx,
+                    meta.num_vars,
+                    &meta.depth_var_pairs,
+                    &meta.same_var_constraints,
+                );
+                let mut session = engine::scheme::SelectSchemeSession::new(
+                    scheme_prog.clone(),
+                    host,
+                );
+                let mut out = Vec::new();
+                session.next_batch(&mut out, usize::MAX)?;
+                Ok(out)
+            }
         }
     }
 
@@ -446,6 +466,21 @@ impl QueryEngine for QueryState {
                     as_of_tx,
                 )))
             }
+            spier_query_ir::CompiledProgram::SelectScheme(scheme_prog, meta) => {
+                let host = engine::scheme::SelectSchemeHostFns::new(
+                    Arc::clone(engine),
+                    vm_params,
+                    t,
+                    as_of_tx,
+                    meta.num_vars,
+                    &meta.depth_var_pairs,
+                    &meta.same_var_constraints,
+                );
+                Arc::new(RefCell::new(engine::scheme::SelectSchemeSession::new(
+                    scheme_prog.clone(),
+                    host,
+                )))
+            }
         };
 
         Ok(SessionHandle { session })
@@ -476,7 +511,8 @@ impl QueryEngine for QueryState {
             "\n{}",
             match &result.program {
                 spier_query_ir::CompiledProgram::Vm(p) => disassemble(p),
-                spier_query_ir::CompiledProgram::Scheme(p) => {
+                spier_query_ir::CompiledProgram::Scheme(p)
+                | spier_query_ir::CompiledProgram::SelectScheme(p, _) => {
                     spier_scheme::write_scheme(&p.body)
                 }
             }
@@ -511,7 +547,8 @@ impl QueryEngine for QueryState {
         let (result, _) = do_compile(frontend, compiler, engine.as_ref(), sql, sql_params)?;
         Ok(match result.program {
             spier_query_ir::CompiledProgram::Vm(p) => p.to_json(),
-            spier_query_ir::CompiledProgram::Scheme(p) => {
+            spier_query_ir::CompiledProgram::Scheme(p)
+            | spier_query_ir::CompiledProgram::SelectScheme(p, _) => {
                 spier_scheme::write_scheme(&p.body)
             }
         })

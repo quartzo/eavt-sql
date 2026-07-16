@@ -1,7 +1,15 @@
+import os
+
 import pytest
 from datetime import datetime, timedelta, timezone
 
 from eavt_sql.engine import EAVTEngine
+
+_scheme_select = os.environ.get("EAVT_SCHEME_SELECT")
+skip_if_scheme = pytest.mark.skipif(
+    _scheme_select is not None,
+    reason="EXPLAIN format is Scheme S-expr when EAVT_SCHEME_SELECT is set",
+)
 
 @pytest.fixture
 def engine():
@@ -272,6 +280,7 @@ def test_sql_text_value_lookup():
     engine.close()
 
 
+@skip_if_scheme
 def test_explain_sql_variable_order():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.partner REF MANY"))
@@ -291,6 +300,7 @@ def test_explain_sql_variable_order():
     engine.close()
 
 
+@skip_if_scheme
 def test_explain_sql_index_selection():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.partner REF MANY"))
@@ -310,6 +320,7 @@ def test_explain_sql_index_selection():
     engine.close()
 
 
+@skip_if_scheme
 def test_explain_sql_range_bounds():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE item.score LONG MANY"))
@@ -324,6 +335,7 @@ def test_explain_sql_range_bounds():
     engine.close()
 
 
+@skip_if_scheme
 def test_explain_sql_no_patterns():
     engine = EAVTEngine(":memory:")
     rows = list(engine.sql("EXPLAIN SELECT 1 WHERE d1.eid = %1", 999999))
@@ -474,6 +486,7 @@ def test_sql_in_with_join():
     engine.close()
 
 
+@skip_if_scheme
 def test_sql_explain_neq():
     engine = _score_engine()
     rows = list(engine.sql(
@@ -485,6 +498,7 @@ def test_sql_explain_neq():
     engine.close()
 
 
+@skip_if_scheme
 def test_sql_explain_in():
     engine = _score_engine()
     rows = list(engine.sql(
@@ -552,6 +566,7 @@ def test_sql_or_join_blocked():
     engine.close()
 
 
+@skip_if_scheme
 def test_sql_explain_or():
     engine = _score_engine()
     rows = list(engine.sql(
@@ -1125,6 +1140,7 @@ def test_insert_ref_integer_literal():
 # ── EXPLAIN integration tests ──
 
 
+@skip_if_scheme
 def test_explain_select():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.name STRING ONE"))
@@ -1138,6 +1154,7 @@ def test_explain_select():
     engine.close()
 
 
+@skip_if_scheme
 def test_explain_join():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.name STRING ONE"))
@@ -1299,6 +1316,7 @@ def test_select_star_with_where():
     engine.close()
 
 
+@skip_if_scheme
 def test_explain_select_star():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE ns.name STRING ONE"))

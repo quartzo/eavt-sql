@@ -1,8 +1,8 @@
 use crate::ast::SExpr;
-use crate::eval::EvalError;
+use crate::eval::{EvalError, EvalStep};
 
 pub trait HostFns {
-    fn call(&mut self, name: &str, args: &[SExpr]) -> Result<SExpr, EvalError>;
+    fn call(&mut self, name: &str, args: &[SExpr]) -> Result<EvalStep, EvalError>;
     fn is_native(&self, name: &str) -> bool;
 }
 

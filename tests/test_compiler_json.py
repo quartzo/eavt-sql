@@ -8,9 +8,17 @@ without executing the program. They check:
 - Instruction sequences for different SQL statement types
 """
 
+import os
+
 import pytest
 
 from eavt_sql.engine import EAVTEngine
+
+_scheme_select = os.environ.get("EAVT_SCHEME_SELECT")
+skip_if_scheme = pytest.mark.skipif(
+    _scheme_select is not None,
+    reason="EXPLAIN format is Scheme S-expr when EAVT_SCHEME_SELECT is set",
+)
 
 
 @pytest.fixture
@@ -38,6 +46,7 @@ class TestDeferredResolution:
     """Compiler resolves attr names to IDs at compile time (DatalogNumIR).
     Attrs emit ConstInt(id), not InternA(name). Entities are always integers."""
 
+    @skip_if_scheme
     def test_resolved_attr_uses_const_int(self, engine):
         """Resolved attrs emit ConstInt with the attr ID, not InternA with the name."""
         program = engine.compile_sql_json(
@@ -49,6 +58,7 @@ class TestDeferredResolution:
         const_ints = find_op(program, "ConstInt")
         assert len(const_ints) > 0, "expected ConstInt for resolved attr ID"
 
+    @skip_if_scheme
     def test_no_baked_attr_id(self, engine):
         program = engine.compile_sql_json(
             "SELECT d1.company.name WHERE d1.company.name = 'ACME'"
@@ -56,6 +66,7 @@ class TestDeferredResolution:
         prefix_push = find_op(program, "PrefixPush")
         assert len(prefix_push) > 0, "expected PrefixPush for resolved attr"
 
+    @skip_if_scheme
     def test_eid_integer_uses_const_int(self, engine):
         """eid is always an integer — compiler emits ConstInt, never ConstStr for eid."""
         program = engine.compile_sql_json(
@@ -69,6 +80,7 @@ class TestDeferredResolution:
 class TestCursorPlan:
     """Cursor plans contain index selection and variable binding info."""
 
+    @skip_if_scheme
     def test_cursor_plan_has_index(self, engine):
         program = engine.compile_sql_json(
             "SELECT d1.company.name WHERE d1.company.name = 'ACME'"
@@ -78,6 +90,7 @@ class TestCursorPlan:
         cf_id = opens[0]["p2"]
         assert cf_id in (0, 1, 2, 3)
 
+    @skip_if_scheme
     def test_cursor_plan_idx_order(self, engine):
         program = engine.compile_sql_json(
             "SELECT d1.company.name WHERE d1.company.name = 'ACME'"
@@ -85,6 +98,7 @@ class TestCursorPlan:
         opens = find_op(program, "ScannerOpen")
         assert len(opens) >= 1
 
+    @skip_if_scheme
     def test_cursor_plan_specs(self, engine):
         program = engine.compile_sql_json(
             "SELECT d1.company.name WHERE d1.company.name = 'ACME'"
@@ -96,6 +110,7 @@ class TestCursorPlan:
 class TestInstructionStructure:
     """Basic structural assertions on instruction sequences."""
 
+    @skip_if_scheme
     def test_select_has_halt(self, engine):
         program = engine.compile_sql_json(
             "SELECT d1.company.name WHERE d1.company.name = 'ACME'"
@@ -103,6 +118,7 @@ class TestInstructionStructure:
         ops = opcodes(program)
         assert ops[-1] == "Halt"
 
+    @skip_if_scheme
     def test_program_has_registers(self, engine):
         program = engine.compile_sql_json(
             "SELECT d1.company.name WHERE d1.company.name = 'ACME'"

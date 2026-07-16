@@ -1,5 +1,6 @@
 import gc
 import gzip
+import os
 
 import orjson
 import pytest
@@ -7,6 +8,12 @@ from datetime import datetime, timedelta, timezone
 
 from eavt_sql.engine import EAVTEngine
 from eavt_sql.types import ref
+
+_scheme_select = os.environ.get("EAVT_SCHEME_SELECT")
+skip_if_scheme = pytest.mark.skipif(
+    _scheme_select is not None,
+    reason="EXPLAIN format is Scheme S-expr when EAVT_SCHEME_SELECT is set",
+)
 
 ATTR_PARTNER = "company.partner"
 ATTR_HQ = "company.hq"
@@ -1650,6 +1657,7 @@ def test_same_var_1000_entities_self_ref():
 # ── Query explain ──────────────────────────────────────────────────
 
 
+@skip_if_scheme
 def test_explain_variable_order_and_estimates():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.partner REF MANY"))
@@ -1665,6 +1673,7 @@ def test_explain_variable_order_and_estimates():
     engine.close()
 
 
+@skip_if_scheme
 def test_explain_same_var_constraints():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.partner REF MANY"))
@@ -1680,6 +1689,7 @@ def test_explain_same_var_constraints():
     engine.close()
 
 
+@skip_if_scheme
 def test_explain_lookups():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.partner REF MANY"))
@@ -1699,6 +1709,7 @@ def test_explain_lookups():
     engine.close()
 
 
+@skip_if_scheme
 def test_explain_index_selection():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.partner REF MANY"))
@@ -1718,6 +1729,7 @@ def test_explain_index_selection():
     engine.close()
 
 
+@skip_if_scheme
 def test_explain_depth_iterator_mapping():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.partner REF MANY"))

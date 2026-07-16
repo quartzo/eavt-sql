@@ -78,7 +78,7 @@ pub const RANGE_LO_OPEN: i32 = 1;
 pub const RANGE_HI_OPEN: i32 = 2;
 
 #[derive(Clone)]
-pub struct RangeSpec {
+pub(crate) struct RangeSpec {
     pub lo: Option<Value>,
     pub hi: Option<Value>,
     pub flags: i32,
@@ -98,7 +98,7 @@ fn op_const_to_str(op: i32) -> &'static str {
     }
 }
 
-fn merge_intervals(
+pub(crate) fn merge_intervals(
     intervals: Vec<(Option<Value>, Option<Value>, i32)>,
 ) -> Vec<(Option<Value>, Option<Value>, i32)> {
     if intervals.len() <= 1 {
@@ -172,7 +172,7 @@ fn merge_intervals(
     merged
 }
 
-fn ops_to_intervals(ops: &[(i32, Value)]) -> Vec<(Option<Value>, Option<Value>, i32)> {
+pub(crate) fn ops_to_intervals(ops: &[(i32, Value)]) -> Vec<(Option<Value>, Option<Value>, i32)> {
     let mut neq_vals: Vec<Value> = Vec::new();
     let mut range_ops: Vec<(i32, Value)> = Vec::new();
     let mut in_vals: Vec<Value> = Vec::new();
@@ -300,7 +300,7 @@ pub enum BoundPart {
     Val(Value),
 }
 
-fn probe_value_matches(dv: &Value, pv: &Value) -> bool {
+pub(crate) fn probe_value_matches(dv: &Value, pv: &Value) -> bool {
     match pv {
         Value::Int64(_) | Value::Bool(_) | Value::Timestamp(_) => dv.raw_int() == pv.raw_int(),
         Value::Float64(_) => dv.raw_float() == pv.raw_float(),
