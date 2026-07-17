@@ -142,11 +142,6 @@ impl PyEngine {
             .map_err(to_string_err)
     }
 
-    fn explain_plan(&self, py: Python<'_>, sql: &str, params: &[u8]) -> PyResult<String> {
-        py.allow_threads(|| self.inner.explain_plan(sql, params))
-            .map_err(to_string_err)
-    }
-
     fn compile_sql_json(&self, py: Python<'_>, sql: &str, params: &[u8]) -> PyResult<String> {
         py.allow_threads(|| self.inner.compile_sql_json(sql, params))
             .map_err(to_string_err)

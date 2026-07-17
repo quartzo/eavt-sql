@@ -51,7 +51,6 @@ pub trait QueryEngine: Send + Sync {
     ) -> Result<SessionHandle, String>;
     fn session_next_batch(&self, session: SessionHandle, max_rows: u64) -> Result<Vec<u8>, String>;
     fn explain(&self, sql: &str, sql_params: &[u8]) -> Result<String, String>;
-    fn explain_plan(&self, sql: &str, sql_params: &[u8]) -> Result<String, String>;
     fn compile_sql_json(&self, sql: &str, sql_params: &[u8]) -> Result<String, String>;
     fn scan_datoms(&self, as_of_us: u64) -> Result<Vec<u8>, String>;
     fn declare_attr(&self, name: &str, value_type: ValueType, many: bool) -> Result<u32, String>;
@@ -238,7 +237,7 @@ fn resolve_and_stats(ir: DatalogIR, tx_stats: &TxStats<'_>) -> Result<DatalogNum
 }
 
 /// Orchestrate two-stage compilation: frontend → resolve → compiler.
-/// Returns (CompileResult, Option<DatalogIR>) — the num_ir is for explain_plan.
+/// Returns (CompileResult, Option<DatalogIR>) — the num_ir is for explain.
 fn do_compile(
     frontend: &SqlFrontend,
     compiler: &Compiler,
@@ -415,9 +414,12 @@ impl QueryEngine for QueryState {
         let frontend = inner.frontend.as_ref().ok_or("frontend not loaded")?;
         let compiler = inner.compiler.as_ref().ok_or("compiler not loaded")?;
 
-        let (result, _) = do_compile(frontend, compiler, engine.as_ref(), sql, sql_params)?;
+        let (result, num_ir) = do_compile(frontend, compiler, engine.as_ref(), sql, sql_params)?;
 
         let mut out = String::new();
+        if let Some(ir) = num_ir {
+            out.push_str(&format!("{}\n", ir));
+        }
         for t in &result.traces {
             out.push_str(&format!("{t}\n"));
         }
@@ -430,24 +432,6 @@ impl QueryEngine for QueryState {
                 }
             }
         ));
-        Ok(out)
-    }
-
-    fn explain_plan(&self, sql: &str, sql_params: &[u8]) -> Result<String, String> {
-        let inner = self.inner.read().unwrap();
-        let engine = inner.engine.as_ref().ok_or("engine not open")?;
-        let frontend = inner.frontend.as_ref().ok_or("frontend not loaded")?;
-        let compiler = inner.compiler.as_ref().ok_or("compiler not loaded")?;
-
-        let (result, num_ir) = do_compile(frontend, compiler, engine.as_ref(), sql, sql_params)?;
-
-        let mut out = String::new();
-        if let Some(ir) = num_ir {
-            out.push_str(&format!("{}\n", ir));
-        }
-        for t in &result.traces {
-            out.push_str(&format!("{t}\n"));
-        }
         Ok(out)
     }
 

@@ -145,15 +145,6 @@ class EAVTEngine:
         params_bytes = encode_values(list(params)) if params else b"\x00\x00\x00\x00\x00"
         return self._handle.explain(stripped, params_bytes)
 
-    def explain_plan(self, query: str, *params: Any) -> str:
-        """Return plan traces only (join order, cost estimates, index selection).
-        No bytecode disassembly."""
-        stripped = query.strip()
-        if stripped.upper().startswith("EXPLAIN "):
-            stripped = stripped[8:]
-        params_bytes = encode_values(list(params)) if params else b"\x00\x00\x00\x00\x00"
-        return self._handle.explain_plan(stripped, params_bytes)
-
     def compile_sql_json(self, query: str, *params: Any) -> dict:
         import json
 

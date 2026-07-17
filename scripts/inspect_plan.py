@@ -100,21 +100,27 @@ def main() -> None:
             except Exception:
                 pass  # attr may already exist or type mismatch — skip
 
-    # 3. Resolved IR + plan traces
+    # 3. Full output: DatalogIR + plan traces + Scheme IR
     if raw_params:
-        plan_out = engine.explain_plan(sql, *params)
+        full_out = engine.explain(sql, *params)
     else:
-        plan_out = engine.explain_plan(sql)
+        full_out = engine.explain(sql)
 
-    # explain_plan returns resolved IR (DatalogNumIR) + plan traces.
-    # Split: resolved IR ends at the first line starting with '[' (plan trace).
-    lines = plan_out.split("\n")
-    split_idx = next(
+    # Split: DatalogIR (up to first '[' line), plan traces ('[' lines), Scheme (rest).
+    lines = full_out.split("\n")
+    trace_start = next(
         (i for i, ln in enumerate(lines) if ln.strip().startswith("[")),
         len(lines),
     )
-    num_ir_str = "\n".join(lines[:split_idx]).strip()
-    plan_str = "\n".join(lines[split_idx:]).strip()
+    num_ir_str = "\n".join(lines[:trace_start]).strip()
+    rest = "\n".join(lines[trace_start:])
+
+    trace_end = next(
+        (i for i, ln in enumerate(rest.split("\n")) if ln.strip() and not ln.strip().startswith("[")),
+        len(rest.split("\n")),
+    )
+    plan_str = "\n".join(rest.split("\n")[:trace_end]).strip()
+    scheme_str = "\n".join(rest.split("\n")[trace_end:]).strip()
 
     print("\n=== DATALOG NUM IR (resolved) ===")
     print(num_ir_str)
@@ -122,24 +128,8 @@ def main() -> None:
     print("\n=== PLAN ===")
     print(plan_str)
 
-    # 4. Bytecode disassembly
-    if raw_params:
-        explain_out = engine.explain(sql, *params)
-    else:
-        explain_out = engine.explain(sql)
-
-    # explain returns plan traces + bytecode disassembly.
-    # The disassembly starts at the first all-caps opcode line.
-    bc_lines = explain_out.split("\n")
-    bc_start = next(
-        (i for i, ln in enumerate(bc_lines) if ln.strip()[:3].isdigit()),
-        len(bc_lines),
-    )
-    bytecode_str = "\n".join(bc_lines[bc_start:]).strip()
-
-    if bytecode_str:
-        print("\n=== BYTECODE ===")
-        print(bytecode_str)
+    print("\n=== SCHEME IR ===")
+    print(scheme_str)
 
     engine.close()
 
