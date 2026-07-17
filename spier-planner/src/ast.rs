@@ -107,6 +107,50 @@ pub struct IterPlanData {
     pub attr_is_indexed: bool,
 }
 
+impl IterPlanData {
+    /// Posições *bound* (fixas) que aparecem ANTES da variável do `depth`
+    /// informado, na ordem do índice desta cláusula. O codegen consome só
+    /// isto — nunca olha `idx_order` diretamente, então reordenamentos de
+    /// coluna entre índices (AEVT [a,e,v] vs AVET [a,v,e]) não quebram a
+    /// emissão de `depth-fixed`.
+    pub fn bound_positions_before(&self, depth: usize) -> Vec<(String, PlanValue)> {
+        // Variável iterada neste depth para esta cláusula.
+        let var_pos = self
+            .var_depths
+            .iter()
+            .find(|&&(d, _)| d == depth)
+            .map(|&(_, ref p)| p.as_str());
+        let cutoff = match var_pos {
+            Some(p) => self
+                .idx_order
+                .iter()
+                .position(|x| x == p)
+                .unwrap_or(self.idx_order.len()),
+            None => self.idx_order.len(),
+        };
+        self.idx_order[..cutoff]
+            .iter()
+            .filter(|p| *p != "added")
+            .filter_map(|p| {
+                self.bound_ints
+                    .get(p)
+                    .map(|v| (p.clone(), v.clone()))
+            })
+            .collect()
+    }
+
+    /// Todas as posições bound desta cláusula, na ordem do índice, exceto
+    /// "added". Usado para emitir `depth-fixed` de valores que ficam após a
+    /// última variável iterada.
+    pub fn all_bound_positions(&self) -> Vec<(String, PlanValue)> {
+        self.idx_order
+            .iter()
+            .filter(|p| *p != "added")
+            .filter_map(|p| self.bound_ints.get(p).map(|v| (p.clone(), v.clone())))
+            .collect()
+    }
+}
+
 // ── Query plan result (planner output) ──────────────────────────────
 
 pub type RangeBoundsMap = HashMap<String, Vec<Vec<(String, PlanValue)>>>;

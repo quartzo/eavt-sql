@@ -624,12 +624,16 @@ fn build_triejoin_scheme(
         })
         .collect();
 
-    // Pre-compute bind value expressions per clause per position name.
-    let mut bind_vals: Vec<HashMap<&str, SExpr>> = vec![HashMap::new(); plan.iter_plans.len()];
+    // Pre-compute bind value expressions per clause. The key is the position
+    // name (e.g. "a"/"e"/"v") — used only to look up the precomputed expr.
+    // The *ordering* of emission is decided by the planner via
+    // `bound_positions_before` / `all_bound_positions`, never by peeking at
+    // idx_order here.
+    let mut bind_vals: Vec<HashMap<String, SExpr>> = vec![HashMap::new(); plan.iter_plans.len()];
     for (ip_idx, ip) in plan.iter_plans.iter().enumerate() {
         for (pos_name, pv) in &ip.bound_ints {
             let val_expr = match pv {
-                PlanValue::Value(Value::Text(name)) if *pos_name == "a" => {
+                PlanValue::Value(Value::Text(name)) if pos_name == "a" => {
                     SExpr::List(vec![
                         SExpr::Symbol("intern-a".into()),
                         SExpr::Str(name.clone()),
@@ -637,23 +641,8 @@ fn build_triejoin_scheme(
                 }
                 _ => plan_value_to_sexpr(pv),
             };
-            bind_vals[ip_idx].insert(pos_name.as_str(), val_expr);
+            bind_vals[ip_idx].insert(pos_name.clone(), val_expr);
         }
-    }
-
-    // Use the first clause's idx_order as the canonical position order.
-    let canonical_order: Vec<&str> = plan.iter_plans.first()
-        .map(|ip| ip.idx_order.iter().map(|s| s.as_str()).collect())
-        .unwrap_or_default();
-
-    // Build a per-clause map: position_name -> idx_order index.
-    let mut pos_name_to_idx: Vec<HashMap<&str, usize>> = Vec::new();
-    for ip in &plan.iter_plans {
-        let mut m = HashMap::new();
-        for (idx, name) in ip.idx_order.iter().enumerate() {
-            m.insert(name.as_str(), idx);
-        }
-        pos_name_to_idx.push(m);
     }
 
     // Build list of operations (outermost first) for the triejoin.
@@ -668,12 +657,10 @@ fn build_triejoin_scheme(
 
         // Collect scanner refs per clause for this depth.
         let mut scanners: Vec<SExpr> = Vec::new();
-        let mut required_pos_idx: Vec<(usize, &str)> = Vec::new();
 
         for (ip_idx, ip) in plan.iter_plans.iter().enumerate() {
-            if let Some(&(_, ref pos_name)) = ip.var_depths.iter().find(|&&(d, _)| d == depth) {
+            if ip.var_depths.iter().any(|&(d, _)| d == depth) {
                 scanners.push(SExpr::Symbol(format!("s{ip_idx}")));
-                required_pos_idx.push((ip_idx, pos_name.as_str()));
             }
         }
 
@@ -681,26 +668,19 @@ fn build_triejoin_scheme(
             continue;
         }
 
-        // For each clause, emit depth-fixed for any un-emitted bound values
-        // at positions BEFORE this variable's position in idx_order.
-        // Use THIS clause's own idx_order (clauses may reorder columns, e.g.
-        // AEVT [a,e,v] vs AVET [a,v,e]) — never the canonical/first order.
-        for &(ip_idx, pos_name) in &required_pos_idx {
-            let target_idx = pos_name_to_idx[ip_idx].get(pos_name).copied().unwrap_or(0);
-            let clause_order = &plan.iter_plans[ip_idx].idx_order;
-            for peek_idx in 0..target_idx {
-                if peek_idx >= clause_order.len() {
-                    break;
-                }
-                let peek_pos = clause_order[peek_idx].as_str();
-                if peek_pos == "added" {
+        // Emit depth-fixed for bound values BEFORE this depth's variable.
+        // Ordering comes from the planner's `bound_positions_before`, which is
+        // aware of each index's column order — the compiler stays agnostic.
+        for (ip_idx, ip) in plan.iter_plans.iter().enumerate() {
+            if !ip.var_depths.iter().any(|&(d, _)| d == depth) {
+                continue;
+            }
+            for (pos_name, _pv) in ip.bound_positions_before(depth) {
+                if bound_emitted[ip_idx].contains(&pos_name) {
                     continue;
                 }
-                if bound_emitted[ip_idx].contains(peek_pos) {
-                    continue;
-                }
-                if let Some(val_expr) = bind_vals[ip_idx].get(peek_pos) {
-                    bound_emitted[ip_idx].insert(peek_pos.to_string());
+                if let Some(val_expr) = bind_vals[ip_idx].get(&pos_name) {
+                    bound_emitted[ip_idx].insert(pos_name.clone());
                     ops.push(SExpr::List(vec![
                         SExpr::Symbol("depth-fixed".into()),
                         SExpr::List(vec![SExpr::Symbol(format!("s{ip_idx}"))]),
@@ -725,19 +705,15 @@ fn build_triejoin_scheme(
         ]));
     }
 
-    // After all depth-runs, emit remaining depth-fixed for bound values
-    // that were NOT before any variable's position. Use each clause's own
-    // idx_order (see note above about differing column orders).
-    for (ip_idx, _ip) in plan.iter_plans.iter().enumerate() {
-        for pos_name in _ip.idx_order.iter().map(|s| s.as_str()) {
-            if pos_name == "added" {
+    // After all depth-runs, emit remaining depth-fixed for bound values that
+    // were NOT before any variable's position.
+    for (ip_idx, ip) in plan.iter_plans.iter().enumerate() {
+        for (pos_name, _pv) in ip.all_bound_positions() {
+            if bound_emitted[ip_idx].contains(&pos_name) {
                 continue;
             }
-            if bound_emitted[ip_idx].contains(pos_name) {
-                continue;
-            }
-            if let Some(val_expr) = bind_vals[ip_idx].get(pos_name) {
-                bound_emitted[ip_idx].insert(pos_name.to_string());
+            if let Some(val_expr) = bind_vals[ip_idx].get(&pos_name) {
+                bound_emitted[ip_idx].insert(pos_name.clone());
                 ops.push(SExpr::List(vec![
                     SExpr::Symbol("depth-fixed".into()),
                     SExpr::List(vec![SExpr::Symbol(format!("s{ip_idx}"))]),
