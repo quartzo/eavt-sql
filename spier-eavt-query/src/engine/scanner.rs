@@ -31,6 +31,134 @@ impl spier_storage_traits::Cursor for InvalidCursor {
     fn invalidate(&mut self) {}
 }
 
+// ---------------------------------------------------------------------------
+// PositionStack — encapsulates the per-position cursor state.
+//
+// Each `scanner-init` / `depth-fixed-begin` pushes the current key prefix for a
+// position onto the stack; `depth-cleanup` / `depth-fixed-end` pops it and
+// restores the cursor to the parent position's state. `advance` finds the next
+// active value at a position, constrained to the prefix at the top of the stack.
+// ---------------------------------------------------------------------------
+
+pub struct PositionStack {
+    cursor: Arc<RefCell<dyn Cursor>>,
+    idx_order: Vec<String>,
+    // pilha de (pos_idx, key_prefix) — push ao entrar, pop ao sair
+    stack: Vec<(usize, Vec<u8>)>,
+    // chave ativa atual (linha do grupo corrente)
+    current_active_key: Option<Vec<u8>>,
+    at_end: bool,
+}
+
+impl PositionStack {
+    pub fn new(cursor: Arc<RefCell<dyn Cursor>>, idx_order: Vec<String>) -> Self {
+        Self {
+            cursor,
+            idx_order,
+            stack: Vec::new(),
+            current_active_key: None,
+            at_end: true,
+        }
+    }
+
+    pub fn open_cursor(&mut self, cursor: Arc<RefCell<dyn Cursor>>) {
+        self.cursor = cursor;
+        self.at_end = false;
+    }
+
+    pub fn cursor(&self) -> &Arc<RefCell<dyn Cursor>> {
+        &self.cursor
+    }
+
+    pub fn idx_order(&self) -> &[String] {
+        &self.idx_order
+    }
+
+    // -- pilha de posições --
+
+    /// Salva o prefixo `prefix` na posição `pos_idx`. Retorna `true` se a
+    /// posição já estava na pilha (reentrada).
+    pub fn push(&mut self, pos_idx: usize, prefix: Vec<u8>) -> bool {
+        let is_reentry = self.stack.iter().any(|(p, _)| *p == pos_idx);
+        if !is_reentry {
+            self.stack.push((pos_idx, prefix));
+        }
+        is_reentry
+    }
+
+    /// Remove o topo da pilha, restaurando o estado ao da posição pai.
+    /// O cursor em si não é reposicionado aqui — o chamador
+    /// (`scanner-init` / `advance`) reassume a posição correta a partir do
+    /// novo topo da pilha no próximo passo.
+    pub fn pop(&mut self) -> Option<(usize, Vec<u8>)> {
+        self.stack.pop()
+    }
+
+    pub fn contains(&self, pos_idx: usize) -> bool {
+        self.stack.iter().any(|(p, _)| *p == pos_idx)
+    }
+
+    #[allow(dead_code)]
+    pub fn top(&self) -> Option<&(usize, Vec<u8>)> {
+        self.stack.last()
+    }
+
+    /// Prefixo do topo da pilha (posição corrente).
+    pub fn top_prefix(&self) -> Option<&[u8]> {
+        self.stack.last().map(|(_, p)| p.as_slice())
+    }
+
+    #[allow(dead_code)]
+    pub fn top_pos(&self) -> Option<usize> {
+        self.stack.last().map(|(p, _)| *p)
+    }
+
+    // -- estado ativo --
+
+    pub fn current_active_key(&self) -> Option<&[u8]> {
+        self.current_active_key.as_deref()
+    }
+
+    pub fn set_active_key(&mut self, key: Option<Vec<u8>>) {
+        self.current_active_key = key;
+    }
+
+    pub fn at_end(&self) -> bool {
+        self.at_end
+    }
+
+    pub fn set_at_end(&mut self, v: bool) {
+        self.at_end = v;
+    }
+
+    pub fn is_open(&self) -> bool {
+        !self.at_end || self.current_active_key.is_some()
+    }
+
+    pub fn current_position(&self) -> usize {
+        self.stack.last().map(|(p, _)| *p).unwrap_or(0)
+    }
+
+    pub fn stack_len(&self) -> usize {
+        self.stack.len()
+    }
+
+    /// Prefixo restritivo para `advance` na posição `pos_idx`.
+    ///
+    /// No original o bound era derivado da chave ativa atual
+    /// (`current_active_key[..value_start(pos_idx)]`), o que permite avançar
+    /// iterativamente dentro da mesma posição. Quando não há chave ativa (primeira
+    /// vez / primeiro nível) usamos o prefixo do topo da pilha (grupo pai).
+    pub fn bound_prefix(&self, value_start: impl Fn(usize) -> usize, pos_idx: usize) -> Option<Vec<u8>> {
+        if let Some(key) = self.current_active_key.as_ref() {
+            let end = value_start(pos_idx).min(key.len());
+            Some(key[..end].to_vec())
+        } else {
+            self.top_prefix().map(|p| p.to_vec())
+        }
+    }
+}
+
 pub fn encode_bound_value(val: &Value) -> Vec<u8> {
     match val {
         Value::Text(_) | Value::Bytes(_) => encode_variable(val),
@@ -67,19 +195,16 @@ fn is_unordered_attr(vt: Option<u32>) -> bool {
 // ---------------------------------------------------------------------------
 
 pub struct V2Scanner {
-    cursor: Arc<RefCell<dyn Cursor>>,
+    pos: PositionStack,
     index_name: String,
-    pub(crate) idx_order: Vec<String>,
     saved_values: Vec<(usize, Value)>,
     prefix_bytes_cache: Vec<u8>,
     pub fixed_count: usize,
     as_of_tx: Option<u64>,
     value_attr_type: Option<u32>,
-    current_active_key: Option<Vec<u8>>,
-    at_end: bool,
     history_mode: bool,
-    pub positions: Vec<usize>,
 }
+
 
 // V2Scanner is single-threaded but must be Send to be wrapped in
 // Arc<Mutex<V2Scanner>> for the opaque resource SExpr variant.
@@ -93,18 +218,14 @@ impl V2Scanner {
         value_attr_type: Option<u32>,
     ) -> Self {
         Self {
-            cursor: Arc::new(RefCell::new(InvalidCursor)),
+            pos: PositionStack::new(Arc::new(RefCell::new(InvalidCursor)), idx_order),
             index_name: index_name.to_ascii_uppercase(),
-            idx_order,
             saved_values: Vec::new(),
             prefix_bytes_cache: Vec::new(),
             fixed_count: 0,
             as_of_tx,
             value_attr_type,
-            current_active_key: None,
-            at_end: true,
             history_mode: false,
-            positions: Vec::new(),
         }
     }
 
@@ -121,7 +242,7 @@ impl V2Scanner {
     }
 
     pub fn is_open(&self) -> bool {
-        !self.at_end || self.current_active_key.is_some()
+        self.pos.is_open()
     }
 
     pub fn save_value(&mut self, pos_idx: usize, val: &Value) {
@@ -136,7 +257,7 @@ impl V2Scanner {
 
     pub fn build_prefix_from_saved(&mut self) {
         let mut buf = Vec::new();
-        for (pos_idx, pos_name) in self.idx_order.iter().enumerate() {
+        for (pos_idx, pos_name) in self.pos.idx_order().iter().enumerate() {
             let pv = match self.saved_values.iter().find(|(idx, _)| *idx == pos_idx) {
                 Some((_, v)) => v,
                 None => break,
@@ -178,7 +299,7 @@ impl V2Scanner {
     }
 
     pub fn attr_id_from_key(&self) -> Option<u32> {
-        let key = self.current_active_key.as_ref()?;
+        let key = self.pos.current_active_key()?;
         let idx = &self.index_name;
         let off = match idx.as_str() {
             "EAVT" | "VAET" => 8usize,
@@ -201,14 +322,12 @@ impl V2Scanner {
     }
 
     pub fn clear_at_end(&mut self) {
-        self.at_end = false;
+        self.pos.set_at_end(false);
     }
-
-
 
     #[allow(dead_code)]
     pub fn current_timestamp(&self) -> Option<u64> {
-        let key = self.current_active_key.as_ref()?;
+        let key = self.pos.current_active_key()?;
         if key.len() < 8 {
             return None;
         }
@@ -219,7 +338,7 @@ impl V2Scanner {
 
     #[allow(dead_code)]
     pub fn current_added(&self) -> Option<bool> {
-        let key = self.current_active_key.as_ref()?;
+        let key = self.pos.current_active_key()?;
         if key.len() < 8 {
             return None;
         }
@@ -228,61 +347,68 @@ impl V2Scanner {
         Some(!retracted)
     }
 
+    #[allow(dead_code)]
     pub fn seek_to_prefix_start(&mut self) {
         let target = self.prefix_bytes_cache.clone();
-        self.cursor.borrow_mut().seek(&target);
-        self.at_end = false;
-        self.current_active_key = None;
+        self.pos.cursor().borrow_mut().seek(&target);
+        self.pos.set_at_end(false);
+        self.pos.set_active_key(None);
     }
 
     pub fn seek_to_current_group_start(&mut self, pos_idx: usize) {
-        let key = match self.current_active_key.as_ref() {
-            Some(k) => k.clone(),
+        let key = match self.pos.current_active_key() {
+            Some(k) => k.to_vec(),
             None => {
-                self.cursor.borrow_mut().invalidate();
+                self.pos.cursor().borrow_mut().invalidate();
                 return;
             }
         };
         let vs = self.value_start(&key, pos_idx);
         let target = key[..vs].to_vec();
-        self.cursor.borrow_mut().seek(&target);
-        self.at_end = false;
+        self.pos.cursor().borrow_mut().seek(&target);
+        self.pos.set_at_end(false);
     }
 
+    /// Empilha a posição `pos_idx`, salvando o prefixo atual da chave ativa.
+    /// Retorna `true` se a posição já estava na pilha (reentrada).
     pub fn push_position(&mut self, pos_idx: usize) -> bool {
-        let is_reentry = self.positions.contains(&pos_idx);
-        if !is_reentry {
-            self.positions.push(pos_idx);
-        }
-        is_reentry
+        let prefix = self
+            .pos
+            .current_active_key()
+            .map(|k| {
+                let vs = self.value_start(k, pos_idx);
+                k[..vs].to_vec()
+            })
+            .unwrap_or_default();
+        self.pos.push(pos_idx, prefix)
     }
 
     pub fn current_position(&self) -> usize {
-        self.positions.last().copied().unwrap_or(0)
+        self.pos.current_position()
     }
 
     pub fn next_free_pos(&self) -> usize {
-        self.positions.len() + self.fixed_count
+        self.pos.stack_len() + self.fixed_count
     }
 
     pub fn pop_position(&mut self) {
-        self.positions.pop();
+        self.pos.pop();
     }
 
     pub fn set_cursor(&mut self, cursor: Arc<RefCell<dyn Cursor>>) {
-        self.cursor = cursor;
-        self.at_end = false;
+        self.pos.open_cursor(cursor);
     }
 
     pub fn at_end(&self) -> bool {
-        self.at_end
+        self.pos.at_end()
     }
 
     fn pos_name(&self, pos_idx: usize) -> &str {
-        if pos_idx >= self.idx_order.len() {
+        if pos_idx >= self.pos.idx_order().len() {
             return "t";
         }
-        self.idx_order
+        self.pos
+            .idx_order()
             .get(pos_idx)
             .map(|s| s.as_str())
             .unwrap_or("v")
@@ -304,7 +430,7 @@ impl V2Scanner {
 
     fn value_start(&self, key: &[u8], pos_idx: usize) -> usize {
         let pos_name = self.pos_name(pos_idx);
-        if pos_idx >= self.idx_order.len() || pos_name == "t" || pos_name == "added" {
+        if pos_idx >= self.pos.idx_order().len() || pos_name == "t" || pos_name == "added" {
             return key.len() - 8;
         }
         match self.index_name.as_str() {
@@ -340,7 +466,7 @@ impl V2Scanner {
     }
 
     fn value_end(&self, key: &[u8], pos_idx: usize) -> usize {
-        if pos_idx >= self.idx_order.len() {
+        if pos_idx >= self.pos.idx_order().len() {
             return key.len();
         }
         let pos_name = self.pos_name(pos_idx);
@@ -361,7 +487,7 @@ impl V2Scanner {
 
     fn extract_raw(&self, key: &[u8], pos_idx: usize) -> Extracted {
         let pos_name = self.pos_name(pos_idx);
-        if pos_idx >= self.idx_order.len() || pos_name == "t" || pos_name == "added" {
+        if pos_idx >= self.pos.idx_order().len() || pos_name == "t" || pos_name == "added" {
             let suffix = Self::extract_suffix(key);
             let (t, retracted) = decode_suffix(suffix);
             return if pos_name == "added" {
@@ -393,7 +519,7 @@ impl V2Scanner {
     }
 
     pub fn extract_value(&self, pos_idx: usize) -> Option<Value> {
-        let key = self.current_active_key.as_ref()?;
+        let key = self.pos.current_active_key()?;
         let raw = self.extract_raw(key, pos_idx);
         let pos_name = self.pos_name(pos_idx);
         Some(match pos_name {
@@ -474,10 +600,10 @@ impl V2Scanner {
         let pos_name = self.pos_name(pos_idx);
 
         if pos_name == "added" {
-            if self.current_active_key.is_some() {
-                self.at_end = false;
+            if self.pos.current_active_key().is_some() {
+                self.pos.set_at_end(false);
             } else {
-                self.at_end = true;
+                self.pos.set_at_end(true);
             }
             return;
         }
@@ -490,21 +616,20 @@ impl V2Scanner {
             return;
         }
 
-        let bound_prefix: Option<Vec<u8>> = self.current_active_key.as_ref().map(|k| {
-            let end = self.value_start(k, pos_idx);
-            k[..end].to_vec()
-        });
+        let bound_prefix: Option<Vec<u8>> = self
+            .pos
+            .bound_prefix(|p| self.value_start(self.pos.current_active_key().unwrap_or(&[]), p), pos_idx);
 
-        while self.cursor.borrow().is_valid() {
-            let first_key = self.cursor.borrow().current_key().unwrap().to_vec();
+        while self.pos.cursor().borrow().is_valid() {
+            let first_key = self.pos.cursor().borrow().current_key().unwrap().to_vec();
             if first_key.len() < 8 {
-                self.cursor.borrow_mut().step();
+                self.pos.cursor().borrow_mut().step();
                 continue;
             }
             if let Some(ref bp) = bound_prefix {
                 let bs = self.value_start(&first_key, pos_idx).min(bp.len());
                 if bs != bp.len() || first_key[..bp.len()] != bp[..] {
-                    self.at_end = true;
+                    self.pos.set_at_end(true);
                     return;
                 }
             }
@@ -513,10 +638,10 @@ impl V2Scanner {
             let mut cur_group = first_key[..group_end].to_vec();
             let mut found_key: Option<Vec<u8>> = None;
 
-            while self.cursor.borrow().is_valid() {
-                let key = self.cursor.borrow().current_key().unwrap().to_vec();
+            while self.pos.cursor().borrow().is_valid() {
+                let key = self.pos.cursor().borrow().current_key().unwrap().to_vec();
                 if key.len() < 8 {
-                    self.cursor.borrow_mut().step();
+                    self.pos.cursor().borrow_mut().step();
                     continue;
                 }
                 let ge = key.len() - 8;
@@ -536,7 +661,7 @@ impl V2Scanner {
                 let (t, retracted) = decode_suffix(suffix);
 
                 if as_of_tx.is_some() && t > as_of_tx.unwrap() {
-                    self.cursor.borrow_mut().step();
+                    self.pos.cursor().borrow_mut().step();
                     continue;
                 }
 
@@ -545,7 +670,7 @@ impl V2Scanner {
                 }
 
                 crate::engine::opcodes::skip_group_call();
-                self.cursor.borrow_mut().skip_group(ge);
+                self.pos.cursor().borrow_mut().skip_group(ge);
 
                 if found_key.is_some() {
                     break;
@@ -553,33 +678,32 @@ impl V2Scanner {
             }
 
             if let Some(bk) = found_key {
-                self.current_active_key = Some(bk.clone());
-                self.at_end = false;
+                self.pos.set_active_key(Some(bk.clone()));
+                self.pos.set_at_end(false);
                 return;
             }
         }
-        self.current_active_key = None;
-        self.at_end = true;
+        self.pos.set_active_key(None);
+        self.pos.set_at_end(true);
     }
 
     fn advance_history_each(&mut self, pos_idx: usize) {
         let as_of_tx = self.as_of_tx;
 
-        let bound_prefix: Option<Vec<u8>> = self.current_active_key.as_ref().map(|k| {
-            let end = self.value_start(k, pos_idx);
-            k[..end].to_vec()
-        });
+        let bound_prefix: Option<Vec<u8>> = self
+            .pos
+            .bound_prefix(|p| self.value_start(self.pos.current_active_key().unwrap_or(&[]), p), pos_idx);
 
-        while self.cursor.borrow().is_valid() {
-            let key = self.cursor.borrow().current_key().unwrap().to_vec();
+        while self.pos.cursor().borrow().is_valid() {
+            let key = self.pos.cursor().borrow().current_key().unwrap().to_vec();
             if key.len() < 8 {
-                self.cursor.borrow_mut().step();
+                self.pos.cursor().borrow_mut().step();
                 continue;
             }
             if let Some(ref bp) = bound_prefix {
                 let bs = self.value_start(&key, pos_idx).min(bp.len());
                 if bs != bp.len() || key[..bp.len()] != bp[..] {
-                    self.at_end = true;
+                    self.pos.set_at_end(true);
                     return;
                 }
             }
@@ -588,26 +712,26 @@ impl V2Scanner {
             let (t, _) = decode_suffix(suffix);
 
             if as_of_tx.is_some() && t > as_of_tx.unwrap() {
-                self.cursor.borrow_mut().step();
+                self.pos.cursor().borrow_mut().step();
                 continue;
             }
 
-            self.current_active_key = Some(key);
-            self.at_end = false;
+            self.pos.set_active_key(Some(key));
+            self.pos.set_at_end(false);
             return;
         }
-        self.current_active_key = None;
-        self.at_end = true;
+        self.pos.set_active_key(None);
+        self.pos.set_at_end(true);
     }
 
     pub fn leap_next_at(&mut self) {
         let pos_idx = self.current_position();
         let pos_name = self.pos_name(pos_idx);
         if pos_name == "added" {
-            self.at_end = true;
+            self.pos.set_at_end(true);
             return;
         }
-        if let Some(key) = self.current_active_key.clone() {
+        if let Some(key) = self.pos.current_active_key().map(|k| k.to_vec()) {
             let raw = self.extract_raw(&key, pos_idx);
             self.seek_past_value_at(&raw);
         }
@@ -617,10 +741,10 @@ impl V2Scanner {
     fn seek_past_value_at(&mut self, current_raw: &Extracted) {
         let pos_idx = self.current_position();
         let pos_name = self.pos_name(pos_idx);
-        let key = match self.current_active_key.as_ref() {
-            Some(k) => k.clone(),
+        let key = match self.pos.current_active_key() {
+            Some(k) => k.to_vec(),
             None => {
-                self.cursor.borrow_mut().invalidate();
+                self.pos.cursor().borrow_mut().invalidate();
                 return;
             }
         };
@@ -631,10 +755,10 @@ impl V2Scanner {
         if pos_name == "t" {
             let suffix = Self::extract_suffix(&key);
             if suffix == 0 {
-                self.cursor.borrow_mut().invalidate();
+                self.pos.cursor().borrow_mut().invalidate();
             } else {
                 target.extend_from_slice(&(suffix + 1).to_be_bytes());
-                self.cursor.borrow_mut().seek(&target);
+                self.pos.cursor().borrow_mut().seek(&target);
             }
             return;
         }
@@ -680,9 +804,9 @@ impl V2Scanner {
             }
         };
         if overflow {
-            self.cursor.borrow_mut().invalidate();
+            self.pos.cursor().borrow_mut().invalidate();
         } else {
-            self.cursor.borrow_mut().seek(&target);
+            self.pos.cursor().borrow_mut().seek(&target);
         }
     }
 
@@ -701,10 +825,10 @@ impl V2Scanner {
 
     fn seek_to_value_inner(&mut self, pos_idx: usize, value: &Value) {
         let pos_name = self.pos_name(pos_idx);
-        let key = match self.current_active_key.as_ref() {
-            Some(k) => k.clone(),
+        let key = match self.pos.current_active_key() {
+            Some(k) => k.to_vec(),
             None => {
-                self.cursor.borrow_mut().invalidate();
+                self.pos.cursor().borrow_mut().invalidate();
                 return;
             }
         };
@@ -732,7 +856,7 @@ impl V2Scanner {
             _ => {}
         }
         target.extend_from_slice(&[0u8; 8]);
-        self.cursor.borrow_mut().seek(&target);
+        self.pos.cursor().borrow_mut().seek(&target);
         self.advance_to_active_at(pos_idx);
     }
 }
