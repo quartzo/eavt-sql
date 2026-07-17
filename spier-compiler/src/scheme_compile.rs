@@ -683,13 +683,16 @@ fn build_triejoin_scheme(
 
         // For each clause, emit depth-fixed for any un-emitted bound values
         // at positions BEFORE this variable's position in idx_order.
+        // Use THIS clause's own idx_order (clauses may reorder columns, e.g.
+        // AEVT [a,e,v] vs AVET [a,v,e]) — never the canonical/first order.
         for &(ip_idx, pos_name) in &required_pos_idx {
             let target_idx = pos_name_to_idx[ip_idx].get(pos_name).copied().unwrap_or(0);
+            let clause_order = &plan.iter_plans[ip_idx].idx_order;
             for peek_idx in 0..target_idx {
-                if peek_idx >= canonical_order.len() {
+                if peek_idx >= clause_order.len() {
                     break;
                 }
-                let peek_pos = canonical_order[peek_idx];
+                let peek_pos = clause_order[peek_idx].as_str();
                 if peek_pos == "added" {
                     continue;
                 }
@@ -723,9 +726,10 @@ fn build_triejoin_scheme(
     }
 
     // After all depth-runs, emit remaining depth-fixed for bound values
-    // that were NOT before any variable's position.
+    // that were NOT before any variable's position. Use each clause's own
+    // idx_order (see note above about differing column orders).
     for (ip_idx, _ip) in plan.iter_plans.iter().enumerate() {
-        for &pos_name in &canonical_order {
+        for pos_name in _ip.idx_order.iter().map(|s| s.as_str()) {
             if pos_name == "added" {
                 continue;
             }
