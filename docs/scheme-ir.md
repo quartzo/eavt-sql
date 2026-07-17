@@ -42,6 +42,7 @@ pub enum SExpr {
     Bytes(Vec<u8>),        // raw bytes (printed as #b"hex")
     Symbol(String),        // identifier / function name
     List(Vec<SExpr>),      // s-expression list
+    Resource(Arc<dyn std::any::Any + Send + Sync>),  // opaque resource (e.g., scanner)
 }
 ```
 
@@ -60,6 +61,7 @@ Each variant renders to text as follows:
 | `Bytes(b)` | `#b"hex"` | `#b"48656c6c6f"` |
 | `Symbol(s)` | bare symbol | `company.name`, `D1`, `alloc-entity` |
 | `List(items)` | `(item1 item2 ...)` | `(save D1 "name" "Alice")` |
+| `Resource(_)` | `#<resource>` | `#<resource>` |
 
 String escaping: `\n` → newline, `\t` → tab, `\\` → backslash, `\"` → double quote.
 
@@ -118,7 +120,7 @@ is wrapped in `Arc<CompiledProgram>` inside `ProgramHandle`.
 
 ## 4. Special Forms (Evaluator)
 
-The tree-walking evaluator (`spier_scheme::eval`) recognizes 10 special forms.
+The tree-walking evaluator (`spier_scheme::eval`) recognizes 13 special forms.
 Special forms do **not** pre-evaluate their arguments — they control evaluation
 themselves.
 
@@ -132,10 +134,13 @@ themselves.
 | `if` | `(if test then [else])` | If test truthy eval then, else eval else (or `Void`) |
 | `begin` | `(begin expr...)` | Sequence, returns last expression |
 | `set!` | `(set! name expr)` | Mutate existing binding (error if unbound) |
+| `lambda` | `(lambda (params...) body...+)` | Create a closure |
 | `dbg` | `(dbg [label] expr)` | Eval expr, log `[scheme] label: value`, return value (transparent) |
 | `trace` | `(trace expr)` | Eval expr, log `[scheme] (trace): value`, return value |
 | `log` | `(log msg [args...])` | Eval all items, log joined output, return `Void` |
 | `assert` | `(assert cond [msg])` | If falsy, error with message |
+| `depth-run` | `(depth-run (scanners...) ranges (lambda (var) body...))` | Leapfrog triejoin loop — see §11.6 |
+| `depth-fixed` | `(depth-fixed (scanners...) value (lambda () body...))` | Fixed prefix scope — see §11.6 |
 
 ### 4.2 Examples
 
@@ -183,6 +188,7 @@ Empty list `()` returns `Void`.
 ```rust
 pub struct Environment {
     bindings: HashMap<String, SExpr>,
+    pub depth_counter: usize,
 }
 
 impl Environment {
@@ -191,6 +197,9 @@ impl Environment {
     pub fn get(&self, name: &str) -> Option<&SExpr>;       // lookup
 }
 ```
+
+`depth_counter` is used by the evaluator to assign unique stage keys for
+leapfrog triejoin convergence across recursive depth-run calls.
 
 ### 4.6 EvalError
 
@@ -249,7 +258,10 @@ These are the host functions provided by the EAVT query engine:
 | `lookup-entity` | 2 | `(lookup-entity attr value)` | Look up entity by UNIQUE attribute |
 | `lookup-value` | 2 | `(lookup-value eid attr)` | Get attribute value for an entity |
 | `save` | 3 | `(save eid attr value)` | Persist one datom (entity, attribute, value) |
-| `result` | 2+ | `(result eid total)` | Return marker for result emission |
+| `retract` | 3 | `(retract eid attr value)` | Retract one datom |
+| `result` | 1+ | `(result eid total)` | Return marker for result emission |
+| `declare-attr` | 2–4 | `(declare-attr name type [many?] [unique?])` | Declare a new attribute |
+| `declare-partition` | 1 | `(declare-partition name)` | Declare a new partition |
 
 #### `alloc-entity`
 
@@ -763,42 +775,57 @@ the entire statement produces no result.
 ## 11. SELECT via Scheme
 
 SELECT compiles to `Program::SelectScheme(SchemeProgram, SelectSchemeMeta)` with
-a triejoin skeleton and host functions for scanning.
+a triejoin skeleton built from three layers:
+
+1. **Scanner setup** — `(let* ((s0 (scanner-open INDEX)) ...))`
+2. **Fixed prefix** — `(depth-fixed (s) value (lambda () body))` for bound attributes
+3. **Triejoin nesting** — `(depth-run (scanners) ranges (lambda (var) body))`
 
 ### 11.1 Triejoin Skeleton Structure
 
 ```
-(begin
-  ; Scanner setup
-  (scanner-open sid cf-id history?)
-  (prefix-push sid value pos-idx)
-
-  ; Range constraints per depth
-  (range-op depth op-int val)
-  (range-branch depth)
-
-  ; Depth nesting (innermost to outermost)
-  (depth-run depth ((sid0 pos0) (sid1 pos1)) (lambda () leaf-body))
-
-  ; Probe guard (optional)
-  (when (probe-begin e a v) ...)
-)
+(let* ((s0 (scanner-open "INDEX_NAME" [history?])) ...)
+  (depth-fixed (s0) bound-value
+    (lambda ()
+      (depth-run (s0 s1) (and (>= val) (< val))
+        (lambda (depth_var)
+          (depth-run (s1) ()
+            (lambda (depth_var)
+              (result-row (resolve-val depth_var) ...))))))))
 ```
 
 ### 11.2 Projected Result Row
 
 ```scheme
-(result-row (bind-get vid) (attr-name (bind-get aid-vid)) (resolve-val (bind-get v-vid)) ...)
+(result-row _vv_d1 (attr-name _aid) (resolve-val _v_d1_bench_value) ...)
 ```
 
-Key projection helpers:
-- `bind-get` — get the value bound at a variable index in this row
-- `attr-name` — resolve attribute ID to its name string
-- `resolve-val` — decode a raw value using the attribute's type
-- `probe-get-t` — get the t value from the current probe match
-- `probe-begin` — start a fully-bound probe lookup (eid, attr, value)
+Each `depth-run` lambda parameter binds a variable at that depth. Projections
+reference these variables directly — no `bind-get` indirection needed:
 
-### 11.3 Example: Simple SELECT
+| Helper | Usage | Description |
+|--------|-------|-------------|
+| `attr-name` | `(attr-name aid-var)` | Resolve attribute ID to its name string |
+| `resolve-val` | `(resolve-val raw-var)` | Decode a raw value using the attribute's type |
+| `probe-begin` | `(probe-begin eid aid value)` | Start a fully-bound probe lookup (eid, attr, value) |
+
+### 11.3 Range Trees
+
+Ranges are passed as boolean trees directly to `depth-run`:
+
+| Operator | Usage | Description |
+|----------|-------|-------------|
+| `and` | `(and (>= val) (< val))` | Conjunction |
+| `or` | `(or (branch) (branch))` | Disjunction |
+| `branch` | `(branch)` | OR branch separator |
+| `=` | `(= val)` | Equality |
+| `!=` | `(!= val)` | Inequality |
+| `>` | `(> val)` | Greater than |
+| `>=` | `(>= val)` | Greater than or equal |
+| `<` | `(< val)` | Less than |
+| `<=` | `(<= val)` | Less than or equal |
+
+### 11.4 Example: Simple SELECT
 
 ```sql
 SELECT eid, company.name
@@ -807,15 +834,67 @@ WHERE company.ceo = %1
 ```
 
 ```scheme
-(begin
-  (scanner-open 0 1 false)
-  (prefix-push 0 (intern-a "company.ceo") 1)
-  (range-op 0 0 (param 1))
-  (depth-run 0 ((0 0))
+(let* ((s0 (scanner-open "AEVT")))
+  (depth-fixed (s0) (intern-a "company.ceo")
     (lambda ()
-      (result-row (bind-get 0) (attr-name (bind-get 2)))))
-)
+      (depth-run (s0) ()
+        (lambda (_e_d1)
+          (result-row _e_d1 (attr-name (intern-a "company.name"))))))))
 ```
+
+### 11.5 Example: Range SELECT (the motivating example)
+
+```sql
+SELECT d1.val WHERE d1.bench.value >= %1 AND d1.bench.value < %2
+```
+
+```scheme
+(let* ((s0 (scanner-open "AVET")) (s1 (scanner-open "AEVT")))
+  (depth-fixed (s1) (intern-a "bench.value")
+    (lambda ()
+      (depth-run (s0) ()
+        (lambda (_skip_a_avet)
+          (depth-run (s0) ()
+            (lambda (_vv_d1)
+              (depth-run (s0 s1) ()
+                (lambda (_e_d1)
+                  (depth-run (s1) (and (>= (param 1)) (< (param 2)))
+                    (lambda (_v_d1_bench_value)
+                      (result-row (resolve-val _vv_d1)))))))))))))
+```
+
+### 11.6 Special Forms for Scanning
+
+#### `depth-run`
+
+```
+(depth-run (scanner-refs...) range-tree (lambda (var) body...))
+```
+
+Internal host call sequence (per iteration):
+1. `(scanner-init scanner var-id)` — for each scanner
+2. `(scheme-leap-init stage-key scanner0 scanner1 ... ranges)` — converge
+3. `(scanner-read scanner)` — read current value, bind to lambda param
+4. Execute body (may call `result-row`, `save`, `retract`, etc.)
+5. `(scheme-leap-next stage-key scanner0 scanner1 ... ranges)` — advance
+6. `(depth-cleanup scanner)` — for each scanner, when loop ends
+
+All host calls are made internally by the evaluator — the generated Scheme
+only shows `(depth-run (s0 s1) (and (>= (param 1)) (< (param 2))) (lambda (_v) ...))`.
+
+#### `depth-fixed`
+
+```
+(depth-fixed (scanner-refs...) value-expr (lambda () body...))
+```
+
+Internal host call sequence:
+1. `(depth-fixed-begin scanner0 ... value)` — push prefix onto each scanner
+2. Execute body
+3. `(depth-fixed-end scanner0 ...)` — pop prefix from each scanner
+
+This replaces manual `prefix-push`/`pop` and ensures proper scoping of
+prefix bindings on scanner cursors.
 
 ---
 
@@ -825,14 +904,14 @@ DELETE compiles to a triejoin skeleton identical to SELECT, but with `retract`
 calls in the leaf body and a `result-row` yielding the entity ID.
 
 ```scheme
-(begin
-  ; ... same scanner + range setup as SELECT ...
-  (depth-run 0 ((0 0))
+(let* ((s0 (scanner-open "AEVT")))
+  (depth-fixed (s0) (intern-a "person.name")
     (lambda ()
-      (begin
-        (retract (bind-get 0) "person.name" "Alice")
-        (result-row (bind-get 0)))))
-)
+      (depth-run (s0) ()
+        (lambda (_e_d1)
+          (begin
+            (retract _e_d1 "person.name" "Alice")
+            (result-row _e_d1)))))))
 ```
 
 Direct DELETE (eid condition) compiles to `Program::Scheme` without scanning:
@@ -851,15 +930,15 @@ UPDATE compiles to a triejoin skeleton with `save` calls in the leaf body
 and a `result-row` yielding the entity ID.
 
 ```scheme
-(begin
-  ; ... same scanner + range setup as SELECT ...
-  (depth-run 1 ((0 1))
+(let* ((s0 (scanner-open "AEVT")))
+  (depth-fixed (s0) (intern-a "person.age")
     (lambda ()
-      (begin
-        (save (bind-get 1) "person.age" 30)
-        (save (bind-get 1) "person.city" "NYC")
-        (result-row (bind-get 1)))))
-)
+      (depth-run (s0) ()
+        (lambda (_e_d1)
+          (begin
+            (save _e_d1 "person.age" 30)
+            (save _e_d1 "person.city" "NYC")
+            (result-row _e_d1)))))))
 ```
 
 ---
@@ -888,34 +967,45 @@ These are direct DML statements compiled to `Program::Scheme`.
 ## 15. SelectSchemeHostFns Reference (18 functions)
 
 These host functions are used by `SelectSchemeSession` for scanning operations.
+Some are called **directly** in generated Scheme; others are called **internally**
+by the `depth-run` and `depth-fixed` special forms.
+
+### 15.1 Directly Called in Generated Scheme
 
 | # | Function | Signature | Description |
 |---|----------|-----------|-------------|
-| 1 | `scanner-open` | `(scanner-open sid cf-id history?)` | Open a scanner on a column family |
-| 2 | `prefix-push` | `(prefix-push sid value pos-idx)` | Add a bound prefix value to scanner |
-| 3 | `range-op` | `(range-op depth op-int val)` | Add a range constraint at depth |
-| 4 | `range-branch` | `(range-branch depth)` | Create an OR branch in the range constraints |
-| 5 | `depth-run` | `(depth-run depth scanners lambda)` | Nest triejoin at this depth |
-| 6 | `bind-get` | `(bind-get vid)` | Get the current binding for variable index |
-| 7 | `result-row` | `(result-row val...)` | Emit a result row (yield) |
+| 1 | `scanner-open` | `(scanner-open index-name [history?])` | Open a scanner on an index (name: `"EAVT"`, `"AEVT"`, `"AVET"`, `"VAET"`). Returns an opaque `Resource` |
+| 2 | `prefix-push` | `(prefix-push scanner value pos-name)` | Push a bound prefix value at a named position (`"e"`, `"a"`, `"v"`, `"t"`) |
+| 3 | `intern-a` | `(intern-a attr-name)` | Resolve attribute name string to integer ID |
+| 4 | `attr-name` | `(attr-name aid)` | Resolve attribute ID integer to name string |
+| 5 | `resolve-val` | `(resolve-val value)` | Pass-through identity for values (placeholder for type-aware decoding) |
+| 6 | `param` | `(param idx)` | Get parameter by 1-based index |
+| 7 | `probe-begin` | `(probe-begin eid aid value)` | Perform a point lookup via EAVT probe. Returns `Int(tx-eid)` if found, `Void` if not |
 | 8 | `save` | `(save eid attr value)` | Persist one datom (used in UPDATE) |
 | 9 | `retract` | `(retract eid attr value)` | Retract one datom (used in DELETE) |
-| 10 | `alloc-entity` | `(alloc-entity [partition])` | Allocate entity ID in partition |
-| 11 | `tx-entity` | `(tx-entity)` | Return current transaction entity ID |
-| 12 | `param` | `(param idx)` | Get parameter by 1-based index |
-| 13 | `lookup-entity` | `(lookup-entity attr value)` | Look up entity by UNIQUE attribute |
-| 14 | `lookup-value` | `(lookup-value eid attr)` | Get attribute value for an entity |
-| 15 | `intern-a` | `(intern-a name)` | Resolve attribute name to ID |
-| 16 | `attr-name` | `(attr-name aid)` | Resolve attribute ID to name |
-| 17 | `resolve-val` | `(resolve-val raw)` | Decode raw value using attribute type |
-| 18 | `probe-begin` | `(probe-begin e a v)` | Start a fully-bound probe lookup |
-| 19 | `probe-get-t` | `(probe-get-t)` | Get the t value from probe match |
+| 10 | `result-row` | `(result-row val...)` | Emit a result row via `EvalStep::Yield` |
 
-Note: `scanner-open`, `prefix-push`, `range-op`, `range-branch`, `depth-run`,
-`bind-get`, `result-row`, `intern-a`, `attr-name`, `resolve-val`, `probe-begin`,
-`probe-get-t` are specific to `SelectSchemeSession`. `save`, `retract`,
-`alloc-entity`, `tx-entity`, `param`, `lookup-entity`, `lookup-value` are
-shared with `SchemeHostFns`.
+### 15.2 Called Internally by `depth-run` / `depth-fixed`
+
+These are **not** written directly in generated Scheme — the evaluator calls them
+when executing the `depth-run` and `depth-fixed` special forms:
+
+| # | Function | Signature | Description |
+|---|----------|-----------|-------------|
+| 11 | `scanner-init` | `(scanner-init scanner var-id)` | Initialize scanner for a depth-run stage: open cursor, build prefix, advance to first key |
+| 12 | `scanner-read` | `(scanner-read scanner)` | Read the current value from the scanner's position |
+| 13 | `scheme-leap-init` | `(scheme-leap-init stage-key scanners... ranges)` | Initialize leapfrog convergence across scanners. Returns `#t` if converged, `#f` if no rows |
+| 14 | `scheme-leap-next` | `(scheme-leap-next stage-key scanners... ranges)` | Advance the minimum scanner and re-converge. Returns `#t` if new row, `#f` if exhausted |
+| 15 | `depth-cleanup` | `(depth-cleanup scanner)` | Pop scanner's position stack after a depth-run completes |
+| 16 | `depth-fixed-begin` | `(depth-fixed-begin scanners... value)` | Push a fixed value as a prefix position onto each scanner |
+| 17 | `depth-fixed-end` | `(depth-fixed-end scanners...)` | Pop the prefix from each scanner |
+
+### 15.3 Shared Functions
+
+`save`, `retract`, `param` are shared with `SchemeHostFns` (section 5.3).
+`alloc-entity`, `tx-entity`, `lookup-entity`, `lookup-value` are available in
+`SelectSchemeHostFns` but rarely used in scan contexts (they exist for
+UPDATE/DELETE with nested lookups).
 
 ---
 
@@ -926,36 +1016,53 @@ shared with `SchemeHostFns`.
 ```rust
 pub enum EvalStep {
     Done(SExpr),
-    Yield(SExpr, Box<EvalStep>),
+    Yield(SExpr),
 }
 ```
 
-Functions like `result-row` produce `EvalStep::Yield(value, continuation)`,
-allowing the evaluator to suspend and resume.
+The evaluator runs in a loop: each call to `eval_with_yield` returns one
+`EvalStep`. `Yield(SExpr)` means a result row was produced; `Done(SExpr)`
+means the program completed.
 
-### 16.2 YieldState Enum
+### 16.2 YieldState Struct
 
 ```rust
-pub enum YieldState {
-    Return(SExpr),
-    Suspend(SExpr, Box<dyn FnOnce() -> EvalStep>),
+pub struct YieldState {
+    stack: Vec<Frame>,
+    depth_runs: Vec<DepthRunFrame>,
+    started: bool,
 }
 ```
 
-- `Return(value)` — evaluation complete, this is the final result.
-- `Suspend(value, continuation)` — yield `value`, then the caller can resume
-  with `continuation()` to get the next `EvalStep`.
+`YieldState` holds the evaluator's continuation frames across calls. It is
+passed as `Some(&mut state)` to `eval_with_yield`. On the first call, the
+evaluator runs from the start; on subsequent calls, it resumes from the
+saved `stack` and `depth_runs` state — no closures or boxed continuations.
+
+`DepthRunFrame` preserves the leapfrog triejoin state across yield/resume:
+
+```rust
+pub struct DepthRunFrame {
+    pub stage_key: i64,
+    pub scanner_configs: Vec<SExpr>,
+    pub body: Vec<SExpr>,
+    pub captured_env: HashMap<String, SExpr>,
+    pub phase: DepthRunPhase,
+    pub param_name: Option<String>,
+    pub ranges: SExpr,
+}
+```
 
 ### 16.3 next_batch Flow
 
 `SelectSchemeSession::next_batch(out, max_rows)`:
 
-1. Resume the evaluator from its suspension point (or start fresh).
-2. For each `EvalStep::Yield(row, next)`, decode the `result-row` contents,
-   encode them into the output buffer, and store `next` as the continuation.
-3. When `max_rows` rows are collected or `EvalStep::Done` is reached, return
-   the batch.
-4. On the next call, resume from the stored continuation.
+1. Pass `self.state` (the `YieldState`) as `Some(&mut state)` to `eval_with_yield`.
+2. Loop: on each `EvalStep::Yield(sexpr_row)`, decode the `result-row` contents,
+   encode them into the output buffer, and increment row count.
+3. When `max_rows` rows are collected, return `Ok(true)` (more available).
+4. When `EvalStep::Done` is reached, mark `done = true` and return `Ok(false)`.
+5. On the next call, `eval_with_yield` resumes from the saved `YieldState`.
 
 ### 16.4 Cursor Transport
 
