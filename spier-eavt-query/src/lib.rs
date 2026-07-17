@@ -732,7 +732,7 @@ impl QueryEngine for QueryState {
 fn build_select_scheme_session(
     engine: &Arc<engine::query_engine_inner::QueryEngineInner>,
     scheme_prog: &spier_scheme::SchemeProgram,
-    meta: &spier_query_ir::SelectSchemeMeta,
+    _meta: &spier_query_ir::SelectSchemeMeta,
     vm_params: Vec<spier_value::Value>,
     t: u64,
     as_of_tx: Option<u64>,
@@ -742,9 +742,6 @@ fn build_select_scheme_session(
         vm_params,
         t,
         as_of_tx,
-        meta.num_vars,
-        &meta.depth_var_pairs,
-        &meta.same_var_constraints,
     );
     engine::scheme::SelectSchemeSession::new(scheme_prog.clone(), host)
 }

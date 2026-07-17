@@ -1,5 +1,22 @@
 use crate::write_scheme;
+use std::any::Any;
 use std::fmt;
+use std::sync::Arc;
+
+#[derive(Clone)]
+pub struct Opaque(pub Arc<dyn Any + Send + Sync>);
+
+impl fmt::Debug for Opaque {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("#<opaque>")
+    }
+}
+
+impl PartialEq for Opaque {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SExpr {
@@ -11,6 +28,7 @@ pub enum SExpr {
     Bytes(Vec<u8>),
     Symbol(String),
     List(Vec<SExpr>),
+    Resource(Opaque),
     Closure {
         params: Vec<String>,
         body: Vec<SExpr>,

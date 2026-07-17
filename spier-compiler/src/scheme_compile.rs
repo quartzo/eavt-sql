@@ -439,9 +439,7 @@ pub fn compile_select_scheme(
             SExpr::Int(1),
         ])
     } else {
-        let (_, var_id_map) = build_var_names_and_id_map(plan);
-        let probe_only = plan.ordered_vars.is_empty();
-        build_projection(plan, &var_id_map, total_proj_len, &constant_indices, probe_only)
+        build_projection(plan, total_proj_len, &constant_indices)
     };
 
     build_triejoin_scheme(plan, &find_vars, leaf_body)
@@ -455,10 +453,7 @@ pub fn compile_delete_scheme(
 ) -> Result<(SchemeProgram, SelectSchemeMeta), String> {
     use spier_sql_parse::{RustConditionRight, RustLiteral};
 
-    let (_, var_id_map) = build_var_names_and_id_map(plan);
-    let e_var_id = var_id_map.get(target_evar).copied().unwrap_or(0);
-
-    let eid_get = SExpr::List(vec![SExpr::Symbol("bind-get".into()), SExpr::Int(e_var_id as i64)]);
+    let eid_get = SExpr::Symbol(target_evar.to_string());
 
     let mut leaf_stmts: Vec<SExpr> = Vec::new();
 
@@ -512,18 +507,12 @@ pub fn compile_update_scheme(
 ) -> Result<(SchemeProgram, SelectSchemeMeta), String> {
     use spier_sql_parse::{RustLiteral, RustValue};
 
-    let (_, var_id_map) = build_var_names_and_id_map(plan);
-
     let mut leaf_stmts: Vec<SExpr> = Vec::new();
     let mut first_eid_get: Option<SExpr> = None;
 
     for clause in &update_stmt.clauses {
         let clause_evar = format!("_e_{}", clause.alias.to_lowercase());
-        let e_var_id = var_id_map.get(&clause_evar).copied().unwrap_or(0);
-        let eid_get = SExpr::List(vec![
-            SExpr::Symbol("bind-get".into()),
-            SExpr::Int(e_var_id as i64),
-        ]);
+        let eid_get = SExpr::Symbol(clause_evar.clone());
         if first_eid_get.is_none() {
             first_eid_get = Some(eid_get.clone());
         }
@@ -541,11 +530,7 @@ pub fn compile_update_scheme(
                 ]),
                 RustValue::AliasRef(name) => {
                     let ref_evar = format!("_e_{}", name.to_lowercase());
-                    let ref_vid = var_id_map.get(&ref_evar).copied().unwrap_or(0);
-                    SExpr::List(vec![
-                        SExpr::Symbol("bind-get".into()),
-                        SExpr::Int(ref_vid as i64),
-                    ])
+                    SExpr::Symbol(ref_evar)
                 }
                 _ => SExpr::Int(0),
             };
@@ -668,23 +653,15 @@ fn build_triejoin_scheme(
     let depth_groups = build_depth_groups(plan);
 
     // Build scanner configs per depth: ((s0 "e") (s1 "t")) with position names from var_depths
+    // Build scanner configs per depth: (s0 s1) — bare refs
     let mut depth_scanners: Vec<Vec<SExpr>> = Vec::new();
     for depth in 0..num_depths {
-        let mut args: Vec<SExpr> = Vec::new();
-        if let Some(cids) = depth_groups.get(&depth) {
-            for &cid in cids {
-                let pos_name = plan.iter_plans[cid].var_depths
-                    .iter()
-                    .find(|&&(d, _)| d == depth)
-                    .map(|&(_, ref name)| name.clone())
-                    .unwrap_or_else(|| "".to_string());
-                if pos_name.is_empty() { continue; }
-                args.push(SExpr::List(vec![
-                    SExpr::Symbol(format!("s{cid}")),
-                    SExpr::Str(pos_name),
-                ]));
-            }
-        }
+        let args: Vec<SExpr> = depth_groups.get(&depth)
+            .map(|cids| cids.iter()
+                .filter(|&&cid| plan.iter_plans[cid].var_depths.iter().any(|&(d, _)| d == depth))
+                .map(|&cid| SExpr::Symbol(format!("s{cid}")))
+                .collect())
+            .unwrap_or_default();
         depth_scanners.push(args);
     }
 
@@ -694,17 +671,20 @@ fn build_triejoin_scheme(
         let ranges = depth_ranges.get(&depth).cloned().unwrap_or(SExpr::List(vec![]));
         body = SExpr::List(vec![
             SExpr::Symbol("depth-run".into()),
-            SExpr::Int(depth as i64),
             SExpr::List(scanner_args.clone()),
             ranges,
-            SExpr::List(vec![SExpr::Symbol("lambda".into()), SExpr::List(vec![]), body]),
+SExpr::List(vec![SExpr::Symbol("lambda".into()), SExpr::List(vec![SExpr::Symbol(ordered_vars[depth].clone())]), body]),
         ]);
     }
 
     // Emit probe: if plan.lookups has a fully-bound lookup pattern,
-    // wrap the triejoin body in (when (probe-begin eid attr value) ...)
+    // wrap the triejoin body in (let* ((t_var (probe-begin ...))) (when t_var body))
     for pattern in &plan.lookups {
         if !pattern.is_lookup() { continue; }
+        let t_var = match &pattern.t {
+            spier_datalog::DatalogSlot::Var(name) => name.clone(),
+            _ => continue,
+        };
         let e_val = match &pattern.e {
             spier_datalog::DatalogSlot::Const(bv) => bound_value_to_sexpr(bv),
             _ => continue,
@@ -724,9 +704,16 @@ fn build_triejoin_scheme(
             v_val,
         ]);
         body = SExpr::List(vec![
-            SExpr::Symbol("when".into()),
-            probe_call,
-            body,
+            SExpr::Symbol("let*".into()),
+            SExpr::List(vec![SExpr::List(vec![
+                SExpr::Symbol(t_var.clone()),
+                probe_call,
+            ])]),
+            SExpr::List(vec![
+                SExpr::Symbol("when".into()),
+                SExpr::Symbol(t_var),
+                body,
+            ]),
         ]);
     }
 
@@ -738,10 +725,9 @@ fn build_triejoin_scheme(
                 let val = parts[2].clone();
                 body = SExpr::List(vec![
                     SExpr::Symbol("depth-fixed".into()),
-                    SExpr::Int(0),
                     SExpr::List(vec![scanner_ref]),
                     val,
-                    SExpr::List(vec![SExpr::Symbol("lambda".into()), SExpr::List(vec![]), body]),
+SExpr::List(vec![SExpr::Symbol("lambda".into()), SExpr::List(vec![]), body]),
                 ]);
             }
         }
@@ -770,41 +756,10 @@ fn build_triejoin_scheme(
         ])
     };
 
-    // Compute same_var_constraints for the Scheme path.
-    // For each scanner (sid = ip_idx), find positions in the index order
-    // that map to the same variable and create constraint pairs.
-    let mut same_var_constraints: Vec<(i32, Vec<(usize, usize)>)> = Vec::new();
-    for (ip_idx, ip) in plan.iter_plans.iter().enumerate() {
-        let v2_order: Vec<&str> = ip.idx_order.iter().map(|s| s.as_str()).collect();
-        let mut var_positions: HashMap<&str, Vec<usize>> = HashMap::new();
-        for (idx, pos) in v2_order.iter().enumerate() {
-            let var_name = match *pos {
-                "e" => ip.specs.get(0),
-                "a" => ip.specs.get(1),
-                "v" => ip.specs.get(2),
-                _ => None,
-            }
-            .and_then(|s| match s {
-                spier_query_ir::SpecKind::Var(n) => Some(n.as_str()),
-                _ => None,
-            });
-            if let Some(var_name) = var_name {
-                var_positions.entry(var_name).or_default().push(idx);
-            }
-        }
-        for positions in var_positions.values() {
-            if positions.len() >= 2 {
-                let pairs: Vec<(usize, usize)> =
-                    positions[1..].iter().map(|&p| (positions[0], p)).collect();
-                same_var_constraints.push((ip_idx as i32, pairs));
-            }
-        }
-    }
-
     let meta = SelectSchemeMeta {
         num_vars: var_names_list.len(),
         depth_var_pairs,
-        same_var_constraints,
+        same_var_constraints: Vec::new(),
     };
 
     Ok((SchemeProgram::new(full_body).with_param_count(0), meta))
@@ -825,10 +780,8 @@ fn build_depth_groups(plan: &QueryPlanResult) -> HashMap<usize, Vec<usize>> {
 
 fn build_projection(
     plan: &QueryPlanResult,
-    var_id_map: &HashMap<String, usize>,
     total_proj_len: usize,
     constant_indices: &HashMap<usize, PlanValue>,
-    probe_only: bool,
 ) -> SExpr {
     let mut proj_args: Vec<SExpr> = Vec::new();
     let mut fv_idx = 0;
@@ -836,8 +789,6 @@ fn build_projection(
         spier_datalog::FindVar::Var(n) => n.clone(),
         spier_datalog::FindVar::Const(n, _) => n.clone(),
     }).collect();
-
-    let t_vars: std::collections::HashSet<&String> = plan.t_lookup_vars.iter().collect();
 
     for i in 0..total_proj_len {
         if let Some(pv) = constant_indices.get(&i) {
@@ -851,32 +802,17 @@ fn build_projection(
         }
         let var_name = &find_vars[fv_idx];
         fv_idx += 1;
-        if let Some(&vid) = var_id_map.get(var_name) {
-            let bind = SExpr::List(vec![
-                SExpr::Symbol("bind-get".into()),
-                SExpr::Int(vid as i64),
-            ]);
-            if t_vars.contains(var_name) {
-                if probe_only {
-                    proj_args.push(SExpr::List(vec![
-                        SExpr::Symbol("probe-get-t".into()),
-                    ]));
-                } else {
-                    proj_args.push(bind);
-                }
-            } else if plan.attr_vars.contains(var_name) {
-                proj_args.push(SExpr::List(vec![
-                    SExpr::Symbol("attr-name".into()),
-                    bind,
-                ]));
-            } else {
-                proj_args.push(SExpr::List(vec![
-                    SExpr::Symbol("resolve-val".into()),
-                    bind,
-                ]));
-            }
+        let bind = SExpr::Symbol(var_name.clone());
+        if plan.attr_vars.contains(var_name) {
+            proj_args.push(SExpr::List(vec![
+                SExpr::Symbol("attr-name".into()),
+                bind,
+            ]));
         } else {
-            proj_args.push(SExpr::Void);
+            proj_args.push(SExpr::List(vec![
+                SExpr::Symbol("resolve-val".into()),
+                bind,
+            ]));
         }
     }
 

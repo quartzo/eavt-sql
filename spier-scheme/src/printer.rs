@@ -29,6 +29,7 @@ fn write_expr(out: &mut String, expr: &SExpr) {
             out.push('"');
         }
         SExpr::Symbol(s) => out.push_str(s),
+        SExpr::Resource(_) => out.push_str("#<resource>"),
         SExpr::List(items) => {
             out.push('(');
             for (i, item) in items.iter().enumerate() {

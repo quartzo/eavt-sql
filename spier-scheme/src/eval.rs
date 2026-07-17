@@ -38,12 +38,14 @@ impl std::error::Error for EvalError {}
 #[derive(Clone)]
 pub struct Environment {
     bindings: HashMap<String, SExpr>,
+    pub depth_counter: usize,
 }
 
 impl Environment {
     pub fn new() -> Self {
         Self {
             bindings: HashMap::new(),
+            depth_counter: 0,
         }
     }
 
@@ -64,11 +66,13 @@ pub enum DepthRunPhase {
 
 #[derive(Debug, Clone)]
 pub struct DepthRunFrame {
-    pub depth: i64,
+    pub stage_key: i64,
     pub scanner_configs: Vec<SExpr>,
     pub body: Vec<SExpr>,
     pub captured_env: HashMap<String, SExpr>,
     pub phase: DepthRunPhase,
+    pub param_name: Option<String>,
+    pub ranges: SExpr,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -117,12 +121,8 @@ pub(crate) enum Frame {
     RestoreEnv {
         bindings: HashMap<String, SExpr>,
     },
-    DepthRunBody {
-        depth: i64,
-    },
-    DepthFixedPop {
-        scanner_configs: Vec<SExpr>,
-    },
+    DepthRunBody,
+
 }
 
 enum EvalResult {
@@ -162,64 +162,61 @@ fn range_op_symbol_to_int(op: &str) -> Option<i64> {
 /// produces separate [v,v] intervals instead of overwriting lo/hi.
 const RANGE_OP_IN: i64 = 6;
 
-/// Register ranges from a boolean tree (and/or) into the host's
-/// range-op/range-branch state. Called internally by eval_depth_run_frame.
+/// Process a range tree into a flat serialized SExpr list:
+///   ((op_int val) (op_int val) (branch) (op_int val) ...)
 ///
-/// Tree shapes:
-///   ()                          — no ranges
-///   (and (op val) (op val)...) — single branch, AND
-///   (or branch1 branch2...)    — multiple branches, OR
-///   (op val)                    — single condition (implicit AND)
-///
-/// Each `op` is a symbol: =, !=, >, >=, <, <=
-/// Each `val` is any SExpr (literal, (param idx), etc.)
-fn register_ranges(
-    host: &mut dyn HostFns,
-    depth: i64,
+/// Each `(op_int val)` is a condition; `(branch)` marks a new branch boundary.
+/// Empty list means no range constraints.
+fn process_ranges(
     ranges: &SExpr,
     env: &mut Environment,
+    host: &mut dyn HostFns,
     tracer: &dyn SchemeTracer,
+) -> Result<SExpr, EvalError> {
+    let mut out = Vec::new();
+    process_ranges_into(ranges, false, env, host, tracer, &mut out)?;
+    Ok(SExpr::List(out))
+}
+
+fn process_ranges_into(
+    ranges: &SExpr,
+    is_branch: bool,
+    env: &mut Environment,
+    host: &mut dyn HostFns,
+    tracer: &dyn SchemeTracer,
+    out: &mut Vec<SExpr>,
 ) -> Result<(), EvalError> {
     match ranges {
-        SExpr::List(items) if items.is_empty() => {
-            Ok(())
-        }
+        SExpr::List(items) if items.is_empty() => Ok(()),
         SExpr::List(items) => {
-            // Check first element for and/or
             if let SExpr::Symbol(op) = &items[0] {
-                if op == "and" {
-                    for cond in &items[1..] {
-                        register_one_condition(host, depth, cond, env, tracer)?;
-                    }
-                    return Ok(());
-                }
-                if op == "or" {
-                    for (i, branch) in items[1..].iter().enumerate() {
-                        if i > 0 {
-                            expect_done(host, "range-branch", &[SExpr::Int(depth)])?;
+                match op.as_str() {
+                    "and" => {
+                        if is_branch {
+                            out.push(ranged("branch", &[]));
                         }
-                        match branch {
-                            SExpr::List(bitems) => {
-                                if let Some(SExpr::Symbol(first)) = bitems.first() {
-                                    if first == "and" {
-                                        for cond in &bitems[1..] {
-                                            register_one_condition(host, depth, cond, env, tracer)?;
-                                        }
-                                        continue;
-                                    }
-                                }
-                                register_one_condition(host, depth, branch, env, tracer)?;
+                        for cond in &items[1..] {
+                            process_ranges_into(cond, false, env, host, tracer, out)?;
+                        }
+                        return Ok(());
+                    }
+                    "or" => {
+                        for (i, branch) in items[1..].iter().enumerate() {
+                            if i > 0 {
+                                out.push(ranged("branch", &[]));
                             }
-                            _ => return Err(EvalError::Type {
-                                expected: "range condition",
-                                got: format!("{branch:?}"),
-                            }),
+                            process_ranges_into(branch, true, env, host, tracer, out)?;
                         }
+                        return Ok(());
                     }
-                    return Ok(());
+                    _ => {}
                 }
             }
-            register_one_condition(host, depth, ranges, env, tracer)
+            // Single condition: (op val1 val2 ...)
+            if is_branch {
+                out.push(ranged("branch", &[]));
+            }
+            process_one_condition(ranges, env, host, tracer, out)
         }
         _ => Err(EvalError::Type {
             expected: "ranges expression",
@@ -228,12 +225,12 @@ fn register_ranges(
     }
 }
 
-fn register_one_condition(
-    host: &mut dyn HostFns,
-    depth: i64,
+fn process_one_condition(
     cond: &SExpr,
     env: &mut Environment,
+    host: &mut dyn HostFns,
     tracer: &dyn SchemeTracer,
+    out: &mut Vec<SExpr>,
 ) -> Result<(), EvalError> {
     match cond {
         SExpr::List(parts) if parts.len() >= 2 => {
@@ -244,8 +241,6 @@ fn register_one_condition(
                     got: format!("{:?}", parts[0]),
                 }),
             };
-            // (= v1 v2 v3) — multiple values → IN semantics (RANGE_OP_IN per value)
-            // (= val)      — single value  → EQ semantics (RANGE_OP_EQ)
             let op_int = if op_str == "=" && parts.len() > 2 {
                 RANGE_OP_IN
             } else {
@@ -255,7 +250,7 @@ fn register_one_condition(
             };
             for val_expr in &parts[1..] {
                 let val = eval_recursive(val_expr, env, host, tracer)?;
-                expect_done(host, "range-op", &[SExpr::Int(depth), SExpr::Int(op_int), val])?;
+                out.push(ranged("cond", &[SExpr::Int(op_int), val]));
             }
             Ok(())
         }
@@ -264,6 +259,12 @@ fn register_one_condition(
             got: format!("{cond:?}"),
         }),
     }
+}
+
+fn ranged(name: &str, args: &[SExpr]) -> SExpr {
+    let mut items = vec![SExpr::Symbol(name.into())];
+    items.extend_from_slice(args);
+    SExpr::List(items)
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -352,21 +353,47 @@ fn run_eval(
             Frame::RestoreEnv { bindings } => {
                 env.bindings = bindings;
             }
-            Frame::DepthRunBody { depth } => {
+Frame::DepthRunBody => {
                 let dr = match state.depth_runs.last() {
-                    Some(d) if d.depth == depth => d.clone(),
-                    _ => continue,
+                    Some(d) => d.clone(),
+                    None => continue,
                 };
+                let stage_key = dr.stage_key;
+                eprintln!("DepthRunBody: stage_key={stage_key} depth_runs.len={} body.len={}", state.depth_runs.len(), dr.body.len());
 
-                match hc(host, "scheme-leap-next", &[SExpr::Int(depth)])? {
+                let mut sids: Vec<SExpr> = Vec::new();
+                for config in &dr.scanner_configs {
+                    let scanner_ref = if let SExpr::List(pair) = config {
+                        if !pair.is_empty() { &pair[0] } else { config }
+                    } else { config };
+                    let sid_val = match scanner_ref {
+                        SExpr::Symbol(name) => env.get(name).cloned().ok_or_else(|| EvalError::Unbound(name.clone()))?,
+                        other => eval_recursive(other, env, host, tracer)?,
+                    };
+                    sids.push(sid_val);
+                }
+
+                let mut leap_args = vec![SExpr::Int(stage_key)];
+                leap_args.extend(sids.clone());
+                leap_args.push(dr.ranges.clone());
+                match hc(host, "scheme-leap-next", &leap_args)? {
                     EvalResult::Value(ok) => {
                         if is_truthy(&ok) {
-                            state.stack.push(Frame::DepthRunBody { depth });
+                            // Re-bind scanner value to lambda param
+                            if let Some(ref param_name) = dr.param_name {
+                                if !sids.is_empty() {
+                                    let val = expect_done(host, "scanner-read", &[sids[0].clone()])?;
+                                    env.define(param_name.clone(), val);
+                                }
+                            }
+                            state.stack.push(Frame::DepthRunBody);
                             for expr in dr.body.iter().rev() {
                                 state.stack.push(Frame::Eval(expr.clone()));
                             }
                         } else {
-                            hc(host, "depth-cleanup", &[SExpr::Int(depth)])?;
+                            for sid_expr in &sids {
+                                expect_done(host, "depth-cleanup", &[sid_expr.clone()])?;
+                            }
                             state.depth_runs.pop();
                             match process_value(SExpr::Void, env, host, state)? {
                                 EvalResult::Value(v) => return Ok(EvalStep::Done(v)),
@@ -379,18 +406,7 @@ fn run_eval(
                     EvalResult::Pushed => {}
                 }
             }
-            Frame::DepthFixedPop { scanner_configs } => {
-                for config in &scanner_configs {
-                    let sid_val = eval_recursive(config, env, host, tracer)?;
-                    let sid = sexpr_to_int(&sid_val)?;
-                    expect_done(host, "scanner-pop", &[SExpr::Int(sid)])?;
-                }
-                match process_value(SExpr::Void, env, host, state)? {
-                    EvalResult::Value(v) => return Ok(EvalStep::Done(v)),
-                    EvalResult::Yield(row) => return Ok(EvalStep::Yield(row)),
-                    EvalResult::Pushed => {}
-                }
-            }
+
             Frame::Apply {
                 func,
                 args,
@@ -504,7 +520,9 @@ fn eval_frame(
 
     match expr {
         SExpr::Void | SExpr::Bool(_) | SExpr::Int(_) | SExpr::Float(_) | SExpr::Str(_)
-        | SExpr::Bytes(_) | SExpr::Closure { .. } => Ok(EvalResult::Value(expr.clone())),
+        | SExpr::Bytes(_) | SExpr::Resource(_) | SExpr::Closure { .. } => {
+            Ok(EvalResult::Value(expr.clone()))
+        }
 
         SExpr::Symbol(name) => {
             let val = env
@@ -897,6 +915,7 @@ fn process_value(
         Frame::SetFrame { name, closure_env } => {
             let mut e = Environment {
                 bindings: closure_env,
+                depth_counter: 0,
             };
             if e.get(&name).is_none() {
                 return Err(EvalError::Unbound(name));
@@ -914,14 +933,8 @@ fn process_value(
         Frame::RestoreEnv { .. } => {
             Ok(EvalResult::Value(val))
         }
-        Frame::DepthRunBody { depth } => {
-            // Body finished — DepthRunBody is handled in the run_eval main loop.
-            // Push it back and signal Pushed so the main loop processes it.
-            state.stack.push(Frame::DepthRunBody { depth });
-            Ok(EvalResult::Pushed)
-        }
-        Frame::DepthFixedPop { scanner_configs } => {
-            state.stack.push(Frame::DepthFixedPop { scanner_configs });
+        Frame::DepthRunBody => {
+            state.stack.push(Frame::DepthRunBody);
             Ok(EvalResult::Pushed)
         }
         Frame::LetBindings {
@@ -993,47 +1006,37 @@ fn eval_depth_run_frame(
     _tracer: &dyn SchemeTracer,
     state: &mut YieldState,
 ) -> Result<EvalResult, EvalError> {
-    // Support 4 args (no ranges) or 5 args (with ranges):
-    //   (depth-run depth-id scanners (lambda () body))
-    //   (depth-run depth-id scanners ranges (lambda () body))
-    let (ranges, lambda_item) = if items.len() == 5 {
-        (&items[3], &items[4])
-    } else if items.len() == 4 {
-        (&SExpr::List(vec![]), &items[3])
+    //   (depth-run scanners ranges (lambda () body))  — 4 args
+    //   (depth-run scanners (lambda () body))         — 3 args
+    let (ranges, lambda_item) = if items.len() == 4 {
+        (&items[2], &items[3])
+    } else if items.len() == 3 {
+        (&SExpr::List(vec![]), &items[2])
     } else {
         return Err(EvalError::Arity {
             name: "depth-run".into(),
-            expected: "(depth-run depth-id scanners [ranges] (lambda () body...))",
+            expected: "(depth-run scanners [ranges] (lambda () body...))",
         });
     };
-    let depth_id = sexpr_to_int(&items[1])?;
-    let scanner_configs = match &items[2] {
+    let stage_key = state.depth_runs.len() as i64;
+    let scanner_configs = match &items[1] {
         SExpr::List(pairs) => pairs.clone(),
         other => {
             return Err(EvalError::Type {
-                expected: "list of (sid pos-idx) pairs",
+                expected: "list of scanner configs",
                 got: format!("{other:?}"),
             });
         }
     };
 
-    // Register ranges from the boolean tree into host's range-op/range-branch state
-    register_ranges(_host, depth_id, ranges, _env, _tracer)?;
+    let processed_ranges = process_ranges(ranges, _env, _host, _tracer)?;
 
     let lambda = match lambda_item {
         SExpr::Symbol(name) => _env.get(name).cloned().ok_or_else(|| EvalError::Unbound(name.clone()))?,
         other => eval_recursive(other, _env, _host, _tracer)?,
     };
-    let (body_exprs, captured_env) = match lambda {
-        SExpr::Closure { params, body, env: closure_env } => {
-            if !params.is_empty() {
-                return Err(EvalError::Arity {
-                    name: "depth-run".into(),
-                    expected: "(depth-run depth-id configs (lambda () body...))",
-                });
-            }
-            (body, closure_env)
-        }
+    let (body_exprs, captured_env, lambda_params) = match lambda {
+        SExpr::Closure { params, body, env: closure_env } => { (body, closure_env, params) }
         _ => {
             return Err(EvalError::Type {
                 expected: "lambda (closure)",
@@ -1042,31 +1045,52 @@ fn eval_depth_run_frame(
         }
     };
 
+    // Collect sids and call scanner-init for each scanner
+    let mut sids: Vec<SExpr> = Vec::new();
     for config in &scanner_configs {
-        let sid_val = eval_recursive(config, _env, _host, _tracer)?;
-        let sid = sexpr_to_int(&sid_val)?;
-        expect_done(
-            _host,
-            "scanner-init",
-            &[SExpr::Int(sid), SExpr::Int(depth_id)],
-        )?;
+        let (scanner_ref, var_id) = if let SExpr::List(pair) = config {
+            if pair.len() == 2 {
+                (pair[0].clone(), sexpr_to_int(&pair[1]).unwrap_or(0) as i64)
+            } else { (config.clone(), 0) }
+        } else {
+            (config.clone(), 0)
+        };
+        let scanner_val = eval_recursive(&scanner_ref, _env, _host, _tracer)?;
+        expect_done(_host, "scanner-init", &[scanner_val.clone(), SExpr::Int(var_id)])?;
+        sids.push(scanner_val);
     }
 
-    let ok = expect_done(_host, "scheme-leap-init", &[SExpr::Int(depth_id)])?;
+    let mut leap_args = vec![SExpr::Int(stage_key)];
+    leap_args.extend(sids.clone());
+    leap_args.push(processed_ranges.clone());
+    let ok = expect_done(_host, "scheme-leap-init", &leap_args)?;
     if !is_truthy(&ok) {
-        expect_done(_host, "depth-cleanup", &[SExpr::Int(depth_id)])?;
+        for sid_expr in &sids {
+            expect_done(_host, "depth-cleanup", &[sid_expr.clone()])?;
+        }
         return Ok(EvalResult::Value(SExpr::Void));
     }
 
+    // Bind scanner value to lambda param name
+    let param_name = if !lambda_params.is_empty() && !sids.is_empty() {
+        let val = expect_done(_host, "scanner-read", &[sids[0].clone()])?;
+        _env.define(lambda_params[0].clone(), val);
+        Some(lambda_params[0].clone())
+    } else {
+        None
+    };
+
     state.depth_runs.push(DepthRunFrame {
-        depth: depth_id,
+        stage_key,
         scanner_configs,
         body: body_exprs.clone(),
         captured_env: captured_env.clone(),
         phase: DepthRunPhase::Body,
+        param_name,
+        ranges: processed_ranges,
     });
 
-    state.stack.push(Frame::DepthRunBody { depth: depth_id });
+    state.stack.push(Frame::DepthRunBody);
     for expr in body_exprs.iter().rev() {
         state.stack.push(Frame::Eval(expr.clone()));
     }
@@ -1081,23 +1105,30 @@ fn eval_depth_fixed_frame(
     tracer: &dyn SchemeTracer,
     state: &mut YieldState,
 ) -> Result<EvalResult, EvalError> {
-    if items.len() != 5 {
+    if items.len() != 4 {
         return Err(EvalError::Arity {
             name: "depth-fixed".into(),
-            expected: "(depth-fixed depth-id (scanner-refs...) value-expr (lambda () body))",
+            expected: "(depth-fixed (scanner-refs...) value-expr (lambda () body))",
         });
     }
-    let scanner_configs = match &items[2] {
+    let scanner_configs = match &items[1] {
         SExpr::List(refs) => refs.clone(),
-        _ => return Err(EvalError::Type { expected: "scanner refs list", got: format!("{:?}", items[2]) }),
+        _ => return Err(EvalError::Type { expected: "scanner refs list", got: format!("{:?}", items[1]) }),
     };
-    let val = eval_recursive(&items[3], env, host, tracer)?;
-    for config in &scanner_configs {
-        let sid_val = eval_recursive(config, env, host, tracer)?;
-        let sid = sexpr_to_int(&sid_val)?;
-        expect_done(host, "scanner-push", &[SExpr::Int(sid), val.clone()])?;
-    }
-    let lambda = match &items[4] {
+    let val = eval_recursive(&items[2], env, host, tracer)?;
+
+    // Evaluate scanner configs to get resource values
+    let scanners: Vec<SExpr> = scanner_configs.iter()
+        .map(|config| eval_recursive(config, env, host, tracer))
+        .collect::<Result<_, _>>()?;
+
+    // Pré-callback: depth-fixed-bend(scanner0 scanner1 ... val)
+    let mut begin_args: Vec<SExpr> = Vec::with_capacity(scanners.len() + 1);
+    begin_args.extend(scanners.iter().cloned());
+    begin_args.push(val);
+    expect_done(host, "depth-fixed-begin", &begin_args)?;
+
+    let lambda = match &items[3] {
         SExpr::Symbol(name) => env.get(name).cloned().ok_or_else(|| EvalError::Unbound(name.clone()))?,
         other => eval_recursive(other, env, host, tracer)?,
     };
@@ -1110,7 +1141,14 @@ fn eval_depth_fixed_frame(
         }
         _ => return Err(EvalError::Type { expected: "lambda", got: format!("{lambda:?}") }),
     };
-    state.stack.push(Frame::DepthFixedPop { scanner_configs });
+
+    // Pós-callback: (depth-fixed-end scanner0 scanner1 ...) como Frame::Eval
+    let end_expr = SExpr::List({
+        let mut items = vec![SExpr::Symbol("depth-fixed-end".into())];
+        items.extend(scanner_configs); // re-evaluate from env (bindings unchanged)
+        items
+    });
+    state.stack.push(Frame::Eval(end_expr));
     for expr in body_exprs.iter().rev() {
         state.stack.push(Frame::Eval(expr.clone()));
     }
@@ -1175,7 +1213,7 @@ fn eval_recursive_inner(
 ) -> Result<SExpr, EvalError> {
     match expr {
         SExpr::Void | SExpr::Bool(_) | SExpr::Int(_) | SExpr::Float(_) | SExpr::Str(_)
-        | SExpr::Bytes(_) | SExpr::Closure { .. } => Ok(expr.clone()),
+        | SExpr::Bytes(_) | SExpr::Resource(_) | SExpr::Closure { .. } => Ok(expr.clone()),
 
         SExpr::Symbol(name) => env
             .get(name)
@@ -1240,43 +1278,36 @@ fn eval_depth_run_recursive(
     host: &mut dyn HostFns,
     tracer: &dyn SchemeTracer,
 ) -> Result<SExpr, EvalError> {
-    let (ranges, lambda_item) = if items.len() == 5 {
-        (&items[3], &items[4])
-    } else if items.len() == 4 {
-        (&SExpr::List(vec![]), &items[3])
+    let (ranges, lambda_item) = if items.len() == 4 {
+        (&items[2], &items[3])
+    } else if items.len() == 3 {
+        (&SExpr::List(vec![]), &items[2])
     } else {
         return Err(EvalError::Arity {
             name: "depth-run".into(),
-            expected: "(depth-run depth-id scanners [ranges] (lambda () body...))",
+            expected: "(depth-run scanners [ranges] (lambda () body...))",
         });
     };
-    let depth_id = sexpr_to_int(&items[1])?;
-    let scanner_configs = match &items[2] {
+    let stage_key = env.depth_counter;
+    env.depth_counter += 1;
+    let scanner_configs = match &items[1] {
         SExpr::List(pairs) => pairs.clone(),
         other => {
             return Err(EvalError::Type {
-                expected: "list of (sid pos-idx) pairs",
+                expected: "list of scanner configs",
                 got: format!("{other:?}"),
             });
         }
     };
 
-    register_ranges(host, depth_id, ranges, env, tracer)?;
+    let processed_ranges = process_ranges(ranges, env, host, tracer)?;
 
     let lambda = match lambda_item {
         SExpr::Symbol(name) => env.get(name).cloned().ok_or_else(|| EvalError::Unbound(name.clone()))?,
         other => eval_recursive(other, env, host, tracer)?,
     };
-    let (body_exprs, captured_env) = match lambda {
-        SExpr::Closure { params, body, env: closure_env } => {
-            if !params.is_empty() {
-                return Err(EvalError::Arity {
-                    name: "depth-run".into(),
-                    expected: "(depth-run depth-id configs (lambda () body...))",
-                });
-            }
-            (body, closure_env)
-        }
+    let (body_exprs, captured_env, lambda_params) = match lambda {
+        SExpr::Closure { params, body, env: closure_env } => { (body, closure_env, params) }
         _ => {
             return Err(EvalError::Type {
                 expected: "lambda (closure)",
@@ -1286,35 +1317,63 @@ fn eval_depth_run_recursive(
     };
 
     loop {
+        let mut sids: Vec<SExpr> = Vec::new();
         for config in &scanner_configs {
-            let sid_val = eval_recursive(config, env, host, tracer)?;
-            let sid = sexpr_to_int(&sid_val)?;
-            expect_done(
-                host,
-                "scanner-init",
-                &[SExpr::Int(sid), SExpr::Int(depth_id)],
-            )?;
+            let (scanner_ref, var_id) = if let SExpr::List(pair) = config {
+                if pair.len() == 2 {
+                    (pair[0].clone(), sexpr_to_int(&pair[1]).unwrap_or(0) as usize)
+                } else { continue; }
+            } else {
+                (config.clone(), 0)
+            };
+            let scanner_val = eval_recursive(&scanner_ref, env, host, tracer)?;
+            expect_done(host, "scanner-init", &[scanner_val.clone(), SExpr::Int(var_id as i64)])?;
+            sids.push(scanner_val);
         }
 
-        let ok = expect_done(host, "scheme-leap-init", &[SExpr::Int(depth_id)])?;
+        let mut leap_args = vec![SExpr::Int(stage_key as i64)];
+        leap_args.extend(sids.clone());
+        leap_args.push(processed_ranges.clone());
+        let ok = expect_done(host, "scheme-leap-init", &leap_args)?;
         if !is_truthy(&ok) {
             break;
         }
 
+        // Bind scanner value to lambda param
+        let param_val = if !lambda_params.is_empty() && !sids.is_empty() {
+            let val = expect_done(host, "scanner-read", &[sids[0].clone()])?;
+            Some(val)
+        } else {
+            None
+        };
+
         let mut inner_env = Environment {
             bindings: captured_env.clone(),
+            depth_counter: env.depth_counter,
         };
+        if let Some(ref val) = param_val {
+            inner_env.define(lambda_params[0].clone(), val.clone());
+        }
         for expr in &body_exprs {
             eval_recursive(expr, &mut inner_env, host, tracer)?;
         }
 
-        let ok = expect_done(host, "scheme-leap-next", &[SExpr::Int(depth_id)])?;
+        let mut leap_next_args = vec![SExpr::Int(stage_key as i64)];
+        leap_next_args.extend(sids.clone());
+        leap_next_args.push(processed_ranges.clone());
+        let ok = expect_done(host, "scheme-leap-next", &leap_next_args)?;
         if !is_truthy(&ok) {
             break;
         }
     }
 
-    expect_done(host, "depth-cleanup", &[SExpr::Int(depth_id)])?;
+    for config in &scanner_configs {
+        let scanner_ref = if let SExpr::List(pair) = config {
+            if !pair.is_empty() { &pair[0] } else { config }
+        } else { config };
+        let scanner_val = eval_recursive(scanner_ref, env, host, tracer)?;
+        expect_done(host, "depth-cleanup", &[scanner_val])?;
+    }
     Ok(SExpr::Void)
 }
 
@@ -1324,23 +1383,28 @@ fn eval_depth_fixed_recursive(
     host: &mut dyn HostFns,
     tracer: &dyn SchemeTracer,
 ) -> Result<SExpr, EvalError> {
-    if items.len() != 5 {
+    if items.len() != 4 {
         return Err(EvalError::Arity {
             name: "depth-fixed".into(),
-            expected: "(depth-fixed depth-id (scanner-refs...) value-expr (lambda () body))",
+            expected: "(depth-fixed (scanner-refs...) value-expr (lambda () body))",
         });
     }
-    let scanner_configs = match &items[2] {
+    let scanner_configs = match &items[1] {
         SExpr::List(refs) => refs.clone(),
-        _ => return Err(EvalError::Type { expected: "scanner refs list", got: format!("{:?}", items[2]) }),
+        _ => return Err(EvalError::Type { expected: "scanner refs list", got: format!("{:?}", items[1]) }),
     };
-    let val = eval_recursive(&items[3], env, host, tracer)?;
-    for config in &scanner_configs {
-        let sid_val = eval_recursive(config, env, host, tracer)?;
-        let sid = sexpr_to_int(&sid_val)?;
-        expect_done(host, "scanner-push", &[SExpr::Int(sid), val.clone()])?;
-    }
-    let lambda = match &items[4] {
+    let val = eval_recursive(&items[2], env, host, tracer)?;
+
+    let scanners: Vec<SExpr> = scanner_configs.iter()
+        .map(|config| eval_recursive(config, env, host, tracer))
+        .collect::<Result<_, _>>()?;
+
+    let mut begin_args: Vec<SExpr> = Vec::with_capacity(scanners.len() + 1);
+    begin_args.extend(scanners.iter().cloned());
+    begin_args.push(val);
+    expect_done(host, "depth-fixed-begin", &begin_args)?;
+
+    let lambda = match &items[3] {
         SExpr::Symbol(name) => env.get(name).cloned().ok_or_else(|| EvalError::Unbound(name.clone()))?,
         other => eval_recursive(other, env, host, tracer)?,
     };
@@ -1353,15 +1417,11 @@ fn eval_depth_fixed_recursive(
         }
         _ => return Err(EvalError::Type { expected: "lambda", got: format!("{lambda:?}") }),
     };
-    let mut inner_env = Environment { bindings: captured_env };
+    let mut inner_env = Environment { bindings: captured_env, depth_counter: 0 };
     for expr in &body_exprs {
         eval_recursive(expr, &mut inner_env, host, tracer)?;
     }
-    for config in &scanner_configs {
-        let sid_val = eval_recursive(config, env, host, tracer)?;
-        let sid = sexpr_to_int(&sid_val)?;
-        expect_done(host, "scanner-pop", &[SExpr::Int(sid)])?;
-    }
+    expect_done(host, "depth-fixed-end", &scanners)?;
     Ok(SExpr::Void)
 }
 
@@ -1700,6 +1760,7 @@ fn eval_apply_recursive(
             }
             let mut inner_env = Environment {
                 bindings: closure_env.clone(),
+                depth_counter: 0,
             };
             for (name, arg) in params.iter().zip(args) {
                 inner_env.define(name.clone(), arg.clone());
@@ -1890,13 +1951,13 @@ mod tests {
 
     #[test]
     fn depth_run_calls_host() {
-        let result = run("(depth-run 0 () (lambda () 42))").unwrap();
+        let result = run("(depth-run () (lambda () 42))").unwrap();
         assert_eq!(result, SExpr::Void);
     }
 
     #[test]
     fn depth_run_with_let_binding() {
-        let input = "(let* ((f (lambda () 1))) (depth-run 1 () f))";
+        let input = "(let* ((f (lambda () 1))) (depth-run () f))";
         let result = run(input).unwrap();
         assert_eq!(result, SExpr::Void);
     }
@@ -1942,7 +2003,7 @@ mod tests {
 
         let leap_next_count = Cell::new(0u32);
 
-        let input = "(depth-run 0 () (lambda () (begin (bind-get 0) 42)))";
+        let input = "(depth-run () (lambda () (begin (bind-get 0) 42)))";
         let expr = parse(input).unwrap();
         let mut env = Environment::new();
         let mut host = CountingHost {
@@ -2003,8 +2064,8 @@ mod tests {
         limits.insert(1, 3);
 
         let input = "\
-            (depth-run 0 () (lambda () \
-                (depth-run 1 () (lambda () \
+            (depth-run () (lambda () \
+                (depth-run () (lambda () \
                     (result-row 1 2)))))";
         let expr = parse(input).unwrap();
         let mut env = Environment::new();
@@ -2169,7 +2230,7 @@ mod tests {
         }
 
         let leap_next_count = Cell::new(0u32);
-        let input = "(depth-run 0 () (lambda () (result-row 42)))";
+        let input = "(depth-run () (lambda () (result-row 42)))";
         let expr = parse(input).unwrap();
         let mut env = Environment::new();
         let mut host = DepthYieldHost {

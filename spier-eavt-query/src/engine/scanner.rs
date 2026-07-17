@@ -78,8 +78,12 @@ pub struct V2Scanner {
     current_active_key: Option<Vec<u8>>,
     at_end: bool,
     history_mode: bool,
-    pub depth_positions: std::collections::HashMap<usize, usize>,
+    pub positions: Vec<usize>,
 }
+
+// V2Scanner is single-threaded but must be Send to be wrapped in
+// Arc<Mutex<V2Scanner>> for the opaque resource SExpr variant.
+unsafe impl Send for V2Scanner {}
 
 impl V2Scanner {
     pub fn new(
@@ -100,7 +104,7 @@ impl V2Scanner {
             current_active_key: None,
             at_end: true,
             history_mode: false,
-            depth_positions: std::collections::HashMap::new(),
+            positions: Vec::new(),
         }
     }
 
@@ -254,20 +258,7 @@ impl V2Scanner {
         self.at_end = false;
     }
 
-    pub fn check_same_var_pairs(&self, pairs: &[(usize, usize)]) -> bool {
-        let key = match self.current_active_key.as_ref() {
-            Some(k) => k,
-            None => return false,
-        };
-        for (a, b) in pairs {
-            let raw_a = self.extract_raw(key, *a);
-            let raw_b = self.extract_raw(key, *b);
-            if raw_a != raw_b {
-                return false;
-            }
-        }
-        true
-    }
+
 
     #[allow(dead_code)]
     pub fn current_timestamp(&self) -> Option<u64> {
@@ -298,30 +289,31 @@ impl V2Scanner {
         self.current_active_key = None;
     }
 
-    pub fn bind_depth(&mut self, depth: usize, pos_idx: usize) {
-        self.depth_positions.insert(depth, pos_idx);
+    pub fn push_position(&mut self, pos_idx: usize) -> bool {
+        let is_reentry = self.positions.contains(&pos_idx);
+        if !is_reentry {
+            self.positions.push(pos_idx);
+        }
+        is_reentry
     }
 
-    /// Compute the first idx_order position not yet bound by prefix or depth.
+    pub fn current_position(&self) -> usize {
+        self.positions.last().copied().unwrap_or(0)
+    }
+
     pub fn next_free_pos(&self) -> usize {
         let prefix_names: std::collections::HashSet<&str> =
             self.prefix_values.iter().map(|(n, _)| n.as_str()).collect();
-        let bound_idxs: std::collections::HashSet<usize> =
-            self.depth_positions.values().copied().collect();
         for (idx, name) in self.idx_order.iter().enumerate() {
-            if !prefix_names.contains(name.as_str()) && !bound_idxs.contains(&idx) {
+            if !prefix_names.contains(name.as_str()) && !self.positions.contains(&idx) {
                 return idx;
             }
         }
         0
     }
 
-    pub fn depth_position(&self, depth: usize) -> usize {
-        self.depth_positions.get(&depth).copied().unwrap_or(0)
-    }
-
-    pub fn unbind_depth(&mut self, depth: usize) {
-        self.depth_positions.remove(&depth);
+    pub fn pop_position(&mut self) {
+        self.positions.pop();
     }
 
     pub fn set_cursor(&mut self, cursor: Arc<RefCell<dyn Cursor>>) {
