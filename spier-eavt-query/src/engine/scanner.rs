@@ -134,11 +134,19 @@ impl PositionStack {
     /// Entradas fixas com sua posição (índice no vetor == posição em `idx_order`),
     /// em ordem crescente — para rebuild do prefixo de busca.
     pub fn fixed_entries(&self) -> Vec<(usize, Value)> {
+        let n = self.idx_order.len();
         self.stack
             .iter()
             .enumerate()
             .filter_map(|(i, e)| match e {
-                StackEntry::Fixed(v) => Some((i, v.clone())),
+                StackEntry::Fixed(v) => {
+                    assert!(
+                        i < n,
+                        "fixed entry at stack index {i} exceeds idx_order length {n}; \
+                         position stack desyncronizada (fixos devem ser empilhados em ordem crescente de idx_order)"
+                    );
+                    Some((i, v.clone()))
+                }
                 _ => None,
             })
             .collect()
@@ -442,7 +450,17 @@ impl V2Scanner {
         self.pos.at_end()
     }
 
+    /// Nome da coluna na posição `pos_idx` de `idx_order` ("e"/"a"/"v"/"t"/
+    /// "added"). `pos_idx` deve estar na faixa `[0, idx_order.len() + 1]`
+    /// (as posições `len` e `len+1` são "t" e "added"). Fora disso é uso
+    /// inválido de `pos_idx` e provoca pânico com mensagem clara.
     fn pos_name(&self, pos_idx: usize) -> &str {
+        assert!(
+            pos_idx < self.pos.idx_order().len() + 2,
+            "pos_idx {pos_idx} fora da faixa válida [0, {}] de idx_order {:?}",
+            self.pos.idx_order().len() + 1,
+            self.pos.idx_order()
+        );
         if pos_idx >= self.pos.idx_order().len() {
             return "t";
         }
@@ -563,7 +581,16 @@ impl V2Scanner {
         self.extract_value(self.current_position())
     }
 
+    /// Extrai o valor na posição `pos_idx` (usado pelos testes para inspecionar
+    /// colunas arbitrárias da chave ativa). `pos_idx` deve estar na faixa
+    /// `[0, idx_order.len())` — fora disso é mal uso e provoca pânico.
     pub(crate) fn extract_value(&self, pos_idx: usize) -> Option<Value> {
+        assert!(
+            pos_idx < self.pos.idx_order().len(),
+            "extract_value: pos_idx {pos_idx} fora da faixa [0, {}) de idx_order {:?}",
+            self.pos.idx_order().len(),
+            self.pos.idx_order()
+        );
         let key = self.pos.current_active_key()?;
         let raw = self.extract_raw(key, pos_idx);
         let pos_name = self.pos_name(pos_idx);
