@@ -43,7 +43,8 @@ impl spier_storage_traits::Cursor for InvalidCursor {
 /// Entrada da pilha de posições. Agnóstica ao tipo: tanto posições *iteradas*
 /// (varridas pelo cursor) quanto posições *fixas* (depth-fixed) vivem na mesma
 /// LIFO, na ordem em que foram empilhadas (que o compilador garante ser
-/// crescente em `idx_order`). Cada entrada carrega seu próprio `pos_idx`.
+/// crescente em `idx_order`). A posição de cada entrada é o seu índice no
+/// vetor `stack` — não há `pos_idx` solto para evitar mal uso.
 pub enum StackEntry {
     Scanned(Vec<u8>), // prefixo truncado da chave ativa
     Fixed(Value),    // valor exato (depth-fixed)
@@ -52,9 +53,9 @@ pub enum StackEntry {
 pub struct PositionStack {
     cursor: Arc<RefCell<dyn Cursor>>,
     idx_order: Vec<String>,
-    // pilha única de (pos_idx, entry) — push ao entrar, pop ao sair.
-    // pos_idx = ordem de empilhamento (= posição em idx_order).
-    stack: Vec<(usize, StackEntry)>,
+    // pilha única de entradas — push ao entrar, pop ao sair.
+    // a posição de uma entrada é o seu índice neste vetor (= posição em idx_order).
+    stack: Vec<StackEntry>,
     // chave ativa atual (linha do grupo corrente)
     current_active_key: Option<Vec<u8>>,
     at_end: bool,
@@ -93,94 +94,62 @@ impl PositionStack {
         self.stack.len()
     }
 
-    /// Empilha uma posição *iterada* com o prefixo `prefix`. Retorna `true` se
-    /// a posição (pos_idx) já estava na pilha (reentrada).
+    /// Empilha uma posição *iterada* com o prefixo `prefix`. Sem `pos_idx`: a
+    /// posição é o índice resultante no vetor. Retorna `false` (a reentrada é
+    /// tratada pelo chamador via `depth-cleanup` simétrico, não por este push).
     pub fn push_scanned(&mut self, prefix: Vec<u8>) -> bool {
-        let pos_idx = self.stack.len();
-        let is_reentry = self.stack.iter().any(|(p, _)| *p == pos_idx);
-        if !is_reentry {
-            self.stack.push((pos_idx, StackEntry::Scanned(prefix)));
-        }
-        is_reentry
+        self.stack.push(StackEntry::Scanned(prefix));
+        false
     }
 
-    /// Como `push_scanned`, mas com `pos_idx` explícito — usado apenas por
-    /// helpers de teste que inspecionam posições arbitrárias.
-    #[cfg(test)]
-    pub fn push_scanned_at(&mut self, pos_idx: usize, prefix: Vec<u8>) {
-        if !self.stack.iter().any(|(p, _)| *p == pos_idx) {
-            self.stack.push((pos_idx, StackEntry::Scanned(prefix)));
-        }
-    }
-
-    /// Empilha uma posição *fixa* com o valor exato. Retorna o `pos_idx`
-    /// atribuído (usado por callers que precisam saber a posição).
-    pub fn push_fixed(&mut self, val: &Value) -> usize {
-        let pos_idx = self.stack.len();
-        self.stack.push((pos_idx, StackEntry::Fixed(val.clone())));
-        pos_idx
+    /// Empilha uma posição *fixa* com o valor exato.
+    pub fn push_fixed(&mut self, val: &Value) {
+        self.stack.push(StackEntry::Fixed(val.clone()));
     }
 
     /// Remove o topo da pilha (LIFO, serve para ambos os tipos). Restaura o
     /// estado ao da posição pai. O cursor em si não é reposicionado aqui — o
     /// chamador reassume a posição correta a partir do novo topo.
-    pub fn pop(&mut self) -> Option<(usize, StackEntry)> {
+    pub fn pop(&mut self) -> Option<StackEntry> {
         self.stack.pop()
     }
 
     /// Remove o topo *se* for um `Fixed`; caso contrário procura o `Fixed` mais
     /// recente na pilha (defesa contra ordem assimétrica de desempilhamento).
-    pub fn pop_fixed(&mut self) -> Option<(usize, Value)> {
-        if let Some((pos_idx, StackEntry::Fixed(v))) = self.stack.last() {
-            let pos_idx = *pos_idx;
-            let v = v.clone();
-            self.stack.pop();
-            return Some((pos_idx, v));
+    pub fn pop_fixed(&mut self) -> Option<Value> {
+        if let Some(StackEntry::Fixed(_)) = self.stack.last() {
+            if let StackEntry::Fixed(v) = self.stack.pop().unwrap() {
+                return Some(v);
+            }
         }
         // fallback: procura o Fixed mais recente
-        if let Some(i) = self.stack.iter().rposition(|(_, e)| matches!(e, StackEntry::Fixed(_))) {
-            let (pos_idx, entry) = self.stack.remove(i);
-            if let StackEntry::Fixed(v) = entry {
-                return Some((pos_idx, v));
+        if let Some(i) = self.stack.iter().rposition(|e| matches!(e, StackEntry::Fixed(_))) {
+            if let StackEntry::Fixed(v) = self.stack.remove(i) {
+                return Some(v);
             }
         }
         None
     }
 
-    /// Entradas fixas em ordem de `pos_idx` (para rebuild do prefixo de busca).
+    /// Entradas fixas com sua posição (índice no vetor == posição em `idx_order`),
+    /// em ordem crescente — para rebuild do prefixo de busca.
     pub fn fixed_entries(&self) -> Vec<(usize, Value)> {
-        let mut out: Vec<(usize, Value)> = self
-            .stack
+        self.stack
             .iter()
-            .filter_map(|(p, e)| match e {
-                StackEntry::Fixed(v) => Some((*p, v.clone())),
+            .enumerate()
+            .filter_map(|(i, e)| match e {
+                StackEntry::Fixed(v) => Some((i, v.clone())),
                 _ => None,
             })
-            .collect();
-        out.sort_by_key(|(p, _)| *p);
-        out
-    }
-
-    pub fn contains(&self, pos_idx: usize) -> bool {
-        self.stack.iter().any(|(p, _)| *p == pos_idx)
-    }
-
-    #[allow(dead_code)]
-    pub fn top(&self) -> Option<&(usize, StackEntry)> {
-        self.stack.last()
+            .collect()
     }
 
     /// Prefixo do topo da pilha (posição corrente), se for uma posição iterada.
     pub fn top_prefix(&self) -> Option<&[u8]> {
         match self.stack.last() {
-            Some((_, StackEntry::Scanned(p))) => Some(p.as_slice()),
+            Some(StackEntry::Scanned(p)) => Some(p.as_slice()),
             _ => None,
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn top_pos(&self) -> Option<usize> {
-        self.stack.last().map(|(p, _)| *p)
     }
 
     // -- estado ativo --
@@ -205,8 +174,9 @@ impl PositionStack {
         !self.at_end || self.current_active_key.is_some()
     }
 
+    /// Posição corrente = índice do topo da pilha (0 se vazia).
     pub fn current_position(&self) -> usize {
-        self.stack.last().map(|(p, _)| *p).unwrap_or(0)
+        self.stack.len().saturating_sub(1)
     }
 
     pub fn stack_len(&self) -> usize {
@@ -462,26 +432,6 @@ impl V2Scanner {
 
     pub fn pop_position(&mut self) {
         self.pos.pop();
-    }
-
-    // -- helpers de teste: inspecionam posições arbitrárias sem poluir a API --
-
-    #[cfg(test)]
-    pub(crate) fn push_position_at(&mut self, pos_idx: usize) {
-        let prefix = self
-            .pos
-            .current_active_key()
-            .map(|k| {
-                let vs = self.value_start(k, pos_idx);
-                k[..vs].to_vec()
-            })
-            .unwrap_or_default();
-        self.pos.push_scanned_at(pos_idx, prefix);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn advance_at(&mut self, pos_idx: usize) {
-        self.advance_to_active_at_inner(pos_idx);
     }
 
     pub fn set_cursor(&mut self, cursor: Arc<RefCell<dyn Cursor>>) {
@@ -1535,23 +1485,25 @@ mod v2_tests {
             V2Scanner::new("AVET", vec!["a".into(), "v".into(), "e".into()], None, None);
         scanner.set_cursor(cursor);
 
-        scanner.push_position_at(1);
-        scanner.advance_at(1);
+        // empilha posições 0 e 1; o topo (1 = "v") é a posição varrida
+        scanner.push_position();
+        scanner.push_position();
+        scanner.advance_to_active_at();
         assert!(!scanner.at_end());
         let val = scanner.extract_value(1).unwrap();
         assert_eq!(val.raw_int(), 1);
 
-        scanner.advance_at(1);
+        scanner.advance_to_active_at();
         assert!(!scanner.at_end());
         let val = scanner.extract_value(1).unwrap();
         assert_eq!(val.raw_int(), 2);
 
-        scanner.advance_at(1);
+        scanner.advance_to_active_at();
         assert!(!scanner.at_end());
         let val = scanner.extract_value(1).unwrap();
         assert_eq!(val.raw_int(), 3);
 
-        scanner.advance_at(1);
+        scanner.advance_to_active_at();
         assert!(scanner.at_end());
     }
 
@@ -1565,8 +1517,9 @@ mod v2_tests {
             V2Scanner::new("AVET", vec!["a".into(), "v".into(), "e".into()], None, None);
         scanner.set_cursor(cursor);
 
-        scanner.push_position_at(1);
-        scanner.advance_at(1);
+        scanner.push_position();
+        scanner.push_position();
+        scanner.advance_to_active_at();
         assert!(!scanner.at_end());
         let v_val = scanner.extract_value(1).unwrap();
         assert_eq!(v_val.raw_int(), 42);
@@ -1590,13 +1543,14 @@ mod v2_tests {
             V2Scanner::new("AVET", vec!["a".into(), "v".into(), "e".into()], None, None);
         scanner.set_cursor(cursor);
 
-        scanner.push_position_at(1);
-        scanner.advance_at(1);
+        scanner.push_position();
+        scanner.push_position();
+        scanner.advance_to_active_at();
         assert!(!scanner.at_end());
         let val = scanner.extract_value(1).unwrap();
         assert_eq!(val.raw_int(), 6);
 
-        scanner.advance_at(1);
+        scanner.advance_to_active_at();
         assert!(scanner.at_end());
     }
 }
