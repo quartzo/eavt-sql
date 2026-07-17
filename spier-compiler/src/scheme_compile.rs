@@ -600,6 +600,7 @@ fn build_triejoin_scheme(
 
     let mut stmts: Vec<SExpr> = Vec::new();
     let mut prefix_stmts: Vec<SExpr> = Vec::new();
+    let mut inner_fixed_stmts: Vec<SExpr> = Vec::new();
 
     // Build let* bindings for scanners: (s0 (scanner-open INDEX_NAME [history]))
     let mut scanner_bindings: Vec<SExpr> = Vec::new();
@@ -618,7 +619,9 @@ fn build_triejoin_scheme(
             SExpr::List(open_args),
         ]));
 
+        // Split bound_ints into contiguous (before first gap) and inner (after first gap)
         let v2_order: Vec<&str> = ip.idx_order.iter().map(|s| s.as_str()).collect();
+        let mut has_gap = false;
         for pos_name in &v2_order {
             if let Some(pv) = ip.bound_ints.get(*pos_name) {
                 let val_expr = match pv {
@@ -630,12 +633,19 @@ fn build_triejoin_scheme(
                     }
                     _ => plan_value_to_sexpr(pv),
                 };
-                prefix_stmts.push(SExpr::List(vec![
+                let stmt = SExpr::List(vec![
                     SExpr::Symbol("prefix-push".into()),
                     SExpr::Symbol(format!("s{ip_idx}")),
                     val_expr,
                     SExpr::Str(pos_name.to_string()),
-                ]));
+                ]);
+                if has_gap {
+                    inner_fixed_stmts.push(stmt);
+                } else {
+                    prefix_stmts.push(stmt);
+                }
+            } else {
+                has_gap = true;
             }
         }
     }
@@ -666,6 +676,23 @@ fn build_triejoin_scheme(
     }
 
     let mut body = leaf_body;
+
+    // Inner depth-run with equality range for non-contiguous bound values
+    for stmt in inner_fixed_stmts.iter().rev() {
+        if let SExpr::List(ref parts) = stmt {
+            if parts.len() >= 3 {
+                let scanner_ref = parts[1].clone();
+                let val = parts[2].clone();
+                body = SExpr::List(vec![
+                    SExpr::Symbol("depth-run".into()),
+                    SExpr::List(vec![scanner_ref]),
+                    SExpr::List(vec![SExpr::Symbol("=".into()), val]),
+SExpr::List(vec![SExpr::Symbol("lambda".into()), SExpr::List(vec![SExpr::Symbol("_".into())]), body]),
+                ]);
+            }
+        }
+    }
+
     for depth in (0..num_depths).rev() {
         let scanner_args = &depth_scanners[depth];
         let ranges = depth_ranges.get(&depth).cloned().unwrap_or(SExpr::List(vec![]));
@@ -717,7 +744,7 @@ SExpr::List(vec![SExpr::Symbol("lambda".into()), SExpr::List(vec![SExpr::Symbol(
         ]);
     }
 
-    // Wrap body in nested depth-fixed for each prefix-push (innermost first)
+    // Outer depth-fixed for contiguous prefix bound values (outside depth-runs)
     for stmt in prefix_stmts.iter().rev() {
         if let SExpr::List(ref parts) = stmt {
             if parts.len() >= 3 {

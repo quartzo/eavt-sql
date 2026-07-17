@@ -79,6 +79,7 @@ pub struct V2Scanner {
     at_end: bool,
     history_mode: bool,
     pub positions: Vec<usize>,
+    pub frame_stack: Vec<Value>,
 }
 
 // V2Scanner is single-threaded but must be Send to be wrapped in
@@ -105,6 +106,7 @@ impl V2Scanner {
             at_end: true,
             history_mode: false,
             positions: Vec::new(),
+            frame_stack: Vec::new(),
         }
     }
 

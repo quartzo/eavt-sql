@@ -729,6 +729,72 @@ impl QueryEngine for QueryState {
     }
 }
 
+impl QueryState {
+    /// Parse raw Scheme text and wrap as a `ProgramHandle` for debugging.
+    pub fn compile_scheme(&self, scheme_text: &str) -> Result<ProgramHandle, String> {
+        let parsed = spier_scheme::parse(scheme_text)
+            .map_err(|e| format!("scheme parse error: {e}"))?;
+        let prog = spier_scheme::SchemeProgram::new(parsed);
+        let meta = spier_query_ir::SelectSchemeMeta {
+            num_vars: 0,
+            depth_var_pairs: vec![],
+            same_var_constraints: vec![],
+        };
+        Ok(ProgramHandle {
+            program: Arc::new(spier_query_ir::Program::SelectScheme(prog, meta)),
+        })
+    }
+
+    /// Run Scheme text and return rows as `Vec<Vec<Value>>` for debugging.
+    pub fn compile_scheme_debug(&self, scheme_text: &str) -> Result<Vec<Vec<spier_value::Value>>, String> {
+        let parsed = spier_scheme::parse(scheme_text)
+            .map_err(|e| format!("scheme parse error: {e}"))?;
+        let prog = spier_scheme::SchemeProgram::new(parsed);
+        let meta = spier_query_ir::SelectSchemeMeta {
+            num_vars: 0,
+            depth_var_pairs: vec![],
+            same_var_constraints: vec![],
+        };
+
+        let (mut session, engine) = {
+            let inner = self.inner.read().unwrap();
+            let eng = inner.engine.as_ref().ok_or("engine not open")?.clone();
+            let t = eng.allocate_t_and_write_tx();
+            (build_select_scheme_session(&eng, &prog, &meta, vec![], t, None), eng)
+        };
+
+        let mut rows = Vec::new();
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            let more = session.next_batch(&mut buf, 1).map_err(|e| format!("scheme error: {e}"))?;
+            if buf.is_empty() {
+                break;
+            }
+            let mut pos = 0usize;
+            if pos + 4 <= buf.len() {
+                let _num_cols = u32::from_be_bytes(buf[pos..pos+4].try_into().unwrap()) as usize;
+                pos += 4;
+            }
+            let mut row = Vec::new();
+            while pos < buf.len() {
+                let (val, n) = spier_value::query_codec::decode_one(&buf[pos..], 0)
+                    .map_err(|e| format!("decode error: {e}"))?;
+                row.push(val);
+                pos += n;
+            }
+            rows.push(row);
+            if !more {
+                break;
+            }
+        }
+
+        // keep engine alive until session is done
+        drop(engine);
+        Ok(rows)
+    }
+}
+
 fn build_select_scheme_session(
     engine: &Arc<engine::query_engine_inner::QueryEngineInner>,
     scheme_prog: &spier_scheme::SchemeProgram,

@@ -496,6 +496,7 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                 | "resolve-val" | "attr-name" | "probe-begin"
                 | "save" | "retract" | "scanner-read"
                 | "depth-fixed-begin" | "depth-fixed-end"
+                | "dbg-scanners"
         )
     }
 
@@ -670,7 +671,7 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                     let scanner = extract_scanner(&args[i])?;
                     let val = sexpr_to_value(&args[n - 1]).map_err(|e| he(e))?;
                     let mut s = scanner.lock().unwrap();
-                    let pos = s.positions_filled;
+                    let pos = s.next_free_pos();
                     s.push_prefix_at(pos, &val);
                 }
                 Ok(EvalStep::Done(SExpr::Void))

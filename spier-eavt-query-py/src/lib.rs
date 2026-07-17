@@ -325,6 +325,24 @@ impl PyEngine {
         py.allow_threads(|| self.inner.internal_status(target))
             .map_err(to_string_err)
     }
+
+    fn compile_scheme(&self, py: Python<'_>, scheme_text: &str) -> PyResult<PyProgramHandle> {
+        let handle = py.allow_threads(|| self.inner.compile_scheme(scheme_text))
+            .map_err(to_string_err)?;
+        Ok(PyProgramHandle { inner: handle })
+    }
+
+    fn compile_scheme_debug(&self, py: Python<'_>, scheme_text: &str) -> PyResult<Vec<Vec<u8>>> {
+        let rows = py.allow_threads(|| self.inner.compile_scheme_debug(scheme_text))
+            .map_err(to_string_err)?;
+        Ok(rows.iter().map(|row| {
+            let mut buf = Vec::new();
+            for val in row {
+                spier_value::query_codec::encode_one(&mut buf, val);
+            }
+            buf
+        }).collect())
+    }
 }
 
 #[pymodule]

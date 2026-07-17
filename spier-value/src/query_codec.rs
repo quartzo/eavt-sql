@@ -98,7 +98,7 @@ pub fn encode_one(buf: &mut Vec<u8>, v: &Value) {
     }
 }
 
-fn decode_one(buf: &[u8], pos: usize) -> Result<(Value, usize), String> {
+pub fn decode_one(buf: &[u8], pos: usize) -> Result<(Value, usize), String> {
     if pos >= buf.len() {
         return Err("decode_one: unexpected end".into());
     }
