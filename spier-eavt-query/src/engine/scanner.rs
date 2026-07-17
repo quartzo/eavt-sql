@@ -235,6 +235,20 @@ impl V2Scanner {
         self.current_active_key = None;
     }
 
+    pub fn seek_to_current_group_start(&mut self, pos_idx: usize) {
+        let key = match self.current_active_key.as_ref() {
+            Some(k) => k.clone(),
+            None => {
+                self.cursor.borrow_mut().invalidate();
+                return;
+            }
+        };
+        let vs = self.value_start(&key, pos_idx);
+        let target = key[..vs].to_vec();
+        self.cursor.borrow_mut().seek(&target);
+        self.at_end = false;
+    }
+
     pub fn push_position(&mut self, pos_idx: usize) -> bool {
         let is_reentry = self.positions.contains(&pos_idx);
         if !is_reentry {
@@ -476,20 +490,17 @@ impl V2Scanner {
             return;
         }
 
+        let bound_prefix: Option<Vec<u8>> = self.current_active_key.as_ref().map(|k| {
+            let end = self.value_start(k, pos_idx);
+            k[..end].to_vec()
+        });
+
         while self.cursor.borrow().is_valid() {
             let first_key = self.cursor.borrow().current_key().unwrap().to_vec();
             if first_key.len() < 8 {
                 self.cursor.borrow_mut().step();
                 continue;
             }
-            let bound_prefix: Option<Vec<u8>> = {
-                let end = self.value_start(&first_key, pos_idx);
-                if end <= first_key.len() {
-                    Some(first_key[..end].to_vec())
-                } else {
-                    None
-                }
-            };
             if let Some(ref bp) = bound_prefix {
                 let bs = self.value_start(&first_key, pos_idx).min(bp.len());
                 if bs != bp.len() || first_key[..bp.len()] != bp[..] {
@@ -589,7 +600,8 @@ impl V2Scanner {
         self.at_end = true;
     }
 
-    pub fn leap_next_at(&mut self, pos_idx: usize) {
+    pub fn leap_next_at(&mut self) {
+        let pos_idx = self.current_position();
         let pos_name = self.pos_name(pos_idx);
         if pos_name == "added" {
             self.at_end = true;
@@ -597,12 +609,13 @@ impl V2Scanner {
         }
         if let Some(key) = self.current_active_key.clone() {
             let raw = self.extract_raw(&key, pos_idx);
-            self.seek_past_value_at(&raw, pos_idx);
+            self.seek_past_value_at(&raw);
         }
         self.advance_to_active_at(pos_idx);
     }
 
-    fn seek_past_value_at(&mut self, current_raw: &Extracted, pos_idx: usize) {
+    fn seek_past_value_at(&mut self, current_raw: &Extracted) {
+        let pos_idx = self.current_position();
         let pos_name = self.pos_name(pos_idx);
         let key = match self.current_active_key.as_ref() {
             Some(k) => k.clone(),
@@ -673,7 +686,8 @@ impl V2Scanner {
         }
     }
 
-    pub fn seek_to_value(&mut self, pos_idx: usize, value: &Value) {
+    pub fn seek_to_value(&mut self, value: &Value) {
+        let pos_idx = self.current_position();
         let t0 = if crate::engine::opcodes::debug_timing_enabled() {
             Some(std::time::Instant::now())
         } else {

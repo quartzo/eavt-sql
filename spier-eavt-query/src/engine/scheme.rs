@@ -403,8 +403,7 @@ impl SelectSchemeHostFns {
                     };
                     if needs_seek {
                         let mut s = scanner.lock().unwrap();
-                        let pos = s.current_position();
-                        s.seek_to_value(pos, mv);
+                        s.seek_to_value(mv);
                         if s.at_end() { return false; }
                     }
                 }
@@ -451,8 +450,7 @@ impl SelectSchemeHostFns {
                         if std::mem::discriminant(&cur) != std::mem::discriminant(lo) { return false; }
                         for scanner in scanners {
                             let mut s = scanner.lock().unwrap();
-                            let pos = s.current_position();
-                            s.seek_to_value(pos, lo);
+                            s.seek_to_value(lo);
                         }
                         if !Self::leap_converge(scanners) { return false; }
                         if lo_open {
@@ -571,7 +569,7 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                             }
                         }
                     } else {
-                        s.seek_to_prefix_start();
+                        s.seek_to_current_group_start(pos_idx);
                         s.advance_to_active_at(pos_idx);
                     }
                     s.clear_at_end();
@@ -628,8 +626,7 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                 }
                 {
                     let mut s = scanners[min_idx].lock().unwrap();
-                    let pos = s.current_position();
-                    s.leap_next_at(pos);
+                    s.leap_next_at();
                     if s.at_end() { return Ok(EvalStep::Done(SExpr::Bool(false))); }
                 }
                 if Self::leap_converge(&scanners) {

@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-
+use std::collections::{HashMap, HashSet};
 use spier_datalog::BoundValue;
 use spier_planner::{PlanValue, QueryPlanResult};
 use spier_query_ir::SelectSchemeMeta;
@@ -589,6 +588,7 @@ fn build_triejoin_scheme(
     leaf_body: SExpr,
 ) -> Result<(SchemeProgram, SelectSchemeMeta), String> {
     let ordered_vars = &plan.ordered_vars;
+    let num_depths = ordered_vars.len();
 
     let (var_names_list, var_id_map) = build_var_names_and_id_map(plan);
     let depth_var_pairs: Vec<(usize, usize)> = ordered_vars
@@ -624,14 +624,7 @@ fn build_triejoin_scheme(
         })
         .collect();
 
-    // Determine canonical position order from first clause's idx_order.
-    // Process in reverse (innermost first) so nesting is correct.
-    let canonical_order: Vec<&str> = plan.iter_plans.first()
-        .map(|ip| ip.idx_order.iter().map(|s| s.as_str()).collect())
-        .unwrap_or_default();
-
-    // Pre-compute bind value expressions per clause per position.
-    // bind_vals[ip_idx][pos_name] = Option<SExpr>
+    // Pre-compute bind value expressions per clause per position name.
     let mut bind_vals: Vec<HashMap<&str, SExpr>> = vec![HashMap::new(); plan.iter_plans.len()];
     for (ip_idx, ip) in plan.iter_plans.iter().enumerate() {
         for (pos_name, pv) in &ip.bound_ints {
@@ -648,71 +641,117 @@ fn build_triejoin_scheme(
         }
     }
 
-    let mut body = leaf_body;
+    // Use the first clause's idx_order as the canonical position order.
+    let canonical_order: Vec<&str> = plan.iter_plans.first()
+        .map(|ip| ip.idx_order.iter().map(|s| s.as_str()).collect())
+        .unwrap_or_default();
 
-    for pos_name in canonical_order.iter().rev() {
-        if *pos_name == "added" {
+    // Build a per-clause map: position_name -> idx_order index.
+    let mut pos_name_to_idx: Vec<HashMap<&str, usize>> = Vec::new();
+    for ip in &plan.iter_plans {
+        let mut m = HashMap::new();
+        for (idx, name) in ip.idx_order.iter().enumerate() {
+            m.insert(name.as_str(), idx);
+        }
+        pos_name_to_idx.push(m);
+    }
+
+    // Build list of operations (outermost first) for the triejoin.
+    let mut ops: Vec<SExpr> = Vec::new();
+
+    // Track which bound values have been emitted as depth-fixed.
+    let mut bound_emitted: Vec<HashSet<String>> = vec![HashSet::new(); plan.iter_plans.len()];
+
+    // Process each depth in forward order (outermost first).
+    for depth in 0..num_depths {
+        let var_name = &ordered_vars[depth];
+
+        // Collect scanner refs per clause for this depth.
+        let mut scanners: Vec<SExpr> = Vec::new();
+        let mut required_pos_idx: Vec<(usize, &str)> = Vec::new();
+
+        for (ip_idx, ip) in plan.iter_plans.iter().enumerate() {
+            if let Some(&(_, ref pos_name)) = ip.var_depths.iter().find(|&&(d, _)| d == depth) {
+                scanners.push(SExpr::Symbol(format!("s{ip_idx}")));
+                required_pos_idx.push((ip_idx, pos_name.as_str()));
+            }
+        }
+
+        if scanners.is_empty() {
             continue;
         }
 
-        // Collect scanners and operations at this position.
-        let mut bind_group: Vec<(SExpr, SExpr)> = Vec::new(); // (scanner, val_expr)
-        let mut scan_group: Vec<(SExpr, usize, String)> = Vec::new(); // (scanner, depth, var_name)
+        // For each clause, emit depth-fixed for any un-emitted bound values
+        // at positions BEFORE this variable's position in idx_order.
+        for &(ip_idx, pos_name) in &required_pos_idx {
+            let target_idx = pos_name_to_idx[ip_idx].get(pos_name).copied().unwrap_or(0);
+            for peek_idx in 0..target_idx {
+                if peek_idx >= canonical_order.len() {
+                    break;
+                }
+                let peek_pos = canonical_order[peek_idx];
+                if peek_pos == "added" {
+                    continue;
+                }
+                if bound_emitted[ip_idx].contains(peek_pos) {
+                    continue;
+                }
+                if let Some(val_expr) = bind_vals[ip_idx].get(peek_pos) {
+                    bound_emitted[ip_idx].insert(peek_pos.to_string());
+                    ops.push(SExpr::List(vec![
+                        SExpr::Symbol("depth-fixed".into()),
+                        SExpr::List(vec![SExpr::Symbol(format!("s{ip_idx}"))]),
+                        val_expr.clone(),
+                        SExpr::List(vec![
+                            SExpr::Symbol("lambda".into()),
+                            SExpr::List(vec![]),
+                            SExpr::Symbol("__BODY__".into()),
+                        ]),
+                    ]));
+                }
+            }
+        }
 
-        for (ip_idx, ip) in plan.iter_plans.iter().enumerate() {
-            if !ip.idx_order.iter().any(|p| p == pos_name) {
+        // Emit depth-run for this variable.
+        let ranges = depth_ranges.get(&depth).cloned().unwrap_or(SExpr::List(vec![]));
+        ops.push(SExpr::List(vec![
+            SExpr::Symbol("depth-run".into()),
+            SExpr::List(scanners),
+            ranges,
+            SExpr::List(vec![SExpr::Symbol("lambda".into()), SExpr::List(vec![SExpr::Symbol(var_name.clone())]), SExpr::Symbol("__BODY__".into())]),
+        ]));
+    }
+
+    // After all depth-runs, emit remaining depth-fixed for bound values
+    // that were NOT before any variable's position.
+    for (ip_idx, _ip) in plan.iter_plans.iter().enumerate() {
+        for &pos_name in &canonical_order {
+            if pos_name == "added" {
                 continue;
             }
-            let scanner = SExpr::Symbol(format!("s{ip_idx}"));
-
+            if bound_emitted[ip_idx].contains(pos_name) {
+                continue;
+            }
             if let Some(val_expr) = bind_vals[ip_idx].get(pos_name) {
-                bind_group.push((scanner, val_expr.clone()));
-            } else if let Some(&(depth, _)) = ip.var_depths.iter().find(|&&(_, ref p)| p == pos_name) {
-                let var_name = ordered_vars[depth].clone();
-                scan_group.push((scanner, depth, var_name));
-            }
-        }
-
-        // Emit depth-fixed for binds (grouped by value).
-        if !bind_group.is_empty() {
-            let mut by_val: Vec<(SExpr, Vec<SExpr>)> = Vec::new();
-            for (scanner, val) in &bind_group {
-                if let Some(existing) = by_val.iter_mut().find(|(v, _)| *v == *val) {
-                    existing.1.push(scanner.clone());
-                } else {
-                    by_val.push((val.clone(), vec![scanner.clone()]));
-                }
-            }
-            for (val, scanners) in by_val {
-                body = SExpr::List(vec![
+                bound_emitted[ip_idx].insert(pos_name.to_string());
+                ops.push(SExpr::List(vec![
                     SExpr::Symbol("depth-fixed".into()),
-                    SExpr::List(scanners),
-                    val,
-                    SExpr::List(vec![SExpr::Symbol("lambda".into()), SExpr::List(vec![]), body]),
-                ]);
+                    SExpr::List(vec![SExpr::Symbol(format!("s{ip_idx}"))]),
+                    val_expr.clone(),
+                    SExpr::List(vec![
+                        SExpr::Symbol("lambda".into()),
+                        SExpr::List(vec![]),
+                        SExpr::Symbol("__BODY__".into()),
+                    ]),
+                ]));
             }
         }
+    }
 
-        // Emit depth-run for scans (grouped by depth).
-        if !scan_group.is_empty() {
-            let mut by_depth: Vec<(usize, Vec<SExpr>, String)> = Vec::new();
-            for (scanner, depth, var_name) in &scan_group {
-                if let Some(existing) = by_depth.iter_mut().find(|(d, _, _)| *d == *depth) {
-                    existing.1.push(scanner.clone());
-                } else {
-                    by_depth.push((*depth, vec![scanner.clone()], var_name.clone()));
-                }
-            }
-            for (depth, scanners, var_name) in by_depth {
-                let ranges = depth_ranges.get(&depth).cloned().unwrap_or(SExpr::List(vec![]));
-                body = SExpr::List(vec![
-                    SExpr::Symbol("depth-run".into()),
-                    SExpr::List(scanners),
-                    ranges,
-                    SExpr::List(vec![SExpr::Symbol("lambda".into()), SExpr::List(vec![SExpr::Symbol(var_name)]), body]),
-                ]);
-            }
-        }
+    // Build the nested Scheme: start from leaf_body, apply ops in reverse order.
+    let mut body = leaf_body;
+    for op in ops.iter().rev() {
+        body = replace_body_placeholder(op, &body);
     }
 
     // Emit probe: if plan.lookups has a fully-bound lookup pattern,
@@ -772,6 +811,15 @@ fn build_triejoin_scheme(
     };
 
     Ok((SchemeProgram::new(full_body).with_param_count(0), meta))
+}
+
+/// Recursively replace Symbol("__BODY__") with `replacement` in the given SExpr.
+fn replace_body_placeholder(expr: &SExpr, replacement: &SExpr) -> SExpr {
+    match expr {
+        SExpr::Symbol(s) if s == "__BODY__" => replacement.clone(),
+        SExpr::List(items) => SExpr::List(items.iter().map(|item| replace_body_placeholder(item, replacement)).collect()),
+        other => other.clone(),
+    }
 }
 
 fn build_projection(

@@ -141,7 +141,7 @@ fn hc(host: &mut dyn HostFns, name: &str, args: &[SExpr]) -> Result<EvalResult, 
 fn expect_done(host: &mut dyn HostFns, name: &str, args: &[SExpr]) -> Result<SExpr, EvalError> {
     match host.call(name, args)? {
         EvalStep::Done(v) => Ok(v),
-        EvalStep::Yield(_) => Err(EvalError::Other(format!("{name}: yield not supported in non-streaming mode"))),
+        EvalStep::Yield(row) => Ok(row),
     }
 }
 
