@@ -489,7 +489,7 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
     fn is_native(&self, name: &str) -> bool {
         matches!(
             name,
-            "scanner-open" | "prefix-push" | "scanner-init"
+            "scanner-open" | "scanner-init"
                 | "scheme-leap-init" | "scheme-leap-next" | "depth-cleanup"
                 | "intern-a" | "param"
                 | "result-row"
@@ -525,17 +525,7 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                 Ok(EvalStep::Done(SExpr::Resource(Opaque(resource))))
             }
 
-            "prefix-push" => {
-                let scanner = extract_scanner(&args[0])?;
-                let mut s = scanner.lock().unwrap();
-                let val = sexpr_to_value(&args[1]).map_err(|e| he(e))?;
-                let pos_name = expect_str(&args[2])?;
-                let pos_idx = s.idx_order.iter()
-                    .position(|p| *p == pos_name)
-                    .unwrap_or(0);
-                s.push_prefix_at(pos_idx, &val);
-                Ok(EvalStep::Done(SExpr::Void))
-            }
+            // -- scanner-init (called by depth-run) --
 
             "scanner-read" => {
                 let scanner = extract_scanner(&args[0])?;
@@ -557,11 +547,11 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                 let is_reentry = s.push_position(pos_idx);
                 if !is_reentry {
                     if !s.is_open() {
-                        if let Some(aid) = s.attr_id_from_prefix() {
+                        if let Some(aid) = s.attr_id_from_prefix_bytes() {
                             let vt = self.engine.value_type_for(aid);
                             s.set_value_attr_type(vt);
                         }
-                        s.build_prefix_bytes();
+                        s.build_prefix_from_saved();
                         let cf_id = match s.index_name() {
                             "EAVT" => 0u32, "AEVT" => 1, "AVET" => 2, "VAET" => 3, _ => 0,
                         };
@@ -585,11 +575,9 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                         s.advance_to_active_at(pos_idx);
                     }
                     s.clear_at_end();
-                    if s.prefix_values_is_empty() {
-                        if let Some(aid) = s.attr_id_from_key() {
-                            let vt = self.engine.value_type_for(aid);
-                            s.set_value_attr_type(vt);
-                        }
+                    if let Some(aid) = s.attr_id_from_key() {
+                        let vt = self.engine.value_type_for(aid);
+                        s.set_value_attr_type(vt);
                     }
                 }
                 Ok(EvalStep::Done(SExpr::Void))
@@ -623,7 +611,6 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                 if scanners.is_empty() { return Ok(EvalStep::Done(SExpr::Bool(false))); }
                 let raw_ops = Self::parse_ranges(ranges_sexpr)?;
 
-                // Find min value scanner and advance it
                 let mut min_idx = 0usize;
                 let mut min_val: Option<Value> = None;
                 for (i, sm) in scanners.iter().enumerate() {
@@ -672,7 +659,7 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                     let val = sexpr_to_value(&args[n - 1]).map_err(|e| he(e))?;
                     let mut s = scanner.lock().unwrap();
                     let pos = s.next_free_pos();
-                    s.push_prefix_at(pos, &val);
+                    s.save_value(pos, &val);
                 }
                 Ok(EvalStep::Done(SExpr::Void))
             }
@@ -681,7 +668,7 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                 for arg in args {
                     let scanner = extract_scanner(arg)?;
                     let mut s = scanner.lock().unwrap();
-                    s.pop_prefix();
+                    s.pop_saved_value();
                 }
                 Ok(EvalStep::Done(SExpr::Void))
             }

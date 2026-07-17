@@ -70,16 +70,15 @@ pub struct V2Scanner {
     cursor: Arc<RefCell<dyn Cursor>>,
     index_name: String,
     pub(crate) idx_order: Vec<String>,
-    pub(crate) prefix_values: Vec<(String, Value)>,
+    saved_values: Vec<(usize, Value)>,
     prefix_bytes_cache: Vec<u8>,
-    pub positions_filled: usize,
+    pub fixed_count: usize,
     as_of_tx: Option<u64>,
     value_attr_type: Option<u32>,
     current_active_key: Option<Vec<u8>>,
     at_end: bool,
     history_mode: bool,
     pub positions: Vec<usize>,
-    pub frame_stack: Vec<Value>,
 }
 
 // V2Scanner is single-threaded but must be Send to be wrapped in
@@ -97,16 +96,15 @@ impl V2Scanner {
             cursor: Arc::new(RefCell::new(InvalidCursor)),
             index_name: index_name.to_ascii_uppercase(),
             idx_order,
-            prefix_values: Vec::new(),
+            saved_values: Vec::new(),
             prefix_bytes_cache: Vec::new(),
-            positions_filled: 0,
+            fixed_count: 0,
             as_of_tx,
             value_attr_type,
             current_active_key: None,
             at_end: true,
             history_mode: false,
             positions: Vec::new(),
-            frame_stack: Vec::new(),
         }
     }
 
@@ -126,75 +124,20 @@ impl V2Scanner {
         !self.at_end || self.current_active_key.is_some()
     }
 
-    pub fn push_prefix_at(&mut self, pos_in_idx: usize, val: &Value) {
-        let pos_name = self
-            .idx_order
-            .get(pos_in_idx)
-            .map(|s| s.as_str())
-            .unwrap_or("v")
-            .to_string();
-        // Replace if this position already has a value
-        if let Some(existing) = self.prefix_values.iter_mut().find(|(p, _)| p == &pos_name) {
-            existing.1 = val.clone();
-        } else {
-            self.prefix_values.push((pos_name, val.clone()));
-            self.positions_filled += 1;
-        }
+    pub fn save_value(&mut self, pos_idx: usize, val: &Value) {
+        self.saved_values.push((pos_idx, val.clone()));
+        self.fixed_count += 1;
     }
 
-    pub fn pop_prefix(&mut self) {
-        self.prefix_values.pop();
-        self.positions_filled = self.positions_filled.saturating_sub(1);
+    pub fn pop_saved_value(&mut self) {
+        self.fixed_count = self.fixed_count.saturating_sub(1);
+        self.saved_values.pop();
     }
 
-    fn passes_filters(&self, key: &[u8]) -> bool {
-        let leading_count = {
-            let mut count = 0;
-            for pos_name in &self.idx_order {
-                if self.prefix_values.iter().any(|(name, _)| name == pos_name) {
-                    count += 1;
-                } else {
-                    break;
-                }
-            }
-            count
-        };
-        for (pos_name, val) in &self.prefix_values {
-            let p_idx = self.idx_order.iter().position(|s| s == pos_name).unwrap_or(0);
-            if p_idx < leading_count {
-                continue;
-            }
-            let start = self.value_start(key, p_idx);
-            let end = self.value_end(key, p_idx);
-            if end > key.len() {
-                return false;
-            }
-            let key_slice = &key[start..end];
-            let encoded = match pos_name.as_str() {
-                "a" => (val.raw_int() as u32).to_be_bytes().to_vec(),
-                "e" => (val.raw_int() as u64).to_be_bytes().to_vec(),
-                "v" => {
-                    if self.value_attr_type == Some(DB_TYPE_REF) {
-                        (val.raw_int() as u64).to_be_bytes().to_vec()
-                    } else if self.is_unordered() {
-                        encode_variable_unordered(val)
-                    } else {
-                        encode_bound_value(val)
-                    }
-                }
-                _ => encode_bound_value(val),
-            };
-            if key_slice != encoded.as_slice() {
-                return false;
-            }
-        }
-        true
-    }
-
-    pub fn build_prefix_bytes(&mut self) {
+    pub fn build_prefix_from_saved(&mut self) {
         let mut buf = Vec::new();
-        for pos_name in &self.idx_order {
-            let pv = match self.prefix_values.iter().find(|(name, _)| name == pos_name) {
+        for (pos_idx, pos_name) in self.idx_order.iter().enumerate() {
+            let pv = match self.saved_values.iter().find(|(idx, _)| *idx == pos_idx) {
                 Some((_, v)) => v,
                 None => break,
             };
@@ -220,13 +163,18 @@ impl V2Scanner {
         self.prefix_bytes_cache = buf;
     }
 
-    pub fn attr_id_from_prefix(&self) -> Option<u32> {
-        for (pos_name, val) in &self.prefix_values {
-            if pos_name == "a" {
-                return Some(val.raw_int() as u32);
-            }
+    pub fn attr_id_from_prefix_bytes(&self) -> Option<u32> {
+        let off = match self.index_name.as_str() {
+            "EAVT" | "VAET" => 8usize,
+            "AEVT" | "AVET" => 0usize,
+            _ => return None,
+        };
+        let key = &self.prefix_bytes_cache;
+        if key.len() >= off + 4 {
+            Some(u32::from_be_bytes(key[off..off + 4].try_into().ok()?))
+        } else {
+            None
         }
-        None
     }
 
     pub fn attr_id_from_key(&self) -> Option<u32> {
@@ -246,10 +194,6 @@ impl V2Scanner {
 
     pub fn value_attr_type(&self) -> Option<u32> {
         self.value_attr_type
-    }
-
-    pub fn prefix_values_is_empty(&self) -> bool {
-        self.prefix_values.is_empty()
     }
 
     pub fn set_value_attr_type(&mut self, vt: Option<u32>) {
@@ -304,14 +248,7 @@ impl V2Scanner {
     }
 
     pub fn next_free_pos(&self) -> usize {
-        let prefix_names: std::collections::HashSet<&str> =
-            self.prefix_values.iter().map(|(n, _)| n.as_str()).collect();
-        for (idx, name) in self.idx_order.iter().enumerate() {
-            if !prefix_names.contains(name.as_str()) && !self.positions.contains(&idx) {
-                return idx;
-            }
-        }
-        0
+        self.positions.len() + self.fixed_count
     }
 
     pub fn pop_position(&mut self) {
@@ -462,11 +399,7 @@ impl V2Scanner {
             }
             "t" => {
                 if let Extracted::Int(n) = raw {
-                    let tx_eid = spier_transactor::resolver_consts::make_entity_id(
-                        spier_transactor::resolver_consts::PART_TX,
-                        n,
-                    );
-                    Value::Int64(tx_eid as i64)
+                    Value::Int64(n as i64)
                 } else {
                     Value::Int64(0)
                 }
@@ -543,17 +476,20 @@ impl V2Scanner {
             return;
         }
 
-        let bound_prefix: Option<Vec<u8>> = self.current_active_key.as_ref().map(|k| {
-            let end = self.value_start(k, pos_idx);
-            k[..end].to_vec()
-        });
-
         while self.cursor.borrow().is_valid() {
             let first_key = self.cursor.borrow().current_key().unwrap().to_vec();
             if first_key.len() < 8 {
                 self.cursor.borrow_mut().step();
                 continue;
             }
+            let bound_prefix: Option<Vec<u8>> = {
+                let end = self.value_start(&first_key, pos_idx);
+                if end <= first_key.len() {
+                    Some(first_key[..end].to_vec())
+                } else {
+                    None
+                }
+            };
             if let Some(ref bp) = bound_prefix {
                 let bs = self.value_start(&first_key, pos_idx).min(bp.len());
                 if bs != bp.len() || first_key[..bp.len()] != bp[..] {
@@ -594,9 +530,7 @@ impl V2Scanner {
                 }
 
                 if self.history_mode || !retracted {
-                    if self.passes_filters(&key) {
-                        found_key = Some(key.clone());
-                    }
+                    found_key = Some(key.clone());
                 }
 
                 crate::engine::opcodes::skip_group_call();

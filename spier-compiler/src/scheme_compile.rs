@@ -589,7 +589,6 @@ fn build_triejoin_scheme(
     leaf_body: SExpr,
 ) -> Result<(SchemeProgram, SelectSchemeMeta), String> {
     let ordered_vars = &plan.ordered_vars;
-    let num_depths = ordered_vars.len();
 
     let (var_names_list, var_id_map) = build_var_names_and_id_map(plan);
     let depth_var_pairs: Vec<(usize, usize)> = ordered_vars
@@ -597,10 +596,6 @@ fn build_triejoin_scheme(
         .enumerate()
         .map(|(d, name)| (d, *var_id_map.get(name).unwrap()))
         .collect();
-
-    let mut stmts: Vec<SExpr> = Vec::new();
-    let mut prefix_stmts: Vec<SExpr> = Vec::new();
-    let mut inner_fixed_stmts: Vec<SExpr> = Vec::new();
 
     // Build let* bindings for scanners: (s0 (scanner-open INDEX_NAME [history]))
     let mut scanner_bindings: Vec<SExpr> = Vec::new();
@@ -618,40 +613,9 @@ fn build_triejoin_scheme(
             SExpr::Symbol(scanner_name.clone()),
             SExpr::List(open_args),
         ]));
-
-        // Split bound_ints into contiguous (before first gap) and inner (after first gap)
-        let v2_order: Vec<&str> = ip.idx_order.iter().map(|s| s.as_str()).collect();
-        let mut has_gap = false;
-        for pos_name in &v2_order {
-            if let Some(pv) = ip.bound_ints.get(*pos_name) {
-                let val_expr = match pv {
-                    PlanValue::Value(Value::Text(name)) if *pos_name == "a" => {
-                        SExpr::List(vec![
-                            SExpr::Symbol("intern-a".into()),
-                            SExpr::Str(name.clone()),
-                        ])
-                    }
-                    _ => plan_value_to_sexpr(pv),
-                };
-                let stmt = SExpr::List(vec![
-                    SExpr::Symbol("prefix-push".into()),
-                    SExpr::Symbol(format!("s{ip_idx}")),
-                    val_expr,
-                    SExpr::Str(pos_name.to_string()),
-                ]);
-                if has_gap {
-                    inner_fixed_stmts.push(stmt);
-                } else {
-                    prefix_stmts.push(stmt);
-                }
-            } else {
-                has_gap = true;
-            }
-        }
     }
 
     // Build per-depth range trees from plan.range_bounds.
-    // Each depth's ranges become a boolean tree: (and (op val) ...) or (or branch1 branch2)
     let depth_ranges: HashMap<usize, SExpr> = plan.range_bounds.iter()
         .filter_map(|(var_name, branches)| {
             let depth = ordered_vars.iter().position(|v| v == var_name)?;
@@ -660,48 +624,95 @@ fn build_triejoin_scheme(
         })
         .collect();
 
-    let depth_groups = build_depth_groups(plan);
+    // Determine canonical position order from first clause's idx_order.
+    // Process in reverse (innermost first) so nesting is correct.
+    let canonical_order: Vec<&str> = plan.iter_plans.first()
+        .map(|ip| ip.idx_order.iter().map(|s| s.as_str()).collect())
+        .unwrap_or_default();
 
-    // Build scanner configs per depth: ((s0 "e") (s1 "t")) with position names from var_depths
-    // Build scanner configs per depth: (s0 s1) — bare refs
-    let mut depth_scanners: Vec<Vec<SExpr>> = Vec::new();
-    for depth in 0..num_depths {
-        let args: Vec<SExpr> = depth_groups.get(&depth)
-            .map(|cids| cids.iter()
-                .filter(|&&cid| plan.iter_plans[cid].var_depths.iter().any(|&(d, _)| d == depth))
-                .map(|&cid| SExpr::Symbol(format!("s{cid}")))
-                .collect())
-            .unwrap_or_default();
-        depth_scanners.push(args);
+    // Pre-compute bind value expressions per clause per position.
+    // bind_vals[ip_idx][pos_name] = Option<SExpr>
+    let mut bind_vals: Vec<HashMap<&str, SExpr>> = vec![HashMap::new(); plan.iter_plans.len()];
+    for (ip_idx, ip) in plan.iter_plans.iter().enumerate() {
+        for (pos_name, pv) in &ip.bound_ints {
+            let val_expr = match pv {
+                PlanValue::Value(Value::Text(name)) if *pos_name == "a" => {
+                    SExpr::List(vec![
+                        SExpr::Symbol("intern-a".into()),
+                        SExpr::Str(name.clone()),
+                    ])
+                }
+                _ => plan_value_to_sexpr(pv),
+            };
+            bind_vals[ip_idx].insert(pos_name.as_str(), val_expr);
+        }
     }
 
     let mut body = leaf_body;
 
-    // Inner depth-run with equality range for non-contiguous bound values
-    for stmt in inner_fixed_stmts.iter().rev() {
-        if let SExpr::List(ref parts) = stmt {
-            if parts.len() >= 3 {
-                let scanner_ref = parts[1].clone();
-                let val = parts[2].clone();
+    for pos_name in canonical_order.iter().rev() {
+        if *pos_name == "added" {
+            continue;
+        }
+
+        // Collect scanners and operations at this position.
+        let mut bind_group: Vec<(SExpr, SExpr)> = Vec::new(); // (scanner, val_expr)
+        let mut scan_group: Vec<(SExpr, usize, String)> = Vec::new(); // (scanner, depth, var_name)
+
+        for (ip_idx, ip) in plan.iter_plans.iter().enumerate() {
+            if !ip.idx_order.iter().any(|p| p == pos_name) {
+                continue;
+            }
+            let scanner = SExpr::Symbol(format!("s{ip_idx}"));
+
+            if let Some(val_expr) = bind_vals[ip_idx].get(pos_name) {
+                bind_group.push((scanner, val_expr.clone()));
+            } else if let Some(&(depth, _)) = ip.var_depths.iter().find(|&&(_, ref p)| p == pos_name) {
+                let var_name = ordered_vars[depth].clone();
+                scan_group.push((scanner, depth, var_name));
+            }
+        }
+
+        // Emit depth-fixed for binds (grouped by value).
+        if !bind_group.is_empty() {
+            let mut by_val: Vec<(SExpr, Vec<SExpr>)> = Vec::new();
+            for (scanner, val) in &bind_group {
+                if let Some(existing) = by_val.iter_mut().find(|(v, _)| *v == *val) {
+                    existing.1.push(scanner.clone());
+                } else {
+                    by_val.push((val.clone(), vec![scanner.clone()]));
+                }
+            }
+            for (val, scanners) in by_val {
                 body = SExpr::List(vec![
-                    SExpr::Symbol("depth-run".into()),
-                    SExpr::List(vec![scanner_ref]),
-                    SExpr::List(vec![SExpr::Symbol("=".into()), val]),
-SExpr::List(vec![SExpr::Symbol("lambda".into()), SExpr::List(vec![SExpr::Symbol("_".into())]), body]),
+                    SExpr::Symbol("depth-fixed".into()),
+                    SExpr::List(scanners),
+                    val,
+                    SExpr::List(vec![SExpr::Symbol("lambda".into()), SExpr::List(vec![]), body]),
                 ]);
             }
         }
-    }
 
-    for depth in (0..num_depths).rev() {
-        let scanner_args = &depth_scanners[depth];
-        let ranges = depth_ranges.get(&depth).cloned().unwrap_or(SExpr::List(vec![]));
-        body = SExpr::List(vec![
-            SExpr::Symbol("depth-run".into()),
-            SExpr::List(scanner_args.clone()),
-            ranges,
-SExpr::List(vec![SExpr::Symbol("lambda".into()), SExpr::List(vec![SExpr::Symbol(ordered_vars[depth].clone())]), body]),
-        ]);
+        // Emit depth-run for scans (grouped by depth).
+        if !scan_group.is_empty() {
+            let mut by_depth: Vec<(usize, Vec<SExpr>, String)> = Vec::new();
+            for (scanner, depth, var_name) in &scan_group {
+                if let Some(existing) = by_depth.iter_mut().find(|(d, _, _)| *d == *depth) {
+                    existing.1.push(scanner.clone());
+                } else {
+                    by_depth.push((*depth, vec![scanner.clone()], var_name.clone()));
+                }
+            }
+            for (depth, scanners, var_name) in by_depth {
+                let ranges = depth_ranges.get(&depth).cloned().unwrap_or(SExpr::List(vec![]));
+                body = SExpr::List(vec![
+                    SExpr::Symbol("depth-run".into()),
+                    SExpr::List(scanners),
+                    ranges,
+                    SExpr::List(vec![SExpr::Symbol("lambda".into()), SExpr::List(vec![SExpr::Symbol(var_name)]), body]),
+                ]);
+            }
+        }
     }
 
     // Emit probe: if plan.lookups has a fully-bound lookup pattern,
@@ -744,42 +755,13 @@ SExpr::List(vec![SExpr::Symbol("lambda".into()), SExpr::List(vec![SExpr::Symbol(
         ]);
     }
 
-    // Outer depth-fixed for contiguous prefix bound values (outside depth-runs)
-    for stmt in prefix_stmts.iter().rev() {
-        if let SExpr::List(ref parts) = stmt {
-            if parts.len() >= 3 {
-                let scanner_ref = parts[1].clone();
-                let val = parts[2].clone();
-                body = SExpr::List(vec![
-                    SExpr::Symbol("depth-fixed".into()),
-                    SExpr::List(vec![scanner_ref]),
-                    val,
-SExpr::List(vec![SExpr::Symbol("lambda".into()), SExpr::List(vec![]), body]),
-                ]);
-            }
-        }
-    }
-
-    stmts.push(body);
-
-    // Build the full body: (let* (scanner bindings) body)
-    let inner_body = if stmts.len() == 1 {
-        stmts.remove(0)
-    } else {
-        SExpr::List({
-            let mut v = vec![SExpr::Symbol("begin".into())];
-            v.extend(stmts);
-            v
-        })
-    };
-
     let full_body = if scanner_bindings.is_empty() {
-        inner_body
+        body
     } else {
         SExpr::List(vec![
             SExpr::Symbol("let*".into()),
             SExpr::List(scanner_bindings),
-            inner_body,
+            body,
         ])
     };
 
@@ -790,19 +772,6 @@ SExpr::List(vec![SExpr::Symbol("lambda".into()), SExpr::List(vec![]), body]),
     };
 
     Ok((SchemeProgram::new(full_body).with_param_count(0), meta))
-}
-
-fn build_depth_groups(plan: &QueryPlanResult) -> HashMap<usize, Vec<usize>> {
-    let mut depth_groups: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (ip_idx, ip) in plan.iter_plans.iter().enumerate() {
-        for &d in &ip.active_depths {
-            if !ip.var_depths.iter().any(|&(vd, _)| vd == d) {
-                continue;
-            }
-            depth_groups.entry(d).or_default().push(ip_idx);
-        }
-    }
-    depth_groups
 }
 
 fn build_projection(

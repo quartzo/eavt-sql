@@ -359,7 +359,6 @@ Frame::DepthRunBody => {
                     None => continue,
                 };
                 let stage_key = dr.stage_key;
-                eprintln!("DepthRunBody: stage_key={stage_key} depth_runs.len={} body.len={}", state.depth_runs.len(), dr.body.len());
 
                 let mut sids: Vec<SExpr> = Vec::new();
                 for config in &dr.scanner_configs {
@@ -934,7 +933,9 @@ fn process_value(
             Ok(EvalResult::Value(val))
         }
         Frame::DepthRunBody => {
-            state.stack.push(Frame::DepthRunBody);
+            if !state.depth_runs.is_empty() {
+                state.stack.push(Frame::DepthRunBody);
+            }
             Ok(EvalResult::Pushed)
         }
         Frame::LetBindings {
