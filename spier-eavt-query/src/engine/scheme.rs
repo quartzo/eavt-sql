@@ -379,8 +379,7 @@ impl SelectSchemeHostFns {
             let mut all_equal = true;
             for scanner in scanners {
                 let s = scanner.lock().unwrap();
-                let pos = s.current_position();
-                if let Some(v) = s.extract_value(pos) {
+                if let Some(v) = s.extract_current() {
                     match &max_val {
                         None => max_val = Some(v),
                         Some(mv) if v != *mv => {
@@ -398,8 +397,7 @@ impl SelectSchemeHostFns {
                 for scanner in scanners {
                     let needs_seek = {
                         let s = scanner.lock().unwrap();
-                        let pos = s.current_position();
-                        matches!(s.extract_value(pos), Some(v) if v < *mv)
+                        matches!(s.extract_current(), Some(v) if v < *mv)
                     };
                     if needs_seek {
                         let mut s = scanner.lock().unwrap();
@@ -430,8 +428,7 @@ impl SelectSchemeHostFns {
         for _ in 0..max_iter {
             let cur = {
                 let scanner = scanners[0].lock().unwrap();
-                let pos = scanner.current_position();
-                match scanner.extract_value(pos) {
+                match scanner.extract_current() {
                     Some(v) => v,
                     None => return false,
                 }
@@ -456,14 +453,12 @@ impl SelectSchemeHostFns {
                         if lo_open {
                             let at_lo = {
                                 let scanner = scanners[0].lock().unwrap();
-                                let pos = scanner.current_position();
-                                scanner.extract_value(pos).map_or(false, |v| &v == lo)
+                                scanner.extract_current().map_or(false, |v| &v == lo)
                             };
                             if at_lo {
                                 for scanner in scanners {
                                     let mut s = scanner.lock().unwrap();
-                                    let pos = s.current_position();
-                                    s.advance_to_active_at(pos);
+                                    s.advance_to_active_at();
                                 }
                                 if !Self::leap_converge(scanners) { return false; }
                             }
@@ -528,8 +523,7 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
             "scanner-read" => {
                 let scanner = extract_scanner(&args[0])?;
                 let s = scanner.lock().unwrap();
-                let pos = s.current_position();
-                match s.extract_value(pos) {
+                match s.extract_current() {
                     Some(val) => Ok(EvalStep::Done(value_to_sexpr(&val).unwrap_or(SExpr::Void))),
                     None => Ok(EvalStep::Done(SExpr::Void)),
                 }
@@ -541,8 +535,7 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                 let scanner = extract_scanner(&args[0])?;
                 let _var_id = expect_int(&args[1])? as usize;
                 let mut s = scanner.lock().unwrap();
-                let pos_idx = s.next_free_pos();
-                let is_reentry = s.push_position(pos_idx);
+                let is_reentry = s.push_position();
                 if !is_reentry {
                     if !s.is_open() {
                         if let Some(aid) = s.attr_id_from_prefix_bytes() {
@@ -561,7 +554,7 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                             )),
                         };
                         s.set_cursor(cursor);
-                        s.advance_to_active_at(pos_idx);
+                        s.advance_to_active_at();
                         if s.value_attr_type().is_none() {
                             if let Some(aid) = s.attr_id_from_key() {
                                 let vt = self.engine.value_type_for(aid);
@@ -569,8 +562,8 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                             }
                         }
                     } else {
-                        s.seek_to_current_group_start(pos_idx);
-                        s.advance_to_active_at(pos_idx);
+                        s.seek_to_current_group_start();
+                        s.advance_to_active_at();
                     }
                     s.clear_at_end();
                     if let Some(aid) = s.attr_id_from_key() {
@@ -613,8 +606,7 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                 let mut min_val: Option<Value> = None;
                 for (i, sm) in scanners.iter().enumerate() {
                     let s = sm.lock().unwrap();
-                    let pos = s.current_position();
-                    let val = s.extract_value(pos);
+                    let val = s.extract_current();
                     match &min_val {
                         None => { min_val = val.clone(); min_idx = i; }
                         Some(mv) => {
@@ -655,8 +647,7 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                     let scanner = extract_scanner(&args[i])?;
                     let val = sexpr_to_value(&args[n - 1]).map_err(|e| he(e))?;
                     let mut s = scanner.lock().unwrap();
-                    let pos = s.next_free_pos();
-                    s.save_value(pos, &val);
+                    s.save_value(&val);
                 }
                 Ok(EvalStep::Done(SExpr::Void))
             }
