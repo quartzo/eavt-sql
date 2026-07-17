@@ -191,15 +191,16 @@ impl PositionStack {
         self.stack.len()
     }
 
-    /// Prefixo restritivo para `advance` na posição `pos_idx`.
+    /// Prefixo restritivo para `advance` na posição corrente (topo da pilha).
     ///
     /// No original o bound era derivado da chave ativa atual
-    /// (`current_active_key[..value_start(pos_idx)]`), o que permite avançar
+    /// (`current_active_key[..value_start(pos)]`), o que permite avançar
     /// iterativamente dentro da mesma posição. Quando não há chave ativa (primeira
     /// vez / primeiro nível) usamos o prefixo do topo da pilha (grupo pai).
-    pub fn bound_prefix(&self, value_start: impl Fn(usize) -> usize, pos_idx: usize) -> Option<Vec<u8>> {
+    pub fn bound_prefix(&self, value_start: impl Fn(usize) -> usize) -> Option<Vec<u8>> {
+        let pos = self.current_position();
         if let Some(key) = self.current_active_key.as_ref() {
-            let end = value_start(pos_idx).min(key.len());
+            let end = value_start(pos).min(key.len());
             Some(key[..end].to_vec())
         } else {
             self.top_prefix().map(|p| p.to_vec())
@@ -401,7 +402,6 @@ impl V2Scanner {
     }
 
     pub fn seek_to_current_group_start(&mut self) {
-        let pos_idx = self.current_position();
         let key = match self.pos.current_active_key() {
             Some(k) => k.to_vec(),
             None => {
@@ -409,7 +409,7 @@ impl V2Scanner {
                 return;
             }
         };
-        let vs = self.value_start(&key, pos_idx);
+        let vs = self.value_start(&key);
         let target = key[..vs].to_vec();
         self.pos.cursor().borrow_mut().seek(&target);
         self.pos.set_at_end(false);
@@ -418,12 +418,11 @@ impl V2Scanner {
     /// Empilha a próxima posição varrida, salvando o prefixo atual da chave
     /// ativa. Retorna `true` se a posição já estava na pilha (reentrada).
     pub fn push_position(&mut self) -> bool {
-        let pos_idx = self.pos.next_free_pos();
         let prefix = self
             .pos
             .current_active_key()
             .map(|k| {
-                let vs = self.value_start(k, pos_idx);
+                let vs = self.value_start(k);
                 k[..vs].to_vec()
             })
             .unwrap_or_default();
@@ -432,10 +431,6 @@ impl V2Scanner {
 
     pub fn current_position(&self) -> usize {
         self.pos.current_position()
-    }
-
-    fn next_free_pos(&self) -> usize {
-        self.pos.next_free_pos()
     }
 
     pub fn pop_position(&mut self) {
@@ -450,14 +445,16 @@ impl V2Scanner {
         self.pos.at_end()
     }
 
-    /// Nome da coluna na posição `pos_idx` de `idx_order` ("e"/"a"/"v"/"t"/
-    /// "added"). `pos_idx` deve estar na faixa `[0, idx_order.len() + 1]`
-    /// (as posições `len` e `len+1` são "t" e "added"). Fora disso é uso
-    /// inválido de `pos_idx` e provoca pânico com mensagem clara.
-    fn pos_name(&self, pos_idx: usize) -> &str {
+    /// Nome da coluna na posição corrente (topo da pilha) de `idx_order`
+    /// ("e"/"a"/"v"/"t"/"added"). A posição é derivada do topo da pilha:
+    /// posições `[0, idx_order.len())` mapeiam para os nomes de `idx_order`;
+    /// posições `len` e `len+1` são "t" e "added". Fora disso é estado
+    /// inválido e provoca pânico com mensagem clara.
+    fn pos_name(&self) -> &str {
+        let pos_idx = self.current_position();
         assert!(
             pos_idx < self.pos.idx_order().len() + 2,
-            "pos_idx {pos_idx} fora da faixa válida [0, {}] de idx_order {:?}",
+            "posição {pos_idx} fora da faixa válida [0, {}] de idx_order {:?}",
             self.pos.idx_order().len() + 1,
             self.pos.idx_order()
         );
@@ -485,8 +482,11 @@ impl V2Scanner {
         is_unordered_attr(self.value_attr_type)
     }
 
-    fn value_start(&self, key: &[u8], pos_idx: usize) -> usize {
-        let pos_name = self.pos_name(pos_idx);
+    /// Offset de início do valor na posição corrente dentro de `key`. Posições
+    /// além de `idx_order` (t/added) caem no sufixo (últimos 8 bytes).
+    fn value_start(&self, key: &[u8]) -> usize {
+        let pos_idx = self.current_position();
+        let pos_name = self.pos_name();
         if pos_idx >= self.pos.idx_order().len() || pos_name == "t" || pos_name == "added" {
             return key.len() - 8;
         }
@@ -522,12 +522,13 @@ impl V2Scanner {
         }
     }
 
-    fn value_end(&self, key: &[u8], pos_idx: usize) -> usize {
+    fn value_end(&self, key: &[u8]) -> usize {
+        let pos_idx = self.current_position();
         if pos_idx >= self.pos.idx_order().len() {
             return key.len();
         }
-        let pos_name = self.pos_name(pos_idx);
-        let start = self.value_start(key, pos_idx);
+        let pos_name = self.pos_name();
+        let start = self.value_start(key);
         match pos_name {
             "e" => start + 8,
             "a" => start + 4,
@@ -542,8 +543,9 @@ impl V2Scanner {
         }
     }
 
-    fn extract_raw(&self, key: &[u8], pos_idx: usize) -> Extracted {
-        let pos_name = self.pos_name(pos_idx);
+    fn extract_raw(&self, key: &[u8]) -> Extracted {
+        let pos_name = self.pos_name();
+        let pos_idx = self.current_position();
         if pos_idx >= self.pos.idx_order().len() || pos_name == "t" || pos_name == "added" {
             let suffix = Self::extract_suffix(key);
             let (t, retracted) = decode_suffix(suffix);
@@ -553,9 +555,8 @@ impl V2Scanner {
                 Extracted::Int(t)
             };
         }
-        let pos_name = self.pos_name(pos_idx);
-        let start = self.value_start(key, pos_idx);
-        let end = self.value_end(key, pos_idx);
+        let start = self.value_start(key);
+        let end = self.value_end(key);
         match pos_name {
             "a" => {
                 Extracted::Int(u32::from_be_bytes(key[start..start + 4].try_into().unwrap()) as u64)
@@ -575,25 +576,133 @@ impl V2Scanner {
         }
     }
 
-    /// Extrai o valor na posição corrente (topo da pilha). Substitui o
-    /// `extract_value(current_position())` da API antiga.
-    pub fn extract_current(&self) -> Option<Value> {
-        self.extract_value(self.current_position())
+    /// Dump de debug para inspeção aberta da chave ativa: lista todas as
+    /// colunas decodificadas por nome (idx_order + "t" + "added"). Substitui o
+    /// antigo `extract_value(pos_idx)`, que exigia um índice solto.
+    #[allow(dead_code)]
+    pub fn dump_key(&self) -> Option<Vec<(String, Value)>> {
+        let key = self.pos.current_active_key()?;
+        let n = self.pos.idx_order().len();
+        let mut out: Vec<(String, Value)> = Vec::with_capacity(n + 2);
+        for (i, name) in self.pos.idx_order().iter().enumerate() {
+            out.push((name.clone(), self.decode_at(key, i)));
+        }
+        out.push(("t".to_string(), self.decode_at(key, n)));
+        out.push(("added".to_string(), self.decode_at(key, n + 1)));
+        Some(out)
     }
 
-    /// Extrai o valor na posição `pos_idx` (usado pelos testes para inspecionar
-    /// colunas arbitrárias da chave ativa). `pos_idx` deve estar na faixa
-    /// `[0, idx_order.len())` — fora disso é mal uso e provoca pânico.
-    pub(crate) fn extract_value(&self, pos_idx: usize) -> Option<Value> {
-        assert!(
-            pos_idx < self.pos.idx_order().len(),
-            "extract_value: pos_idx {pos_idx} fora da faixa [0, {}) de idx_order {:?}",
-            self.pos.idx_order().len(),
-            self.pos.idx_order()
-        );
+    /// Decodifica a coluna no índice `pos_idx` da chave (uso interno do dump).
+    #[allow(dead_code)]
+    fn decode_at(&self, key: &[u8], pos_idx: usize) -> Value {
+        let pos_name = if pos_idx >= self.pos.idx_order().len() {
+            if pos_idx == self.pos.idx_order().len() {
+                "t"
+            } else {
+                "added"
+            }
+        } else {
+            self.pos.idx_order().get(pos_idx).map(|s| s.as_str()).unwrap_or("v")
+        };
+        if pos_idx >= self.pos.idx_order().len() || pos_name == "t" || pos_name == "added" {
+            let suffix = Self::extract_suffix(key);
+            let (t, retracted) = decode_suffix(suffix);
+            return if pos_name == "added" {
+                Value::Bool(if retracted { 0 } else { 1 })
+            } else {
+                Value::Int64(t as i64)
+            };
+        }
+        let start = self.value_start_at(key, pos_idx);
+        let end = self.value_end_at(key, pos_idx);
+        match pos_name {
+            "a" => Value::Int64(
+                u32::from_be_bytes(key[start..start + 4].try_into().unwrap()) as i64,
+            ),
+            "e" => Value::entity_id(u64::from_be_bytes(key[start..start + 8].try_into().unwrap())),
+            _ => {
+                if self.is_variable_value(key.len()) {
+                    let raw = Extracted::Bytes(key[start..end].to_vec());
+                    self.decode_v(&raw, key)
+                } else {
+                    let raw = Extracted::Int(u64::from_be_bytes(key[start..start + 8].try_into().unwrap()));
+                    self.decode_v(&raw, key)
+                }
+            }
+        }
+    }
+
+    /// Offset de início do valor na posição `pos_idx` (helper de dump, índice
+    /// passado explicitamente apenas para iteração por nome).
+    #[allow(dead_code)]
+    fn value_start_at(&self, key: &[u8], pos_idx: usize) -> usize {
+        let pos_name = if pos_idx >= self.pos.idx_order().len() {
+            "t"
+        } else {
+            self.pos.idx_order().get(pos_idx).map(|s| s.as_str()).unwrap_or("v")
+        };
+        if pos_idx >= self.pos.idx_order().len() || pos_name == "t" || pos_name == "added" {
+            return key.len() - 8;
+        }
+        match self.index_name.as_str() {
+            "EAVT" => match pos_idx {
+                0 => 0,
+                1 => 8,
+                _ => 12,
+            },
+            "AEVT" => match pos_idx {
+                0 => 0,
+                1 => 4,
+                _ => 12,
+            },
+            "AVET" => match pos_idx {
+                0 => 0,
+                1 => 4,
+                _ => {
+                    let vs = 4usize;
+                    if self.is_variable_value(key.len()) {
+                        find_v_end(key, vs, self.is_unordered())
+                    } else {
+                        vs + 8
+                    }
+                }
+            },
+            "VAET" => match pos_idx {
+                0 => 0,
+                1 => 8,
+                _ => 12,
+            },
+            _ => 12,
+        }
+    }
+
+    /// Offset de fim do valor na posição `pos_idx` (helper de dump).
+    #[allow(dead_code)]
+    fn value_end_at(&self, key: &[u8], pos_idx: usize) -> usize {
+        if pos_idx >= self.pos.idx_order().len() {
+            return key.len();
+        }
+        let pos_name = self.pos.idx_order().get(pos_idx).map(|s| s.as_str()).unwrap_or("v");
+        let start = self.value_start_at(key, pos_idx);
+        match pos_name {
+            "e" => start + 8,
+            "a" => start + 4,
+            "v" => {
+                if self.is_variable_value(key.len()) {
+                    find_v_end(key, start, self.is_unordered())
+                } else {
+                    start + 8
+                }
+            }
+            _ => key.len(),
+        }
+    }
+
+    /// Extrai o valor na posição corrente (topo da pilha).
+    pub fn extract_current(&self) -> Option<Value> {
         let key = self.pos.current_active_key()?;
-        let raw = self.extract_raw(key, pos_idx);
-        let pos_name = self.pos_name(pos_idx);
+        let raw = self.extract_raw(key);
+        let pos_name = self.pos_name();
         Some(match pos_name {
             "e" => {
                 if let Extracted::Int(n) = raw {
@@ -662,15 +771,14 @@ impl V2Scanner {
         } else {
             None
         };
-        let pos_idx = self.current_position();
-        self.advance_to_active_at_inner(pos_idx);
+        self.advance_to_active_at_inner();
         if let Some(t0) = t0 {
             crate::engine::opcodes::scanner_advance_elapsed(t0.elapsed().as_nanos() as u64);
         }
     }
 
-    fn advance_to_active_at_inner(&mut self, pos_idx: usize) {
-        let pos_name = self.pos_name(pos_idx);
+    fn advance_to_active_at_inner(&mut self) {
+        let pos_name = self.pos_name();
 
         if pos_name == "added" {
             if self.pos.current_active_key().is_some() {
@@ -685,13 +793,13 @@ impl V2Scanner {
         let is_t_pos = pos_name == "t";
 
         if self.history_mode && is_t_pos {
-            self.advance_history_each(pos_idx);
+            self.advance_history_each();
             return;
         }
 
         let bound_prefix: Option<Vec<u8>> = self
             .pos
-            .bound_prefix(|p| self.value_start(self.pos.current_active_key().unwrap_or(&[]), p), pos_idx);
+            .bound_prefix(|_| self.value_start(self.pos.current_active_key().unwrap_or(&[])));
 
         while self.pos.cursor().borrow().is_valid() {
             let first_key = self.pos.cursor().borrow().current_key().unwrap().to_vec();
@@ -700,13 +808,13 @@ impl V2Scanner {
                 continue;
             }
             if let Some(ref bp) = bound_prefix {
-                let bs = self.value_start(&first_key, pos_idx).min(bp.len());
+                let bs = self.value_start(&first_key).min(bp.len());
                 if bs != bp.len() || first_key[..bp.len()] != bp[..] {
                     self.pos.set_at_end(true);
                     return;
                 }
             }
-            let first_raw = self.extract_raw(&first_key, pos_idx);
+            let first_raw = self.extract_raw(&first_key);
             let group_end = first_key.len() - 8;
             let mut cur_group = first_key[..group_end].to_vec();
             let mut found_key: Option<Vec<u8>> = None;
@@ -725,7 +833,7 @@ impl V2Scanner {
                     cur_group = key[..ge].to_vec();
                 }
 
-                let raw = self.extract_raw(&key, pos_idx);
+                let raw = self.extract_raw(&key);
                 if raw != first_raw {
                     break;
                 }
@@ -760,12 +868,12 @@ impl V2Scanner {
         self.pos.set_at_end(true);
     }
 
-    fn advance_history_each(&mut self, pos_idx: usize) {
+    fn advance_history_each(&mut self) {
         let as_of_tx = self.as_of_tx;
 
         let bound_prefix: Option<Vec<u8>> = self
             .pos
-            .bound_prefix(|p| self.value_start(self.pos.current_active_key().unwrap_or(&[]), p), pos_idx);
+            .bound_prefix(|_| self.value_start(self.pos.current_active_key().unwrap_or(&[])));
 
         while self.pos.cursor().borrow().is_valid() {
             let key = self.pos.cursor().borrow().current_key().unwrap().to_vec();
@@ -774,7 +882,7 @@ impl V2Scanner {
                 continue;
             }
             if let Some(ref bp) = bound_prefix {
-                let bs = self.value_start(&key, pos_idx).min(bp.len());
+                let bs = self.value_start(&key).min(bp.len());
                 if bs != bp.len() || key[..bp.len()] != bp[..] {
                     self.pos.set_at_end(true);
                     return;
@@ -798,22 +906,20 @@ impl V2Scanner {
     }
 
     pub fn leap_next_at(&mut self) {
-        let pos_idx = self.current_position();
-        let pos_name = self.pos_name(pos_idx);
+        let pos_name = self.pos_name();
         if pos_name == "added" {
             self.pos.set_at_end(true);
             return;
         }
         if let Some(key) = self.pos.current_active_key().map(|k| k.to_vec()) {
-            let raw = self.extract_raw(&key, pos_idx);
+            let raw = self.extract_raw(&key);
             self.seek_past_value_at(&raw);
         }
         self.advance_to_active_at();
     }
 
     fn seek_past_value_at(&mut self, current_raw: &Extracted) {
-        let pos_idx = self.current_position();
-        let pos_name = self.pos_name(pos_idx);
+        let pos_name = self.pos_name();
         let key = match self.pos.current_active_key() {
             Some(k) => k.to_vec(),
             None => {
@@ -821,7 +927,7 @@ impl V2Scanner {
                 return;
             }
         };
-        let vs = self.value_start(&key, pos_idx);
+        let vs = self.value_start(&key);
 
         let mut target = key[..vs].to_vec();
 
@@ -884,20 +990,19 @@ impl V2Scanner {
     }
 
     pub fn seek_to_value(&mut self, value: &Value) {
-        let pos_idx = self.current_position();
         let t0 = if crate::engine::opcodes::debug_timing_enabled() {
             Some(std::time::Instant::now())
         } else {
             None
         };
-        self.seek_to_value_inner(pos_idx, value);
+        self.seek_to_value_inner(value);
         if let Some(t0) = t0 {
             crate::engine::opcodes::scanner_seek_elapsed(t0.elapsed().as_nanos() as u64);
         }
     }
 
-    fn seek_to_value_inner(&mut self, pos_idx: usize, value: &Value) {
-        let pos_name = self.pos_name(pos_idx);
+    fn seek_to_value_inner(&mut self, value: &Value) {
+        let pos_name = self.pos_name();
         let key = match self.pos.current_active_key() {
             Some(k) => k.to_vec(),
             None => {
@@ -905,7 +1010,7 @@ impl V2Scanner {
                 return;
             }
         };
-        let vs = self.value_start(&key, pos_idx);
+        let vs = self.value_start(&key);
         let mut target = key[..vs].to_vec();
 
         match pos_name {
@@ -1498,6 +1603,17 @@ mod v2_tests {
         buf
     }
 
+    /// Inspeciona uma coluna da chave ativa por nome (dump de debug aberto).
+    fn col(scanner: &V2Scanner, name: &str) -> i64 {
+        scanner
+            .dump_key()
+            .unwrap()
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.raw_int())
+            .unwrap()
+    }
+
     #[test]
     fn test_v2_scanner_advance_eavt() {
         let t1 = 1000u64;
@@ -1517,18 +1633,15 @@ mod v2_tests {
         scanner.push_position();
         scanner.advance_to_active_at();
         assert!(!scanner.at_end());
-        let val = scanner.extract_value(1).unwrap();
-        assert_eq!(val.raw_int(), 1);
+        assert_eq!(col(&scanner, "v"), 1);
 
         scanner.advance_to_active_at();
         assert!(!scanner.at_end());
-        let val = scanner.extract_value(1).unwrap();
-        assert_eq!(val.raw_int(), 2);
+        assert_eq!(col(&scanner, "v"), 2);
 
         scanner.advance_to_active_at();
         assert!(!scanner.at_end());
-        let val = scanner.extract_value(1).unwrap();
-        assert_eq!(val.raw_int(), 3);
+        assert_eq!(col(&scanner, "v"), 3);
 
         scanner.advance_to_active_at();
         assert!(scanner.at_end());
@@ -1548,11 +1661,9 @@ mod v2_tests {
         scanner.push_position();
         scanner.advance_to_active_at();
         assert!(!scanner.at_end());
-        let v_val = scanner.extract_value(1).unwrap();
-        assert_eq!(v_val.raw_int(), 42);
+        assert_eq!(col(&scanner, "v"), 42);
 
-        let e_val = scanner.extract_value(2).unwrap();
-        assert_eq!(e_val.raw_int(), 777);
+        assert_eq!(col(&scanner, "e"), 777);
     }
 
     #[test]
@@ -1574,8 +1685,7 @@ mod v2_tests {
         scanner.push_position();
         scanner.advance_to_active_at();
         assert!(!scanner.at_end());
-        let val = scanner.extract_value(1).unwrap();
-        assert_eq!(val.raw_int(), 6);
+        assert_eq!(col(&scanner, "v"), 6);
 
         scanner.advance_to_active_at();
         assert!(scanner.at_end());
