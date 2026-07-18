@@ -1166,11 +1166,16 @@ fn eval_depth_fixed_frame(
     Ok(EvalResult::Pushed)
 }
 
-/// (scanner-iterate scanner-expr (param) [:ranges ranges-expr] body...)
+/// (scanner-iterate scanner-expr-or-list (param) [:ranges ranges-expr] body...)
 ///
-/// Single-scanner iteration without lambda/closure. Binds `param` directly
-/// in the current Environment. Reuses the `DepthRunBody` frame handler for
-/// the loop — zero duplicated loop logic.
+/// Single-scanner iteration or multi-scanner leapfrog triejoin. Binds `param`
+/// directly in the current Environment to the converged value (read from
+/// scanners[0]). Reuses the `DepthRunBody` frame handler for the loop.
+///
+/// `scanner-expr-or-list` may be either a single scanner expression or a
+/// list of scanner expressions `(s1 s2 ...)`. With multiple scanners, the
+/// leapfrog converge logic in `scheme-leap-init` / `scheme-leap-next` only
+/// emits when ALL scanners are positioned at the same value (intersection).
 ///
 /// The optional `:ranges ranges-expr` keyword pair injects a flat ranges
 /// value (produced by `ranges-create`) into scheme-leap-init / scheme-leap-next,
@@ -1185,10 +1190,14 @@ fn eval_scanner_iterate_frame(
     if items.len() < 4 {
         return Err(EvalError::Arity {
             name: "scanner-iterate".into(),
-            expected: "(scanner-iterate scanner-expr (param) [:ranges ranges-expr] body...+)",
+            expected: "(scanner-iterate scanner-expr-or-list (param) [:ranges ranges-expr] body...+)",
         });
     }
-    let scanner_expr = &items[1];
+    // items[1]: single scanner-expr OR non-empty list of scanner-exprs.
+    let scanner_exprs: Vec<SExpr> = match &items[1] {
+        SExpr::List(list) if !list.is_empty() => list.clone(),
+        single => vec![single.clone()],
+    };
     let params = match &items[2] {
         SExpr::List(p) if !p.is_empty() => p,
         _ => {
@@ -1239,7 +1248,7 @@ fn eval_scanner_iterate_frame(
     if body_exprs.is_empty() {
         return Err(EvalError::Arity {
             name: "scanner-iterate".into(),
-            expected: "(scanner-iterate scanner-expr (param) [:ranges ranges-expr] body...+)",
+            expected: "(scanner-iterate scanner-expr-or-list (param) [:ranges ranges-expr] body...+)",
         });
     }
 
@@ -1250,35 +1259,42 @@ fn eval_scanner_iterate_frame(
         None => SExpr::List(vec![]),
     };
 
-    // Eval scanner-expr → resource.
-    // The cursor was already opened by scanner-open and is ready to use.
-    let scanner_val = eval_recursive(scanner_expr, env, host, tracer)?;
+    // Eval each scanner-expr → resource.
+    let mut scanner_vals: Vec<SExpr> = Vec::with_capacity(scanner_exprs.len());
+    for expr in &scanner_exprs {
+        let sv = eval_recursive(expr, env, host, tracer)?;
+        scanner_vals.push(sv);
+    }
 
-    // scanner-seek-prefix: push_position (sets bound_prefix = prefix_bytes_cache)
-    // + advance_to_active_at (finds first key matching prefix, or at_end).
-    // Does NOT reopen the cursor — on second call, cursor is past prefix → at_end.
-    expect_done(host, "scanner-seek-prefix", &[scanner_val.clone()])?;
+    // scanner-seek-prefix on EVERY scanner (positions cursor at prefix start).
+    for sv in &scanner_vals {
+        expect_done(host, "scanner-seek-prefix", &[sv.clone()])?;
+    }
 
-    // scheme-leap-init(0, scanner, ranges) — checks if cursor has an active key
-    // within the prefix. If cursor is past the prefix (second iterate), returns
-    // false. When ranges is non-empty, apply_ranges also filters/positions.
-    let leap_args = vec![SExpr::Int(0), scanner_val.clone(), ranges_val.clone()];
+    // scheme-leap-init(0, scanners..., ranges) — leapfrog converge on first
+    // value; with non-empty ranges, also filters/positions to the range.
+    let mut leap_args = vec![SExpr::Int(0)];
+    leap_args.extend(scanner_vals.iter().cloned());
+    leap_args.push(ranges_val.clone());
     let ok = expect_done(host, "scheme-leap-init", &leap_args)?;
     if !is_truthy(&ok) {
-        // Scanner exhausted for this prefix — pop the position and return.
-        expect_done(host, "depth-cleanup", &[scanner_val])?;
+        // No intersection (or scanner exhausted) — cleanup all and return.
+        for sv in &scanner_vals {
+            expect_done(host, "depth-cleanup", &[sv.clone()])?;
+        }
         return Ok(EvalResult::Value(SExpr::Void));
     }
 
-    // scanner-read → bind param directly in env (no closure)
-    let val = expect_done(host, "scanner-read", &[scanner_val.clone()])?;
+    // Bind param from scanners[0] — after converge, all scanners hold the
+    // same value at the join position, so reading from any one is equivalent.
+    let val = expect_done(host, "scanner-read", &[scanner_vals[0].clone()])?;
     env.define(param_name.clone(), val);
 
     // Push DepthRunFrame — the DepthRunBody handler reuses this for the loop.
     let stage_key = state.depth_runs.len() as i64;
     state.depth_runs.push(DepthRunFrame {
         stage_key,
-        scanner_configs: vec![scanner_val],
+        scanner_configs: scanner_vals,
         body: body_exprs.clone(),
         captured_env: HashMap::new(),
         phase: DepthRunPhase::Body,

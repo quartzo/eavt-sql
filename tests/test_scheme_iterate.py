@@ -574,3 +574,172 @@ def test_iterate_ref_round_trip_via_scanner_iterate(engine):
     assert rows == [(target_eid,)], (
         f"REF value should round-trip as {target_eid}, got {rows}"
     )
+
+
+# ── Multi-scanner leapfrog triejoin ──────────────────────────────────────────
+
+
+def _setup_two_entities_with_tag_x(e: EAVTEngine, vals1: list[int], vals2: list[int]):
+    """Declare tag.x MANY LONG and create two entities with the given values."""
+    e.run_scheme('(declare-attr "tag.x" "LONG" #t #f)')
+    saves1 = " ".join(f'(save eid "tag.x" {v})' for v in vals1)
+    saves2 = " ".join(f'(save eid "tag.x" {v})' for v in vals2)
+    eid1 = e.run_scheme(
+        f'(let* ((eid (alloc-entity))) {saves1} (result eid))'
+    )[0][0]
+    eid2 = e.run_scheme(
+        f'(let* ((eid (alloc-entity))) {saves2} (result eid))'
+    )[0][0]
+    aid = e._handle.lookup_attr("tag.x")
+    return eid1, eid2, aid
+
+
+def test_iterate_multi_two_scanners_intersection(engine):
+    """Two scanners on different eids emit only the intersection of values.
+
+    eid1 has [10, 20, 30], eid2 has [20, 30, 40] → leapfrog converges only
+    on 20 and 30.
+    """
+    eid1, eid2, aid = _setup_two_entities_with_tag_x(engine, [10, 20, 30], [20, 30, 40])
+    rows = engine.run_scheme_select(
+        f'(let* ((s1 (scanner-open "EAVT")) '
+        f'       (s2 (scanner-open "EAVT"))) '
+        f'(scanner-push s1 {eid1}) (scanner-push s1 {aid}) '
+        f'(scanner-push s2 {eid2}) (scanner-push s2 {aid}) '
+        f'(scanner-iterate (s1 s2) (v) (result-row v)))'
+    )
+    assert [r[0] for r in rows] == [20, 30]
+
+
+def test_iterate_multi_no_intersection_empty(engine):
+    """Scanners with disjoint value sets emit nothing."""
+    eid1, eid2, aid = _setup_two_entities_with_tag_x(engine, [1, 2, 3], [100, 200])
+    rows = engine.run_scheme_select(
+        f'(let* ((s1 (scanner-open "EAVT")) '
+        f'       (s2 (scanner-open "EAVT"))) '
+        f'(scanner-push s1 {eid1}) (scanner-push s1 {aid}) '
+        f'(scanner-push s2 {eid2}) (scanner-push s2 {aid}) '
+        f'(scanner-iterate (s1 s2) (v) (result-row v)))'
+    )
+    assert rows == []
+
+
+def test_iterate_multi_three_way_join(engine):
+    """Three scanners converge only on values present in all three."""
+    engine.run_scheme('(declare-attr "tag.x" "LONG" #t #f)')
+    aid = engine._handle.lookup_attr("tag.x")
+    eids = []
+    for vals in ([10, 20, 30], [20, 30, 40], [30, 40, 50]):
+        saves = " ".join(f'(save eid "tag.x" {v})' for v in vals)
+        eid = engine.run_scheme(
+            f'(let* ((eid (alloc-entity))) {saves} (result eid))'
+        )[0][0]
+        eids.append(eid)
+    e0, e1, e2 = eids
+    rows = engine.run_scheme_select(
+        f'(let* ((s0 (scanner-open "EAVT")) '
+        f'       (s1 (scanner-open "EAVT")) '
+        f'       (s2 (scanner-open "EAVT"))) '
+        f'(scanner-push s0 {e0}) (scanner-push s0 {aid}) '
+        f'(scanner-push s1 {e1}) (scanner-push s1 {aid}) '
+        f'(scanner-push s2 {e2}) (scanner-push s2 {aid}) '
+        f'(scanner-iterate (s0 s1 s2) (v) (result-row v)))'
+    )
+    assert [r[0] for r in rows] == [30]
+
+
+def test_iterate_multi_with_ranges(engine):
+    """`:ranges` applies to the converged value across all scanners."""
+    eid1, eid2, aid = _setup_two_entities_with_tag_x(engine, [10, 20, 30, 50], [20, 30, 50, 70])
+    rows = engine.run_scheme_select(
+        f'(let* ((s1 (scanner-open "EAVT")) '
+        f'       (s2 (scanner-open "EAVT")) '
+        f'       (r0 (ranges-create (>= 30)))) '
+        f'(scanner-push s1 {eid1}) (scanner-push s1 {aid}) '
+        f'(scanner-push s2 {eid2}) (scanner-push s2 {aid}) '
+        f'(scanner-iterate (s1 s2) (v) :ranges r0 (result-row v)))'
+    )
+    # Intersection = [20, 30, 50]; filtered by >= 30 → [30, 50]
+    assert [r[0] for r in rows] == [30, 50]
+
+
+def test_iterate_multi_single_value_in_each(engine):
+    """Both scanners have a single matching value → emits that one value."""
+    eid1, eid2, aid = _setup_two_entities_with_tag_x(engine, [42], [42])
+    rows = engine.run_scheme_select(
+        f'(let* ((s1 (scanner-open "EAVT")) '
+        f'       (s2 (scanner-open "EAVT"))) '
+        f'(scanner-push s1 {eid1}) (scanner-push s1 {aid}) '
+        f'(scanner-push s2 {eid2}) (scanner-push s2 {aid}) '
+        f'(scanner-iterate (s1 s2) (v) (result-row v)))'
+    )
+    assert rows == [(42,)]
+
+
+def test_iterate_multi_cross_index_ref_join(engine):
+    """Join across two different indices using REF values.
+
+    Setup: tag.x is a REF-type attribute.
+      child.tag.x     = [parent1, parent2]      (stored in "v" as REF)
+      parent1.tag.x   = [parent1]               (parent1 self-ref)
+
+    Scanners:
+      s_eavt: prefix [child, aid] → iterates "v" (the ref values: parent1, parent2)
+      s_aevt: prefix [aid]        → iterates "e" (entities having tag.x: parent1, child)
+
+    Leapfrog converges only on entities that are BOTH a ref of child AND have
+    tag.x themselves — intersection is {parent1}.
+    """
+    engine.run_scheme('(declare-attr "tag.x" "REF" #t #f)')
+    aid = engine._handle.lookup_attr("tag.x")
+    rows = engine.run_scheme(
+        '(let* ((p1 (alloc-entity)) '
+        '       (p2 (alloc-entity)) '
+        '       (c  (alloc-entity))) '
+        '(save c "tag.x" p1) '
+        '(save c "tag.x" p2) '
+        '(save p1 "tag.x" p1) '
+        '(result p1 p2 c))'
+    )
+    p1, p2, c = rows[0]
+
+    rows = engine.run_scheme_select(
+        f'(let* ((s_eavt (scanner-open "EAVT")) '
+        f'       (s_aevt (scanner-open "AEVT"))) '
+        f'(scanner-push s_eavt {c}) (scanner-push s_eavt {aid}) '
+        f'(scanner-push s_aevt {aid}) '
+        f'(scanner-iterate (s_eavt s_aevt) (v) (result-row v)))'
+    )
+    vals = [r[0] for r in rows]
+    assert p1 in vals, f"parent1 ({p1}) should be in intersection, got {vals}"
+    assert p2 not in vals, f"parent2 ({p2}) should NOT be in intersection, got {vals}"
+
+
+def test_iterate_multi_empty_list_errors(engine):
+    """Empty scanner list `()` is an error."""
+    with pytest.raises(ValueError):
+        engine.run_scheme_select(
+            '(let* ((s (scanner-open "EAVT"))) '
+            '(scanner-iterate () (v) (result-row v)))'
+        )
+
+
+def test_iterate_multi_single_atom_backward_compat(engine):
+    """A single atom (not list) is equivalent to a single-element list.
+    Existing single-scanner programs keep working unchanged."""
+    eid, aid = _setup_long_data(engine, [5, 10, 15])
+    # atom form
+    rows_atom = engine.run_scheme_select(
+        f'(let* ((s (scanner-open "EAVT"))) '
+        f'(scanner-push s {eid}) '
+        f'(scanner-push s {aid}) '
+        f'(scanner-iterate s (v) (result-row v)))'
+    )
+    # single-element list form
+    rows_list = engine.run_scheme_select(
+        f'(let* ((s (scanner-open "EAVT"))) '
+        f'(scanner-push s {eid}) '
+        f'(scanner-push s {aid}) '
+        f'(scanner-iterate (s) (v) (result-row v)))'
+    )
+    assert rows_atom == rows_list == [(5,), (10,), (15,)]
