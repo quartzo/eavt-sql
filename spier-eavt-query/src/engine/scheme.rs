@@ -329,7 +329,7 @@ impl SchemeHostFns {
                             if at_lo {
                                 for scanner in scanners {
                                     let mut s = scanner.lock().unwrap();
-                                    s.advance_to_active_at();
+                                    s.leap_next_at();
                                 }
                                 if !Self::leap_converge(scanners) { return false; }
                             }
