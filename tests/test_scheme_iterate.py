@@ -306,3 +306,85 @@ def test_iterate_repush_does_not_reset_cursor(engine):
     # Second iteration still empty — cursor is past the prefix, push/pop
     # didn't reposition it
     assert vals == ["a", "b", "c"]
+
+
+# ── Adjacent-prefix transition ────────────────────────────────────────────────
+
+
+def test_iterate_adjacent_prefix_chain(engine):
+    """Iterate P1, then immediately-adjacent P2, then P3; verify the cursor
+    stops exactly at the first key of each next prefix (the transition point).
+
+    Setup uses three attributes declared consecutively so their aids are
+    lexicographically adjacent (aid_b == aid_a + 1, aid_c == aid_b + 1) on
+    the same entity. In the EAVT index (idx_order = [e, a, v, t, added])
+    the datoms are emitted as:
+
+        [eid, aid_a, "aa", t1, ...]
+        [eid, aid_b, "bb", t2, ...]
+        [eid, aid_c, "cc", t3, ...]
+
+    with NO keys between adjacent pairs.
+
+    After iterating P1 = [eid, aid_a] the cursor must be positioned exactly
+    at [eid, aid_b, "bb", ...] — the first key outside P1. When the prefix
+    is then changed to P2 = [eid, aid_b], `scanner-seek-prefix` (called
+    internally by `scanner-iterate`) recognizes the current cursor key as
+    belonging to P2 and continues without reopen. Same applies for P2 → P3.
+
+    Diagnostic value:
+      - p2 == []           → cursor went at_end after P1 (transition broken)
+      - p2 contains "aa"   → cursor didn't advance during P1 iteration
+      - p2 skips "bb"      → cursor overshot the first P2 key (off-by-one)
+      - same diagnostics apply to p3, proving the state survives multiple
+        consecutive transitions (not just the first one).
+    """
+    engine.run_scheme('(declare-attr "tag.a" "STRING" #f #f)')
+    engine.run_scheme('(declare-attr "tag.b" "STRING" #f #f)')
+    engine.run_scheme('(declare-attr "tag.c" "STRING" #f #f)')
+    aid_a = engine._handle.lookup_attr("tag.a")
+    aid_b = engine._handle.lookup_attr("tag.b")
+    aid_c = engine._handle.lookup_attr("tag.c")
+    assert aid_b == aid_a + 1, f"aids not adjacent: aid_a={aid_a}, aid_b={aid_b}"
+    assert aid_c == aid_b + 1, f"aids not adjacent: aid_b={aid_b}, aid_c={aid_c}"
+
+    eid = engine.run_scheme(
+        '(let* ((eid (alloc-entity))) '
+        '(save eid "tag.a" "aa") '
+        '(save eid "tag.b" "bb") '
+        '(save eid "tag.c" "cc") '
+        '(result eid))'
+    )[0][0]
+
+    prog = (
+        f'(let* ((s (scanner-open "EAVT"))) '
+        # P1 = [eid, aid_a]
+        f'(scanner-push s {eid}) '
+        f'(scanner-push s {aid_a}) '
+        f'(scanner-iterate s (v) (result-row v "P1")) '
+        # Transition 1: pop both, push P2 = [eid, aid_b] (adjacent)
+        f'(scanner-pop s) '
+        f'(scanner-pop s) '
+        f'(scanner-push s {eid}) '
+        f'(scanner-push s {aid_b}) '
+        f'(scanner-iterate s (v) (result-row v "P2")) '
+        # Transition 2: pop both, push P3 = [eid, aid_c] (adjacent)
+        f'(scanner-pop s) '
+        f'(scanner-pop s) '
+        f'(scanner-push s {eid}) '
+        f'(scanner-push s {aid_c}) '
+        f'(scanner-iterate s (v) (result-row v "P3")))'
+    )
+    rows = engine.run_scheme_select(prog)
+
+    p1_vals = [r[0] for r in rows if r[1] == "P1"]
+    p2_vals = [r[0] for r in rows if r[1] == "P2"]
+    p3_vals = [r[0] for r in rows if r[1] == "P3"]
+
+    assert p1_vals == ["aa"], f"P1 must emit only 'aa', got {p1_vals}"
+    assert p2_vals == ["bb"], (
+        f"P2 must emit 'bb' (cursor must be at transition), got {p2_vals}"
+    )
+    assert p3_vals == ["cc"], (
+        f"P3 must emit 'cc' (cursor must be at transition), got {p3_vals}"
+    )
