@@ -238,3 +238,71 @@ def test_iterate_excludes_retracted(engine):
     vals = [r[0] for r in rows]
     assert "a" not in vals
     assert set(vals) == {"b", "c"}
+
+
+# ── Index exhaustion ─────────────────────────────────────────────────────────
+
+
+def test_iterate_second_call_empty(engine):
+    """After full iteration, a second scanner-iterate yields no rows.
+
+    The cursor is positioned past the prefix range (exhausted). Since
+    scanner-iterate does NOT reopen the cursor, the second call sees
+    the cursor past the prefix → at_end → empty.
+    """
+    eid, aid = _setup_tag_data(engine)
+    prog = (
+        f'(let* ((s (scanner-open "EAVT"))) '
+        f'(scanner-push s {eid}) '
+        f'(scanner-push s {aid}) '
+        f'(scanner-iterate s (v) (result-row v)) '
+        f'(scanner-iterate s (v) (result-row v)))'
+    )
+    rows = engine.run_scheme_select(prog)
+    vals = [r[0] for r in rows]
+    # Second iteration is empty — index exhausted
+    assert vals == ["a", "b", "c"]
+
+
+def test_iterate_read_after_exhaustion_returns_void(engine):
+    """After scanner-iterate completes, scanner-read returns Void (no active key).
+
+    depth-cleanup has popped the position, so the scanner has no active key.
+    scanner-read returns Void, which encodes as 0.
+    """
+    eid, aid = _setup_tag_data(engine)
+    rows = engine.run_scheme_select(
+        f'(let* ((s (scanner-open "EAVT"))) '
+        f'(scanner-push s {eid}) '
+        f'(scanner-push s {aid}) '
+        f'(scanner-iterate s (v) (result-row v)) '
+        f'(result-row (scanner-read s)))'
+    )
+    # Last row is the scanner-read after exhaustion → Void → 0
+    assert rows[-1] == (0,)
+
+
+def test_iterate_repush_does_not_reset_cursor(engine):
+    """After exhaustion, scanner-pop + scanner-push does NOT reposition the cursor.
+
+    scanner-push/scanner-pop only manipulate the prefix — they're orthogonal
+    to the cursor. The cursor stays exhausted. A second scanner-iterate
+    after repush is still empty because the cursor hasn't moved.
+    """
+    eid, aid = _setup_tag_data(engine)
+    prog = (
+        f'(let* ((s (scanner-open "EAVT"))) '
+        f'(scanner-push s {eid}) '
+        f'(scanner-push s {aid}) '
+        f'(scanner-iterate s (v) (result-row v)) '
+        f'(scanner-pop s) '
+        f'(scanner-pop s) '
+        f'(scanner-push s {eid}) '
+        f'(scanner-push s {aid}) '
+        f'(scanner-iterate s (v) (result-row v)))'
+    )
+    rows = engine.run_scheme_select(prog)
+    vals = [r[0] for r in rows]
+    # Second iteration still empty — cursor is past the prefix, push/pop
+    # didn't reposition it
+    assert vals == ["a", "b", "c"]

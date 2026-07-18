@@ -324,6 +324,7 @@ impl spier_scheme::HostFns for SchemeHostFns {
                 | "declare-attr" | "declare-partition"
                 | "scanner-open" | "scanner-init" | "scanner-read"
                 | "scanner-push" | "scanner-pop" | "scanner-prefix"
+                | "scanner-seek-prefix"
                 | "scheme-leap-init" | "scheme-leap-next" | "depth-cleanup"
                 | "intern-a" | "result-row"
                 | "resolve-val" | "attr-name" | "probe-begin"
@@ -340,7 +341,8 @@ impl spier_scheme::HostFns for SchemeHostFns {
             "scanner-open" => {
                 let index_name = expect_str(&args[0])?;
                 let history = args.get(1).map_or(false, |a| matches!(a, SExpr::Bool(true)));
-                let base_order : &[&str] = match index_name.to_ascii_uppercase().as_str() {
+                let upper = index_name.to_ascii_uppercase();
+                let base_order : &[&str] = match upper.as_str() {
                     "EAVT" => &["e", "a", "v"],
                     "AEVT" => &["a", "e", "v"],
                     "AVET" => &["a", "v", "e"],
@@ -353,11 +355,42 @@ impl spier_scheme::HostFns for SchemeHostFns {
                     .collect();
                 let mut scanner = V2Scanner::new(&index_name, idx_order, self.ctx.as_of_tx, None);
                 if history { scanner.set_history_mode(); }
+
+                // Open cursor immediately at the start of the index (empty prefix).
+                // The cursor is ready to use — no separate "init" step required.
+                let cf_id: u32 = match upper.as_str() {
+                    "AEVT" => 1, "AVET" => 2, "VAET" => 3, _ => 0,
+                };
+                let prefix = scanner.prefix_bytes().to_vec();
+                let cursor = match self.engine.open_raw_cursor(cf_id, &prefix) {
+                    Ok(c) => c,
+                    Err(_) => Arc::new(std::cell::RefCell::new(
+                        crate::engine::scanner::InvalidCursor,
+                    )),
+                };
+                scanner.set_cursor(cursor);
+                scanner.advance_to_active_at();
+
                 let resource: Arc<dyn std::any::Any + Send + Sync> = Arc::new(Mutex::new(scanner));
                 Ok(EvalStep::Done(SExpr::Resource(Opaque(resource))))
             }
 
             // -- scanner-init (called by depth-run) --
+
+            // -- Scanner prefix iteration (no cursor reopening) --
+
+            "scanner-seek-prefix" => {
+                /// Lightweight: push prefix_bytes_cache as Scanned + advance_to_active_at.
+                /// Does NOT reopen the cursor — assumes scanner-open already did it.
+                /// Clears current_active_key so bound_prefix uses top_prefix() (the
+                /// pushed prefix), not a stale key from a previous position.
+                let scanner = extract_scanner(&args[0])?;
+                let mut s = scanner.lock().unwrap();
+                let prefix = s.prefix_bytes().to_vec();
+                s.pos_push_scanned_prefix(prefix);
+                s.advance_to_active_at();
+                Ok(EvalStep::Done(SExpr::Void))
+            }
 
             "scanner-read" => {
                 let scanner = extract_scanner(&args[0])?;
@@ -374,41 +407,44 @@ impl spier_scheme::HostFns for SchemeHostFns {
                 let scanner = extract_scanner(&args[0])?;
                 let _var_id = expect_int(&args[1])? as usize;
                 let mut s = scanner.lock().unwrap();
-                let is_reentry = s.push_position();
-                if !is_reentry {
-                    if !s.is_open() {
-                        if let Some(aid) = s.attr_id_from_prefix_bytes() {
-                            let vt = self.engine.value_type_for(aid);
-                            s.set_value_attr_type(vt);
-                        }
-                        s.build_prefix_from_saved();
-                        let cf_id = match s.index_name() {
-                            "EAVT" => 0u32, "AEVT" => 1, "AVET" => 2, "VAET" => 3, _ => 0,
-                        };
-                        let prefix = s.prefix_bytes().to_vec();
-                        let cursor = match self.engine.open_raw_cursor(cf_id, &prefix) {
-                            Ok(c) => c,
-                            Err(_) => Arc::new(std::cell::RefCell::new(
-                                crate::engine::scanner::InvalidCursor,
-                            )),
-                        };
-                        s.set_cursor(cursor);
-                        s.advance_to_active_at();
-                        if s.value_attr_type().is_none() {
-                            if let Some(aid) = s.attr_id_from_key() {
-                                let vt = self.engine.value_type_for(aid);
-                                s.set_value_attr_type(vt);
-                            }
-                        }
-                    } else {
-                        s.seek_to_current_group_start();
-                        s.advance_to_active_at();
-                    }
-                    s.clear_at_end();
-                    if let Some(aid) = s.attr_id_from_key() {
+                // Build prefix from Fixed entries and push as Scanned.
+                // pos_push_scanned_prefix clears current_active_key so bound_prefix
+                // uses top_prefix() (the pushed prefix), not a stale key.
+                s.build_prefix_from_saved();
+                let prefix = s.prefix_bytes().to_vec();
+                s.pos_push_scanned_prefix(prefix);
+                if !s.is_open() {
+                    if let Some(aid) = s.attr_id_from_prefix_bytes() {
                         let vt = self.engine.value_type_for(aid);
                         s.set_value_attr_type(vt);
                     }
+                    let cf_id = match s.index_name() {
+                        "EAVT" => 0u32, "AEVT" => 1, "AVET" => 2, "VAET" => 3, _ => 0,
+                    };
+                    let prefix = s.prefix_bytes().to_vec();
+                    let cursor = match self.engine.open_raw_cursor(cf_id, &prefix) {
+                        Ok(c) => c,
+                        Err(_) => Arc::new(std::cell::RefCell::new(
+                            crate::engine::scanner::InvalidCursor,
+                        )),
+                    };
+                    s.set_cursor(cursor);
+                    s.advance_to_active_at();
+                    if s.value_attr_type().is_none() {
+                        if let Some(aid) = s.attr_id_from_key() {
+                            let vt = self.engine.value_type_for(aid);
+                            s.set_value_attr_type(vt);
+                        }
+                    }
+                } else {
+                    // Cursor already open (from scanner-open). Seek to prefix.
+                    s.seek_to_prefix_start();
+                    s.advance_to_active_at();
+                }
+                s.clear_at_end();
+                if let Some(aid) = s.attr_id_from_key() {
+                    let vt = self.engine.value_type_for(aid);
+                    s.set_value_attr_type(vt);
                 }
                 Ok(EvalStep::Done(SExpr::Void))
             }

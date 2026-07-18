@@ -1194,16 +1194,21 @@ fn eval_scanner_iterate_frame(
     };
     let body_exprs: Vec<SExpr> = items[3..].to_vec();
 
-    // Eval scanner-expr → resource
+    // Eval scanner-expr → resource.
+    // The cursor was already opened by scanner-open and is ready to use.
     let scanner_val = eval_recursive(scanner_expr, env, host, tracer)?;
 
-    // scanner-init(scanner, 0) — opens cursor, positions at first active key
-    expect_done(host, "scanner-init", &[scanner_val.clone(), SExpr::Int(0)])?;
+    // scanner-seek-prefix: push_position (sets bound_prefix = prefix_bytes_cache)
+    // + advance_to_active_at (finds first key matching prefix, or at_end).
+    // Does NOT reopen the cursor — on second call, cursor is past prefix → at_end.
+    expect_done(host, "scanner-seek-prefix", &[scanner_val.clone()])?;
 
-    // scheme-leap-init(0, scanner, ()) — for single scanner, converge is trivial
+    // scheme-leap-init(0, scanner, ()) — checks if cursor has an active key
+    // within the prefix. If cursor is past the prefix (second iterate), returns false.
     let leap_args = vec![SExpr::Int(0), scanner_val.clone(), SExpr::List(vec![])];
     let ok = expect_done(host, "scheme-leap-init", &leap_args)?;
     if !is_truthy(&ok) {
+        // Scanner exhausted for this prefix — pop the position and return.
         expect_done(host, "depth-cleanup", &[scanner_val])?;
         return Ok(EvalResult::Value(SExpr::Void));
     }
@@ -1213,8 +1218,6 @@ fn eval_scanner_iterate_frame(
     env.define(param_name.clone(), val);
 
     // Push DepthRunFrame — the DepthRunBody handler reuses this for the loop.
-    // scanner_configs stores the evaluated Resource so the handler doesn't
-    // need to re-evaluate a Symbol each iteration.
     let stage_key = state.depth_runs.len() as i64;
     state.depth_runs.push(DepthRunFrame {
         stage_key,

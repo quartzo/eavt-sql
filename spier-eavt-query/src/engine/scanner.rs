@@ -393,7 +393,6 @@ impl V2Scanner {
         Some(!retracted)
     }
 
-    #[allow(dead_code)]
     pub fn seek_to_prefix_start(&mut self) {
         let target = self.prefix_bytes_cache.clone();
         self.pos.cursor().borrow_mut().seek(&target);
@@ -417,9 +416,8 @@ impl V2Scanner {
 
     /// Empilha a próxima posição varrida, salvando o prefixo atual da chave
     /// ativa. Retorna `true` se a posição já estava na pilha (reentrada).
-    /// Quando não há chave ativa (primeira entrada), usa `prefix_bytes_cache`
-    /// (que inclui os Fixed entries) como prefixo — assim `bound_prefix`
-    /// filtra corretamente as chaves fora do range do prefixo.
+    /// Usado por depth-run (triejoin) — deriva o prefixo da chave ativa
+    /// para construir incrementalmente o prefixo de busca.
     pub fn push_position(&mut self) -> bool {
         let prefix = self
             .pos
@@ -438,6 +436,18 @@ impl V2Scanner {
 
     pub fn pop_position(&mut self) {
         self.pos.pop();
+    }
+
+    /// Push prefix_bytes_cache as a Scanned entry and clear current_active_key.
+    /// Used by scanner-seek-prefix (scanner-iterate) — orthogonal to depth-run's
+    /// push_position which derives prefix from current_active_key.
+    pub fn pos_push_scanned_prefix(&mut self, prefix: Vec<u8>) {
+        self.pos.set_active_key(None);
+        self.pos.push_scanned(prefix);
+    }
+
+    pub fn clear_active_key(&mut self) {
+        self.pos.set_active_key(None);
     }
 
     pub fn set_cursor(&mut self, cursor: Arc<RefCell<dyn Cursor>>) {
@@ -811,10 +821,23 @@ impl V2Scanner {
                 continue;
             }
             if let Some(ref bp) = bound_prefix {
-                let bs = self.value_start(&first_key).min(bp.len());
-                if bs != bp.len() || first_key[..bp.len()] != bp[..] {
-                    self.pos.set_at_end(true);
-                    return;
+                if bp.is_empty() {
+                    // No prefix constraint — accept all keys.
+                } else {
+                    let cmp_len = bp.len().min(first_key.len());
+                    let key_prefix = &first_key[..cmp_len];
+                    if key_prefix != &bp[..] {
+                        // Key doesn't match prefix.
+                        if key_prefix < &bp[..] {
+                            // Key is before prefix range — seek forward to prefix.
+                            self.pos.cursor().borrow_mut().seek(bp);
+                            continue;
+                        } else {
+                            // Key is past prefix range — index exhausted for this prefix.
+                            self.pos.set_at_end(true);
+                            return;
+                        }
+                    }
                 }
             }
             let first_raw = self.extract_raw(&first_key);
