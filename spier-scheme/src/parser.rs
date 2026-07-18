@@ -187,6 +187,7 @@ impl<'a> Parser<'a> {
         }
 
         if self.pos == digit_start {
+            self.pos = start;
             return self.parse_symbol_rest();
         }
 

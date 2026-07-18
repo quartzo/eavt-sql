@@ -137,6 +137,9 @@ themselves.
 | `lambda` | `(lambda (params...) body...+)` | Create a closure |
 | `print` | `(print [arg...])` | Eval each arg, write them space-separated to stdout + newline, return `Void` |
 | `assert` | `(assert cond [msg])` | If falsy, error with message |
+| `and` | `(and expr...)` | Evaluate left-to-right; if any falsy, return it (short-circuit); else last value |
+| `or` | `(or expr...)` | Evaluate left-to-right; if any truthy, return it (short-circuit); else last value |
+| `not` | `(not expr)` | Return `#t` if expr is falsy, `#f` otherwise |
 | `depth-run` | `(depth-run (scanners...) ranges (lambda (var) body...))` | Leapfrog triejoin loop — see §11.6 |
 | `depth-fixed` | `(depth-fixed (scanners...) value (lambda () body...))` | Fixed prefix scope — see §11.6 |
 
@@ -158,6 +161,19 @@ themselves.
 (print "x" (+ 1 2))
 ; prints: x 3
 ; => Void
+
+; Logic — and/or short-circuit, return the decisive value
+(and 1 2 3)        ; => 3 (last truthy)
+(and #t #f)         ; => #f (first falsy)
+(or #f #f 5)        ; => 5 (first truthy)
+(not 42)            ; => #f (42 is truthy)
+
+; Arithmetic — host functions, variadic with float promotion
+(+ 1 2 3)           ; => 6
+(+ 1 0.5)           ; => 1.5 (float promotion)
+(/ 5 2)             ; => 2.5 (always returns float)
+(< 1 2 3)           ; => #t (chain comparison)
+(= 1 1.0)           ; => #t (numeric equality)
 ```
 
 ### 4.3 Truthiness
@@ -336,7 +352,32 @@ Return marker. Reconstructs the list as `List([Symbol("result"), ...args])`.
 This is used by `SchemeSession::next_batch` to detect the result and pack
 it into the output buffer.
 
-### 5.4 Value Conversion: SExpr ↔ Value
+### 5.4 Arithmetic, Comparison, and Utility Host Functions
+
+These are pure functions (no engine state access):
+
+| Function | Arity | Signature | Description |
+|----------|-------|-----------|-------------|
+| `+` | 2+ | `(+ a b ...)` | Addition; float promotion if any arg is float |
+| `-` | 1+ | `(- a b ...)` | Subtraction (or negation with 1 arg); float promotion |
+| `*` | 2+ | `(* a b ...)` | Multiplication; float promotion |
+| `/` | 2+ | `(/ a b ...)` | Division; **always returns float** |
+| `mod` | 2 | `(mod a b)` | Integer remainder; errors if b=0 |
+| `<` | 2+ | `(< a b ...)` | Strict less-than chain; all numeric |
+| `>` | 2+ | `(> a b ...)` | Strict greater-than chain |
+| `<=` | 2+ | `(<= a b ...)` | Less-or-equal chain |
+| `>=` | 2+ | `(>= a b ...)` | Greater-or-equal chain |
+| `=` | 2+ | `(= a b ...)` | Numeric equality chain (Int=Float ok) |
+| `!=` | 2 | `(!= a b)` | Numeric inequality |
+| `min` | 1+ | `(min a b ...)` | Minimum value; float promotion |
+| `max` | 1+ | `(max a b ...)` | Maximum value; float promotion |
+| `abs` | 1 | `(abs n)` | Absolute value; preserves int/float type |
+
+All numeric hosts compare/converge as `f64` internally. Promotions to
+float happen when any argument is a float; otherwise integer arithmetic
+is preserved.
+
+### 5.5 Value Conversion: SExpr ↔ Value
 
 **SExpr → Value** (`sexpr_to_value`):
 

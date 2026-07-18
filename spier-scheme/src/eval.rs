@@ -111,6 +111,12 @@ pub(crate) enum Frame {
         name: String,
         closure_env: HashMap<String, SExpr>,
     },
+    AndSeq {
+        remaining: Vec<SExpr>,
+    },
+    OrSeq {
+        remaining: Vec<SExpr>,
+    },
     ClosureFrame {
         body: Vec<SExpr>,
         bound_env: HashMap<String, SExpr>,
@@ -490,6 +496,12 @@ Frame::DepthRunBody => {
                     }
                 }
             }
+            Frame::AndSeq { .. } => {
+                unreachable!("AndSeq handled by process_value")
+            }
+            Frame::OrSeq { .. } => {
+                unreachable!("OrSeq handled by process_value")
+            }
         }
     }
 
@@ -725,6 +737,36 @@ fn eval_special_form_frame(
             Ok(EvalResult::Value(SExpr::Void))
         }
 
+        "and" => {
+            if items.len() == 1 {
+                return Ok(EvalResult::Value(SExpr::Bool(true)));
+            }
+            state.stack.push(Frame::AndSeq { remaining: items[2..].to_vec() });
+            state.stack.push(Frame::Eval(items[1].clone()));
+            Ok(EvalResult::Pushed)
+        }
+
+        "or" => {
+            if items.len() == 1 {
+                return Ok(EvalResult::Value(SExpr::Bool(false)));
+            }
+            state.stack.push(Frame::OrSeq { remaining: items[2..].to_vec() });
+            state.stack.push(Frame::Eval(items[1].clone()));
+            Ok(EvalResult::Pushed)
+        }
+
+        "not" => {
+            if items.len() != 2 {
+                return Err(EvalError::Arity {
+                    name: "not".into(),
+                    expected: "(not x)",
+                });
+            }
+            let val = eval_recursive(&items[1], env, host, tracer)?;
+            let result = SExpr::Bool(!is_truthy(&val));
+            Ok(EvalResult::Value(result))
+        }
+
         "lambda" => {
             let result = eval_lambda(items, env)?;
             Ok(EvalResult::Value(result))
@@ -867,6 +909,32 @@ fn process_value(
                 }
                 None => Ok(EvalResult::Value(SExpr::Void)),
             }
+        }
+        Frame::AndSeq { remaining } => {
+            if !is_truthy(&val) {
+                return Ok(EvalResult::Value(val));
+            }
+            if remaining.is_empty() {
+                return Ok(EvalResult::Value(val));
+            }
+            let mut rest = remaining;
+            let next = rest.remove(0);
+            state.stack.push(Frame::AndSeq { remaining: rest });
+            state.stack.push(Frame::Eval(next));
+            Ok(EvalResult::Pushed)
+        }
+        Frame::OrSeq { remaining } => {
+            if is_truthy(&val) {
+                return Ok(EvalResult::Value(val));
+            }
+            if remaining.is_empty() {
+                return Ok(EvalResult::Value(val));
+            }
+            let mut rest = remaining;
+            let next = rest.remove(0);
+            state.stack.push(Frame::OrSeq { remaining: rest });
+            state.stack.push(Frame::Eval(next));
+            Ok(EvalResult::Pushed)
         }
         Frame::SetFrame { name, closure_env } => {
             let mut e = Environment {
@@ -1198,6 +1266,9 @@ fn eval_special_form_recursive(
         "set!" => eval_set(items, env, host, tracer),
         "print" => eval_print(items, env, host, tracer),
         "assert" => eval_assert(items, env, host, tracer),
+        "and" => eval_and(items, env, host, tracer),
+        "or" => eval_or(items, env, host, tracer),
+        "not" => eval_not(items, env, host, tracer),
         "lambda" => eval_lambda(items, env),
         "scanner-iterate" => Err(EvalError::Other(
             "scanner-iterate requires yield-mode evaluation (use SelectSchemeSession)".into(),
@@ -1225,6 +1296,7 @@ fn is_special_form(name: &str) -> bool {
     matches!(
         name,
         "let*" | "let" | "when" | "if" | "begin" | "set!" | "print" | "assert"
+            | "and" | "or" | "not"
             | "lambda" | "scanner-iterate" | "ranges-create"
     )
 }
@@ -1444,6 +1516,66 @@ fn eval_assert(
         return Err(EvalError::Other(format!("assertion: {msg}")));
     }
     Ok(SExpr::Void)
+}
+
+fn eval_and(
+    items: &[SExpr],
+    env: &mut Environment,
+    host: &mut dyn HostFns,
+    tracer: &dyn SchemeTracer,
+) -> Result<SExpr, EvalError> {
+    if items.len() <= 1 {
+        return Ok(SExpr::Bool(true));
+    }
+    let mut result = eval_recursive(&items[1], env, host, tracer)?;
+    if !is_truthy(&result) {
+        return Ok(result);
+    }
+    for item in &items[2..] {
+        result = eval_recursive(item, env, host, tracer)?;
+        if !is_truthy(&result) {
+            return Ok(result);
+        }
+    }
+    Ok(result)
+}
+
+fn eval_or(
+    items: &[SExpr],
+    env: &mut Environment,
+    host: &mut dyn HostFns,
+    tracer: &dyn SchemeTracer,
+) -> Result<SExpr, EvalError> {
+    if items.len() <= 1 {
+        return Ok(SExpr::Bool(false));
+    }
+    let mut result = eval_recursive(&items[1], env, host, tracer)?;
+    if is_truthy(&result) {
+        return Ok(result);
+    }
+    for item in &items[2..] {
+        result = eval_recursive(item, env, host, tracer)?;
+        if is_truthy(&result) {
+            return Ok(result);
+        }
+    }
+    Ok(result)
+}
+
+fn eval_not(
+    items: &[SExpr],
+    env: &mut Environment,
+    host: &mut dyn HostFns,
+    tracer: &dyn SchemeTracer,
+) -> Result<SExpr, EvalError> {
+    if items.len() != 2 {
+        return Err(EvalError::Arity {
+            name: "not".into(),
+            expected: "(not x)",
+        });
+    }
+    let val = eval_recursive(&items[1], env, host, tracer)?;
+    Ok(SExpr::Bool(!is_truthy(&val)))
 }
 
 fn eval_lambda(

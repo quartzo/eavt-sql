@@ -754,22 +754,15 @@ impl spier_scheme::HostFns for SchemeHostFns {
                 if args.len() < 2 {
                     return Err(he("(/) requires at least 2 arguments".to_string()));
                 }
-                let mut any_float = false;
                 let mut result = sexpr_num_to_f64(&args[0])?;
-                any_float = is_float(&args[0]);
                 for arg in &args[1..] {
-                    any_float |= is_float(arg);
                     let n = sexpr_num_to_f64(arg)?;
                     if n == 0.0 {
                         return Err(he("division by zero".to_string()));
                     }
                     result /= n;
                 }
-                Ok(EvalStep::Done(if any_float {
-                    SExpr::Float(result)
-                } else {
-                    SExpr::Int(result as i64)
-                }))
+                Ok(EvalStep::Done(SExpr::Float(result)))
             }
             "mod" => {
                 if args.len() != 2 {
