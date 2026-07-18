@@ -30,7 +30,7 @@ fn cf_name_to_id(name: &str) -> usize {
 
 fn build_ea_prefix(e: u64, a: u32) -> Vec<u8> {
     let mut buf = Vec::with_capacity(12);
-    buf.extend_from_slice(&e.to_be_bytes());
+    buf.extend_from_slice(&keys::encode_int64(e as i64).to_be_bytes());
     buf.extend_from_slice(&a.to_be_bytes());
     buf
 }
@@ -1065,9 +1065,8 @@ mod tests {
     use crate::resolver_consts::{make_entity_id, seq_of, PART_USER};
 
     fn eavt_key(e: u64) -> Vec<u8> {
-        // minimal EAVT key: [e(8)][a(4)][suffix(8)] — only the leading e matters for seeding
         let mut k = Vec::with_capacity(20);
-        k.extend_from_slice(&e.to_be_bytes());
+        k.extend_from_slice(&keys::encode_int64(e as i64).to_be_bytes());
         k.extend_from_slice(&[0u8; 4]);
         k.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE]);
         k
