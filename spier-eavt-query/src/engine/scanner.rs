@@ -893,12 +893,12 @@ impl V2Scanner {
                     found_key = Some(key.clone());
                 }
 
-                crate::engine::opcodes::skip_group_call();
-                self.pos.cursor().borrow_mut().skip_group(ge);
-
                 if found_key.is_some() {
                     break;
                 }
+                // No non-retracted key found in this group — skip to next.
+                crate::engine::opcodes::skip_group_call();
+                self.pos.cursor().borrow_mut().skip_group(ge);
             }
 
             if let Some(bk) = found_key {

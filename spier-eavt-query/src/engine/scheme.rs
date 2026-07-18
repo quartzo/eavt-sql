@@ -117,6 +117,21 @@ fn expect_int(expr: &SExpr) -> Result<i64, spier_scheme::EvalError> {
     }
 }
 
+fn is_float(expr: &SExpr) -> bool {
+    matches!(expr, SExpr::Float(_))
+}
+
+fn sexpr_num_to_f64(expr: &SExpr) -> Result<f64, spier_scheme::EvalError> {
+    match expr {
+        SExpr::Int(n) => Ok(*n as f64),
+        SExpr::Float(f) => Ok(*f),
+        other => Err(spier_scheme::EvalError::Type {
+            expected: "number",
+            got: spier_scheme::write_scheme(other),
+        }),
+    }
+}
+
 fn expect_str(expr: &SExpr) -> Result<String, spier_scheme::EvalError> {
     match expr {
         SExpr::Str(s) => Ok(s.clone()),
@@ -348,6 +363,9 @@ impl spier_scheme::HostFns for SchemeHostFns {
                 | "intern-a" | "result-row"
                 | "resolve-val" | "attr-name"
                 | "dbg-scanners" | "ranges-show"
+                | "+" | "-" | "*" | "/" | "mod"
+                | "<" | ">" | "=" | "!=" | "<=" | ">="
+                | "min" | "max" | "abs"
         )
     }
 
@@ -674,6 +692,228 @@ impl spier_scheme::HostFns for SchemeHostFns {
                     format!("{l}{lo}, {hi}{r}")
                 }).collect();
                 Ok(EvalStep::Done(SExpr::Str(parts.join(", "))))
+            }
+
+            // -- Arithmetic --
+
+            "+" => {
+                if args.len() < 2 {
+                    return Err(he("(+) requires at least 2 arguments".to_string()));
+                }
+                let mut any_float = false;
+                let mut result = sexpr_num_to_f64(&args[0])?;
+                any_float = is_float(&args[0]);
+                for arg in &args[1..] {
+                    any_float |= is_float(arg);
+                    result += sexpr_num_to_f64(arg)?;
+                }
+                Ok(EvalStep::Done(if any_float {
+                    SExpr::Float(result)
+                } else {
+                    SExpr::Int(result as i64)
+                }))
+            }
+            "-" => {
+                if args.is_empty() {
+                    return Err(he("(-) requires at least 1 argument".to_string()));
+                }
+                let mut any_float = is_float(&args[0]);
+                let mut result = sexpr_num_to_f64(&args[0])?;
+                if args.len() == 1 {
+                    result = -result;
+                } else {
+                    for arg in &args[1..] {
+                        any_float |= is_float(arg);
+                        result -= sexpr_num_to_f64(arg)?;
+                    }
+                }
+                Ok(EvalStep::Done(if any_float {
+                    SExpr::Float(result)
+                } else {
+                    SExpr::Int(result as i64)
+                }))
+            }
+            "*" => {
+                if args.len() < 2 {
+                    return Err(he("(*) requires at least 2 arguments".to_string()));
+                }
+                let mut any_float = false;
+                let mut result = sexpr_num_to_f64(&args[0])?;
+                any_float = is_float(&args[0]);
+                for arg in &args[1..] {
+                    any_float |= is_float(arg);
+                    result *= sexpr_num_to_f64(arg)?;
+                }
+                Ok(EvalStep::Done(if any_float {
+                    SExpr::Float(result)
+                } else {
+                    SExpr::Int(result as i64)
+                }))
+            }
+            "/" => {
+                if args.len() < 2 {
+                    return Err(he("(/) requires at least 2 arguments".to_string()));
+                }
+                let mut any_float = false;
+                let mut result = sexpr_num_to_f64(&args[0])?;
+                any_float = is_float(&args[0]);
+                for arg in &args[1..] {
+                    any_float |= is_float(arg);
+                    let n = sexpr_num_to_f64(arg)?;
+                    if n == 0.0 {
+                        return Err(he("division by zero".to_string()));
+                    }
+                    result /= n;
+                }
+                Ok(EvalStep::Done(if any_float {
+                    SExpr::Float(result)
+                } else {
+                    SExpr::Int(result as i64)
+                }))
+            }
+            "mod" => {
+                if args.len() != 2 {
+                    return Err(he("(mod) requires exactly 2 arguments".to_string()));
+                }
+                let a = expect_int(&args[0])?;
+                let b = expect_int(&args[1])?;
+                if b == 0 {
+                    return Err(he("mod: division by zero".to_string()));
+                }
+                Ok(EvalStep::Done(SExpr::Int(a % b)))
+            }
+
+            // -- Comparison --
+
+            "<" => {
+                if args.len() < 2 {
+                    return Ok(EvalStep::Done(SExpr::Bool(true)));
+                }
+                let mut prev = sexpr_num_to_f64(&args[0])?;
+                for arg in &args[1..] {
+                    let cur = sexpr_num_to_f64(arg)?;
+                    if prev >= cur {
+                        return Ok(EvalStep::Done(SExpr::Bool(false)));
+                    }
+                    prev = cur;
+                }
+                Ok(EvalStep::Done(SExpr::Bool(true)))
+            }
+            ">" => {
+                if args.len() < 2 {
+                    return Ok(EvalStep::Done(SExpr::Bool(true)));
+                }
+                let mut prev = sexpr_num_to_f64(&args[0])?;
+                for arg in &args[1..] {
+                    let cur = sexpr_num_to_f64(arg)?;
+                    if prev <= cur {
+                        return Ok(EvalStep::Done(SExpr::Bool(false)));
+                    }
+                    prev = cur;
+                }
+                Ok(EvalStep::Done(SExpr::Bool(true)))
+            }
+            "<=" => {
+                if args.len() < 2 {
+                    return Ok(EvalStep::Done(SExpr::Bool(true)));
+                }
+                let mut prev = sexpr_num_to_f64(&args[0])?;
+                for arg in &args[1..] {
+                    let cur = sexpr_num_to_f64(arg)?;
+                    if prev > cur {
+                        return Ok(EvalStep::Done(SExpr::Bool(false)));
+                    }
+                    prev = cur;
+                }
+                Ok(EvalStep::Done(SExpr::Bool(true)))
+            }
+            ">=" => {
+                if args.len() < 2 {
+                    return Ok(EvalStep::Done(SExpr::Bool(true)));
+                }
+                let mut prev = sexpr_num_to_f64(&args[0])?;
+                for arg in &args[1..] {
+                    let cur = sexpr_num_to_f64(arg)?;
+                    if prev < cur {
+                        return Ok(EvalStep::Done(SExpr::Bool(false)));
+                    }
+                    prev = cur;
+                }
+                Ok(EvalStep::Done(SExpr::Bool(true)))
+            }
+            "=" => {
+                if args.len() < 2 {
+                    return Ok(EvalStep::Done(SExpr::Bool(true)));
+                }
+                let mut prev = sexpr_num_to_f64(&args[0])?;
+                for arg in &args[1..] {
+                    let cur = sexpr_num_to_f64(arg)?;
+                    if (prev - cur).abs() > 0.0 {
+                        return Ok(EvalStep::Done(SExpr::Bool(false)));
+                    }
+                    prev = cur;
+                }
+                Ok(EvalStep::Done(SExpr::Bool(true)))
+            }
+            "!=" => {
+                if args.len() != 2 {
+                    return Err(he("(!=) requires exactly 2 arguments".to_string()));
+                }
+                Ok(EvalStep::Done(SExpr::Bool(
+                    (sexpr_num_to_f64(&args[0])? - sexpr_num_to_f64(&args[1])?).abs() > 0.0,
+                )))
+            }
+
+            // -- Min / Max / Abs --
+
+            "min" => {
+                if args.is_empty() {
+                    return Err(he("(min) requires at least 1 argument".to_string()));
+                }
+                let mut any_float = false;
+                let mut best = sexpr_num_to_f64(&args[0])?;
+                any_float = is_float(&args[0]);
+                for arg in &args[1..] {
+                    any_float |= is_float(arg);
+                    let n = sexpr_num_to_f64(arg)?;
+                    if n < best { best = n; }
+                }
+                Ok(EvalStep::Done(if any_float {
+                    SExpr::Float(best)
+                } else {
+                    SExpr::Int(best as i64)
+                }))
+            }
+            "max" => {
+                if args.is_empty() {
+                    return Err(he("(max) requires at least 1 argument".to_string()));
+                }
+                let mut any_float = false;
+                let mut best = sexpr_num_to_f64(&args[0])?;
+                any_float = is_float(&args[0]);
+                for arg in &args[1..] {
+                    any_float |= is_float(arg);
+                    let n = sexpr_num_to_f64(arg)?;
+                    if n > best { best = n; }
+                }
+                Ok(EvalStep::Done(if any_float {
+                    SExpr::Float(best)
+                } else {
+                    SExpr::Int(best as i64)
+                }))
+            }
+            "abs" => {
+                if args.len() != 1 {
+                    return Err(he("(abs) requires exactly 1 argument".to_string()));
+                }
+                match &args[0] {
+                    SExpr::Int(n) => Ok(EvalStep::Done(SExpr::Int(n.abs()))),
+                    SExpr::Float(f) => Ok(EvalStep::Done(SExpr::Float(f.abs()))),
+                    other => Err(spier_scheme::EvalError::Type {
+                        expected: "number",
+                        got: spier_scheme::write_scheme(other),
+                    }),
+                }
             }
 
             _ => Err(spier_scheme::EvalError::NotFound(name.into())),
