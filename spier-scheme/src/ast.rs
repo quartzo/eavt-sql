@@ -29,11 +29,6 @@ pub enum SExpr {
     Symbol(String),
     List(Vec<SExpr>),
     Resource(Opaque),
-    Closure {
-        params: Vec<String>,
-        body: Vec<SExpr>,
-        env: std::collections::HashMap<String, SExpr>,
-    },
 }
 
 #[derive(Debug, Clone)]

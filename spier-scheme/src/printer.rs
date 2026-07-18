@@ -40,23 +40,6 @@ fn write_expr(out: &mut String, expr: &SExpr) {
             }
             out.push(')');
         }
-        SExpr::Closure { params, body, .. } => {
-            out.push_str("(lambda (");
-            for (i, p) in params.iter().enumerate() {
-                if i > 0 {
-                    out.push(' ');
-                }
-                out.push_str(p);
-            }
-            out.push_str(") ");
-            for (i, b) in body.iter().enumerate() {
-                if i > 0 {
-                    out.push(' ');
-                }
-                write_expr(out, b);
-            }
-            out.push(')');
-        }
     }
 }
 

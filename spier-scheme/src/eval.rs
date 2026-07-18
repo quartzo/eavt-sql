@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::ast::SExpr;
-use crate::host::{HostFns, NullTracer, SchemeTracer};
+use crate::host::{HostFns, SchemeTracer};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum EvalError {
@@ -116,13 +116,6 @@ pub(crate) enum Frame {
     },
     OrSeq {
         remaining: Vec<SExpr>,
-    },
-    ClosureFrame {
-        body: Vec<SExpr>,
-        bound_env: HashMap<String, SExpr>,
-    },
-    RestoreEnv {
-        bindings: HashMap<String, SExpr>,
     },
     DepthRunBody,
 
@@ -342,17 +335,7 @@ fn run_eval(
                 let _ = (name, closure_env);
                 unreachable!("set! should be handled inline")
             }
-            Frame::ClosureFrame { body, bound_env } => {
-                let saved = std::mem::replace(&mut env.bindings, bound_env);
-                state.stack.push(Frame::RestoreEnv { bindings: saved });
-                for expr in body.iter().rev() {
-                    state.stack.push(Frame::Eval(expr.clone()));
-                }
-            }
-            Frame::RestoreEnv { bindings } => {
-                env.bindings = bindings;
-            }
-Frame::DepthRunBody => {
+            Frame::DepthRunBody => {
                 let dr = match state.depth_runs.last() {
                     Some(d) => d.clone(),
                     None => continue,
@@ -521,7 +504,7 @@ fn eval_frame(
 
     match expr {
         SExpr::Void | SExpr::Bool(_) | SExpr::Int(_) | SExpr::Float(_) | SExpr::Str(_)
-        | SExpr::Bytes(_) | SExpr::Resource(_) | SExpr::Closure { .. } => {
+        | SExpr::Bytes(_) | SExpr::Resource(_) => {
             Ok(EvalResult::Value(expr.clone()))
         }
 
@@ -761,11 +744,6 @@ fn eval_special_form_frame(
             Ok(EvalResult::Value(result))
         }
 
-        "lambda" => {
-            let result = eval_lambda(items, env)?;
-            Ok(EvalResult::Value(result))
-        }
-
         "scanner-iterate" => eval_scanner_iterate_frame(items, env, host, tracer, state),
 
         "ranges-create" => {
@@ -817,19 +795,6 @@ fn process_value(
                         SExpr::Symbol(ref name) if host.is_native(name) => {
                             hc(host, name, &[])
                         }
-                        SExpr::Closure { params, body, env: closure_env } => {
-                            if !params.is_empty() {
-                                return Err(EvalError::Arity {
-                                    name: "lambda".into(),
-                                    expected: "matching arity",
-                                });
-                            }
-                            state.stack.push(Frame::ClosureFrame {
-                                body,
-                                bound_env: closure_env,
-                            });
-                            Ok(EvalResult::Pushed)
-                        }
                         _ => Ok(EvalResult::Value(val)),
                     }
                 }
@@ -854,23 +819,6 @@ fn process_value(
                                 EvalResult::Yield(row) => Ok(EvalResult::Yield(row)),
                                 EvalResult::Pushed => Ok(EvalResult::Pushed),
                             }
-                        }
-                        SExpr::Closure { params, body, env: closure_env } => {
-                            if new_args.len() != params.len() {
-                                return Err(EvalError::Arity {
-                                    name: "lambda".into(),
-                                    expected: "matching arity",
-                                });
-                            }
-                            let mut bound_env = closure_env;
-                            for (name, arg) in params.iter().zip(&new_args) {
-                                bound_env.insert(name.clone(), arg.clone());
-                            }
-                            state.stack.push(Frame::ClosureFrame {
-                                body,
-                                bound_env,
-                            });
-                            Ok(EvalResult::Pushed)
                         }
                         _ => Err(EvalError::Other(format!(
                             "cannot apply: {}",
@@ -939,12 +887,6 @@ fn process_value(
                 return Err(EvalError::Unbound(name));
             }
             e.define(name, val.clone());
-            Ok(EvalResult::Value(val))
-        }
-        Frame::ClosureFrame { .. } => {
-            unreachable!("ClosureFrame handled in run_eval main loop")
-        }
-        Frame::RestoreEnv { .. } => {
             Ok(EvalResult::Value(val))
         }
         Frame::DepthRunBody => {
@@ -1192,7 +1134,7 @@ fn is_special_form(name: &str) -> bool {
         name,
         "let*" | "let" | "when" | "if" | "begin" | "set!" | "print" | "assert"
             | "and" | "or" | "not"
-            | "lambda" | "scanner-iterate" | "ranges-create"
+            | "scanner-iterate" | "ranges-create"
     )
 }
 
@@ -1205,7 +1147,7 @@ fn eval_recursive(
 ) -> Result<SExpr, EvalError> {
     match expr {
         SExpr::Void | SExpr::Bool(_) | SExpr::Int(_) | SExpr::Float(_) | SExpr::Str(_)
-        | SExpr::Bytes(_) | SExpr::Resource(_) | SExpr::Closure { .. } => Ok(expr.clone()),
+        | SExpr::Bytes(_) | SExpr::Resource(_) => Ok(expr.clone()),
 
         SExpr::Symbol(name) => env
             .get(name)
@@ -1237,26 +1179,6 @@ fn eval_recursive(
                         args.push(eval_recursive(arg, env, host, tracer)?);
                     }
                     match func {
-                        SExpr::Closure { params, body, env: closure_env } => {
-                            if args.len() != params.len() {
-                                return Err(EvalError::Arity {
-                                    name: "lambda".into(),
-                                    expected: "matching arity",
-                                });
-                            }
-                            let mut inner_env = Environment {
-                                bindings: closure_env.clone(),
-                                depth_counter: 0,
-                            };
-                            for (name, arg) in params.iter().zip(args) {
-                                inner_env.define(name.clone(), arg.clone());
-                            }
-                            let mut result = SExpr::Void;
-                            for expr in &body {
-                                result = eval_recursive(expr, &mut inner_env, host, &NullTracer)?;
-                            }
-                            Ok(result)
-                        }
                         _ => Err(EvalError::Other(format!(
                             "cannot apply outside yield: {}",
                             crate::printer::write_scheme(&func)
@@ -1269,49 +1191,6 @@ fn eval_recursive(
 }
 
 
-fn eval_lambda(
-    items: &[SExpr],
-    env: &Environment,
-) -> Result<SExpr, EvalError> {
-    if items.len() < 2 {
-        return Err(EvalError::Arity {
-            name: "lambda".into(),
-            expected: "(lambda (params...) body...+)",
-        });
-    }
-    let params = match &items[1] {
-        SExpr::List(pairs) => {
-            let mut p = Vec::new();
-            for item in pairs {
-                match item {
-                    SExpr::Symbol(s) => p.push(s.clone()),
-                    _ => {
-                        return Err(EvalError::Type {
-                            expected: "symbol in param list",
-                            got: format!("{item:?}"),
-                        });
-                    }
-                }
-            }
-            p
-        }
-        _ => {
-            return Err(EvalError::Type {
-                expected: "parameter list",
-                got: format!("{:?}", items[1]),
-            });
-        }
-    };
-    if items.len() < 3 {
-        return Err(EvalError::Arity {
-            name: "lambda".into(),
-            expected: "(lambda (params...) body...+)",
-        });
-    }
-    let body = items[2..].to_vec();
-    let captured = env.bindings.clone();
-    Ok(SExpr::Closure { params, body, env: captured })
-}
 
 
 fn sexpr_to_int(expr: &SExpr) -> Result<i64, EvalError> {
@@ -1458,23 +1337,6 @@ mod tests {
         assert!(matches!(run("(+ 1)"), Err(EvalError::Arity { .. })));
     }
 
-    #[test]
-    fn lambda_creates_closure() {
-        let result = run("(lambda () 42)").unwrap();
-        assert!(matches!(result, SExpr::Closure { .. }));
-    }
-
-    #[test]
-    fn lambda_application() {
-        assert_eq!(run("((lambda (x) (+ x 1)) 5)").unwrap(), SExpr::Int(6));
-    }
-
-    #[test]
-    fn lambda_captures_env() {
-        let input = "(let* ((y 10)) ((lambda (x) (+ x y)) 5))";
-        assert_eq!(run(input).unwrap(), SExpr::Int(15));
-    }
-
     // ── yield / resume tests ────────────────────────────────────────
 
     struct YieldingHost {
@@ -1558,26 +1420,6 @@ mod tests {
         let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, &mut state);
         assert!(matches!(r, Ok(EvalStep::Yield(_))));
         assert_eq!(host.rows, vec![vec![1], vec![2]]);
-
-        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, &mut state);
-        assert!(r.is_ok());
-    }
-
-    #[test]
-    fn yield_resume_in_lambda_body() {
-        let input = "((lambda () (begin (result-row 100) (result-row 200))))";
-        let expr = parse(input).unwrap();
-        let mut host = YieldingHost { rows: vec![], yield_after: 1, call_count: 0 };
-        let mut env = Environment::new();
-        let mut state = YieldState::default();
-
-        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, &mut state);
-        assert!(matches!(r, Ok(EvalStep::Yield(_))));
-        assert_eq!(host.rows, vec![vec![100]]);
-
-        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, &mut state);
-        assert!(matches!(r, Ok(EvalStep::Yield(_))));
-        assert_eq!(host.rows, vec![vec![100], vec![200]]);
 
         let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, &mut state);
         assert!(r.is_ok());
