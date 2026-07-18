@@ -402,6 +402,16 @@ impl spier_scheme::HostFns for SchemeHostFns {
                 let prefix = s.prefix_bytes().to_vec();
                 s.pos_push_scanned_prefix(prefix);
                 s.advance_to_active_at();
+                // Discover the attribute's value type from the aid embedded in
+                // the prefix so decode_v picks the correct decoder. This matters
+                // for REF (encode_entity — no sign flip) vs LONG (encode_int64
+                // — sign flip): without it, value_attr_type stays None and REF
+                // values get misdecoded as LONG with an erroneous sign flip.
+                let vt_opt = s.attr_id_from_prefix_bytes()
+                    .and_then(|aid| self.engine.value_type_for(aid));
+                if let Some(vt) = vt_opt {
+                    s.set_value_attr_type(Some(vt));
+                }
                 Ok(EvalStep::Done(SExpr::Void))
             }
 

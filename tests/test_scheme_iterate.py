@@ -544,3 +544,33 @@ def test_iterate_with_ranges_filters_out_everything(engine):
         f'  (result-row v)))'
     )
     assert rows == []
+
+
+# ── REF round-trip regression ────────────────────────────────────────────────
+
+
+def test_iterate_ref_round_trip_via_scanner_iterate(engine):
+    """Regression: REF values read via scanner-iterate must round-trip exactly.
+
+    Before the fix in scanner-seek-prefix, value_attr_type was never set on
+    the scanner-iterate path, so REF values fell into the LONG decoder path
+    which applies decode_int64 (sign flip). The result was that entity IDs
+    like 0x0000400000000001 came back as 0x8000400000000001 (i64 negative).
+    """
+    engine.run_scheme('(declare-attr "ref.x" "REF" #t #f)')
+    aid = engine._handle.lookup_attr("ref.x")
+    target_eid, src_eid = engine.run_scheme(
+        '(let* ((target (alloc-entity)) '
+        '       (src (alloc-entity))) '
+        '(save src "ref.x" target) '
+        '(result target src))'
+    )[0]
+
+    rows = engine.run_scheme_select(
+        f'(let* ((s (scanner-open "EAVT"))) '
+        f'(scanner-push s {src_eid}) (scanner-push s {aid}) '
+        f'(scanner-iterate s (v) (result-row v)))'
+    )
+    assert rows == [(target_eid,)], (
+        f"REF value should round-trip as {target_eid}, got {rows}"
+    )
