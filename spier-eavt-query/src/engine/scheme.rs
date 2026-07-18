@@ -143,6 +143,19 @@ fn value_to_sexpr(val: &Value) -> Result<SExpr, spier_scheme::EvalError> {
     }
 }
 
+/// Format a `Value` for human-readable range display (e.g. `(10, 20]`).
+fn format_value_for_range(val: &Value) -> String {
+    match val {
+        Value::Int64(n) => n.to_string(),
+        Value::Float64(f) => f.to_string(),
+        Value::Bool(b) => (if *b != 0 { "true" } else { "false" }).to_string(),
+        Value::Timestamp(ts) => format!("ts:{ts}"),
+        Value::Text(s) => format!("\"{s}\""),
+        Value::Bytes(b) => format!("bytes({})", b.len()),
+        Value::Unknown(tag, raw) => format!("?(tag={tag},raw={raw})"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SchemeHostFns — unified host functions for the Scheme evaluator
 // ---------------------------------------------------------------------------
@@ -329,7 +342,7 @@ impl spier_scheme::HostFns for SchemeHostFns {
                 | "intern-a" | "result-row"
                 | "resolve-val" | "attr-name" | "probe-begin"
                 | "depth-fixed-begin" | "depth-fixed-end"
-                | "dbg-scanners"
+                | "dbg-scanners" | "ranges-show"
         )
     }
 
@@ -720,6 +733,44 @@ impl spier_scheme::HostFns for SchemeHostFns {
                 let scanner = extract_scanner(&args[0])?;
                 let s = scanner.lock().unwrap();
                 Ok(EvalStep::Done(SExpr::Bytes(s.prefix_bytes().to_vec())))
+            }
+
+            // -- Range debugging --
+
+            "ranges-show" => {
+                if args.len() != 1 {
+                    return Err(he("ranges-show: expected 1 arg (ranges)".to_string()));
+                }
+                let raw_ops = Self::parse_ranges(&args[0])?;
+                if raw_ops.is_empty() {
+                    return Ok(EvalStep::Done(SExpr::Str("(-inf, +inf)".into())));
+                }
+                let mut all_intervals: Vec<(Option<Value>, Option<Value>, i32)> = Vec::new();
+                for branch in &raw_ops {
+                    all_intervals.extend(ops_to_intervals(branch));
+                }
+                let specs: Vec<RangeSpec> = merge_intervals(all_intervals)
+                    .into_iter()
+                    .map(|(lo, hi, flags)| RangeSpec { lo, hi, flags })
+                    .collect();
+                if specs.is_empty() {
+                    return Ok(EvalStep::Done(SExpr::Str("∅ (empty)".into())));
+                }
+                let parts: Vec<String> = specs.iter().map(|spec| {
+                    let lo = match &spec.lo {
+                        None => "-inf".to_string(),
+                        Some(v) => format_value_for_range(v),
+                    };
+                    let hi = match &spec.hi {
+                        None => "+inf".to_string(),
+                        Some(v) => format_value_for_range(v),
+                    };
+                    // None (infinite) bounds are always rendered as open parens.
+                    let l = if spec.lo.is_none() || spec.flags & RANGE_LO_OPEN != 0 { "(" } else { "[" };
+                    let r = if spec.hi.is_none() || spec.flags & RANGE_HI_OPEN != 0 { ")" } else { "]" };
+                    format!("{l}{lo}, {hi}{r}")
+                }).collect();
+                Ok(EvalStep::Done(SExpr::Str(parts.join(", "))))
             }
 
             _ => Err(spier_scheme::EvalError::NotFound(name.into())),

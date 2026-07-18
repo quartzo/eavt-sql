@@ -787,6 +787,17 @@ fn eval_special_form_frame(
 
         "scanner-iterate" => eval_scanner_iterate_frame(items, env, host, tracer, state),
 
+        "ranges-create" => {
+            if items.len() != 2 {
+                return Err(EvalError::Arity {
+                    name: "ranges-create".into(),
+                    expected: "(ranges-create range-tree)",
+                });
+            }
+            let result = process_ranges(&items[1], env, host, tracer)?;
+            Ok(EvalResult::Value(result))
+        }
+
         _ => unreachable!("checked by is_special_form"),
     }
 }
@@ -1354,6 +1365,17 @@ fn eval_special_form_recursive(
         "scanner-iterate" => Err(EvalError::Other(
             "scanner-iterate requires yield-mode evaluation (use SelectSchemeSession)".into(),
         )),
+
+        "ranges-create" => {
+            if items.len() != 2 {
+                return Err(EvalError::Arity {
+                    name: "ranges-create".into(),
+                    expected: "(ranges-create range-tree)",
+                });
+            }
+            process_ranges(&items[1], env, host, tracer)
+        }
+
         _ => unreachable!("checked by is_special_form"),
     }
 }
@@ -1519,7 +1541,7 @@ fn is_special_form(name: &str) -> bool {
     matches!(
         name,
         "let*" | "let" | "when" | "if" | "begin" | "set!" | "dbg" | "trace" | "log" | "assert"
-            | "lambda" | "depth-run" | "depth-fixed" | "scanner-iterate"
+            | "lambda" | "depth-run" | "depth-fixed" | "scanner-iterate" | "ranges-create"
     )
 }
 
