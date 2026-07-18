@@ -953,7 +953,7 @@ impl VMResultStream for SelectSchemeSession {
                 &mut self.env,
                 &mut self.host,
                 &tracer,
-                Some(&mut self.state),
+                &mut self.state,
             )
             .map_err(|e| format!("scheme eval error: {e}"))?;
 

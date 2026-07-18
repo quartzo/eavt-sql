@@ -718,16 +718,10 @@ fn eval_special_form_frame(
                     expected: "(assert cond [msg])",
                 });
             }
-            let test = match eval_with_yield(&items[1], env, host, tracer, Some(state))? {
-                EvalStep::Done(v) => v,
-                EvalStep::Yield(row) => return Ok(EvalResult::Yield(row)),
-            };
+            let test = eval_recursive(&items[1], env, host, tracer)?;
             if !is_truthy(&test) {
                 let msg = if items.len() > 2 {
-                    let m = match eval_with_yield(&items[2], env, host, tracer, Some(state))? {
-                        EvalStep::Done(v) => v,
-                        EvalStep::Yield(row) => return Ok(EvalResult::Yield(row)),
-                    };
+                    let m = eval_recursive(&items[2], env, host, tracer)?;
                     crate::printer::write_scheme(&m)
                 } else {
                     "assertion failed".into()
@@ -983,6 +977,9 @@ fn process_value(
                         let mut new_names = names;
                         let mut new_vals = vals;
                         new_names.push(name);
+                        if op == "let*" {
+                            env.define(new_names.last().unwrap().clone(), val.clone());
+                        }
                         new_vals.push(val);
                         state.stack.push(Frame::LetBindings {
                             op,
@@ -1169,7 +1166,8 @@ pub fn eval(
     host: &mut dyn HostFns,
     tracer: &dyn SchemeTracer,
 ) -> Result<SExpr, EvalError> {
-    match eval_with_yield(expr, env, host, tracer, None)? {
+    let mut state = YieldState::default();
+    match run_eval(expr, env, host, tracer, &mut state)? {
         EvalStep::Done(v) => Ok(v),
         EvalStep::Yield(_) => unreachable!("eval() does not yield"),
     }
@@ -1180,36 +1178,26 @@ pub fn eval_with_yield(
     env: &mut Environment,
     host: &mut dyn HostFns,
     tracer: &dyn SchemeTracer,
-    yield_state: Option<&mut YieldState>,
+    yield_state: &mut YieldState,
 ) -> Result<EvalStep, EvalError> {
-    if let Some(state) = yield_state {
-        run_eval(expr, env, host, tracer, state)
-    } else {
-        eval_recursive(expr, env, host, tracer).map(EvalStep::Done)
-    }
+    run_eval(expr, env, host, tracer, yield_state)
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Recursive evaluator (backward compatible, no yield support)
+// Shared helpers
 // ═══════════════════════════════════════════════════════════════════
+
+fn is_special_form(name: &str) -> bool {
+    matches!(
+        name,
+        "let*" | "let" | "when" | "if" | "begin" | "set!" | "print" | "assert"
+            | "and" | "or" | "not"
+            | "lambda" | "scanner-iterate" | "ranges-create"
+    )
+}
+
 
 fn eval_recursive(
-    expr: &SExpr,
-    env: &mut Environment,
-    host: &mut dyn HostFns,
-    tracer: &dyn SchemeTracer,
-) -> Result<SExpr, EvalError> {
-    if tracer.is_enabled() {
-        tracer.trace_eval(expr);
-    }
-    let result = eval_recursive_inner(expr, env, host, tracer)?;
-    if tracer.is_enabled() {
-        tracer.trace_result(expr, &result);
-    }
-    Ok(result)
-}
-
-fn eval_recursive_inner(
     expr: &SExpr,
     env: &mut Environment,
     host: &mut dyn HostFns,
@@ -1229,7 +1217,11 @@ fn eval_recursive_inner(
         SExpr::List(items) => {
             match &items[0] {
                 SExpr::Symbol(op) if is_special_form(op) => {
-                    eval_special_form_recursive(op, items, env, host, tracer)
+                    let mut local_state = YieldState::default();
+                    match run_eval(expr, env, host, tracer, &mut local_state)? {
+                        EvalStep::Done(v) => Ok(v),
+                        EvalStep::Yield(_) => unreachable!(),
+                    }
                 }
                 SExpr::Symbol(op) if host.is_native(op) => {
                     let mut args = Vec::with_capacity(items.len() - 1);
@@ -1244,339 +1236,38 @@ fn eval_recursive_inner(
                     for arg in &items[1..] {
                         args.push(eval_recursive(arg, env, host, tracer)?);
                     }
-                    eval_apply_recursive(&func, &args, host)
-                }
-            }
-        }
-    }
-}
-
-fn eval_special_form_recursive(
-    op: &str,
-    items: &[SExpr],
-    env: &mut Environment,
-    host: &mut dyn HostFns,
-    tracer: &dyn SchemeTracer,
-) -> Result<SExpr, EvalError> {
-    match op {
-        "let" | "let*" => eval_let(op, items, env, host, tracer),
-        "when" => eval_when(items, env, host, tracer),
-        "if" => eval_if(items, env, host, tracer),
-        "begin" => eval_begin(items, env, host, tracer),
-        "set!" => eval_set(items, env, host, tracer),
-        "print" => eval_print(items, env, host, tracer),
-        "assert" => eval_assert(items, env, host, tracer),
-        "and" => eval_and(items, env, host, tracer),
-        "or" => eval_or(items, env, host, tracer),
-        "not" => eval_not(items, env, host, tracer),
-        "lambda" => eval_lambda(items, env),
-        "scanner-iterate" => Err(EvalError::Other(
-            "scanner-iterate requires yield-mode evaluation (use SelectSchemeSession)".into(),
-        )),
-
-        "ranges-create" => {
-            if items.len() != 2 {
-                return Err(EvalError::Arity {
-                    name: "ranges-create".into(),
-                    expected: "(ranges-create range-tree)",
-                });
-            }
-            process_ranges(&items[1], env, host, tracer)
-        }
-
-        _ => unreachable!("checked by is_special_form"),
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// Shared helpers
-// ═══════════════════════════════════════════════════════════════════
-
-fn is_special_form(name: &str) -> bool {
-    matches!(
-        name,
-        "let*" | "let" | "when" | "if" | "begin" | "set!" | "print" | "assert"
-            | "and" | "or" | "not"
-            | "lambda" | "scanner-iterate" | "ranges-create"
-    )
-}
-
-fn eval_let(
-    op: &str,
-    items: &[SExpr],
-    env: &mut Environment,
-    host: &mut dyn HostFns,
-    tracer: &dyn SchemeTracer,
-) -> Result<SExpr, EvalError> {
-    if items.len() < 3 {
-        return Err(EvalError::Arity {
-            name: op.into(),
-            expected: "(let ((name val) ...) body...+)",
-        });
-    }
-    let bindings = match &items[1] {
-        SExpr::List(pairs) => pairs,
-        _ => {
-            return Err(EvalError::Type {
-                expected: "list of (name expr) pairs",
-                got: format!("{:?}", items[1]),
-            });
-        }
-    };
-
-    if op == "let*" {
-        for pair in bindings {
-            match pair {
-                SExpr::List(pair_items) if pair_items.len() == 2 => {
-                    let name = match &pair_items[0] {
-                        SExpr::Symbol(s) => s.clone(),
-                        _ => {
-                            return Err(EvalError::Type {
-                                expected: "symbol",
-                                got: format!("{:?}", pair_items[0]),
-                            });
+                    match func {
+                        SExpr::Closure { params, body, env: closure_env } => {
+                            if args.len() != params.len() {
+                                return Err(EvalError::Arity {
+                                    name: "lambda".into(),
+                                    expected: "matching arity",
+                                });
+                            }
+                            let mut inner_env = Environment {
+                                bindings: closure_env.clone(),
+                                depth_counter: 0,
+                            };
+                            for (name, arg) in params.iter().zip(args) {
+                                inner_env.define(name.clone(), arg.clone());
+                            }
+                            let mut result = SExpr::Void;
+                            for expr in &body {
+                                result = eval_recursive(expr, &mut inner_env, host, &NullTracer)?;
+                            }
+                            Ok(result)
                         }
-                    };
-                    let val = eval_recursive(&pair_items[1], env, host, tracer)?;
-                    env.define(name, val);
-                }
-                _ => {
-                    return Err(EvalError::Other(format!(
-                        "expected (name expr) pair, got: {pair:?}"
-                    )));
+                        _ => Err(EvalError::Other(format!(
+                            "cannot apply outside yield: {}",
+                            crate::printer::write_scheme(&func)
+                        ))),
+                    }
                 }
             }
         }
-    } else {
-        let mut vals = Vec::with_capacity(bindings.len());
-        let mut names = Vec::with_capacity(bindings.len());
-        for pair in bindings {
-            match pair {
-                SExpr::List(pair_items) if pair_items.len() == 2 => {
-                    let name = match &pair_items[0] {
-                        SExpr::Symbol(s) => s.clone(),
-                        _ => {
-                            return Err(EvalError::Type {
-                                expected: "symbol",
-                                got: format!("{:?}", pair_items[0]),
-                            });
-                        }
-                    };
-                    let val = eval_recursive(&pair_items[1], env, host, tracer)?;
-                    names.push(name);
-                    vals.push(val);
-                }
-                _ => {
-                    return Err(EvalError::Other(format!(
-                        "expected (name expr) pair, got: {pair:?}"
-                    )));
-                }
-            }
-        }
-        for (name, val) in names.into_iter().zip(vals) {
-            env.define(name, val);
-        }
-    }
-
-    let mut result = SExpr::Void;
-    for body in &items[2..] {
-        result = eval_recursive(body, env, host, tracer)?;
-    }
-    Ok(result)
-}
-
-fn eval_when(
-    items: &[SExpr],
-    env: &mut Environment,
-    host: &mut dyn HostFns,
-    tracer: &dyn SchemeTracer,
-) -> Result<SExpr, EvalError> {
-    if items.len() < 2 {
-        return Err(EvalError::Arity {
-            name: "when".into(),
-            expected: "(when test body...+)",
-        });
-    }
-    let test = eval_recursive(&items[1], env, host, tracer)?;
-    if is_truthy(&test) {
-        let mut result = SExpr::Void;
-        for body in &items[2..] {
-            result = eval_recursive(body, env, host, tracer)?;
-        }
-        Ok(result)
-    } else {
-        Ok(SExpr::Void)
     }
 }
 
-fn eval_if(
-    items: &[SExpr],
-    env: &mut Environment,
-    host: &mut dyn HostFns,
-    tracer: &dyn SchemeTracer,
-) -> Result<SExpr, EvalError> {
-    if items.len() < 3 {
-        return Err(EvalError::Arity {
-            name: "if".into(),
-            expected: "(if test then [else])",
-        });
-    }
-    let test = eval_recursive(&items[1], env, host, tracer)?;
-    if is_truthy(&test) {
-        eval_recursive(&items[2], env, host, tracer)
-    } else if items.len() > 3 {
-        eval_recursive(&items[3], env, host, tracer)
-    } else {
-        Ok(SExpr::Void)
-    }
-}
-
-fn eval_begin(
-    items: &[SExpr],
-    env: &mut Environment,
-    host: &mut dyn HostFns,
-    tracer: &dyn SchemeTracer,
-) -> Result<SExpr, EvalError> {
-    let mut result = SExpr::Void;
-    for expr in &items[1..] {
-        result = eval_recursive(expr, env, host, tracer)?;
-    }
-    Ok(result)
-}
-
-fn eval_set(
-    items: &[SExpr],
-    env: &mut Environment,
-    host: &mut dyn HostFns,
-    tracer: &dyn SchemeTracer,
-) -> Result<SExpr, EvalError> {
-    if items.len() != 3 {
-        return Err(EvalError::Arity {
-            name: "set!".into(),
-            expected: "(set! name expr)",
-        });
-    }
-    let name = match &items[1] {
-        SExpr::Symbol(s) => s.clone(),
-        _ => {
-            return Err(EvalError::Type {
-                expected: "symbol",
-                got: format!("{:?}", items[1]),
-            });
-        }
-    };
-    let val = eval_recursive(&items[2], env, host, tracer)?;
-    if env.get(&name).is_none() {
-        return Err(EvalError::Unbound(name));
-    }
-    env.define(name, val.clone());
-    Ok(val)
-}
-
-fn eval_print(
-    items: &[SExpr],
-    env: &mut Environment,
-    host: &mut dyn HostFns,
-    tracer: &dyn SchemeTracer,
-) -> Result<SExpr, EvalError> {
-    let mut out = String::new();
-    for item in &items[1..] {
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        let val = eval_recursive(item, env, host, tracer)?;
-        out.push_str(&crate::printer::write_scheme(&val));
-    }
-    println!("{out}");
-    use std::io::Write;
-    let _ = std::io::stdout().flush();
-    Ok(SExpr::Void)
-}
-
-fn eval_assert(
-    items: &[SExpr],
-    env: &mut Environment,
-    host: &mut dyn HostFns,
-    tracer: &dyn SchemeTracer,
-) -> Result<SExpr, EvalError> {
-    if items.len() < 2 {
-        return Err(EvalError::Arity {
-            name: "assert".into(),
-            expected: "(assert cond [msg])",
-        });
-    }
-    let test = eval_recursive(&items[1], env, host, tracer)?;
-    if !is_truthy(&test) {
-        let msg = if items.len() > 2 {
-            let m = eval_recursive(&items[2], env, host, tracer)?;
-            crate::printer::write_scheme(&m)
-        } else {
-            "assertion failed".into()
-        };
-        return Err(EvalError::Other(format!("assertion: {msg}")));
-    }
-    Ok(SExpr::Void)
-}
-
-fn eval_and(
-    items: &[SExpr],
-    env: &mut Environment,
-    host: &mut dyn HostFns,
-    tracer: &dyn SchemeTracer,
-) -> Result<SExpr, EvalError> {
-    if items.len() <= 1 {
-        return Ok(SExpr::Bool(true));
-    }
-    let mut result = eval_recursive(&items[1], env, host, tracer)?;
-    if !is_truthy(&result) {
-        return Ok(result);
-    }
-    for item in &items[2..] {
-        result = eval_recursive(item, env, host, tracer)?;
-        if !is_truthy(&result) {
-            return Ok(result);
-        }
-    }
-    Ok(result)
-}
-
-fn eval_or(
-    items: &[SExpr],
-    env: &mut Environment,
-    host: &mut dyn HostFns,
-    tracer: &dyn SchemeTracer,
-) -> Result<SExpr, EvalError> {
-    if items.len() <= 1 {
-        return Ok(SExpr::Bool(false));
-    }
-    let mut result = eval_recursive(&items[1], env, host, tracer)?;
-    if is_truthy(&result) {
-        return Ok(result);
-    }
-    for item in &items[2..] {
-        result = eval_recursive(item, env, host, tracer)?;
-        if is_truthy(&result) {
-            return Ok(result);
-        }
-    }
-    Ok(result)
-}
-
-fn eval_not(
-    items: &[SExpr],
-    env: &mut Environment,
-    host: &mut dyn HostFns,
-    tracer: &dyn SchemeTracer,
-) -> Result<SExpr, EvalError> {
-    if items.len() != 2 {
-        return Err(EvalError::Arity {
-            name: "not".into(),
-            expected: "(not x)",
-        });
-    }
-    let val = eval_recursive(&items[1], env, host, tracer)?;
-    Ok(SExpr::Bool(!is_truthy(&val)))
-}
 
 fn eval_lambda(
     items: &[SExpr],
@@ -1622,45 +1313,6 @@ fn eval_lambda(
     Ok(SExpr::Closure { params, body, env: captured })
 }
 
-fn eval_apply_recursive(
-    func: &SExpr,
-    args: &[SExpr],
-    host: &mut dyn HostFns,
-) -> Result<SExpr, EvalError> {
-    match func {
-        SExpr::Closure { params, body, env: closure_env } => {
-            if args.len() != params.len() {
-                return Err(EvalError::Arity {
-                    name: "lambda".into(),
-                    expected: "matching arity",
-                });
-            }
-            let mut inner_env = Environment {
-                bindings: closure_env.clone(),
-                depth_counter: 0,
-            };
-            for (name, arg) in params.iter().zip(args) {
-                inner_env.define(name.clone(), arg.clone());
-            }
-            let mut result = SExpr::Void;
-            for expr in body {
-                result = eval_recursive(expr, &mut inner_env, host, &NullTracer)?;
-            }
-            Ok(result)
-        }
-        SExpr::Symbol(name) => {
-            if host.is_native(name) {
-                expect_done(host, name, args)
-            } else {
-                Err(EvalError::NotFound(name.into()))
-            }
-        }
-        _ => Err(EvalError::Other(format!(
-            "cannot apply non-symbol: {}",
-            crate::printer::write_scheme(func)
-        ))),
-    }
-}
 
 fn sexpr_to_int(expr: &SExpr) -> Result<i64, EvalError> {
     match expr {
@@ -1717,18 +1369,15 @@ mod tests {
                 }
                 "save" => Ok(EvalStep::Done(SExpr::Void)),
                 "result" => Ok(EvalStep::Done(SExpr::Void)),
-                "scanner-init" => Ok(EvalStep::Done(SExpr::Void)),
                 "scheme-leap-init" => Ok(EvalStep::Done(SExpr::Bool(true))),
                 "scheme-leap-next" => Ok(EvalStep::Done(SExpr::Bool(false))),
-                "depth-cleanup" => Ok(EvalStep::Done(SExpr::Void)),
                 "result-row" => Ok(EvalStep::Done(SExpr::Void)),
-                "bind-get" => Ok(EvalStep::Done(SExpr::Int(42))),
                 _ => Err(EvalError::NotFound(name.into())),
             }
         }
 
         fn is_native(&self, name: &str) -> bool {
-            matches!(name, "+" | "-" | "*" | "save" | "result" | "depth-run" | "scanner-init" | "scheme-leap-init" | "scheme-leap-next" | "depth-cleanup" | "result-row" | "bind-get")
+            matches!(name, "+" | "-" | "*" | "save" | "result" | "scheme-leap-init" | "scheme-leap-next" | "result-row")
         }
     }
 
@@ -1866,19 +1515,19 @@ mod tests {
         let mut env = Environment::new();
         let mut state = YieldState::default();
 
-        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, Some(&mut state));
+        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, &mut state);
         assert!(matches!(r, Ok(EvalStep::Yield(_))));
         assert_eq!(host.rows, vec![vec![1]]);
 
-        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, Some(&mut state));
+        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, &mut state);
         assert!(matches!(r, Ok(EvalStep::Yield(_))));
         assert_eq!(host.rows, vec![vec![1], vec![2]]);
 
-        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, Some(&mut state));
+        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, &mut state);
         assert!(matches!(r, Ok(EvalStep::Yield(_))));
         assert_eq!(host.rows, vec![vec![1], vec![2], vec![3]]);
 
-        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, Some(&mut state));
+        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, &mut state);
         assert!(r.is_ok());
         assert_eq!(host.rows.len(), 3);
     }
@@ -1889,7 +1538,7 @@ mod tests {
         let expr = parse(input).unwrap();
         let mut host = YieldingHost { rows: vec![], yield_after: 0, call_count: 0 };
         let mut env = Environment::new();
-        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, None);
+        let r = eval(&expr, &mut env, &mut host, &NullTracer);
         assert!(r.is_ok());
         assert_eq!(host.rows, vec![vec![10], vec![20]]);
     }
@@ -1902,15 +1551,15 @@ mod tests {
         let mut env = Environment::new();
         let mut state = YieldState::default();
 
-        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, Some(&mut state));
+        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, &mut state);
         assert!(matches!(r, Ok(EvalStep::Yield(_))));
         assert_eq!(host.rows, vec![vec![1]]);
 
-        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, Some(&mut state));
+        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, &mut state);
         assert!(matches!(r, Ok(EvalStep::Yield(_))));
         assert_eq!(host.rows, vec![vec![1], vec![2]]);
 
-        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, Some(&mut state));
+        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, &mut state);
         assert!(r.is_ok());
     }
 
@@ -1922,15 +1571,15 @@ mod tests {
         let mut env = Environment::new();
         let mut state = YieldState::default();
 
-        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, Some(&mut state));
+        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, &mut state);
         assert!(matches!(r, Ok(EvalStep::Yield(_))));
         assert_eq!(host.rows, vec![vec![100]]);
 
-        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, Some(&mut state));
+        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, &mut state);
         assert!(matches!(r, Ok(EvalStep::Yield(_))));
         assert_eq!(host.rows, vec![vec![100], vec![200]]);
 
-        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, Some(&mut state));
+        let r = eval_with_yield(&expr, &mut env, &mut host, &NullTracer, &mut state);
         assert!(r.is_ok());
     }
 
