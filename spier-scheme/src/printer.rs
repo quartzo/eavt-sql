@@ -141,7 +141,7 @@ mod tests {
             "\"hello world\"",
             "(let* ((x 1) (y 2)) (when x y))",
             "(save D1 \"person.age\" (param 2))",
-            "(begin (dbg \"x\" 42) (+ 1 2))",
+            "(begin (print \"x\" 42) (+ 1 2))",
         ];
         for case in cases {
             let parsed = parse(case).unwrap();

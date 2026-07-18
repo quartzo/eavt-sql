@@ -111,9 +111,6 @@ pub(crate) enum Frame {
         name: String,
         closure_env: HashMap<String, SExpr>,
     },
-    DbgFrame {
-        label: String,
-    },
     ClosureFrame {
         body: Vec<SExpr>,
         bound_env: HashMap<String, SExpr>,
@@ -338,10 +335,6 @@ fn run_eval(
             Frame::SetFrame { name, closure_env } => {
                 let _ = (name, closure_env);
                 unreachable!("set! should be handled inline")
-            }
-            Frame::DbgFrame { label } => {
-                let _ = label;
-                unreachable!("dbg should be handled inline")
             }
             Frame::ClosureFrame { body, bound_env } => {
                 let saved = std::mem::replace(&mut env.bindings, bound_env);
@@ -691,61 +684,18 @@ fn eval_special_form_frame(
             Ok(EvalResult::Pushed)
         }
 
-        "dbg" => {
-            if items.len() < 2 {
-                return Err(EvalError::Arity {
-                    name: "dbg".into(),
-                    expected: "(dbg [label] expr)",
-                });
-            }
-            let (label, expr_idx) = if items.len() == 2 {
-                (format!("{:?}", items[1]), 1)
-            } else {
-                match &items[1] {
-                    SExpr::Str(s) => (s.clone(), 2),
-                    SExpr::Symbol(s) => (s.clone(), 2),
-                    _ => (format!("{:?}", items[1]), 2),
-                }
-            };
-            state.stack.push(Frame::DbgFrame { label });
-            state.stack.push(Frame::Eval(items[expr_idx].clone()));
-            Ok(EvalResult::Pushed)
-        }
-
-        "trace" => {
-            if items.len() < 2 {
-                return Err(EvalError::Arity {
-                    name: "trace".into(),
-                    expected: "(trace expr)",
-                });
-            }
-            let val = match eval_with_yield(&items[1], env, host, tracer, Some(state))? {
-                EvalStep::Done(v) => v,
-                EvalStep::Yield(row) => return Ok(EvalResult::Yield(row)),
-            };
-            tracer.trace_log(&format!("[scheme] (trace): {}", crate::printer::write_scheme(&val)));
-            Ok(EvalResult::Value(val))
-        }
-
-        "log" => {
-            if items.len() < 2 {
-                return Err(EvalError::Arity {
-                    name: "log".into(),
-                    expected: "(log msg [args...])",
-                });
-            }
+        "print" => {
             let mut out = String::new();
             for item in &items[1..] {
                 if !out.is_empty() {
                     out.push(' ');
                 }
-                let val = match eval_with_yield(item, env, host, tracer, Some(state))? {
-                    EvalStep::Done(v) => v,
-                    EvalStep::Yield(row) => return Ok(EvalResult::Yield(row)),
-                };
+                let val = eval_recursive(item, env, host, tracer)?;
                 out.push_str(&crate::printer::write_scheme(&val));
             }
-            tracer.trace_log(&format!("[scheme] {out}"));
+            println!("{out}");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
             Ok(EvalResult::Value(SExpr::Void))
         }
 
@@ -927,10 +877,6 @@ fn process_value(
                 return Err(EvalError::Unbound(name));
             }
             e.define(name, val.clone());
-            Ok(EvalResult::Value(val))
-        }
-        Frame::DbgFrame { label } => {
-            let _ = label;
             Ok(EvalResult::Value(val))
         }
         Frame::ClosureFrame { .. } => {
@@ -1250,9 +1196,7 @@ fn eval_special_form_recursive(
         "if" => eval_if(items, env, host, tracer),
         "begin" => eval_begin(items, env, host, tracer),
         "set!" => eval_set(items, env, host, tracer),
-        "dbg" => eval_dbg(items, env, host, tracer),
-        "trace" => eval_trace(items, env, host, tracer),
-        "log" => eval_log(items, env, host, tracer),
+        "print" => eval_print(items, env, host, tracer),
         "assert" => eval_assert(items, env, host, tracer),
         "lambda" => eval_lambda(items, env),
         "scanner-iterate" => Err(EvalError::Other(
@@ -1280,7 +1224,7 @@ fn eval_special_form_recursive(
 fn is_special_form(name: &str) -> bool {
     matches!(
         name,
-        "let*" | "let" | "when" | "if" | "begin" | "set!" | "dbg" | "trace" | "log" | "assert"
+        "let*" | "let" | "when" | "if" | "begin" | "set!" | "print" | "assert"
             | "lambda" | "scanner-iterate" | "ranges-create"
     )
 }
@@ -1457,61 +1401,12 @@ fn eval_set(
     Ok(val)
 }
 
-fn eval_dbg(
+fn eval_print(
     items: &[SExpr],
     env: &mut Environment,
     host: &mut dyn HostFns,
     tracer: &dyn SchemeTracer,
 ) -> Result<SExpr, EvalError> {
-    if items.len() < 2 {
-        return Err(EvalError::Arity {
-            name: "dbg".into(),
-            expected: "(dbg [label] expr)",
-        });
-    }
-    let (label, expr_idx) = if items.len() == 2 {
-        (format!("{:?}", items[1]), 1)
-    } else {
-        match &items[1] {
-            SExpr::Str(s) => (s.clone(), 2),
-            SExpr::Symbol(s) => (s.clone(), 2),
-            _ => (format!("{:?}", items[1]), 2),
-        }
-    };
-    let val = eval_recursive(&items[expr_idx], env, host, tracer)?;
-    tracer.trace_log(&format!("[scheme] {label}: {}", crate::printer::write_scheme(&val)));
-    Ok(val)
-}
-
-fn eval_trace(
-    items: &[SExpr],
-    env: &mut Environment,
-    host: &mut dyn HostFns,
-    tracer: &dyn SchemeTracer,
-) -> Result<SExpr, EvalError> {
-    if items.len() < 2 {
-        return Err(EvalError::Arity {
-            name: "trace".into(),
-            expected: "(trace expr)",
-        });
-    }
-    let val = eval_recursive(&items[1], env, host, tracer)?;
-    tracer.trace_log(&format!("[scheme] (trace): {}", crate::printer::write_scheme(&val)));
-    Ok(val)
-}
-
-fn eval_log(
-    items: &[SExpr],
-    env: &mut Environment,
-    host: &mut dyn HostFns,
-    tracer: &dyn SchemeTracer,
-) -> Result<SExpr, EvalError> {
-    if items.len() < 2 {
-        return Err(EvalError::Arity {
-            name: "log".into(),
-            expected: "(log msg [args...])",
-        });
-    }
     let mut out = String::new();
     for item in &items[1..] {
         if !out.is_empty() {
@@ -1520,7 +1415,9 @@ fn eval_log(
         let val = eval_recursive(item, env, host, tracer)?;
         out.push_str(&crate::printer::write_scheme(&val));
     }
-    tracer.trace_log(&format!("[scheme] {out}"));
+    println!("{out}");
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
     Ok(SExpr::Void)
 }
 
@@ -1765,9 +1662,9 @@ mod tests {
     }
 
     #[test]
-    fn dbg_transparent() {
-        let input = r#"(dbg "x" (+ 1 2))"#;
-        assert_eq!(run(input).unwrap(), SExpr::Int(3));
+    fn print_returns_void() {
+        let input = r#"(print "x" (+ 1 2))"#;
+        assert_eq!(run(input).unwrap(), SExpr::Void);
     }
 
     #[test]

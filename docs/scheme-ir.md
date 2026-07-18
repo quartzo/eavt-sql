@@ -135,9 +135,7 @@ themselves.
 | `begin` | `(begin expr...)` | Sequence, returns last expression |
 | `set!` | `(set! name expr)` | Mutate existing binding (error if unbound) |
 | `lambda` | `(lambda (params...) body...+)` | Create a closure |
-| `dbg` | `(dbg [label] expr)` | Eval expr, log `[scheme] label: value`, return value (transparent) |
-| `trace` | `(trace expr)` | Eval expr, log `[scheme] (trace): value`, return value |
-| `log` | `(log msg [args...])` | Eval all items, log joined output, return `Void` |
+| `print` | `(print [arg...])` | Eval each arg, write them space-separated to stdout + newline, return `Void` |
 | `assert` | `(assert cond [msg])` | If falsy, error with message |
 | `depth-run` | `(depth-run (scanners...) ranges (lambda (var) body...))` | Leapfrog triejoin loop — see §11.6 |
 | `depth-fixed` | `(depth-fixed (scanners...) value (lambda () body...))` | Fixed prefix scope — see §11.6 |
@@ -156,10 +154,10 @@ themselves.
 (begin 1 2 3)
 ; => 3
 
-; Debug — logs then passes through
-(dbg "x" (+ 1 2))
-; logs: [scheme] "x": 3
-; => 3
+; Debug — writes to stdout, returns Void
+(print "x" (+ 1 2))
+; prints: x 3
+; => Void
 ```
 
 ### 4.3 Truthiness
@@ -239,7 +237,7 @@ pub trait HostFns {
 pub trait SchemeTracer {
     fn trace_eval(&self, _form: &SExpr) {}          // called before eval
     fn trace_result(&self, _form: &SExpr, _result: &SExpr) {} // called after eval
-    fn trace_log(&self, _msg: &str) {}              // called by dbg/trace/log
+    fn trace_log(&self, _msg: &str) {}              // legacy hook (unused)
     fn is_enabled(&self) -> bool { false }           // short-circuit check
 }
 ```
@@ -696,27 +694,23 @@ text = engine.compile_sql_json("UPSERT AS D1 SET company.name = 'ACME'")
 
 ### 9.3 Debug Primitives
 
-The evaluator supports four debug primitives (special forms):
+The evaluator supports two debug primitives (special forms):
 
 ```scheme
-; dbg — transparent debug print
-(dbg "label" expr)     ; logs: [scheme] "label": <value>, returns value
-(dbg expr)             ; auto-generates label from expression text
-
-; trace — simple debug print
-(trace expr)           ; logs: [scheme] (trace): <value>, returns value
-
-; log — multi-value log
-(log msg arg1 arg2)    ; logs: [scheme] msg arg1 arg2, returns #void
+; print — write to stdout
+(print "label" expr)   ; prints: label <value>
+(print)                ; prints empty line
+(print 1 2 3)          ; prints: 1 2 3
+; always returns #void
 
 ; assert — runtime assertion
 (assert cond)          ; error if falsy
 (assert cond "msg")    ; error with message if falsy
 ```
 
-These are used for debugging Scheme programs. The `SchemeTracer` trait
-receives the log messages — `NullTracer` discards them, a custom tracer
-could route them to stderr or a log file.
+`print` writes directly to stdout via `println!` and flushes. `assert`
+raises `EvalError::Other("assertion: <msg>")` when the condition is
+falsy.
 
 ---
 
@@ -1085,4 +1079,3 @@ empty batch is returned. Cleanup is automatic via Arc refcount + Drop.
 
 - Debug-instrumented scripts via gRPC (client edits Scheme, sends back for execution).
 - Prepared statement cache for SchemeProgram (immutable, cloneable).
-- Custom `SchemeTracer` implementations for structured logging.
