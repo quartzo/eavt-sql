@@ -35,20 +35,19 @@ impl spier_storage_traits::Cursor for InvalidCursor {
 // ---------------------------------------------------------------------------
 // PositionStack — encapsulates the per-position cursor state.
 //
-// Each `scanner-init` / `depth-fixed-begin` pushes the current key prefix for a
-// position onto the stack; `depth-cleanup` / `depth-fixed-end` pops it and
-// restores the cursor to the parent position's state. `advance` finds the next
-// active value at a position, constrained to the prefix at the top of the stack.
+// Fixed entries are pushed by `scanner-push` and popped by `scanner-pop`.
+// `advance` finds the next active value at a position, constrained to the
+// prefix of the current Fixed entries.
 // ---------------------------------------------------------------------------
 
 /// Entrada da pilha de posições. Agnóstica ao tipo: tanto posições *iteradas*
-/// (varridas pelo cursor) quanto posições *fixas* (depth-fixed) vivem na mesma
+/// (varridas pelo cursor) quanto posições *fixas* (bound values) vivem na mesma
 /// LIFO, na ordem em que foram empilhadas (que o compilador garante ser
 /// crescente em `idx_order`). A posição de cada entrada é o seu índice no
 /// vetor `stack` — não há `pos_idx` solto para evitar mal uso.
 pub enum StackEntry {
     Scanned(Vec<u8>), // prefixo truncado da chave ativa
-    Fixed(Value),    // valor exato (depth-fixed)
+    Fixed(Value),    // valor exato (bound)
 }
 
 pub struct PositionStack {
@@ -95,9 +94,7 @@ impl PositionStack {
         self.stack.len()
     }
 
-    /// Empilha uma posição *iterada* com o prefixo `prefix`. Sem `pos_idx`: a
-    /// posição é o índice resultante no vetor. Retorna `false` (a reentrada é
-    /// tratada pelo chamador via `depth-cleanup` simétrico, não por este push).
+    /// Empilha uma posição *iterada* com o prefixo `prefix`.
     pub fn push_scanned(&mut self, prefix: Vec<u8>) -> bool {
         self.stack.push(StackEntry::Scanned(prefix));
         false
@@ -413,8 +410,7 @@ impl V2Scanner {
 
     /// Empilha a próxima posição varrida, salvando o prefixo atual da chave
     /// ativa. Retorna `true` se a posição já estava na pilha (reentrada).
-    /// Usado por depth-run (triejoin) — deriva o prefixo da chave ativa
-    /// para construir incrementalmente o prefixo de busca.
+    /// (Legacy, unused.) Deriva prefixo da chave ativa.
     pub fn push_position(&mut self) -> bool {
         let prefix = self
             .pos
@@ -450,8 +446,7 @@ impl V2Scanner {
     pub fn prefix_bytes_dbg(&self) -> Vec<u8> { self.build_prefix_bytes() }
 
     /// Push prefix_bytes_cache as a Scanned entry and clear current_active_key.
-    /// Used by scanner-seek-prefix (scanner-iterate) — orthogonal to depth-run's
-    /// push_position which derives prefix from current_active_key.
+    /// (Legacy, unused.)
     pub fn pos_push_scanned_prefix(&mut self, prefix: Vec<u8>) {
         self.pos.set_active_key(None);
         self.pos.push_scanned(prefix);
@@ -1655,7 +1650,7 @@ mod v2_tests {
             .unwrap()
     }
 
-    // Nota: os testes que usavam push_position (legado do depth-run) foram
-    // removidos. A iteração agora é testada via scanner-iterate em Python
-    // (tests/test_scheme_iterate.py) e via test_v2_scanner_decode abaixo.
+    // Nota: os testes que usavam push_position foram removidos.
+    // A iteração agora é testada via scanner-iterate em Python
+    // (tests/test_scheme_iterate.py).
 }

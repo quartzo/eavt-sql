@@ -112,7 +112,7 @@ impl IterPlanData {
     /// informado, na ordem do índice desta cláusula. O codegen consome só
     /// isto — nunca olha `idx_order` diretamente, então reordenamentos de
     /// coluna entre índices (AEVT [a,e,v] vs AVET [a,v,e]) não quebram a
-    /// emissão de `depth-fixed`.
+    /// emissão de `scanner-push`.
     pub fn bound_positions_before(&self, depth: usize) -> Vec<(String, PlanValue)> {
         // Variável iterada neste depth para esta cláusula.
         let var_pos = self
@@ -140,7 +140,7 @@ impl IterPlanData {
     }
 
     /// Todas as posições bound desta cláusula, na ordem do índice, exceto
-    /// "added". Usado para emitir `depth-fixed` de valores que ficam após a
+    /// "added". Usado para emitir `scanner-push` de valores que ficam após a
     /// última variável iterada.
     pub fn all_bound_positions(&self) -> Vec<(String, PlanValue)> {
         self.idx_order

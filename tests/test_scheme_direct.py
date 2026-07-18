@@ -7,7 +7,7 @@ SQL parsing or the triejoin scanner. They cover the host functions:
     declare-attr, declare-partition, alloc-entity, tx-entity,
     save, retract, lookup-entity, lookup-value, param, result
 
-`depth-run` / `depth-fixed` / scanner host functions are intentionally
+`scanner-iterate` / scanner host functions are intentionally
 NOT covered here — those belong to the triejoin path.
 """
 from __future__ import annotations

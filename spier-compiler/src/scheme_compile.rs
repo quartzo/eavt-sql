@@ -650,15 +650,15 @@ fn build_triejoin_scheme(
     // Build list of operations (outermost first) for the triejoin.
     //
     // Each op is a "body transformer" expressed via a `__BODY__` placeholder:
-    // - depth-fixed becomes:  (begin (scanner-push s val) __BODY__ (scanner-pop s))
-    // - depth-run becomes:    (scanner-iterate (scanners) (var) [:ranges (ranges-create r)]
+    // - bound attr becomes:  (begin (scanner-push s val) __BODY__ (scanner-pop s))
+    // - iteration becomes:   (scanner-iterate (scanners) (var) [:ranges (ranges-create r)]
     //                                   (begin (scanner-push s0 var) ... __BODY__ (scanner-pop s0) ...))
     //
     // The outer build wraps the leaf_body in these templates inside-out by
     // substituting __BODY__ (via `replace_body_placeholder`).
     let mut ops: Vec<SExpr> = Vec::new();
 
-    // Track which bound values have been emitted as scanner-push (depth-fixed).
+    // Track which bound values have been emitted as scanner-push.
     let mut bound_emitted: Vec<HashSet<String>> = vec![HashSet::new(); plan.iter_plans.len()];
 
     // Process each depth in forward order (outermost first).
@@ -676,7 +676,7 @@ fn build_triejoin_scheme(
             continue;
         }
 
-        // Emit scanner-push (depth-fixed) for bound values BEFORE this depth's
+        // Emit scanner-push for bound values BEFORE this depth's variable.
         // variable. Ordering comes from the planner's `bound_positions_before`.
         for (ip_idx, ip) in plan.iter_plans.iter().enumerate() {
             if !ip.var_depths.iter().any(|&(d, _)| d == depth) {
@@ -705,7 +705,7 @@ fn build_triejoin_scheme(
             }
         }
 
-        // Emit scanner-iterate (depth-run) for this variable.
+        // Emit scanner-iterate for this variable.
         let ranges_tree = depth_ranges.get(&depth).cloned().unwrap_or(SExpr::List(vec![]));
         let ranges_is_empty = matches!(&ranges_tree, SExpr::List(items) if items.is_empty());
 

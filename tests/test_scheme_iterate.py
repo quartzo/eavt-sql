@@ -261,8 +261,8 @@ def test_iterate_second_call_empty(engine):
 def test_iterate_read_after_exhaustion_returns_void(engine):
     """After scanner-iterate completes, scanner-read returns Void (no active key).
 
-    depth-cleanup has popped the position, so the scanner has no active key.
-    scanner-read returns Void, which encodes as 0.
+    The scanner has no active key at the iterator level after the loop
+    completes. scanner-read returns Void, which encodes as 0.
     """
     eid, aid = _setup_tag_data(engine)
     rows = engine.run_scheme_select(
@@ -735,19 +735,19 @@ def test_iterate_multi_single_atom_backward_compat(engine):
 # ── Nested scanner-iterate triejoin ──────────────────────────────────────────
 #
 # These tests replicate the triejoin structure that the SQL compiler emits
-# (`depth-fixed` per bound attr + shared multi-scanner `depth-run` on `?e` +
-# one `depth-run` per attr value), but written directly in `scanner-iterate`.
+# (scanner-push per bound attr + shared multi-scanner scanner-iterate on ?e +
+# one scanner-iterate per attr value), written directly in scanner-iterate.
 #
 # Canonical shape (2-attr join on the same entity):
 #
 #   (let* ((s0 (scanner-open "AEVT"))
 #          (s1 (scanner-open "AEVT")))
-#     (scanner-push s0 (intern-a "user.name"))   ; depth-fixed: attr name
-#     (scanner-push s1 (intern-a "user.age"))    ; depth-fixed: attr age
-#     (scanner-iterate (s0 s1) (e)              ; shared depth-run on ?e
+#     (scanner-push s0 (intern-a "user.name"))   ; push attr name
+#     (scanner-push s1 (intern-a "user.age"))    ; push attr age
+#     (scanner-iterate (s0 s1) (e)              ; shared leapfrog on ?e
 #       (scanner-push s0 e) (scanner-push s1 e) ; propagate converged ?e
-#       (scanner-iterate (s0) (name)            ; depth-run on name value
-#         (scanner-iterate (s1) (age)          ; depth-run on age value
+#       (scanner-iterate (s0) (name)            ; iterate name value
+#         (scanner-iterate (s1) (age)          ; iterate age value
 #           (result-row e name age)))
 #       (scanner-pop s0) (scanner-pop s1)))     ; symmetric pop
 #

@@ -213,7 +213,7 @@ impl Environment {
 ```
 
 `depth_counter` is used by the evaluator to assign unique stage keys for
-leapfrog triejoin convergence across recursive depth-run calls.
+leapfrog triejoin convergence across recursive `scanner-iterate` calls.
 
 ### 4.6 EvalError
 

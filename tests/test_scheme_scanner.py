@@ -2,7 +2,7 @@
 
 These tests exercise the scanner prefix manipulation functions added to the
 unified SchemeHostFns, without going through SQL parsing or the triejoin
-scanner (depth-run, depth-fixed, scanner-init, leapfrog).
+scanner (scanner-push, scanner-pop, scanner-prefix, leapfrog).
 
 The functions under test are native Scheme host fns:
 
