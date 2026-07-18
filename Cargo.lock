@@ -1280,7 +1280,14 @@ dependencies = [
 name = "spier-memtable"
 version = "0.1.0"
 dependencies = [
- "crossbeam-skiplist",
+ "spier-memtable-nim",
+ "spier-storage-traits",
+]
+
+[[package]]
+name = "spier-memtable-nim"
+version = "0.1.0"
+dependencies = [
  "spier-storage-traits",
 ]
 

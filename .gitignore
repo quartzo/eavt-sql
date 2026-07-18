@@ -30,4 +30,5 @@ tests/bench_cnpj_eavt_vs_mmap_results.md
 # Nim blobstore build artifacts (output belongs in OUT_DIR via build.rs)
 .nimcache/
 libnim_blobstore_*.a
+libnim_memtable*.a
 nim-blobstore/*/sha256

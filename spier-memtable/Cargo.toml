@@ -2,8 +2,8 @@
 name = "spier-memtable"
 version = "0.1.0"
 edition = "2021"
-description = "MemTable write buffer (crossbeam SkipMap per CF, Arc-swap snapshots, materialized scan)"
+description = "MemTableEngine adapter over the Nim backend (spier-memtable-nim): persistent treap, COW snapshots, opaque-cursor FFI"
 
 [dependencies]
-crossbeam-skiplist = "0.1"
 spier-storage-traits = { path = "../spier-storage-traits" }
+spier-memtable-nim = { path = "../spier-memtable-nim" }

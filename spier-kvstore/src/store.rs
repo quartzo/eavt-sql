@@ -95,21 +95,17 @@ impl StoreInner {
             }
         }
         if let Some(ref snap) = self.flush_snap {
-            if let Some(map) = self.mt.get_cf_map(snap, cf_id as u32) {
-                if !map.is_empty() {
-                    sources.push(SourceKind::MemTable(
-                        crate::merge_iter::ChunkedMemTableSource::new(map, prefix),
-                    ));
-                }
+            if let Ok(cursor) = self.mt.open_scan_source(snap.clone(), cf_id as u32, prefix, false) {
+                sources.push(SourceKind::MemTable(
+                    crate::merge_iter::ChunkedMemTableSource::new(cursor, prefix),
+                ));
             }
         }
         let live_snap = self.mt.snapshot().unwrap();
-        if let Some(map) = self.mt.get_cf_map(&live_snap, cf_id as u32) {
-            if !map.is_empty() {
-                sources.push(SourceKind::MemTable(
-                    crate::merge_iter::ChunkedMemTableSource::new(map, prefix),
-                ));
-            }
+        if let Ok(cursor) = self.mt.open_scan_source(live_snap, cf_id as u32, prefix, false) {
+            sources.push(SourceKind::MemTable(
+                crate::merge_iter::ChunkedMemTableSource::new(cursor, prefix),
+            ));
         }
         sources
     }
@@ -644,6 +640,7 @@ mod tests {
     use super::*;
     use crate::blobstore::BlobStoreEngine;
     use crate::journal::JournalEngine;
+    use crate::memtable::MemTableEngine;
     use tempfile::TempDir;
 
     fn make_mt() -> spier_memtable::MemTable {

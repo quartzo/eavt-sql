@@ -1,8 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
-use std::ops::Bound;
 
-use spier_memtable::CfMap;
+use spier_memtable::MemTableCursor;
 
 fn prefix_upper_bound(prefix: &[u8]) -> Vec<u8> {
     let mut e = prefix.to_vec();
@@ -31,60 +30,28 @@ pub enum SourceKind {
     PageStore(PageStoreIter),
 }
 
-const CHUNK_SIZE: usize = 64;
-
-/// Lazy cursor over a MemTable snapshot's SkipMap. Fetches chunks of
-/// CHUNK_SIZE keys using lower_bound (O(log n)) per chunk + Entry::next()
-/// (O(1)) within each chunk. For 11 advances: O(log n) + 11×O(1).
+/// Lazy cursor over a MemTable snapshot. Holds only an opaque `u64` cursor id
+/// (the Nim-side persistent treap structure is never referenced from Rust).
+/// Each `advance`/`seek`/`skip_group`/`update_end` forwards to the Nim cursor,
+/// which yields one key per `next()` — zero mass materialization.
 pub struct ChunkedMemTableSource {
-    map: CfMap,
-    upper: Vec<u8>,
+    cursor: MemTableCursor,
     cur_key: Option<Vec<u8>>,
-    cache: Vec<Vec<u8>>,
-    cache_pos: usize,
 }
 
 impl ChunkedMemTableSource {
-    pub fn new(map: CfMap, prefix: &[u8]) -> Self {
-        let upper = if prefix.is_empty() {
-            vec![0xFF; 64]
-        } else {
-            prefix_upper_bound(prefix)
-        };
+    pub fn new(cursor: MemTableCursor, _prefix: &[u8]) -> Self {
         let mut src = Self {
-            map,
-            upper,
+            cursor,
             cur_key: None,
-            cache: Vec::new(),
-            cache_pos: 0,
         };
-        src.refill(Bound::Included(prefix));
+        src.prime();
         src
     }
 
-    fn refill(&mut self, bound: Bound<&[u8]>) {
-        let upper = self.upper.clone();
-        let map = &*self.map;
-
-        let mut cache = Vec::with_capacity(CHUNK_SIZE);
-        let mut entry = map.lower_bound(bound);
-        while cache.len() < CHUNK_SIZE {
-            match entry {
-                Some(e) => {
-                    let key = e.key().clone();
-                    if key >= upper {
-                        break;
-                    }
-                    cache.push(key);
-                    entry = e.next();
-                }
-                None => break,
-            }
-        }
-
-        self.cur_key = cache.first().cloned();
-        self.cache = cache;
-        self.cache_pos = 0;
+    /// Pull the next key from the Nim cursor into `cur_key`.
+    fn prime(&mut self) {
+        self.cur_key = self.cursor.next();
     }
 }
 
@@ -102,42 +69,27 @@ impl ScanSource for ChunkedMemTableSource {
     }
 
     fn advance(&mut self) {
-        self.cache_pos += 1;
-        if self.cache_pos < self.cache.len() {
-            self.cur_key = Some(self.cache[self.cache_pos].clone());
-        } else if let Some(last) = self.cache.last() {
-            let last = last.clone();
-            self.refill(Bound::Excluded(&last));
-        } else {
-            self.cur_key = None;
-        }
+        self.prime();
     }
 
     fn seek(&mut self, target: &[u8]) {
-        self.refill(Bound::Included(target));
+        self.cursor.seek(target);
+        self.prime();
     }
 
     fn advance_to(&mut self, target: &[u8]) {
-        self.refill(Bound::Included(target));
+        self.cursor.advance_to(target);
+        self.prime();
     }
 
     fn update_end(&mut self, end: &[u8]) {
-        self.upper = end.to_vec();
-        if let Some(ref k) = self.cur_key {
-            if k.as_slice() >= end {
-                self.cur_key = None;
-            }
-        }
+        self.cursor.update_end(end);
+        self.prime();
     }
 
     fn skip_group(&mut self, group: &[u8]) {
-        while let Some(ref k) = self.cur_key {
-            if k.len() >= group.len() && k[..group.len()] == *group {
-                self.advance();
-            } else {
-                break;
-            }
-        }
+        self.cursor.skip_group(group);
+        self.prime();
     }
 }
 
@@ -674,16 +626,17 @@ impl Cursor for ReverseMergedInner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossbeam_skiplist::SkipMap;
-    use std::sync::Arc;
+    use spier_memtable::MemTable;
+    use spier_storage_traits::memtable::MemTableEngine;
 
     fn chunked_source(keys: Vec<&[u8]>) -> ChunkedMemTableSource {
-        let map: CfMap = Arc::new(
-            keys.into_iter()
-                .map(|k| (k.to_vec(), ()))
-                .collect::<SkipMap<Vec<u8>, ()>>(),
-        );
-        ChunkedMemTableSource::new(map, b"")
+        let mt = MemTable::new(4);
+        for k in &keys {
+            mt.put(0, k).unwrap();
+        }
+        let snap = mt.snapshot().unwrap();
+        let cursor = mt.open_scan_source(snap, 0, b"", false).unwrap();
+        ChunkedMemTableSource::new(cursor, b"")
     }
 
     #[test]
@@ -795,13 +748,13 @@ mod tests {
         }
         all_keys.sort();
 
-        let map: CfMap = Arc::new(
-            all_keys
-                .into_iter()
-                .map(|k| (k, ()))
-                .collect::<SkipMap<Vec<u8>, ()>>(),
-        );
-        let s = ChunkedMemTableSource::new(map, b"");
+        let mt = MemTable::new(4);
+        for k in &all_keys {
+            mt.put(0, k).unwrap();
+        }
+        let snap = mt.snapshot().unwrap();
+        let cursor = mt.open_scan_source(snap, 0, b"", false).unwrap();
+        let s = ChunkedMemTableSource::new(cursor, b"");
         let sources = vec![SourceKind::MemTable(s)];
         let mut merged = MergedInner::new(sources, b"");
         assert!(merged.valid);

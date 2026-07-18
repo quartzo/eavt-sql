@@ -1,189 +1,59 @@
 use std::sync::Arc;
-use std::sync::Mutex;
 
-use crossbeam_skiplist::SkipMap;
+use spier_memtable_nim::NimMemTableStore;
 use spier_storage_traits::memtable::{MemTableEngine, MemTableSnapshot};
 
-fn pack_keys(keys: &[Vec<u8>]) -> Vec<u8> {
-    let mut buf = Vec::new();
-    for k in keys {
-        buf.extend_from_slice(&(k.len() as u32).to_be_bytes());
-        buf.extend_from_slice(k);
-    }
-    buf
-}
+pub use spier_memtable_nim::{MemTableCursor, NimSnap};
 
-fn prefix_upper_bound(prefix: &[u8]) -> Vec<u8> {
-    let mut e = prefix.to_vec();
-    for b in e.iter_mut().rev() {
-        if *b < 0xFF {
-            *b += 1;
-            return e;
-        }
-    }
-    vec![0xFF; 64]
-}
-
-// Each CF holds an Arc<SkipMap>. Snapshots clone the Arc (O(1)); clear/drain
-// swaps in a fresh empty SkipMap (O(1)). Old snapshots keep the previous SkipMap
-// alive via Arc until they drop — no tombstones, no GC, lock-free reads.
-pub type CfMap = Arc<SkipMap<Vec<u8>, ()>>;
-
-struct CfData {
-    map: CfMap,
-    size: usize,
-}
-
-impl CfData {
-    fn new() -> Self {
-        Self {
-            map: Arc::new(SkipMap::new()),
-            size: 0,
-        }
-    }
-}
-
-struct MemTableInner {
-    cfs: Vec<CfData>,
-}
-
-impl MemTableInner {
-    fn new(num_cf: usize) -> Self {
-        Self {
-            cfs: (0..num_cf).map(|_| CfData::new()).collect(),
-        }
-    }
-
-    fn put(&mut self, cf_id: usize, key: &[u8]) -> usize {
-        let cf = &mut self.cfs[cf_id];
-        let is_new = !cf.map.contains_key(key);
-        cf.map.insert(key.to_vec(), ());
-        if is_new {
-            cf.size += key.len();
-        }
-        self.total_size()
-    }
-
-    fn total_size(&self) -> usize {
-        self.cfs.iter().map(|cf| cf.size).sum()
-    }
-
-    fn clear(&mut self) {
-        for cf in &mut self.cfs {
-            cf.map = Arc::new(SkipMap::new());
-            cf.size = 0;
-        }
-    }
-}
-
-// Snapshot holds Arc clones of every CF's SkipMap. After clear()/drain() swaps
-// in fresh empty maps, this still points at the pre-clear state — readers see a
-// frozen view while the live MemTable continues mutating a different map.
-pub type CfSnapshots = Vec<CfMap>;
-
-/// Pure Rust MemTable. just implements [`MemTableEngine`].
+/// MemTable write buffer. Thin adapter over the Nim-backed memtable
+/// (`spier_memtable_nim::NimMemTableStore`), reached through the same C-ABI
+/// cursor/FFI the other Nim backends use. The ordered structure and its COW
+/// snapshots live entirely inside Nim; Rust holds only opaque u64 ids. Cursors
+/// own an `Arc` to the Nim store, so they outlive this `MemTable` if needed.
 pub struct MemTable {
-    inner: Mutex<MemTableInner>,
+    inner: Arc<NimMemTableStore>,
 }
 
 impl MemTable {
     pub fn new(num_cf: usize) -> Self {
         Self {
-            inner: Mutex::new(MemTableInner::new(num_cf)),
+            inner: Arc::new(NimMemTableStore::open(num_cf).expect("memtable open")),
         }
     }
 
-    /// Extract the Arc<SkipMap> for a given CF from a snapshot.
-    pub fn get_cf_map(&self, snap: &MemTableSnapshot, cf: u32) -> Option<CfMap> {
-        let cfs = snap.data.downcast_ref::<CfSnapshots>()?;
-        cfs.get(cf as usize).cloned()
-    }
-
-    /// Like scan_prefix but returns Vec<Vec<u8>> directly, skipping pack/unpack.
-    pub fn scan_prefix_keys(
+    /// Open a lazy cursor-backed scan source over a snapshot/CF/prefix.
+    /// Returns a `MemTableCursor` (opaque id) that yields one key per `next()`.
+    pub fn open_scan_source(
         &self,
-        snap: &MemTableSnapshot,
+        snap: MemTableSnapshot,
         cf: u32,
         prefix: &[u8],
-    ) -> Vec<Vec<u8>> {
-        let cfs = match snap.data.downcast_ref::<CfSnapshots>() {
-            Some(c) => c,
-            None => return Vec::new(),
-        };
-        let map = match cfs.get(cf as usize) {
-            Some(m) => m,
-            None => return Vec::new(),
-        };
-        if prefix.is_empty() {
-            map.iter().map(|e| e.key().clone()).collect()
-        } else {
-            let upper = prefix_upper_bound(prefix);
-            map.range(prefix.to_vec()..upper)
-                .map(|e| e.key().clone())
-                .collect()
-        }
+        reverse: bool,
+    ) -> Result<MemTableCursor, String> {
+        self.inner.open_scan_source(snap, cf, prefix, reverse)
     }
 
-    /// Count keys matching a prefix without materializing them (zero allocation).
-    /// Used by approximate_sizes for cardinality estimation.
-    pub fn count_prefix(
-        &self,
-        snap: &MemTableSnapshot,
-        cf: u32,
-        prefix: &[u8],
-    ) -> usize {
-        let cfs = match snap.data.downcast_ref::<CfSnapshots>() {
-            Some(c) => c,
-            None => return 0,
-        };
-        match cfs.get(cf as usize) {
-            Some(map) => {
-                if prefix.is_empty() {
-                    map.len()
-                } else {
-                    let upper = prefix_upper_bound(prefix);
-                    map.range(prefix.to_vec()..upper).count()
-                }
-            }
-            None => 0,
-        }
+    /// Count keys with a prefix without materializing (used by approximate_sizes).
+    pub fn count_prefix(&self, snap: &MemTableSnapshot, cf: u32, prefix: &[u8]) -> usize {
+        self.inner.count_prefix(snap, cf, prefix) as usize
     }
 }
 
 impl MemTableEngine for MemTable {
     fn put(&self, cf: u32, key: &[u8]) -> Result<u64, String> {
-        let mut inner = self.inner.lock().unwrap();
-        Ok(inner.put(cf as usize, key) as u64)
+        self.inner.put(cf, key)
     }
 
     fn batch_write(&self, ops: &[u8]) -> Result<u64, String> {
-        let mut inner = self.inner.lock().unwrap();
-        let mut pos = 0;
-        while pos + 5 <= ops.len() {
-            let cf = ops[pos] as usize;
-            let klen = u32::from_be_bytes([ops[pos + 1], ops[pos + 2], ops[pos + 3], ops[pos + 4]])
-                as usize;
-            if pos + 5 + klen > ops.len() {
-                break;
-            }
-            inner.put(cf, &ops[pos + 5..pos + 5 + klen]);
-            pos += 5 + klen;
-        }
-        Ok(inner.total_size() as u64)
+        self.inner.batch_write(ops)
     }
 
     fn clear(&self) -> Result<(), String> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.clear();
-        Ok(())
+        self.inner.clear()
     }
 
     fn snapshot(&self) -> Result<MemTableSnapshot, String> {
-        let inner = self.inner.lock().unwrap();
-        let cfs: CfSnapshots = inner.cfs.iter().map(|c| c.map.clone()).collect();
-        Ok(MemTableSnapshot {
-            data: Arc::new(cfs),
-        })
+        self.inner.snapshot()
     }
 
     fn scan_prefix(
@@ -192,23 +62,7 @@ impl MemTableEngine for MemTable {
         cf: u32,
         prefix: &[u8],
     ) -> Result<Vec<u8>, String> {
-        let cfs = snap
-            .data
-            .downcast_ref::<CfSnapshots>()
-            .ok_or("invalid snapshot type")?;
-        let map = match cfs.get(cf as usize) {
-            Some(m) => m,
-            None => return Ok(Vec::new()),
-        };
-        let keys: Vec<Vec<u8>> = if prefix.is_empty() {
-            map.iter().map(|e| e.key().clone()).collect()
-        } else {
-            let upper = prefix_upper_bound(prefix);
-            map.range(prefix.to_vec()..upper)
-                .map(|e| e.key().clone())
-                .collect()
-        };
-        Ok(pack_keys(&keys))
+        self.inner.scan_prefix(snap, cf, prefix)
     }
 
     fn scan_prefix_reverse(
@@ -217,34 +71,10 @@ impl MemTableEngine for MemTable {
         cf: u32,
         prefix: &[u8],
     ) -> Result<Vec<u8>, String> {
-        let cfs = snap
-            .data
-            .downcast_ref::<CfSnapshots>()
-            .ok_or("invalid snapshot type")?;
-        let map = match cfs.get(cf as usize) {
-            Some(m) => m,
-            None => return Ok(Vec::new()),
-        };
-        let keys: Vec<Vec<u8>> = if prefix.is_empty() {
-            map.iter().rev().map(|e| e.key().clone()).collect()
-        } else {
-            let upper = prefix_upper_bound(prefix);
-            map.range(prefix.to_vec()..upper)
-                .rev()
-                .map(|e| e.key().clone())
-                .collect()
-        };
-        Ok(pack_keys(&keys))
+        self.inner.scan_prefix_reverse(snap, cf, prefix)
     }
 
     fn contains(&self, snap: MemTableSnapshot, cf: u32, key: &[u8]) -> Result<bool, String> {
-        let cfs = snap
-            .data
-            .downcast_ref::<CfSnapshots>()
-            .ok_or("invalid snapshot type")?;
-        Ok(cfs
-            .get(cf as usize)
-            .map(|m| m.contains_key(key))
-            .unwrap_or(false))
+        self.inner.contains(snap, cf, key)
     }
 }

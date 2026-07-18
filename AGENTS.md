@@ -15,8 +15,9 @@
 - **Rust** (stable, with cargo)
 - **Nim ≥ 2.0.14** — used by `spier-blobstore-nim/build.rs` to compile
   `nim-blobstore/{memory,file,s3,journal}/` into **4 separate static
-  libraries**. The build script invokes `nim c` automatically; Nim must be on
-  `PATH`.
+  libraries**, and by `spier-memtable-nim/build.rs` to compile
+  `nim-memtable/` into a **5th static library** (`libnim_memtable.a`). The
+  build scripts invoke `nim c` automatically; Nim must be on `PATH`.
 - **OpenSSL libcrypto** (`libcrypto.so`, usually via `libssl-dev` / `openssl-libs`)
   — used by the S3 backend for SHA-256 / HMAC-SHA256 in SigV4 signing. Linked
   with `-lcrypto`. No AWS SDK is linked; the rest of the SigV4 protocol is
@@ -92,9 +93,16 @@ nim-blobstore/                      # Pure-Nim blobstore backends — 3 self-con
                                      # read re-emits all valid frames
      all.nim                         # exports nim_journal_open / nim_journal_close
  spier-journal-file/                 # JournalEngine adapter: thin Rust wrapper over
-                                     # NimJournalStore (spier-blobstore-nim) via C-ABI
-                                     # vtable; keeps the JournalFile name + new(config) API
-spier-memtable/                    # MemTableEngine (crossbeam SkipMap per CF)
+                                      # NimJournalStore (spier-blobstore-nim) via C-ABI
+                                      # vtable; keeps the JournalFile name + new(config) API
+spier-memtable-nim/                # NimMemTableStore: Nim-backed MemTableEngine (persistent
+                                    # treap, COW snapshots, opaque-cursor FFI) — compiles
+                                    # nim-memtable/ into libnim_memtable.a
+spier-memtable/                    # MemTableEngine adapter over NimMemTableStore (Arc-shared);
+                                    # exposes open_scan_source -> MemTableCursor
+nim-memtable/                      # Pure-Nim memtable backend — persistent treap per CF
+                                    # (path-copying COW), snapshot version registry,
+                                    # per-handle cursor table. Exports nim_memtable_open/close.
 spier-kvstore/src/                 # KVStoreEngine implementation
 spier-transactor/src/              # TransactorEngine implementation (EAVT + resolver)
   eavt.rs                          # EavtEngine { kv: Box<dyn KVStoreEngine>, resolver }
@@ -262,23 +270,36 @@ packed into `Vec<u8>`.
 
 ### MemTable Snapshot
 
-MemTableEngine uses `crossbeam_skiplist::SkipMap<Vec<u8>, ()>` per CF, each held in an
-`Arc<SkipMap>` so snapshots are O(1) Arc clones. Unlike `imbl::OrdMap` (persistent /
-structural sharing), the SkipMap is **mutable through `&`** — a snapshot only freezes once
-the live MemTable swaps in a fresh empty map (see Flush below). All reads require a
-`MemTableSnapshot`. Reads are lock-free; `scan_prefix` / `scan_prefix_reverse` materialize
-matching keys into a packed `Vec<u8>`.
+MemTableEngine is backed by a **Nim persistent treap** (path-copying COW) per CF
+(`nim-memtable/`). Snapshots are O(1): `snapshot()` records the current per-CF
+roots in a versioned registry and returns an opaque `u64` id wrapped in
+`MemTableSnapshot { data: Arc<NimSnap(u64)> }`. `clear()` swaps the live roots
+for empty ones; old snapshot roots stay alive (shared nodes, no copy) as long
+as a snapshot id references them. The `MemTableSnapshot.data: Arc<dyn Any>` is
+downcast to `NimSnap` on each read to recover the id.
 
-Writes (`put`, `batch_write`, `drain`, `clear`) take no snapshot; reads
-(`scan_prefix`, `scan_prefix_reverse`, `contains`) all require snapshot parameter.
+**Rust never holds a reference to the ordered structure.** The forward scan
+path (`scan_sources` → `ChunkedMemTableSource`) holds only an opaque `u64`
+cursor id (`MemTableCursor`); each `advance`/`seek`/`skip_group` forwards to
+the Nim cursor FFI, which yields **one key per `cursor_next`** — zero mass
+materialization. The cursor holds an `Arc<NimMemTableStore>` so it stays
+self-contained (the Nim handle outlives the cursor even if the parent
+`MemTable` is dropped first). The reverse scan path and the flush path still
+materialize via `scan_prefix`/`scan_prefix_reverse` (returning packed
+`[u32 klen][key]...`) — reverse is already materialized in the merge layer,
+and flush is rare (64 MB threshold).
+
+Writes (`put`, `batch_write`, `clear`) take no snapshot; reads
+(`scan_prefix`, `scan_prefix_reverse`, `contains`, `count_prefix`) all require
+a snapshot parameter.
 
 ### Flush (Snapshot + Clear)
 
 Single MemTable instance lives for the transactor's entire lifetime — no instance swapping.
 
-1. `flush_snap = mt.snapshot()` — O(1) Arc clone of each CF's SkipMap
-2. `mt.clear()` — O(1) per CF (swap in a fresh empty `Arc<SkipMap>`); old snapshots keep the pre-clear SkipMap alive via Arc
-3. Flush scans `flush_snap` → merge with PageStore → commit
+1. `flush_snap = mt.snapshot()` — O(1): record current treap roots in the snapshot registry, return id
+2. `mt.clear()` — O(1) per CF (swap live root for `nil`); old snapshot roots stay alive via the registry (COW, shared nodes)
+3. Flush scans `flush_snap` via `scan_prefix` (materialized, rare) → merge with PageStore → commit
 4. Reads during flush see: active mt + flush_snap + PageStore
 
 ### No Transaction Mechanism

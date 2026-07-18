@@ -1,0 +1,12 @@
+[package]
+name = "spier-memtable-nim"
+version = "0.1.0"
+edition = "2021"
+description = "MemTableEngine backend implemented in Nim (persistent treap, COW snapshots, opaque-cursor FFI)"
+
+[dependencies]
+spier-storage-traits = { path = "../spier-storage-traits" }
+
+[lib]
+name = "spier_memtable_nim"
+path = "src/lib.rs"
