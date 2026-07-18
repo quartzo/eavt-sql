@@ -417,6 +417,9 @@ impl V2Scanner {
 
     /// Empilha a próxima posição varrida, salvando o prefixo atual da chave
     /// ativa. Retorna `true` se a posição já estava na pilha (reentrada).
+    /// Quando não há chave ativa (primeira entrada), usa `prefix_bytes_cache`
+    /// (que inclui os Fixed entries) como prefixo — assim `bound_prefix`
+    /// filtra corretamente as chaves fora do range do prefixo.
     pub fn push_position(&mut self) -> bool {
         let prefix = self
             .pos
@@ -425,7 +428,7 @@ impl V2Scanner {
                 let vs = self.value_start(k);
                 k[..vs].to_vec()
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| self.prefix_bytes_cache.clone());
         self.pos.push_scanned(prefix)
     }
 

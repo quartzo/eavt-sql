@@ -175,6 +175,37 @@ class EAVTEngine:
         out = bytes(out) if out is not None else b""
         return decode_rows(out)
 
+    def run_scheme_select(self, scheme_text: str, *params: Any) -> list[tuple]:
+        """Execute raw Scheme text via SelectSchemeSession (yield-capable).
+
+        Required for `scanner-iterate` and `result-row` — these use the
+        yield/resume evaluator which is not available in `run_scheme` (DML
+        path). The caller drives iteration by pulling batches until empty.
+        """
+        try:
+            prog = self._handle.compile_scheme(scheme_text)
+        except RuntimeError as e:
+            raise ValueError(str(e)) from None
+        params_bytes = encode_values(list(params))
+        try:
+            session = self._handle.run_vm_cursor(prog, params_bytes, U64_MAX, U64_MAX)
+        except RuntimeError as e:
+            raise ValueError(str(e)) from None
+        try:
+            rows: list[tuple] = []
+            while True:
+                try:
+                    batch = self._handle.session_next_batch(session, 1024)
+                except RuntimeError as e:
+                    raise ValueError(str(e)) from None
+                batch = bytes(batch) if batch is not None else b""
+                if not batch:
+                    break
+                rows.extend(decode_rows(batch))
+            return rows
+        finally:
+            del session
+
     def flush(self) -> None:
         self._handle.flush()
 

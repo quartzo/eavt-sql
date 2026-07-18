@@ -492,11 +492,9 @@ Frame::DepthRunBody => {
                             EvalResult::Pushed => {}
                         }
                     } else {
-                        let last = body.len() - 1;
-                        for expr in body[..last].iter().rev() {
+                        for expr in body.iter().rev() {
                             state.stack.push(Frame::Eval(expr.clone()));
                         }
-                        state.stack.push(Frame::Eval(body[last].clone()));
                     }
                 }
             }
@@ -539,16 +537,17 @@ fn eval_frame(
                     eval_special_form_frame(op, items, env, host, tracer, state)
                 }
                 SExpr::Symbol(op) if host.is_native(op) => {
+                    // Evaluate all args eagerly via eval_recursive. Host fn args
+                    // never yield (yielding is done by result-row, which is a
+                    // host fn itself, not an arg to another host fn).
                     if items.len() == 1 {
                         hc(host, op, &[])
                     } else {
-                        state.stack.push(Frame::Apply {
-                            func: SExpr::Symbol(op.clone()),
-                            args: items[1..].to_vec(),
-                            evaluated: 0,
-                        });
-                        state.stack.push(Frame::Eval(items[1].clone()));
-                        Ok(EvalResult::Pushed)
+                        let mut args = Vec::with_capacity(items.len() - 1);
+                        for arg in &items[1..] {
+                            args.push(eval_recursive(arg, env, host, tracer)?);
+                        }
+                        hc(host, op, &args)
                     }
                 }
                 _ => {
@@ -786,6 +785,8 @@ fn eval_special_form_frame(
 
         "depth-fixed" => eval_depth_fixed_frame(items, env, host, tracer, state),
 
+        "scanner-iterate" => eval_scanner_iterate_frame(items, env, host, tracer, state),
+
         _ => unreachable!("checked by is_special_form"),
     }
 }
@@ -982,11 +983,9 @@ fn process_value(
                 if body.is_empty() {
                     Ok(EvalResult::Value(val))
                 } else {
-                    let last = body.len() - 1;
-                    for expr in body[..last].iter().rev() {
+                    for expr in body.iter().rev() {
                         state.stack.push(Frame::Eval(expr.clone()));
                     }
-                    state.stack.push(Frame::Eval(body[last].clone()));
                     Ok(EvalResult::Pushed)
                 }
             }
@@ -1156,6 +1155,85 @@ fn eval_depth_fixed_frame(
     Ok(EvalResult::Pushed)
 }
 
+/// (scanner-iterate scanner-expr (param) body...)
+///
+/// Single-scanner iteration without lambda/closure. Binds `param` directly
+/// in the current Environment. Reuses the `DepthRunBody` frame handler for
+/// the loop — zero duplicated loop logic.
+fn eval_scanner_iterate_frame(
+    items: &[SExpr],
+    env: &mut Environment,
+    host: &mut dyn HostFns,
+    tracer: &dyn SchemeTracer,
+    state: &mut YieldState,
+) -> Result<EvalResult, EvalError> {
+    if items.len() < 4 {
+        return Err(EvalError::Arity {
+            name: "scanner-iterate".into(),
+            expected: "(scanner-iterate scanner-expr (param) body...+)",
+        });
+    }
+    let scanner_expr = &items[1];
+    let params = match &items[2] {
+        SExpr::List(p) if !p.is_empty() => p,
+        _ => {
+            return Err(EvalError::Type {
+                expected: "(param) — non-empty list of symbols",
+                got: crate::printer::write_scheme(&items[2]),
+            })
+        }
+    };
+    let param_name = match &params[0] {
+        SExpr::Symbol(s) => s.clone(),
+        other => {
+            return Err(EvalError::Type {
+                expected: "symbol",
+                got: crate::printer::write_scheme(other),
+            })
+        }
+    };
+    let body_exprs: Vec<SExpr> = items[3..].to_vec();
+
+    // Eval scanner-expr → resource
+    let scanner_val = eval_recursive(scanner_expr, env, host, tracer)?;
+
+    // scanner-init(scanner, 0) — opens cursor, positions at first active key
+    expect_done(host, "scanner-init", &[scanner_val.clone(), SExpr::Int(0)])?;
+
+    // scheme-leap-init(0, scanner, ()) — for single scanner, converge is trivial
+    let leap_args = vec![SExpr::Int(0), scanner_val.clone(), SExpr::List(vec![])];
+    let ok = expect_done(host, "scheme-leap-init", &leap_args)?;
+    if !is_truthy(&ok) {
+        expect_done(host, "depth-cleanup", &[scanner_val])?;
+        return Ok(EvalResult::Value(SExpr::Void));
+    }
+
+    // scanner-read → bind param directly in env (no closure)
+    let val = expect_done(host, "scanner-read", &[scanner_val.clone()])?;
+    env.define(param_name.clone(), val);
+
+    // Push DepthRunFrame — the DepthRunBody handler reuses this for the loop.
+    // scanner_configs stores the evaluated Resource so the handler doesn't
+    // need to re-evaluate a Symbol each iteration.
+    let stage_key = state.depth_runs.len() as i64;
+    state.depth_runs.push(DepthRunFrame {
+        stage_key,
+        scanner_configs: vec![scanner_val],
+        body: body_exprs.clone(),
+        captured_env: HashMap::new(),
+        phase: DepthRunPhase::Body,
+        param_name: Some(param_name),
+        ranges: SExpr::List(vec![]),
+    });
+
+    state.stack.push(Frame::DepthRunBody);
+    for expr in body_exprs.iter().rev() {
+        state.stack.push(Frame::Eval(expr.clone()));
+    }
+
+    Ok(EvalResult::Pushed)
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Public API
 // ═══════════════════════════════════════════════════════════════════
@@ -1269,6 +1347,10 @@ fn eval_special_form_recursive(
         "depth-run" => eval_depth_run_recursive(items, env, host, tracer),
 
         "depth-fixed" => eval_depth_fixed_recursive(items, env, host, tracer),
+
+        "scanner-iterate" => Err(EvalError::Other(
+            "scanner-iterate requires yield-mode evaluation (use SelectSchemeSession)".into(),
+        )),
         _ => unreachable!("checked by is_special_form"),
     }
 }
@@ -1434,7 +1516,7 @@ fn is_special_form(name: &str) -> bool {
     matches!(
         name,
         "let*" | "let" | "when" | "if" | "begin" | "set!" | "dbg" | "trace" | "log" | "assert"
-            | "lambda" | "depth-run" | "depth-fixed"
+            | "lambda" | "depth-run" | "depth-fixed" | "scanner-iterate"
     )
 }
 
