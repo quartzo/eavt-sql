@@ -10,6 +10,20 @@
 - **gRPC server:** `uv run --project py_eavt_client --group dev` (isolated client venv)
 - **All Python commands must use `uv run`.**
 
+### Prerequisites
+
+- **Rust** (stable, with cargo)
+- **Nim ≥ 2.0.14** — used by `spier-blobstore-nim/build.rs` to compile
+  `nim-blobstore/{memory,file,s3}/` into **3 separate static libraries**. The
+  build script invokes `nim c` automatically; Nim must be on `PATH`.
+- **OpenSSL libcrypto** (`libcrypto.so`, usually via `libssl-dev` / `openssl-libs`)
+  — used by the S3 backend for SHA-256 / HMAC-SHA256 in SigV4 signing. Linked
+  with `-lcrypto`. No AWS SDK is linked; the rest of the SigV4 protocol is
+  hand-rolled over `std/httpclient`.
+- **`objcopy`** (GNU binutils or LLVM) — `build.rs` calls
+  `objcopy --weaken` on each of the 3 `.a`s so the duplicated Nim runtime
+  symbols (system.nim, tables.nim, etc.) don't collide at link time.
+
 ### PyO3 Binding Workflow
 
 The 4 `spier-*-py` crates are **not managed by uv** — they are installed as
@@ -40,8 +54,37 @@ spier-value/                       # Core Value type + query codecs
 spier-query-ir/                    # Program IR + range-op constants
   opcodes.rs                       # Program enum (Scheme, SelectScheme), ProgramHandle, SelectSchemeMeta
   spec_kind.rs                     # SpecKind
-spier-blobstore-{memory,file,s3}/  # BlobStore backends (implement BlobStoreEngine)
-spier-journal-file/                # JournalEngine backend
+spier-blobstore-nim/                # Rust wrapper exposing the Nim blobstore via the
+                                    # BlobStoreEngine trait. build.rs invokes `nim c` 3×.
+  Cargo.toml                        # deps: spier-storage-traits, libc, tempfile (dev)
+  build.rs                          # compiles nim-blobstore/{memory,file,s3}/all.nim into
+                                    # 3 separate .a files, runs `objcopy --weaken` on each,
+                                    # links pthread + libcrypto
+  src/lib.rs                        # NimBlobVtable #[repr(C)], NimBlobStore,
+                                    # impl BlobStoreEngine, Send+Sync, Drop,
+                                    # err_to_string (code → static str, no allocation)
+nim-blobstore/                      # Pure-Nim blobstore backends — 3 self-contained dirs
+  memory/                           # → libnim_blobstore_memory.a
+    abi.nim                         # VTable type, error-code constants, helpers
+                                    # (setErr template, allocByteBuf, newUuidBytes,
+                                    # parseConfig)
+    spinlock.nim                    # Raw pthread_mutex binding (std/locks needs --threads:on)
+    backend.nim                     # In-memory HashMap backend
+    all.nim                         # Single compilation entry point
+  file/                             # → libnim_blobstore_file.a
+    abi.nim, spinlock.nim           # backend-local copies (identical to memory/)
+    backend.nim                     # Directory backend: hex-sharded blobs (XX/YY/<hex>),
+                                    # atomic tmp+rename, zstd compression, root_ prefix,
+                                    # read-only guard
+    all.nim
+  s3/                               # → libnim_blobstore_s3.a
+    abi.nim, spinlock.nim           # backend-local copies
+    sha256.nim                      # Thin OpenSSL libcrypto wrapper (EVP_Digest + HMAC)
+    sigv4.nim                       # SigV4 signing (signAwsRequestV4)
+    backend.nim                     # S3 backend: hand-rolled SigV4 over std/httpclient,
+                                    # ListObjectsV2 with pagination, naive XML parsing
+    all.nim
+spier-journal-file/                 # JournalEngine backend
 spier-memtable/                    # MemTableEngine (crossbeam SkipMap per CF)
 spier-kvstore/src/                 # KVStoreEngine implementation
 spier-transactor/src/              # TransactorEngine implementation (EAVT + resolver)
@@ -76,17 +119,83 @@ tests/                             # Python tests (flat)
 
 ### Storage Backends
 
-The storage backends are pure Rust crates. Backends are selected at construction time
+The three blobstore backends (Memory, File, S3) are implemented in **Nim** and
+exposed to Rust via a hand-written C-ABI vtable in `spier-blobstore-nim`. The
+build script (`spier-blobstore-nim/build.rs`) invokes `nim c` **3 times** to
+compile `nim-blobstore/{memory,file,s3}/all.nim` into **3 separate static
+libraries** (`libnim_blobstore_{memory,file,s3}.a`), all linked into the Rust
+crate. Backends are selected at construction time
 (`spier_kvstore::KVState::open(config)`) rather than loaded as `.so` plugins.
 
-| Backend | Crate | Storage | Use Case |
-|---------|-------|---------|----------|
-| Memory  | `spier-blobstore-memory` | In-memory `HashMap` | `:memory:` mode |
-| File    | `spier-blobstore-file` | Directory with zstd-compressed blobs + journal file | Persistent local |
-| S3      | `spier-blobstore-s3` | S3-compatible object store + local journal file | Cloud/distributed |
+| Backend | Directory               | Storage                                                | Use Case            |
+|---------|-------------------------|--------------------------------------------------------|---------------------|
+| Memory  | `nim-blobstore/memory/` | In-memory `HashMap`                                    | `:memory:` mode     |
+| File    | `nim-blobstore/file/`   | Directory with zstd-compressed blobs (hex-sharded)     | Persistent local    |
+| S3      | `nim-blobstore/s3/`     | S3-compatible object store via hand-rolled SigV4 (OpenSSL libcrypto + `std/httpclient`) + local journal file | Cloud/distributed |
 
-All backends implement the hand-written `BlobStoreEngine` trait. Journal implements
-`JournalEngine`.
+Each backend directory is **self-contained** — it owns local copies of
+`abi.nim` and `spinlock.nim` so the 3 `.a`s have no cross-archive symbol
+references (other than libc / libpthread / libcrypto). All backends implement
+the hand-written `BlobStoreEngine` trait (Rust side) by forwarding to the Nim
+functions exported in the C-ABI `VTable`. Journal (`spier-journal-file`) is
+pure Rust and implements `JournalEngine`.
+
+#### FFI error protocol (POSIX-style)
+
+Every C-ABI function returns `c_int` (`0` = success, `-1` = failure) and
+takes `errOut: ptr cint`. On failure, `errOut` receives one of 9 numeric
+codes defined in each `abi.nim`:
+
+```
+ErrOk=0  ErrInvalidHandle=1  ErrInvalidArg=2  ErrIo=3  ErrReadOnly=4
+ErrNoMem=5  ErrNotFound=6  ErrConflict=7  ErrConfig=8
+```
+
+Rust maps codes to static strings via `match` (`err_to_string` in
+`spier-blobstore-nim/src/lib.rs`). **No string allocation crosses the FFI
+boundary**, so there is no `free_str` export and no `freeStr` field in the
+vtable. The vtable's `free_buf` / `free_strs` are still needed for the *data*
+buffers returned by `get` / `list` / `get_root` / `list_roots` (those are
+allocated on Nim's shared heap).
+
+#### Nim build flags
+
+```
+nim c --app:staticlib --noMain --mm:arc --threads:off -d:release --panics:on \
+      --noNimblePath --passC:-fPIC --passL:-fPIC \
+      [--passL:-lcrypto for s3] \
+      --out:libnim_blobstore_<backend>.a nim-blobstore/<backend>/all.nim
+```
+
+`--threads:off` is critical: `--threads:on` (with `--tlsEmulation:on`) caused
+SIGSEGV when Rust foreign threads entered Nim code. Because `--threads:off`
+makes `std/locks` unavailable, each backend's `spinlock.nim` provides a raw
+`pthread_mutex_t` binding instead.
+
+#### Linking 3 self-contained archives
+
+Each `.a` embeds its own copy of the Nim runtime (`system.nim`, `tables.nim`,
+etc.). When linked into one Rust binary, the strong runtime symbols collide.
+`build.rs` runs `objcopy --weaken` on each archive after `nim c`, turning all
+defined globals into weak symbols so the linker silently picks the first
+definition. Backend-specific exports (`nim_blob_<name>_open` / `_close`) are
+unaffected — they remain strong and unique per archive.
+
+#### Allocator boundary
+
+Under `--mm:arc`, Nim uses its own allocator (not libc `malloc`). Any **data
+buffer** returned from Nim to Rust must be released by Nim — Rust uses the
+vtable's `free_buf` for byte buffers and `free_strs` for `char**` arrays.
+**Never** call `libc::free` on Nim-owned memory. Error strings never cross
+the boundary (numeric codes only — see above).
+
+#### S3 backend status
+
+The S3 backend compiles and passes structural config-validation tests, but is
+**not yet validated end-to-end** against moto or a real S3 endpoint
+(`tests/test_config_s3_moto.py` is skipped pending that validation). SigV4
+vectors in `s3/sha256.nim` (OpenSSL libcrypto) were verified against the
+official RFC 4231 / FIPS test vectors.
 
 ### CompileStats Boundary
 

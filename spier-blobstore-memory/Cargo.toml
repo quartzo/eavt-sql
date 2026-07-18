@@ -1,9 +1,0 @@
-[package]
-name = "spier-blobstore-memory"
-version = "0.1.0"
-edition = "2021"
-description = "In-memory BlobStore backend"
-
-[dependencies]
-spier-storage-traits = { path = "../spier-storage-traits" }
-uuid = { version = "1", features = ["v4"] }

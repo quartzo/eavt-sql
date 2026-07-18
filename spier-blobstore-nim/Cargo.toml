@@ -1,0 +1,17 @@
+[package]
+name = "spier-blobstore-nim"
+version = "0.1.0"
+edition = "2021"
+description = "BlobStoreEngine adapter for the Nim blobstore backends (memory / file / s3) via C-ABI vtable"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+spier-storage-traits = { path = "../spier-storage-traits" }
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]

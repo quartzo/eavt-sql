@@ -41,9 +41,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use spier_blobstore_file::FileBlobStore;
-use spier_blobstore_memory::MemoryBlobStore;
-use spier_blobstore_s3::S3BlobStore;
+use spier_blobstore_nim::NimBlobStore;
 use spier_journal_file::JournalFile;
 use spier_memtable::MemTable;
 use spier_storage_traits::CursorHandle;
@@ -96,14 +94,14 @@ fn make_transactor_config(config: &HashMap<String, String>) -> TransactorConfig 
     tc
 }
 
-fn open_memory(read_only: bool) -> Result<Transactor, String> {
-    let blobs = MemoryBlobStore::new();
+fn open_memory(read_only: bool, config: &HashMap<String, String>) -> Result<Transactor, String> {
+    let blobs = NimBlobStore::open_memory(config)?;
     let mt = load_memtable()?;
-    let config = TransactorConfig::default();
+    let config_obj = TransactorConfig::default();
     if read_only {
-        Transactor::open_read_only(Box::new(blobs), None, mt, ":memory:", config)
+        Transactor::open_read_only(Box::new(blobs), None, mt, ":memory:", config_obj)
     } else {
-        Transactor::open(Box::new(blobs), None, mt, ":memory:", config)
+        Transactor::open(Box::new(blobs), None, mt, ":memory:", config_obj)
     }
     .map_err(|e| format!("open memory: {e}"))
 }
@@ -118,7 +116,7 @@ fn open_file(config: &HashMap<String, String>) -> Result<Transactor, String> {
         .map(|v| v == "true")
         .unwrap_or(false);
 
-    let blobs = FileBlobStore::new(config)?;
+    let blobs = NimBlobStore::open_file(config)?;
     let j = JournalFile::new(config)?;
     let journal =
         Some(Box::new(j)
@@ -142,11 +140,11 @@ fn open_s3(config: &HashMap<String, String>) -> Result<Transactor, String> {
         .map(|v| v == "true")
         .unwrap_or(false);
 
-    let blobs = S3BlobStore::new(config)?;
-
     if config.get("endpoint").is_none() || config.get("bucket_name").is_none() {
         return Err("s3 backend requires endpoint and bucket_name in config".into());
     }
+
+    let blobs = NimBlobStore::open_s3(config)?;
 
     let local_path = config.get("path").map(|s| s.as_str()).unwrap_or(".");
 
@@ -217,7 +215,7 @@ fn init(config: &HashMap<String, String>) -> Result<KVState, String> {
         .unwrap_or(false);
 
     let kv = match backend {
-        "memory" => open_memory(read_only)?,
+        "memory" => open_memory(read_only, config)?,
         "file" => open_file(config)?,
         "s3" => open_s3(config)?,
         other => return Err(format!("unknown storage backend: {other}")),

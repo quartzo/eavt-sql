@@ -14,9 +14,7 @@ zstd = "0.13"
 lru = "0.12"
 crossbeam-skiplist = "0.1"
 spier-storage-traits = { path = "../spier-storage-traits" }
-spier-blobstore-memory = { path = "../spier-blobstore-memory" }
-spier-blobstore-file = { path = "../spier-blobstore-file" }
-spier-blobstore-s3 = { path = "../spier-blobstore-s3" }
+spier-blobstore-nim = { path = "../spier-blobstore-nim" }
 spier-journal-file = { path = "../spier-journal-file" }
 spier-memtable = { path = "../spier-memtable" }
 
