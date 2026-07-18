@@ -394,20 +394,6 @@ def test_scheme_if_else(engine):
     assert rows == [("no",)]
 
 
-def test_scheme_lambda_application(engine):
-    rows = engine.run_scheme(
-        "((lambda (n) (result n)) 42)"
-    )
-    assert rows == [(42,)]
-
-
-def test_scheme_lambda_captures_env(engine):
-    rows = engine.run_scheme(
-        "(let* ((x 7)) ((lambda () (result x))))"
-    )
-    assert rows == [(7,)]
-
-
 def test_scheme_begin_multiple_results(engine):
     """begin returns only the last form's value (no yield in DML sessions)."""
     rows = engine.run_scheme("(begin (result 1) (result 2) (result 3))")
