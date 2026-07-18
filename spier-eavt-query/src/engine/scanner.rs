@@ -160,6 +160,11 @@ impl PositionStack {
         }
     }
 
+    /// Entrada do topo da pilha (para distinguir Scanned de Fixed).
+    pub fn top_entry(&self) -> Option<&StackEntry> {
+        self.stack.last()
+    }
+
     // -- estado ativo --
 
     pub fn current_active_key(&self) -> Option<&[u8]> {
@@ -182,9 +187,12 @@ impl PositionStack {
         !self.at_end || self.current_active_key.is_some()
     }
 
-    /// Posição corrente = índice do topo da pilha (0 se vazia).
+    /// Posição corrente para iteração = próximo slot livre da pilha
+    /// (stack.len()). Toda entrada na pilha vem de scanner-push (Fixed), e
+    /// scanner-iterate itera no nível imediatamente após o último Fixed
+    /// empilhado — i.e., o primeiro slot de `idx_order` ainda sem Fixed.
     pub fn current_position(&self) -> usize {
-        self.stack.len().saturating_sub(1)
+        self.stack.len()
     }
 
     pub fn stack_len(&self) -> usize {
@@ -435,8 +443,22 @@ impl V2Scanner {
     }
 
     pub fn pop_position(&mut self) {
-        self.pos.pop();
+        // Nada a fazer aqui — o caller gerencia prefixos via scanner-push/pop
+        // (Fixed entries). Este método existe só para retro-compatibilidade
+        // com o frame handler que o chamava; sem Scanned para desempilhar, é
+        // um no-op. (Pode ser removido quando o handler for limpo.)
+        let _ = self.pos.top_entry();
     }
+
+    // -- DEBUG HELPERS (temporário) --
+    pub fn pos_len(&self) -> usize { self.pos.stack_len() }
+    pub fn pos_name_dbg(&self) -> String {
+        self.pos_name().to_string()
+    }
+    pub fn current_active_key_dbg(&self) -> Option<Vec<u8>> {
+        self.pos.current_active_key().map(|k| k.to_vec())
+    }
+    pub fn prefix_bytes_dbg(&self) -> Vec<u8> { self.prefix_bytes_cache.clone() }
 
     /// Push prefix_bytes_cache as a Scanned entry and clear current_active_key.
     /// Used by scanner-seek-prefix (scanner-iterate) — orthogonal to depth-run's

@@ -743,3 +743,174 @@ def test_iterate_multi_single_atom_backward_compat(engine):
         f'(scanner-iterate (s) (v) (result-row v)))'
     )
     assert rows_atom == rows_list == [(5,), (10,), (15,)]
+
+
+# ── Nested scanner-iterate triejoin ──────────────────────────────────────────
+#
+# These tests replicate the triejoin structure that the SQL compiler emits
+# (`depth-fixed` per bound attr + shared multi-scanner `depth-run` on `?e` +
+# one `depth-run` per attr value), but written directly in `scanner-iterate`.
+#
+# Canonical shape (2-attr join on the same entity):
+#
+#   (let* ((s0 (scanner-open "AEVT"))
+#          (s1 (scanner-open "AEVT")))
+#     (scanner-push s0 (intern-a "user.name"))   ; depth-fixed: attr name
+#     (scanner-push s1 (intern-a "user.age"))    ; depth-fixed: attr age
+#     (scanner-iterate (s0 s1) (e)              ; shared depth-run on ?e
+#       (scanner-push s0 e) (scanner-push s1 e) ; propagate converged ?e
+#       (scanner-iterate (s0) (name)            ; depth-run on name value
+#         (scanner-iterate (s1) (age)          ; depth-run on age value
+#           (result-row e name age)))
+#       (scanner-pop s0) (scanner-pop s1)))     ; symmetric pop
+#
+# AEVT idx_order = [a, e, v, t, added] — push a, then iterate e, then v.
+# The outer `scanner-iterate` converges on `?e`; we explicitly `scanner-push`
+# `e` on each scanner so the inner iterate walks `v` constrained to (a, e).
+# The `scanner-pop` after the inner block is symmetric. Scanners are
+# independent (each owns its cursor); `leap_next_at` does an absolute
+# `cursor.seek(target)` derived from the cached `current_active_key`, so
+# nesting the same scanner at multiple levels is fine: `pos_name()`,
+# `value_start`, `extract_raw` all derive from the top of the position
+# stack.
+
+
+def _setup_join_data(e: EAVTEngine):
+    """Create 3 entities with user.name (STRING) and user.age (LONG).
+
+    e1: name=Alice, age=30
+    e2: name=Alice, age=25      (same name, different age — forces leapfrog
+                                 on the shared e to disambiguate)
+    e3: name=Bob,   (no age)    (only one attr — must NOT appear in join)
+    e4: (no name),   age=30      (only one attr — must NOT appear in join)
+
+    Returns (e1, e2, e3, e4).
+    """
+    e.run_scheme('(declare-attr "user.name" "STRING" #f #f)')
+    e.run_scheme('(declare-attr "user.age" "LONG" #f #f)')
+    rows = e.run_scheme(
+        '(let* ((e1 (alloc-entity)) (e2 (alloc-entity)) '
+        '       (e3 (alloc-entity)) (e4 (alloc-entity))) '
+        '(save e1 "user.name" "Alice") (save e1 "user.age" 30) '
+        '(save e2 "user.name" "Alice") (save e2 "user.age" 25) '
+        '(save e3 "user.name" "Bob") '
+        '(save e4 "user.age" 30) '
+        '(result e1 e2 e3 e4))'
+    )
+    return rows[0]  # (e1, e2, e3, e4)
+
+
+def test_nested_join_two_attrs_basic(engine):
+    """Canonical 2-attr join: entities with BOTH user.name AND user.age.
+
+    The outer `scanner-iterate` converges on `?e`. Before iterating the
+    inner level, we `scanner-push e` on each scanner so the inner
+    `scanner-iterate` walks the `v` slot constrained to (a, e). Without
+    that push, the inner iterate would re-scan all eids under `a`, losing
+    the join constraint. The pop after the inner iterate is symmetric.
+    """
+    e1, e2, e3, e4 = _setup_join_data(engine)
+    rows = engine.run_scheme_select(
+        '(let* ((s0 (scanner-open "AEVT")) '
+        '       (s1 (scanner-open "AEVT"))) '
+        '(scanner-push s0 (intern-a "user.name")) '
+        '(scanner-push s1 (intern-a "user.age")) '
+        '(scanner-iterate (s0 s1) (e) '
+        '  (scanner-push s0 e) (scanner-push s1 e) '
+        '  (scanner-iterate (s0) (name) '
+        '    (scanner-iterate (s1) (age) '
+        '      (result-row e name age))) '
+        '  (scanner-pop s0) (scanner-pop s1)))'
+    )
+    by_eid = {r[0]: (r[1], r[2]) for r in rows}
+    assert by_eid == {e1: ("Alice", 30), e2: ("Alice", 25)}, (
+        f"expected join for e1 and e2 only, got {rows}"
+    )
+    assert e3 not in by_eid, f"e3 has no age, must not appear: {rows}"
+    assert e4 not in by_eid, f"e4 has no name, must not appear: {rows}"
+
+
+def test_nested_join_same_scanner_two_levels(engine):
+    """Same scanner iterated at two nesting levels (outer `e`, inner `v`).
+
+    One scanner on AEVT pushed with aid only. The outer iterate walks `e`;
+    we `scanner-push e` so the inner iterate walks `v` constrained to
+    (a, e). Same-scanner nesting works because the position stack is LIFO
+    and `leap_next_at` does an absolute `cursor.seek` based on the cached
+    active key at the current top.
+    """
+    e1, e2, e3, e4 = _setup_join_data(engine)
+    rows = engine.run_scheme_select(
+        '(let* ((s (scanner-open "AEVT"))) '
+        '(scanner-push s (intern-a "user.age")) '
+        '(scanner-iterate (s) (e) '
+        '  (scanner-push s e) '
+        '  (scanner-iterate (s) (v) '
+        '    (result-row e v)) '
+        '  (scanner-pop s)))'
+    )
+    by_eid = {}
+    for r in rows:
+        by_eid.setdefault(r[0], set()).add(r[1])
+    assert by_eid == {e1: {30}, e2: {25}, e4: {30}}, (
+        f"same-scanner nested iterate wrong: {rows}"
+    )
+    assert e3 not in by_eid
+
+
+def test_nested_join_with_range_on_inner(engine):
+    """2-attr join with `:ranges` on the inner (age) level: age > 27.
+
+    Only e1 (age=30) survives the inner range; e2 (age=25) is filtered
+    out, so its inner iterate emits nothing and the outer converge moves
+    on.
+    """
+    e1, e2, e3, e4 = _setup_join_data(engine)
+    rows = engine.run_scheme_select(
+        '(let* ((s0 (scanner-open "AEVT")) '
+        '       (s1 (scanner-open "AEVT")) '
+        '       (r0 (ranges-create (> 27)))) '
+        '(scanner-push s0 (intern-a "user.name")) '
+        '(scanner-push s1 (intern-a "user.age")) '
+        '(scanner-iterate (s0 s1) (e) '
+        '  (scanner-push s0 e) (scanner-push s1 e) '
+        '  (scanner-iterate (s0) (name) '
+        '    (scanner-iterate (s1) (age) :ranges r0 '
+        '      (result-row e name age))) '
+        '  (scanner-pop s0) (scanner-pop s1)))'
+    )
+    by_eid = {r[0]: (r[1], r[2]) for r in rows}
+    assert by_eid == {e1: ("Alice", 30)}, (
+        f"only e1 (age=30) should survive > 27, got {rows}"
+    )
+    assert e2 not in by_eid, f"e2 (age=25) must be filtered by > 27: {rows}"
+
+
+def test_nested_join_with_range_on_shared_depth(engine):
+    """`:ranges` on the SHARED (outer) level — filters `?e` by a value range.
+
+    Scanners on AEVT (idx_order = [a, e, v, ...]); outer iterate walks `e`
+    and is ranged by eid. The inner levels push `e` then iterate each
+    scanner's `v` slot under (a, e).
+    """
+    e1, e2, e3, e4 = _setup_join_data(engine)
+    rows = engine.run_scheme_select(
+        f'(let* ((s0 (scanner-open "AEVT")) '
+        f'        (s1 (scanner-open "AEVT")) '
+        f'        (r0 (ranges-create (>= {e2})))) '
+        f'(scanner-push s0 (intern-a "user.name")) '
+        f'(scanner-push s1 (intern-a "user.age")) '
+        f'(scanner-iterate (s0 s1) (e) :ranges r0 '
+        f'  (scanner-push s0 e) (scanner-push s1 e) '
+        f'  (scanner-iterate (s0) (name) '
+        f'    (scanner-iterate (s1) (age) '
+        f'      (result-row e name age))) '
+        f'  (scanner-pop s0) (scanner-pop s1)))'
+    )
+    by_eid = {r[0]: (r[1], r[2]) for r in rows}
+    # e1 filtered by outer range (e < e2); e3 has no age; e4 has no name.
+    # Only e2 survives.
+    assert by_eid == {e2: ("Alice", 25)}, (
+        f"outer range >= e2 should leave only e2 with both attrs, got {rows}"
+    )
+    assert e1 not in by_eid, f"e1 must be filtered by outer >= {e2}: {rows}"

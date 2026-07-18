@@ -335,13 +335,11 @@ impl spier_scheme::HostFns for SchemeHostFns {
                 | "lookup-entity" | "lookup-value"
                 | "save" | "retract" | "result"
                 | "declare-attr" | "declare-partition"
-                | "scanner-open" | "scanner-init" | "scanner-read"
+                | "scanner-open" | "scanner-read"
                 | "scanner-push" | "scanner-pop" | "scanner-prefix"
-                | "scanner-seek-prefix"
-                | "scheme-leap-init" | "scheme-leap-next" | "depth-cleanup"
+                | "scheme-leap-init" | "scheme-leap-next"
                 | "intern-a" | "result-row"
-                | "resolve-val" | "attr-name" | "probe-begin"
-                | "depth-fixed-begin" | "depth-fixed-end"
+                | "resolve-val" | "attr-name"
                 | "dbg-scanners" | "ranges-show"
         )
     }
@@ -388,33 +386,6 @@ impl spier_scheme::HostFns for SchemeHostFns {
                 Ok(EvalStep::Done(SExpr::Resource(Opaque(resource))))
             }
 
-            // -- scanner-init (called by depth-run) --
-
-            // -- Scanner prefix iteration (no cursor reopening) --
-
-            "scanner-seek-prefix" => {
-                /// Lightweight: push prefix_bytes_cache as Scanned + advance_to_active_at.
-                /// Does NOT reopen the cursor — assumes scanner-open already did it.
-                /// Clears current_active_key so bound_prefix uses top_prefix() (the
-                /// pushed prefix), not a stale key from a previous position.
-                let scanner = extract_scanner(&args[0])?;
-                let mut s = scanner.lock().unwrap();
-                let prefix = s.prefix_bytes().to_vec();
-                s.pos_push_scanned_prefix(prefix);
-                s.advance_to_active_at();
-                // Discover the attribute's value type from the aid embedded in
-                // the prefix so decode_v picks the correct decoder. This matters
-                // for REF (encode_entity — no sign flip) vs LONG (encode_int64
-                // — sign flip): without it, value_attr_type stays None and REF
-                // values get misdecoded as LONG with an erroneous sign flip.
-                let vt_opt = s.attr_id_from_prefix_bytes()
-                    .and_then(|aid| self.engine.value_type_for(aid));
-                if let Some(vt) = vt_opt {
-                    s.set_value_attr_type(Some(vt));
-                }
-                Ok(EvalStep::Done(SExpr::Void))
-            }
-
             "scanner-read" => {
                 let scanner = extract_scanner(&args[0])?;
                 let s = scanner.lock().unwrap();
@@ -422,54 +393,6 @@ impl spier_scheme::HostFns for SchemeHostFns {
                     Some(val) => Ok(EvalStep::Done(value_to_sexpr(&val).unwrap_or(SExpr::Void))),
                     None => Ok(EvalStep::Done(SExpr::Void)),
                 }
-            }
-
-            // -- DepthEnter (called by depth-run) --
-
-            "scanner-init" => {
-                let scanner = extract_scanner(&args[0])?;
-                let _var_id = expect_int(&args[1])? as usize;
-                let mut s = scanner.lock().unwrap();
-                // Build prefix from Fixed entries and push as Scanned.
-                // pos_push_scanned_prefix clears current_active_key so bound_prefix
-                // uses top_prefix() (the pushed prefix), not a stale key.
-                s.build_prefix_from_saved();
-                let prefix = s.prefix_bytes().to_vec();
-                s.pos_push_scanned_prefix(prefix);
-                if !s.is_open() {
-                    if let Some(aid) = s.attr_id_from_prefix_bytes() {
-                        let vt = self.engine.value_type_for(aid);
-                        s.set_value_attr_type(vt);
-                    }
-                    let cf_id = match s.index_name() {
-                        "EAVT" => 0u32, "AEVT" => 1, "AVET" => 2, "VAET" => 3, _ => 0,
-                    };
-                    let prefix = s.prefix_bytes().to_vec();
-                    let cursor = match self.engine.open_raw_cursor(cf_id, &prefix) {
-                        Ok(c) => c,
-                        Err(_) => Arc::new(std::cell::RefCell::new(
-                            crate::engine::scanner::InvalidCursor,
-                        )),
-                    };
-                    s.set_cursor(cursor);
-                    s.advance_to_active_at();
-                    if s.value_attr_type().is_none() {
-                        if let Some(aid) = s.attr_id_from_key() {
-                            let vt = self.engine.value_type_for(aid);
-                            s.set_value_attr_type(vt);
-                        }
-                    }
-                } else {
-                    // Cursor already open (from scanner-open). Seek to prefix.
-                    s.seek_to_prefix_start();
-                    s.advance_to_active_at();
-                }
-                s.clear_at_end();
-                if let Some(aid) = s.attr_id_from_key() {
-                    let vt = self.engine.value_type_for(aid);
-                    s.set_value_attr_type(vt);
-                }
-                Ok(EvalStep::Done(SExpr::Void))
             }
 
             // -- Leapfrog --
@@ -481,6 +404,29 @@ impl spier_scheme::HostFns for SchemeHostFns {
                 let scanners: Vec<&Mutex<V2Scanner>> = scanner_exprs.iter()
                     .map(|a| extract_scanner(a))
                     .collect::<Result<_, _>>()?;
+                // Position each scanner's cursor at the start of its current
+                // prefix (derived from caller's scanner-push sequence) and
+                // advance to the first active key. This is the equivalent of
+                // what scanner-init used to do, but WITHOUT pushing any
+                // Scanned entry — the iteration level is determined entirely
+                // by the Fixed entries already on the stack.
+                for sm in &scanners {
+                    let mut s = sm.lock().unwrap();
+                    s.build_prefix_from_saved();
+                    let prefix = s.prefix_bytes().to_vec();
+                    if let Some(aid) = s.attr_id_from_prefix_bytes() {
+                        let vt = self.engine.value_type_for(aid);
+                        s.set_value_attr_type(vt);
+                    }
+                    s.seek_to_prefix_start();
+                    s.advance_to_active_at();
+                    if s.value_attr_type().is_none() {
+                        if let Some(aid) = s.attr_id_from_key() {
+                            let vt = self.engine.value_type_for(aid);
+                            s.set_value_attr_type(vt);
+                        }
+                    }
+                }
                 let raw_ops = Self::parse_ranges(ranges_sexpr)?;
                 let ok = if raw_ops.is_empty() {
                     Self::leap_converge(&scanners)
@@ -530,35 +476,6 @@ impl spier_scheme::HostFns for SchemeHostFns {
                 Ok(EvalStep::Done(SExpr::Bool(true)))
             }
 
-            "depth-cleanup" => {
-                let scanner = extract_scanner(&args[0])?;
-                let mut s = scanner.lock().unwrap();
-                s.pop_position();
-                Ok(EvalStep::Done(SExpr::Void))
-            }
-
-            // -- Depth-fixed --
-
-            "depth-fixed-begin" => {
-                let n = args.len();
-                for i in 0..n - 1 {
-                    let scanner = extract_scanner(&args[i])?;
-                    let val = sexpr_to_value(&args[n - 1]).map_err(|e| he(e))?;
-                    let mut s = scanner.lock().unwrap();
-                    s.save_value(&val);
-                }
-                Ok(EvalStep::Done(SExpr::Void))
-            }
-
-            "depth-fixed-end" => {
-                for arg in args {
-                    let scanner = extract_scanner(arg)?;
-                    let mut s = scanner.lock().unwrap();
-                    s.pop_saved_value();
-                }
-                Ok(EvalStep::Done(SExpr::Void))
-            }
-
             // -- Attribute / param access --
 
             "intern-a" => {
@@ -586,33 +503,6 @@ impl spier_scheme::HostFns for SchemeHostFns {
             "resolve-val" => {
                 // For now just pass through (value already decoded by scanner)
                 Ok(EvalStep::Done(args[0].clone()))
-            }
-
-            // -- Probe (point lookup before scan) --
-
-            "probe-begin" => {
-                let e_val = expect_int(&args[0])? as u64;
-                let a_val = expect_int(&args[1])? as u32;
-                let v_probe = sexpr_to_value(&args[2]).map_err(|e| he(e))?;
-                let bound = [
-                    BoundPart::Int(e_val),
-                    BoundPart::Attr(a_val),
-                ];
-                let datoms = self.engine.probe_collect("EAVT", &bound, &self.ctx);
-                let found = datoms.iter().find(|d| {
-                    if d.retracted { return false; }
-                    probe_value_matches(&d.v, &v_probe)
-                });
-                match found {
-                    Some(d) => {
-                        let tx_eid = spier_transactor::resolver_consts::make_entity_id(
-                            spier_transactor::resolver_consts::PART_TX,
-                            d.t,
-                        );
-                        Ok(EvalStep::Done(SExpr::Int(tx_eid as i64)))
-                    }
-                    None => Ok(EvalStep::Done(SExpr::Void)),
-                }
             }
 
             // -- DML: save / retract --
