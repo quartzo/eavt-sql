@@ -10,6 +10,7 @@
 
 import std/random
 import std/algorithm
+import std/sets
 import abi
 import spinlock
 
@@ -27,22 +28,25 @@ type
     right: TreapNode
 
   SnapshotEntry = object
-    roots: seq[TreapNode]   # one root per CF (nil = empty)
+    roots: seq[TreapNode]   # one root per CF (nil = empty); empty seq = slot freed
+    inUse: bool
 
   MemTableHandle = object
     numCf: cuint
     live: seq[TreapNode]        # current live root per CF
     cfSize: seq[int]            # total key bytes per CF (unique keys)
-    snaps: seq[SnapshotEntry]    # versioned registry (index = snapshot id)
-    nextSnap: uint64
-    cursors: seq[CursorState]    # index = cursor id
+    snaps: seq[SnapshotEntry]    # versioned registry (slot index = snapshot id - 1)
+    freeSnapSlots: seq[uint64]   # reclaimable snapshot slot ids (1-based)
+    nextSnap: uint64             # monotonic; only used to seed when no free slot
+    cursors: seq[CursorState]    # index = cursor id - 1
+    freeCursorSlots: seq[uint64]
     nextCursor: uint64
     lock: SpinLock
 
   CursorState = object
     keys: seq[Key]                # materialized keys for this cursor (lazily drained)
     reverse: bool
-    valid: bool
+    inUse: bool
 
 # ---------------------------------------------------------------------------
 # Treap helpers (pure, immutable)
@@ -197,6 +201,7 @@ proc countPrefixImpl(h: pointer, id: uint64, cf: cuint, prefix: ptr Byte, plen: 
 proc scanPrefixImpl(h: pointer, id: uint64, cf: cuint, prefix: ptr Byte, plen: csize_t,
                     reverse: cint, outBuf: ptr pointer, outLen: ptr csize_t,
                     errOut: ptr cint): cint {.cdecl.}
+proc debugCountNodesImpl(h: pointer, outCount: ptr uint64): cint {.cdecl.}
 
 # ---------------------------------------------------------------------------
 # Handle lifecycle
@@ -212,8 +217,10 @@ proc openMemTable*(numCf: cuint, errOut: ptr cint): NimMemTableVtablePtr =
     live: newSeq[TreapNode](numCf.int),
     cfSize: newSeq[int](numCf.int),
     snaps: @[],
+    freeSnapSlots: @[],
     nextSnap: 1,
     cursors: @[],
+    freeCursorSlots: @[],
     nextCursor: 1,
     lock: SpinLock(),
   )
@@ -236,6 +243,7 @@ proc openMemTable*(numCf: cuint, errOut: ptr cint): NimMemTableVtablePtr =
   vt.contains = containsImpl
   vt.countPrefix = countPrefixImpl
   vt.scanPrefix = scanPrefixImpl
+  vt.debugCountNodes = debugCountNodesImpl
   vt.freeBuf = freeShared
   return vt
 
@@ -243,6 +251,22 @@ proc closeMemTable*(vt: NimMemTableVtablePtr) =
   if vt == nil: return
   if vt.handle != nil:
     var h = cast[ptr MemTableHandle](vt.handle)
+    # Manually clear all owned seq/ref fields so ARC releases the TreapNode
+    # graph before the raw `deallocShared` frees the handle struct. ARC does
+    # NOT run finalizers on a raw free, so without this the whole treap and
+    # every retained snapshot/cursor would leak on close.
+    h.live = @[]
+    h.cfSize = @[]
+    for i in 0 ..< h.snaps.len:
+      h.snaps[i].roots = @[]
+      h.snaps[i].inUse = false
+    h.snaps = @[]
+    h.freeSnapSlots = @[]
+    for i in 0 ..< h.cursors.len:
+      h.cursors[i].keys = @[]
+      h.cursors[i].inUse = false
+    h.cursors = @[]
+    h.freeCursorSlots = @[]
     deinitSpinLock(h.lock)
     deallocShared(h)
   freeVtable(vt)
@@ -312,10 +336,14 @@ proc clearImpl(h: pointer, errOut: ptr cint): cint {.cdecl.} =
 proc getSnap(hnd: ptr MemTableHandle, id: uint64): ptr SnapshotEntry =
   if id == 0 or id.int > hnd.snaps.len:
     return nil
+  if not hnd.snaps[id.int - 1].inUse:
+    return nil
   return addr hnd.snaps[id.int - 1]
 
 proc getCursor(hnd: ptr MemTableHandle, cursor: uint64): ptr CursorState =
   if cursor == 0 or cursor.int > hnd.cursors.len:
+    return nil
+  if not hnd.cursors[cursor.int - 1].inUse:
     return nil
   return addr hnd.cursors[cursor.int - 1]
 
@@ -327,9 +355,16 @@ proc snapshotImpl(h: pointer, outId: ptr uint64, errOut: ptr cint): cint {.cdecl
   hnd.lock.withLock:
     var entry: SnapshotEntry
     entry.roots = hnd.live  # seq assignment is a shallow copy of the refs
-    hnd.snaps.add(entry)
-    let id = hnd.nextSnap
-    hnd.nextSnap += 1
+    entry.inUse = true
+    let id = if hnd.freeSnapSlots.len > 0:
+      hnd.freeSnapSlots.pop()
+    else:
+      let id = hnd.nextSnap
+      hnd.nextSnap += 1
+      hnd.snaps.add(entry)
+      id
+    if id.int <= hnd.snaps.len:
+      hnd.snaps[id.int - 1] = entry
     outId[] = id
   return 0
 
@@ -337,9 +372,14 @@ proc snapshotFreeImpl(h: pointer, id: uint64) {.cdecl.} =
   if h == nil: return
   var hnd = cast[ptr MemTableHandle](h)
   hnd.lock.withLock:
-    if id != 0 and id.int <= hnd.snaps.len:
-      # free the snapshot entry (roots become nil; treap nodes are GC'd by ARC)
+    if id != 0 and id.int <= hnd.snaps.len and hnd.snaps[id.int - 1].inUse:
+      # Release the captured roots: ARC decrements the TreapNode refs and
+      # collects any node no longer reachable from a live root or another
+      # outstanding snapshot. Return the slot to the free-list so the
+      # registry does not grow monotonically across the process lifetime.
       hnd.snaps[id.int - 1].roots = @[]
+      hnd.snaps[id.int - 1].inUse = false
+      hnd.freeSnapSlots.add(id)
 
 proc scanImpl(h: pointer, id: uint64, cf: cuint, prefix: ptr Byte, plen: csize_t,
               reverse: cint, outCursor: ptr uint64, errOut: ptr cint): cint {.cdecl.} =
@@ -367,10 +407,16 @@ proc scanImpl(h: pointer, id: uint64, cf: cuint, prefix: ptr Byte, plen: csize_t
     var st: CursorState
     st.keys = collected
     st.reverse = reverse != 0
-    st.valid = collected.len > 0
-    let cid = hnd.nextCursor
-    hnd.nextCursor += 1
-    hnd.cursors.add(st)
+    st.inUse = true
+    let cid = if hnd.freeCursorSlots.len > 0:
+      hnd.freeCursorSlots.pop()
+    else:
+      let id = hnd.nextCursor
+      hnd.nextCursor += 1
+      hnd.cursors.add(st)
+      id
+    if cid.int <= hnd.cursors.len:
+      hnd.cursors[cid.int - 1] = st
     outCursor[] = cid
   return 0
 
@@ -474,10 +520,10 @@ proc cursorFreeImpl(h: pointer, cursor: uint64) {.cdecl.} =
   if h == nil: return
   var hnd = cast[ptr MemTableHandle](h)
   hnd.lock.withLock:
-    let cs = getCursor(hnd, cursor)
-    if cs != nil:
-      cs.keys = @[]
-      cs.valid = false
+    if cursor != 0 and cursor.int <= hnd.cursors.len and hnd.cursors[cursor.int - 1].inUse:
+      hnd.cursors[cursor.int - 1].keys = @[]
+      hnd.cursors[cursor.int - 1].inUse = false
+      hnd.freeCursorSlots.add(cursor)
 
 proc containsImpl(h: pointer, id: uint64, cf: cuint, key: ptr Byte, klen: csize_t,
                   outPresent: ptr cint, errOut: ptr cint): cint {.cdecl.} =
@@ -525,6 +571,25 @@ proc countAll(node: TreapNode): int =
 proc prefixUpperBound(prefix: Key): Key =
   result = prefix & @[byte(0xFF), 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
 
+proc collectAddrs(node: TreapNode; seen: var HashSet[int]) =
+  if node == nil or seen.contains(cast[int](node)): return
+  seen.incl(cast[int](node))
+  collectAddrs(node.left, seen)
+  collectAddrs(node.right, seen)
+
+## Debug-only helper: total number of UNIQUE treap nodes reachable from any live
+## root or any in-use snapshot root. Used by the Rust-side GC tests to assert
+## that releasing snapshots actually lets ARC collect old COW nodes.
+proc debugCountUniqueNodes*(hnd: ptr MemTableHandle): uint64 =
+  var seen: HashSet[int] = initHashSet[int]()
+  for r in hnd.live:
+    collectAddrs(r, seen)
+  for entry in hnd.snaps:
+    if entry.inUse:
+      for r in entry.roots:
+        collectAddrs(r, seen)
+  result = cast[uint64](seen.len)
+
 proc scanPrefixImpl(h: pointer, id: uint64, cf: cuint, prefix: ptr Byte, plen: csize_t,
                     reverse: cint, outBuf: ptr pointer, outLen: ptr csize_t,
                     errOut: ptr cint): cint {.cdecl.} =
@@ -563,4 +628,13 @@ proc scanPrefixImpl(h: pointer, id: uint64, cf: cuint, prefix: ptr Byte, plen: c
     copyMem(buf, addr packed[0], packed.len)
     outBuf[] = buf
     outLen[] = cast[csize_t](packed.len)
+  return 0
+
+proc debugCountNodesImpl(h: pointer, outCount: ptr uint64): cint {.cdecl.} =
+  if h == nil:
+    outCount[] = cast[uint64](-1)
+    return -1
+  var hnd = cast[ptr MemTableHandle](h)
+  hnd.lock.withLock:
+    outCount[] = debugCountUniqueNodes(hnd)
   return 0

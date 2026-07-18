@@ -56,6 +56,7 @@ type
   ScanPrefixFn* = proc(h: pointer, id: uint64, cf: cuint, prefix: ptr Byte, plen: csize_t,
                        reverse: cint, outBuf: ptr pointer, outLen: ptr csize_t,
                        errOut: ptr cint): cint {.cdecl.}
+  DebugCountNodesFn* = proc(h: pointer, outCount: ptr uint64): cint {.cdecl.}
   FreeBufFn* = proc(p: pointer) {.cdecl.}
 
   NimMemTableVtableObj* {.pure, bycopy.} = object
@@ -75,6 +76,7 @@ type
     contains*: ContainsFn
     countPrefix*: CountPrefixFn
     scanPrefix*: ScanPrefixFn
+    debugCountNodes*: DebugCountNodesFn
     freeBuf*: FreeBufFn
 
   NimMemTableVtablePtr* = ptr NimMemTableVtableObj

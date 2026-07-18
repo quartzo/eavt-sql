@@ -53,7 +53,8 @@ impl MemTableEngine for MemTable {
     }
 
     fn snapshot(&self) -> Result<MemTableSnapshot, String> {
-        self.inner.snapshot()
+        // Arc-backed snapshot: NimSnap::Drop calls snapshot_free → real GC.
+        self.inner.snapshot_arc()
     }
 
     fn scan_prefix(

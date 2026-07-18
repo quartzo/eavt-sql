@@ -17,7 +17,7 @@ use std::any::Any;
 use std::ffi::{c_int, c_void};
 use std::sync::Arc;
 
-use spier_storage_traits::memtable::{MemTableEngine, MemTableSnapshot};
+use spier_storage_traits::memtable::MemTableSnapshot;
 // ---------------------------------------------------------------------------
 // Error codes — mirror nim-memtable/abi.nim
 // ---------------------------------------------------------------------------
@@ -148,6 +148,7 @@ pub struct NimMemTableVtable {
         out_len: *mut usize,
         err_out: *mut c_int,
     ) -> c_int,
+    pub debug_count_nodes: extern "C" fn(h: *mut c_void, out_count: *mut u64) -> c_int,
     pub free_buf: extern "C" fn(p: *mut c_void),
 }
 
@@ -178,7 +179,26 @@ fn ensure_nim_init() {
 
 /// Opaque snapshot id returned by the Nim backend. Wrapped in
 /// `MemTableSnapshot.data` so the Rust side can recover it via `downcast_ref`.
-pub struct NimSnap(pub u64);
+///
+/// **GC contract:** holds an `Arc<NimMemTableStore>` so the Nim vtable/handle
+/// stay alive until the snapshot is dropped. `Drop` calls `snapshot_free(id)`
+/// on the Nim side, which clears the snapshot's root pointers and lets Nim's
+/// ARC release the now-unreachable COW treap nodes. Without this Drop the old
+/// treap versions would leak forever (the "immutable reference" lives inside
+/// Nim; Rust signals release via this Drop → FFI call).
+pub struct NimSnap {
+    pub id: u64,
+    store: Arc<NimMemTableStore>,
+}
+
+impl Drop for NimSnap {
+    fn drop(&mut self) {
+        let vt = self.store.vt;
+        if !vt.is_null() {
+            unsafe { ((*vt).snapshot_free)((*vt).handle, self.id) };
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // NimMemTableStore
@@ -221,7 +241,7 @@ impl NimMemTableStore {
     fn snap_id(snap: &MemTableSnapshot) -> Result<u64, String> {
         snap.data
             .downcast_ref::<NimSnap>()
-            .map(|s| s.0)
+            .map(|s| s.id)
             .ok_or_else(|| "invalid memtable snapshot type".to_string())
     }
 
@@ -286,6 +306,19 @@ impl NimMemTableStore {
                 }
             }
             Err(_) => 0,
+        }
+    }
+
+    /// Debug-only: total number of UNIQUE treap nodes reachable from any live
+    /// root or any in-use snapshot root. Used by GC tests to assert that
+    /// releasing snapshots actually lets ARC collect old COW nodes.
+    pub fn debug_count_nodes(&self) -> u64 {
+        let mut out: u64 = 0;
+        let rc = unsafe { ((*self.vt).debug_count_nodes)((*self.vt).handle, &mut out) };
+        if rc != 0 {
+            u64::MAX
+        } else {
+            out
         }
     }
 }
@@ -398,11 +431,13 @@ impl MemTableCursor {
 }
 
 // ---------------------------------------------------------------------------
-// MemTableEngine impl
+// MemTableEngine-equivalent inherent methods. The trait itself is impl'd on the
+// adapter `MemTable` (spier-memtable), which holds an `Arc<NimMemTableStore>`
+// and can therefore produce a properly-GC'd `NimSnap` (see `snapshot_arc`).
 // ---------------------------------------------------------------------------
 
-impl MemTableEngine for NimMemTableStore {
-    fn put(&self, cf: u32, key: &[u8]) -> Result<u64, String> {
+impl NimMemTableStore {
+    pub fn put(&self, cf: u32, key: &[u8]) -> Result<u64, String> {
         let mut err: c_int = 0;
         let mut out_size: u64 = 0;
         let rc = unsafe {
@@ -421,7 +456,7 @@ impl MemTableEngine for NimMemTableStore {
         Ok(out_size)
     }
 
-    fn batch_write(&self, ops: &[u8]) -> Result<u64, String> {
+    pub fn batch_write(&self, ops: &[u8]) -> Result<u64, String> {
         let mut err: c_int = 0;
         let mut out_size: u64 = 0;
         let rc = unsafe {
@@ -433,7 +468,7 @@ impl MemTableEngine for NimMemTableStore {
         Ok(out_size)
     }
 
-    fn clear(&self) -> Result<(), String> {
+    pub fn clear(&self) -> Result<(), String> {
         let mut err: c_int = 0;
         let rc = unsafe { ((*self.vt).clear)((*self.vt).handle, &mut err) };
         if rc != 0 {
@@ -442,19 +477,7 @@ impl MemTableEngine for NimMemTableStore {
         Ok(())
     }
 
-    fn snapshot(&self) -> Result<MemTableSnapshot, String> {
-        let mut id: u64 = 0;
-        let mut err: c_int = 0;
-        let rc = unsafe { ((*self.vt).snapshot)((*self.vt).handle, &mut id, &mut err) };
-        if rc != 0 {
-            return Err(err_to_string(err).to_string());
-        }
-        Ok(MemTableSnapshot {
-            data: Arc::new(NimSnap(id)) as Arc<dyn Any + Send + Sync>,
-        })
-    }
-
-    fn scan_prefix(
+    pub fn scan_prefix(
         &self,
         snap: MemTableSnapshot,
         cf: u32,
@@ -463,7 +486,7 @@ impl MemTableEngine for NimMemTableStore {
         self.scan_prefix_impl(&snap, cf, prefix, false)
     }
 
-    fn scan_prefix_reverse(
+    pub fn scan_prefix_reverse(
         &self,
         snap: MemTableSnapshot,
         cf: u32,
@@ -472,7 +495,7 @@ impl MemTableEngine for NimMemTableStore {
         self.scan_prefix_impl(&snap, cf, prefix, true)
     }
 
-    fn contains(&self, snap: MemTableSnapshot, cf: u32, key: &[u8]) -> Result<bool, String> {
+    pub fn contains(&self, snap: MemTableSnapshot, cf: u32, key: &[u8]) -> Result<bool, String> {
         let id = Self::snap_id(&snap)?;
         let mut present: c_int = 0;
         let mut err: c_int = 0;
@@ -495,6 +518,25 @@ impl MemTableEngine for NimMemTableStore {
 }
 
 impl NimMemTableStore {
+    /// Snapshot that wires up proper GC: the returned `NimSnap` holds an
+    /// `Arc<NimMemTableStore>`, and its `Drop` calls `snapshot_free(id)` so the
+    /// Nim side releases the captured treap roots and ARC can collect COW nodes
+    /// that are no longer reachable.
+    pub fn snapshot_arc(self: &Arc<Self>) -> Result<MemTableSnapshot, String> {
+        let mut id: u64 = 0;
+        let mut err: c_int = 0;
+        let rc = unsafe { ((*self.vt).snapshot)((*self.vt).handle, &mut id, &mut err) };
+        if rc != 0 {
+            return Err(err_to_string(err).to_string());
+        }
+        Ok(MemTableSnapshot {
+            data: Arc::new(NimSnap {
+                id,
+                store: Arc::clone(self),
+            }) as Arc<dyn Any + Send + Sync>,
+        })
+    }
+
     fn scan_prefix_impl(
         &self,
         snap: &MemTableSnapshot,
@@ -555,11 +597,11 @@ mod tests {
 
     #[test]
     fn put_scan_roundtrip_sorted_dedup() {
-        let mt = NimMemTableStore::open(4).expect("open");
+        let mt = Arc::new(NimMemTableStore::open(4).expect("open"));
         for s in ["banana", "apple", "cherry", "date", "apple"] {
             mt.put(0, s.as_bytes()).expect("put");
         }
-        let snap = mt.snapshot().expect("snapshot");
+        let snap = mt.snapshot_arc().expect("snapshot");
         let packed = mt.scan_prefix(snap, 0, b"").expect("scan");
         let keys = unpack_kv(&packed);
         assert_eq!(keys, vec![
@@ -572,13 +614,13 @@ mod tests {
 
     #[test]
     fn snapshot_survives_clear() {
-        let mt = NimMemTableStore::open(4).expect("open");
+        let mt = Arc::new(NimMemTableStore::open(4).expect("open"));
         mt.put(0, b"k1").expect("put");
         mt.put(0, b"k2").expect("put");
-        let snap = mt.snapshot().expect("snapshot");
+        let snap = mt.snapshot_arc().expect("snapshot");
         mt.clear().expect("clear");
         // live scan now empty
-        let live = mt.snapshot().expect("live");
+        let live = mt.snapshot_arc().expect("live");
         assert!(mt.scan_prefix(live, 0, b"").expect("scan").is_empty());
         // snapshot still holds pre-clear data
         let packed = mt.scan_prefix(snap, 0, b"").expect("scan");
@@ -591,7 +633,7 @@ mod tests {
         for i in 0..100u32 {
             mt.put(0, &i.to_be_bytes()).expect("put");
         }
-        let snap = mt.snapshot().expect("snap");
+        let snap = mt.snapshot_arc().expect("snap");
         let cursor = mt.open_scan_source(snap, 0, b"", false).expect("cursor");
         let mut count = 0;
         let mut prev: Option<Vec<u8>> = None;
@@ -611,8 +653,84 @@ mod tests {
         for s in ["ax", "ay", "bz", "bx"] {
             mt.put(0, s.as_bytes()).expect("put");
         }
-        let snap = mt.snapshot().expect("snap");
+        let snap = mt.snapshot_arc().expect("snap");
         assert_eq!(mt.count_prefix(&snap, 0, b"a"), 2);
         assert_eq!(mt.count_prefix(&snap, 0, b""), 4);
+    }
+
+    // -----------------------------------------------------------------------
+    // GC tests (ARC-driven collection of COW treap nodes)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn gc_snapshot_drop_releases_nodes() {
+        // put 50 keys -> 50 nodes live. Snapshot, then clear live.
+        // While the snapshot is alive, the nodes stay (shared via the snapshot
+        // roots). After the snapshot drops, ARC must collect all of them.
+        let mt = Arc::new(NimMemTableStore::open(4).expect("open"));
+        for i in 0..50u32 {
+            mt.put(0, &i.to_be_bytes()).expect("put");
+        }
+        let before = mt.debug_count_nodes();
+        assert_eq!(before, 50, "50 keys => 50 nodes");
+
+        let snap = mt.snapshot_arc().expect("snap");
+        mt.clear().expect("clear");
+        // snapshot still holds the old roots -> nodes still alive
+        assert_eq!(
+            mt.debug_count_nodes(),
+            50,
+            "snapshot keeps nodes alive after clear"
+        );
+        drop(snap);
+        // Now nothing references the old nodes -> ARC must collect them all.
+        assert_eq!(
+            mt.debug_count_nodes(),
+            0,
+            "snapshot drop must release all COW nodes"
+        );
+    }
+
+    #[test]
+    fn gc_live_survives_when_snapshot_dropped() {
+        // put k1, snapshot (holds v1), put k2 (path-copy -> new nodes).
+        // After dropping the snapshot, the v1-only nodes go away but the live
+        // tree (k1+k2) stays. The shared k1 node is NOT double-freed.
+        let mt = Arc::new(NimMemTableStore::open(4).expect("open"));
+        mt.put(0, b"k1").expect("put");
+        let snap = mt.snapshot_arc().expect("snap"); // holds v1 (just k1)
+        mt.put(0, b"k2").expect("put"); // path-copy: live now has k1+k2 (>=2 new nodes)
+        let with_snap = mt.debug_count_nodes();
+        assert!(
+            with_snap >= 2,
+            "expected at least 2 nodes with snapshot alive, got {with_snap}"
+        );
+        drop(snap);
+        let after = mt.debug_count_nodes();
+        // Live still has k1+k2 — at least 2 nodes. The old v1-only node (the
+        // pre-insert root) must have been collected, so `after` <= `with_snap`.
+        assert!(
+            after >= 2 && after < with_snap,
+            "expected 2 <= after < {with_snap}, got {after}"
+        );
+    }
+
+    #[test]
+    fn gc_many_snapshots_no_leak() {
+        // Repeatedly snapshot+drop should NOT grow the live node set.
+        let mt = Arc::new(NimMemTableStore::open(4).expect("open"));
+        for i in 0..10u32 {
+            mt.put(0, &i.to_be_bytes()).expect("put");
+        }
+        let baseline = mt.debug_count_nodes();
+        for _ in 0..1000 {
+            let s = mt.snapshot_arc().expect("snap");
+            drop(s);
+        }
+        assert_eq!(
+            mt.debug_count_nodes(),
+            baseline,
+            "1000 snapshot/drop cycles must not leak nodes"
+        );
     }
 }

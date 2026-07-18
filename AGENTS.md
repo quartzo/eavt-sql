@@ -302,6 +302,21 @@ Single MemTable instance lives for the transactor's entire lifetime — no insta
 3. Flush scans `flush_snap` via `scan_prefix` (materialized, rare) → merge with PageStore → commit
 4. Reads during flush see: active mt + flush_snap + PageStore
 
+### MemTable GC (ARC-driven)
+
+The persistent treap lives inside Nim under `--mm:arc`, so node lifetime is governed by **reference counting** (ARC, deterministic, no cycles since it's a tree). A `TreapNode` stays alive as long as ANY root — live or any in-use snapshot — references it; `insert` does path-copying so old versions are shared, not mutated. The trigger for collection is the Rust → FFI → Nim `Drop` chain:
+
+- `MemTableSnapshot.data: Arc<NimSnap>` where `NimSnap { id, store: Arc<NimMemTableStore> }`.
+- `impl Drop for NimSnap` calls `((*vt).snapshot_free)(handle, id)` on the Nim side.
+- `snapshotFreeImpl` clears the snapshot registry entry (`roots = @[]`, `inUse = false`) and **returns the slot to a free-list** so the registry does NOT grow monotonically across the process lifetime.
+- ARC then decrements the released `TreapNode` refs; any node no longer reachable from a live root or another in-use snapshot has its refcount hit 0 and is freed.
+
+Without that `Drop` the old COW versions would leak forever (the "immutable reference" lives inside Nim; Rust signals release via the Drop → `snapshot_free` FFI call). Cursors follow the same pattern: `MemTableCursor::drop` → `cursor_free` → slot returned to the cursor free-list.
+
+`closeMemTable` manually clears `live` / `snaps` / `cursors` (and the free-lists) BEFORE the raw `deallocShared(handle)`: ARC does NOT run finalizers on a raw free, so without this the whole treap and every retained snapshot/cursor would leak on store close.
+
+GC tests (`spier-memtable-nim`) use a `debug_count_nodes` FFI (counts UNIQUE node addresses reachable from any live or in-use-snapshot root via a `HashSet` of pointer addresses) to assert: (a) snapshot drop collects old COW nodes, (b) shared nodes between snapshot and live are not double-counted, (c) 1000 snapshot/drop cycles leak zero nodes.
+
 ### No Transaction Mechanism
 
 There is no `begin_tx`/`commit_tx`/`rollback_tx`. The system is single-writer serial in the
