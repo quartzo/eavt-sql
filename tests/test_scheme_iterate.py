@@ -388,3 +388,159 @@ def test_iterate_adjacent_prefix_chain(engine):
     assert p3_vals == ["cc"], (
         f"P3 must emit 'cc' (cursor must be at transition), got {p3_vals}"
     )
+
+
+# ── scanner-iterate with :ranges keyword ──────────────────────────────────────
+
+
+def _setup_long_data(e: EAVTEngine, values: list[int]) -> tuple[int, int]:
+    """Declare tag.x as LONG MANY and save the given values on a new entity."""
+    e.run_scheme('(declare-attr "tag.x" "LONG" #t #f)')
+    saves = " ".join(f'(save eid "tag.x" {v})' for v in values)
+    eid = e.run_scheme(
+        f'(let* ((eid (alloc-entity))) {saves} (result eid))'
+    )[0][0]
+    aid = e._handle.lookup_attr("tag.x")
+    return eid, aid
+
+
+def test_iterate_with_ranges_filters_values(engine):
+    """`:ranges` filters iterated values to those inside the merged intervals."""
+    eid, aid = _setup_long_data(engine, [5, 10, 15, 20, 25])
+    rows = engine.run_scheme_select(
+        f'(let* ((s (scanner-open "EAVT")) '
+        f'       (r0 (ranges-create (and (>= 10) (<= 20))))) '
+        f'(scanner-push s {eid}) '
+        f'(scanner-push s {aid}) '
+        f'(scanner-iterate s (v) :ranges r0 (result-row v)))'
+    )
+    assert [r[0] for r in rows] == [10, 15, 20]
+
+
+def test_iterate_with_ranges_eq_single(engine):
+    eid, aid = _setup_long_data(engine, [5, 10, 15, 20, 25])
+    rows = engine.run_scheme_select(
+        f'(let* ((s (scanner-open "EAVT"))) '
+        f'(scanner-push s {eid}) '
+        f'(scanner-push s {aid}) '
+        f'(scanner-iterate s (v) :ranges (ranges-create (= 15)) (result-row v)))'
+    )
+    assert [r[0] for r in rows] == [15]
+
+
+def test_iterate_with_ranges_neq(engine):
+    """NEQ splits the iterated range and skips the excluded value."""
+    eid, aid = _setup_long_data(engine, [5, 10, 15, 20, 25])
+    rows = engine.run_scheme_select(
+        f'(let* ((s (scanner-open "EAVT"))) '
+        f'(scanner-push s {eid}) '
+        f'(scanner-push s {aid}) '
+        f'(scanner-iterate s (v) :ranges (ranges-create (!= 15)) (result-row v)))'
+    )
+    assert [r[0] for r in rows] == [5, 10, 20, 25]
+
+
+def test_iterate_with_ranges_or_disjoint(engine):
+    eid, aid = _setup_long_data(engine, [1, 5, 10, 15, 20])
+    rows = engine.run_scheme_select(
+        f'(let* ((s (scanner-open "EAVT"))) '
+        f'(scanner-push s {eid}) '
+        f'(scanner-push s {aid}) '
+        f'(scanner-iterate s (v) :ranges (ranges-create (or (= 1) (= 20))) '
+        f'  (result-row v)))'
+    )
+    assert [r[0] for r in rows] == [1, 20]
+
+
+def test_iterate_with_ranges_empty_filter_all(engine):
+    """`:ranges` with an empty tree (from `(and)`) means no constraint."""
+    eid, aid = _setup_long_data(engine, [5, 10, 15])
+    rows = engine.run_scheme_select(
+        f'(let* ((s (scanner-open "EAVT")) '
+        f'       (r0 (ranges-create (and)))) '
+        f'(scanner-push s {eid}) '
+        f'(scanner-push s {aid}) '
+        f'(scanner-iterate s (v) :ranges r0 (result-row v)))'
+    )
+    assert [r[0] for r in rows] == [5, 10, 15]
+
+
+def test_iterate_with_ranges_in_middle_of_body(engine):
+    """`:ranges` may appear at any position among body forms."""
+    eid, aid = _setup_long_data(engine, [5, 10, 15, 20, 25])
+    rows = engine.run_scheme_select(
+        f'(let* ((s (scanner-open "EAVT")) '
+        f'       (r0 (ranges-create (>= 20)))) '
+        f'(scanner-push s {eid}) '
+        f'(scanner-push s {aid}) '
+        f'(scanner-iterate s (v) (result-row "pre") :ranges r0 (result-row v)))'
+    )
+    # For each matched value: a "pre" row followed by the value row.
+    assert rows == [("pre",), (20,), ("pre",), (25,)]
+
+
+def test_iterate_with_ranges_can_be_inspected_with_ranges_show(engine):
+    """`:ranges` value is reusable: pass it to ranges-show for debugging."""
+    eid, aid = _setup_long_data(engine, [5, 10, 15, 20, 25])
+    rows = engine.run_scheme_select(
+        f'(let* ((s (scanner-open "EAVT")) '
+        f'       (r0 (ranges-create (and (>= 10) (<= 20))))) '
+        f'(scanner-push s {eid}) '
+        f'(scanner-push s {aid}) '
+        f'(scanner-iterate s (v) :ranges r0 (result-row v)) '
+        f'(result-row (ranges-show r0)))'
+    )
+    values = [r[0] for r in rows if not isinstance(r[0], str)]
+    interval_str = [r[0] for r in rows if isinstance(r[0], str)]
+    assert values == [10, 15, 20]
+    assert interval_str == ["[10, 20]"]
+
+
+def test_iterate_without_ranges_backward_compat(engine):
+    """Forms without `:ranges` keep working exactly as before."""
+    eid, aid = _setup_long_data(engine, [5, 10, 15])
+    rows = engine.run_scheme_select(
+        f'(let* ((s (scanner-open "EAVT"))) '
+        f'(scanner-push s {eid}) '
+        f'(scanner-push s {aid}) '
+        f'(scanner-iterate s (v) (result-row v)))'
+    )
+    assert [r[0] for r in rows] == [5, 10, 15]
+
+
+def test_iterate_with_ranges_duplicate_keyword_errors(engine):
+    """Specifying `:ranges` twice is an error."""
+    eid, aid = _setup_long_data(engine, [5, 10, 15])
+    with pytest.raises(ValueError, match="more than once"):
+        engine.run_scheme_select(
+            f'(let* ((s (scanner-open "EAVT")) '
+            f'       (r0 (ranges-create (>= 5)))) '
+            f'(scanner-push s {eid}) '
+            f'(scanner-push s {aid}) '
+            f'(scanner-iterate s (v) :ranges r0 :ranges r0 (result-row v)))'
+        )
+
+
+def test_iterate_with_ranges_missing_value_errors(engine):
+    """`:ranges` at the end with no value is an error."""
+    eid, aid = _setup_long_data(engine, [5, 10, 15])
+    with pytest.raises(ValueError, match="requires a value"):
+        engine.run_scheme_select(
+            f'(let* ((s (scanner-open "EAVT"))) '
+            f'(scanner-push s {eid}) '
+            f'(scanner-push s {aid}) '
+            f'(scanner-iterate s (v) :ranges))'
+        )
+
+
+def test_iterate_with_ranges_filters_out_everything(engine):
+    """A range that matches no value emits zero rows."""
+    eid, aid = _setup_long_data(engine, [5, 10, 15])
+    rows = engine.run_scheme_select(
+        f'(let* ((s (scanner-open "EAVT"))) '
+        f'(scanner-push s {eid}) '
+        f'(scanner-push s {aid}) '
+        f'(scanner-iterate s (v) :ranges (ranges-create (and (> 100) (< 200))) '
+        f'  (result-row v)))'
+    )
+    assert rows == []

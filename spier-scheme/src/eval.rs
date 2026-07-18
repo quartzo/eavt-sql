@@ -1166,11 +1166,15 @@ fn eval_depth_fixed_frame(
     Ok(EvalResult::Pushed)
 }
 
-/// (scanner-iterate scanner-expr (param) body...)
+/// (scanner-iterate scanner-expr (param) [:ranges ranges-expr] body...)
 ///
 /// Single-scanner iteration without lambda/closure. Binds `param` directly
 /// in the current Environment. Reuses the `DepthRunBody` frame handler for
 /// the loop — zero duplicated loop logic.
+///
+/// The optional `:ranges ranges-expr` keyword pair injects a flat ranges
+/// value (produced by `ranges-create`) into scheme-leap-init / scheme-leap-next,
+/// filtering the iterated values at the current scanner position.
 fn eval_scanner_iterate_frame(
     items: &[SExpr],
     env: &mut Environment,
@@ -1181,7 +1185,7 @@ fn eval_scanner_iterate_frame(
     if items.len() < 4 {
         return Err(EvalError::Arity {
             name: "scanner-iterate".into(),
-            expected: "(scanner-iterate scanner-expr (param) body...+)",
+            expected: "(scanner-iterate scanner-expr (param) [:ranges ranges-expr] body...+)",
         });
     }
     let scanner_expr = &items[1];
@@ -1203,7 +1207,48 @@ fn eval_scanner_iterate_frame(
             })
         }
     };
-    let body_exprs: Vec<SExpr> = items[3..].to_vec();
+
+    // Parse the optional `:ranges ranges-expr` keyword from items[3..].
+    // The keyword may appear in any position among the body forms; its value
+    // is removed from the body sequence.
+    let mut ranges_expr: Option<SExpr> = None;
+    let mut body_exprs: Vec<SExpr> = Vec::new();
+    let mut i = 3;
+    while i < items.len() {
+        if let SExpr::Symbol(s) = &items[i] {
+            if s == ":ranges" {
+                if ranges_expr.is_some() {
+                    return Err(EvalError::Other(
+                        "scanner-iterate: :ranges specified more than once".into(),
+                    ));
+                }
+                if i + 1 >= items.len() {
+                    return Err(EvalError::Other(
+                        "scanner-iterate: :ranges requires a value".into(),
+                    ));
+                }
+                ranges_expr = Some(items[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        }
+        body_exprs.push(items[i].clone());
+        i += 1;
+    }
+
+    if body_exprs.is_empty() {
+        return Err(EvalError::Arity {
+            name: "scanner-iterate".into(),
+            expected: "(scanner-iterate scanner-expr (param) [:ranges ranges-expr] body...+)",
+        });
+    }
+
+    // Evaluate ranges-expr (if present) into the flat form used internally.
+    // None → empty list (matches previous behavior — no filtering).
+    let ranges_val = match ranges_expr {
+        Some(e) => eval_recursive(&e, env, host, tracer)?,
+        None => SExpr::List(vec![]),
+    };
 
     // Eval scanner-expr → resource.
     // The cursor was already opened by scanner-open and is ready to use.
@@ -1214,9 +1259,10 @@ fn eval_scanner_iterate_frame(
     // Does NOT reopen the cursor — on second call, cursor is past prefix → at_end.
     expect_done(host, "scanner-seek-prefix", &[scanner_val.clone()])?;
 
-    // scheme-leap-init(0, scanner, ()) — checks if cursor has an active key
-    // within the prefix. If cursor is past the prefix (second iterate), returns false.
-    let leap_args = vec![SExpr::Int(0), scanner_val.clone(), SExpr::List(vec![])];
+    // scheme-leap-init(0, scanner, ranges) — checks if cursor has an active key
+    // within the prefix. If cursor is past the prefix (second iterate), returns
+    // false. When ranges is non-empty, apply_ranges also filters/positions.
+    let leap_args = vec![SExpr::Int(0), scanner_val.clone(), ranges_val.clone()];
     let ok = expect_done(host, "scheme-leap-init", &leap_args)?;
     if !is_truthy(&ok) {
         // Scanner exhausted for this prefix — pop the position and return.
@@ -1237,7 +1283,7 @@ fn eval_scanner_iterate_frame(
         captured_env: HashMap::new(),
         phase: DepthRunPhase::Body,
         param_name: Some(param_name),
-        ranges: SExpr::List(vec![]),
+        ranges: ranges_val,
     });
 
     state.stack.push(Frame::DepthRunBody);
