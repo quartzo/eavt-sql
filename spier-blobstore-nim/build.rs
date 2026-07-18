@@ -1,12 +1,14 @@
-// build.rs — compiles the 3 Nim blobstore backends (memory / file / s3) into
-// 3 separate static libraries and links all of them into this crate.
+// build.rs — compiles the Nim blobstore backends (memory / file / s3) plus the
+// journal backend into 4 separate static libraries and links all of them into
+// this crate.
 //
-// Why 3 `.a`s instead of one: the user wants true per-backend modularity at
-// the build-artifact level. Each backend owns its own `abi.nim` / `spinlock.nim`
-// and exports symbols prefixed with `nim_blob_<backend>_*`. The Nim runtime
-// symbols are duplicated across the 3 `.a`s but the linker picks the first
-// definition; no duplicate-symbol conflict arises because Nim runtime symbols
-// are either weak or kept private to each compilation unit.
+// Why separate `.a`s instead of one: the user wants true per-backend modularity
+// at the build-artifact level. Each backend owns its own `abi.nim` /
+// `spinlock.nim` and exports symbols prefixed with `nim_blob_<backend>_*` (or
+// `nim_journal_*`). The Nim runtime symbols are duplicated across the archives
+// but the linker picks the first definition; no duplicate-symbol conflict
+// arises because Nim runtime symbols are either weak or kept private to each
+// compilation unit.
 
 use std::env;
 use std::path::PathBuf;
@@ -40,6 +42,7 @@ const BACKENDS: &[Backend] = &[
     Backend { name: "memory", extra_passl: &[] },
     Backend { name: "file",   extra_passl: &[] },
     Backend { name: "s3",     extra_passl: &["--passL:-lcrypto"] },
+    Backend { name: "journal", extra_passl: &[] },
 ];
 
 fn main() {

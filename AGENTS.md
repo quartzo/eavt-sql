@@ -14,14 +14,15 @@
 
 - **Rust** (stable, with cargo)
 - **Nim ≥ 2.0.14** — used by `spier-blobstore-nim/build.rs` to compile
-  `nim-blobstore/{memory,file,s3}/` into **3 separate static libraries**. The
-  build script invokes `nim c` automatically; Nim must be on `PATH`.
+  `nim-blobstore/{memory,file,s3,journal}/` into **4 separate static
+  libraries**. The build script invokes `nim c` automatically; Nim must be on
+  `PATH`.
 - **OpenSSL libcrypto** (`libcrypto.so`, usually via `libssl-dev` / `openssl-libs`)
   — used by the S3 backend for SHA-256 / HMAC-SHA256 in SigV4 signing. Linked
   with `-lcrypto`. No AWS SDK is linked; the rest of the SigV4 protocol is
   hand-rolled over `std/httpclient`.
 - **`objcopy`** (GNU binutils or LLVM) — `build.rs` calls
-  `objcopy --weaken` on each of the 3 `.a`s so the duplicated Nim runtime
+  `objcopy --weaken` on each of the 4 `.a`s so the duplicated Nim runtime
   symbols (system.nim, tables.nim, etc.) don't collide at link time.
 
 ### PyO3 Binding Workflow
@@ -77,14 +78,22 @@ nim-blobstore/                      # Pure-Nim blobstore backends — 3 self-con
                                     # atomic tmp+rename, zstd compression, root_ prefix,
                                     # read-only guard
     all.nim
-  s3/                               # → libnim_blobstore_s3.a
-    abi.nim, spinlock.nim           # backend-local copies
-    sha256.nim                      # Thin OpenSSL libcrypto wrapper (EVP_Digest + HMAC)
-    sigv4.nim                       # SigV4 signing (signAwsRequestV4)
-    backend.nim                     # S3 backend: hand-rolled SigV4 over std/httpclient,
-                                    # ListObjectsV2 with pagination, naive XML parsing
-    all.nim
-spier-journal-file/                 # JournalEngine backend
+   s3/                               # → libnim_blobstore_s3.a
+     abi.nim, spinlock.nim           # backend-local copies
+     sha256.nim                      # Thin OpenSSL libcrypto wrapper (EVP_Digest + HMAC)
+     sigv4.nim                       # SigV4 signing (signAwsRequestV4)
+     backend.nim                     # S3 backend: hand-rolled SigV4 over std/httpclient,
+                                     # ListObjectsV2 with pagination, naive XML parsing
+     all.nim
+   journal/                           # → libnim_blobstore_journal.a
+     abi.nim, spinlock.nim           # backend-local copies
+     backend.nim                     # Sequential file journal at <path>/journal/journal,
+                                     # frame [u32 klen][key][u32 vlen][value] (big-endian);
+                                     # read re-emits all valid frames
+     all.nim                         # exports nim_journal_open / nim_journal_close
+ spier-journal-file/                 # JournalEngine adapter: thin Rust wrapper over
+                                     # NimJournalStore (spier-blobstore-nim) via C-ABI
+                                     # vtable; keeps the JournalFile name + new(config) API
 spier-memtable/                    # MemTableEngine (crossbeam SkipMap per CF)
 spier-kvstore/src/                 # KVStoreEngine implementation
 spier-transactor/src/              # TransactorEngine implementation (EAVT + resolver)
@@ -119,12 +128,13 @@ tests/                             # Python tests (flat)
 
 ### Storage Backends
 
-The three blobstore backends (Memory, File, S3) are implemented in **Nim** and
-exposed to Rust via a hand-written C-ABI vtable in `spier-blobstore-nim`. The
-build script (`spier-blobstore-nim/build.rs`) invokes `nim c` **3 times** to
-compile `nim-blobstore/{memory,file,s3}/all.nim` into **3 separate static
-libraries** (`libnim_blobstore_{memory,file,s3}.a`), all linked into the Rust
-crate. Backends are selected at construction time
+The three blobstore backends (Memory, File, S3) plus the sequential **Journal**
+are implemented in **Nim** and exposed to Rust via a hand-written C-ABI vtable in
+`spier-blobstore-nim`. The build script (`spier-blobstore-nim/build.rs`) invokes
+`nim c` **4 times** to compile `nim-blobstore/{memory,file,s3,journal}/all.nim`
+into **4 separate static libraries**
+(`libnim_blobstore_{memory,file,s3,journal}.a`), all linked into the Rust crate.
+Backends are selected at construction time
 (`spier_kvstore::KVState::open(config)`) rather than loaded as `.so` plugins.
 
 | Backend | Directory               | Storage                                                | Use Case            |
@@ -132,13 +142,16 @@ crate. Backends are selected at construction time
 | Memory  | `nim-blobstore/memory/` | In-memory `HashMap`                                    | `:memory:` mode     |
 | File    | `nim-blobstore/file/`   | Directory with zstd-compressed blobs (hex-sharded)     | Persistent local    |
 | S3      | `nim-blobstore/s3/`     | S3-compatible object store via hand-rolled SigV4 (OpenSSL libcrypto + `std/httpclient`) + local journal file | Cloud/distributed |
+| Journal | `nim-blobstore/journal/`| Sequential append-only file journal (`<path>/journal/journal`) | WAL / crash recovery |
 
 Each backend directory is **self-contained** — it owns local copies of
-`abi.nim` and `spinlock.nim` so the 3 `.a`s have no cross-archive symbol
-references (other than libc / libpthread / libcrypto). All backends implement
-the hand-written `BlobStoreEngine` trait (Rust side) by forwarding to the Nim
-functions exported in the C-ABI `VTable`. Journal (`spier-journal-file`) is
-pure Rust and implements `JournalEngine`.
+`abi.nim` and `spinlock.nim` so the 4 `.a`s have no cross-archive symbol
+references (other than libc / libpthread / libcrypto). The blobstore backends
+implement the hand-written `BlobStoreEngine` trait (Rust side) by forwarding to
+the Nim functions exported in the C-ABI `VTable`; the journal backend implements
+`JournalEngine` via `NimJournalStore` (also in `spier-blobstore-nim`), and
+`spier-journal-file` is a thin Rust adapter that re-exports the same
+`JournalFile` + `new(config)` API over it.
 
 #### FFI error protocol (POSIX-style)
 

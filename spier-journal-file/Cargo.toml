@@ -2,7 +2,8 @@
 name = "spier-journal-file"
 version = "0.1.0"
 edition = "2021"
-description = "File-backed Journal backend"
+description = "File-backed Journal backend (Nim-backed via spier-blobstore-nim)"
 
 [dependencies]
 spier-storage-traits = { path = "../spier-storage-traits" }
+spier-blobstore-nim = { path = "../spier-blobstore-nim" }

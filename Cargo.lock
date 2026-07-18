@@ -1246,6 +1246,7 @@ dependencies = [
 name = "spier-journal-file"
 version = "0.1.0"
 dependencies = [
+ "spier-blobstore-nim",
  "spier-storage-traits",
 ]
 

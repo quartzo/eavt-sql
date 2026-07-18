@@ -16,6 +16,7 @@ use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::sync::Once;
 
 use spier_storage_traits::blobstore::BlobStoreEngine;
+use spier_storage_traits::journal::JournalEngine;
 
 // ---------------------------------------------------------------------------
 // Error codes — mirror nim-blobstore/<backend>/abi.nim
@@ -479,6 +480,158 @@ fn pack_config(config: &HashMap<String, String>) -> (Vec<CString>, Vec<CString>)
 }
 
 // ---------------------------------------------------------------------------
+// JournalEngine FFI (Nim-backed journal, libnim_blobstore_journal.a).
+//
+// The Nim journal backend is a sequential file writer at `<path>/journal/
+// journal`. Frame format mirrors the Rust `JournalFile` exactly:
+//   [u32 klen BE][key][u32 vlen BE][value]
+// `journal_read` returns a Nim-allocated buffer freed via `free_buf`.
+// ---------------------------------------------------------------------------
+
+#[repr(C)]
+pub struct NimJournalVtable {
+    pub handle: *mut c_void,
+    pub append: extern "C" fn(
+        h: *mut c_void,
+        key: *const u8,
+        klen: usize,
+        val: *const u8,
+        vlen: usize,
+        err_out: *mut c_int,
+    ) -> c_int,
+    pub read: extern "C" fn(
+        h: *mut c_void,
+        out_buf: *mut *mut u8,
+        out_len: *mut usize,
+        err_out: *mut c_int,
+    ) -> c_int,
+    pub truncate: extern "C" fn(h: *mut c_void, err_out: *mut c_int) -> c_int,
+    pub size: extern "C" fn(
+        h: *mut c_void,
+        out_size: *mut u64,
+        err_out: *mut c_int,
+    ) -> c_int,
+    pub free_buf: extern "C" fn(p: *mut c_void),
+}
+
+extern "C" {
+    fn nim_journal_open(path: *const c_char, err_out: *mut c_int) -> *mut NimJournalVtable;
+    fn nim_journal_close(vt: *mut NimJournalVtable);
+}
+
+/// Nim-backed journal. Owns the vtable pointer; drops it via `nim_journal_close`.
+pub struct NimJournalStore {
+    vt: *mut NimJournalVtable,
+}
+
+impl std::fmt::Debug for NimJournalStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NimJournalStore")
+            .field("vt", &self.vt)
+            .finish()
+    }
+}
+
+// SAFETY: the Nim handle is guarded by a pthread_mutex on the Nim side; the
+// vtable pointer is effectively const after `open`.
+unsafe impl Send for NimJournalStore {}
+unsafe impl Sync for NimJournalStore {}
+
+impl Drop for NimJournalStore {
+    fn drop(&mut self) {
+        if !self.vt.is_null() {
+            unsafe { nim_journal_close(self.vt) };
+            self.vt = std::ptr::null_mut();
+        }
+    }
+}
+
+impl NimJournalStore {
+    /// Open the journal backed by a file at `<path>/journal/journal`.
+    /// `path` is the same `path` config key used by the blobstore/file backend.
+    pub fn open(config: &HashMap<String, String>) -> Result<Self, String> {
+        ensure_nim_init();
+        let path = config
+            .get("path")
+            .map(|s| s.as_str())
+            .ok_or_else(|| "journal requires a `path` config key".to_string())?;
+        let c_path = CString::new(path).map_err(|e| e.to_string())?;
+        let mut err: c_int = 0;
+        let vt = unsafe { nim_journal_open(c_path.as_ptr(), &mut err) };
+        if vt.is_null() {
+            return Err(format!("journal open failed: {}", err_to_string(err)));
+        }
+        Ok(Self { vt })
+    }
+}
+
+impl JournalEngine for NimJournalStore {
+    fn journal_append(&self, key: &[u8], value: &[u8]) -> Result<(), String> {
+        let mut err: c_int = 0;
+        let rc = unsafe {
+            ((*self.vt).append)(
+                (*self.vt).handle,
+                key.as_ptr(),
+                key.len(),
+                value.as_ptr(),
+                value.len(),
+                &mut err,
+            )
+        };
+        if rc != 0 {
+            return Err(err_to_string(err).to_string());
+        }
+        Ok(())
+    }
+
+    fn journal_read(&self) -> Result<Vec<u8>, String> {
+        let mut out_buf: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut err: c_int = 0;
+        let rc = unsafe {
+            ((*self.vt).read)(
+                (*self.vt).handle,
+                &mut out_buf,
+                &mut out_len,
+                &mut err,
+            )
+        };
+        if rc != 0 {
+            return Err(err_to_string(err).to_string());
+        }
+        if out_buf.is_null() || out_len == 0 {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::with_capacity(out_len);
+        unsafe {
+            std::ptr::copy_nonoverlapping(out_buf, out.as_mut_ptr(), out_len);
+            out.set_len(out_len);
+            ((*self.vt).free_buf)(out_buf as *mut c_void);
+        }
+        Ok(out)
+    }
+
+    fn journal_truncate(&self) -> Result<(), String> {
+        let mut err: c_int = 0;
+        let rc = unsafe { ((*self.vt).truncate)((*self.vt).handle, &mut err) };
+        if rc != 0 {
+            return Err(err_to_string(err).to_string());
+        }
+        Ok(())
+    }
+
+    fn journal_size(&self) -> Result<u64, String> {
+        let mut out_size: u64 = 0;
+        let mut err: c_int = 0;
+        let rc = unsafe { ((*self.vt).size)((*self.vt).handle, &mut out_size, &mut err) };
+        if rc != 0 {
+            return Err(err_to_string(err).to_string());
+        }
+        Ok(out_size)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -696,5 +849,85 @@ mod tests {
         m.insert("secret_key".to_string(), "minioadmin".to_string());
         let bs = NimBlobStore::open_s3(&m).expect("open_s3 with full config");
         drop(bs);  // exercises Drop -> nim_blob_s3_close
+    }
+
+    // -----------------------------------------------------------------------
+    // Journal backend tests
+    // -----------------------------------------------------------------------
+
+    fn journal_config(dir: &std::path::Path) -> HashMap<String, String> {
+        let mut m = HashMap::new();
+        m.insert("path".to_string(), dir.to_string_lossy().into_owned());
+        m
+    }
+
+    fn unpack_kv(buf: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut pos = 0usize;
+        while pos + 8 <= buf.len() {
+            let klen = u32::from_be_bytes([buf[pos], buf[pos+1], buf[pos+2], buf[pos+3]]) as usize;
+            pos += 4;
+            let key = buf[pos..pos+klen].to_vec();
+            pos += klen;
+            let vlen = u32::from_be_bytes([buf[pos], buf[pos+1], buf[pos+2], buf[pos+3]]) as usize;
+            pos += 4;
+            let val = buf[pos..pos+vlen].to_vec();
+            pos += vlen;
+            out.push((key, val));
+        }
+        out
+    }
+
+    #[test]
+    fn journal_append_read_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let j = NimJournalStore::open(&journal_config(dir.path())).expect("open");
+        j.journal_append(b"hello", b"world").expect("append");
+        let entries = unpack_kv(&j.journal_read().expect("read"));
+        assert_eq!(entries, vec![(b"hello".to_vec(), b"world".to_vec())]);
+    }
+
+    #[test]
+    fn journal_multiple_entries_and_binary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let j = NimJournalStore::open(&journal_config(dir.path())).expect("open");
+        for i in 0..5 {
+            j.journal_append(format!("k{i}").as_bytes(), format!("v{i}").as_bytes())
+                .expect("append");
+        }
+        let data: Vec<u8> = vec![0u8, 1, 2, 3];
+        j.journal_append(&data, &data).expect("append");
+        let entries = unpack_kv(&j.journal_read().expect("read"));
+        let mut expected: Vec<(Vec<u8>, Vec<u8>)> = (0..5)
+            .map(|i| (format!("k{i}").into_bytes(), format!("v{i}").into_bytes()))
+            .collect();
+        expected.push((data.to_vec(), data.to_vec()));
+        assert_eq!(entries, expected);
+    }
+
+    #[test]
+    fn journal_truncate_clears() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let j = NimJournalStore::open(&journal_config(dir.path())).expect("open");
+        j.journal_append(b"x", b"y").expect("append");
+        j.journal_truncate().expect("truncate");
+        assert!(j.journal_read().expect("read").is_empty());
+    }
+
+    #[test]
+    fn journal_size_grows_and_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let j = NimJournalStore::open(&journal_config(dir.path())).expect("open");
+        assert_eq!(j.journal_size().expect("size"), 0);
+        j.journal_append(b"hello", b"world").expect("append");
+        assert!(j.journal_size().expect("size") > 0);
+    }
+
+    #[test]
+    fn journal_open_requires_path() {
+        let mut m = HashMap::new();
+        m.insert("backend".to_string(), "file".to_string());
+        let err = NimJournalStore::open(&m).expect_err("expected missing-path rejection");
+        assert!(err.contains("path"), "unexpected error: {}", err);
     }
 }
