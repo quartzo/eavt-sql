@@ -28,7 +28,7 @@ pub const PART_TX: u64 = 3;
 pub const PART_USER: u64 = 4;
 
 const PARTITION_SHIFT: u32 = 44;
-const SEQ_MASK: u64 = 0xFFFFFFFFFFF; // 44 bits
+pub const SEQ_MASK: u64 = 0xFFFFFFFFFFF; // 44 bits
 
 pub fn partition_of(eid: u64) -> u64 {
     eid >> PARTITION_SHIFT

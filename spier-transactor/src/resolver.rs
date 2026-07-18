@@ -191,59 +191,8 @@ impl Resolver {
         }
     }
 
-    pub fn find_max_ent_id(&mut self, store_items: impl Iterator<Item = (Vec<u8>, Vec<u8>)>) {
-        for (k, _) in store_items {
-            if k.len() == 8 {
-                let eid = u64::from_be_bytes([k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7]]);
-                let p = partition_of(eid);
-                let s = seq_of(eid);
-                if let Some(counter) = self.partitions.get_mut(&p) {
-                    if s >= counter.next_seq {
-                        counter.next_seq = s + 1;
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn init_ent_id_from_eavt(
-        &mut self,
-        sstable_keys: Vec<(Vec<u8>, Vec<u8>)>,
-        memtable_items: Vec<(Vec<u8>, Vec<u8>)>,
-    ) {
-        let mut max_per_partition: HashMap<u64, u64> = HashMap::new();
-
-        for (k, _) in sstable_keys {
-            if k.len() >= 8 {
-                let eid = u64::from_be_bytes([k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7]]);
-                let p = partition_of(eid);
-                let s = seq_of(eid);
-                max_per_partition
-                    .entry(p)
-                    .and_modify(|m| *m = (*m).max(s))
-                    .or_insert(s);
-            }
-        }
-
-        for (k, _) in memtable_items {
-            if k.len() >= 8 {
-                let eid = u64::from_be_bytes([k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7]]);
-                let p = partition_of(eid);
-                let s = seq_of(eid);
-                max_per_partition
-                    .entry(p)
-                    .and_modify(|m| *m = (*m).max(s))
-                    .or_insert(s);
-            }
-        }
-
-        for (&p, &max_s) in &max_per_partition {
-            if let Some(counter) = self.partitions.get_mut(&p) {
-                if max_s + 1 > counter.next_seq {
-                    counter.next_seq = max_s + 1;
-                }
-            }
-        }
+    pub fn known_partitions(&self) -> Vec<u64> {
+        self.partitions.keys().copied().collect()
     }
 
     pub fn set_cardinality(&mut self, aid: u32, many: bool) {

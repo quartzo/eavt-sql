@@ -492,6 +492,11 @@ pub struct ReversePageStoreIter {
 
 impl ReversePageStoreIter {
     pub fn new(keys: Vec<Vec<u8>>, prefix: &[u8]) -> Self {
+        // Sort descending so seek_reverse (which relies on partition_point) sees
+        // a deterministically ordered key list regardless of source iteration order.
+        let mut keys = keys;
+        keys.sort();
+        keys.reverse();
         let start = prefix.to_vec();
         let idx = 0;
         let valid = !keys.is_empty() && keys[idx].as_slice() >= start.as_slice();
@@ -530,6 +535,9 @@ impl ReverseScanSource for ReversePageStoreIter {
     }
 
     fn seek_reverse(&mut self, target: &[u8]) {
+        // Keys are stored descending. The largest key <= target is the first
+        // entry (from the front) that is no longer strictly greater than target.
+        // If every key is greater than target, none qualifies (invalid).
         self.idx = self.keys.partition_point(|k| &k[..] > target);
         if self.idx < self.keys.len() {
             self.valid = self.keys[self.idx].as_slice() >= self.start.as_slice();

@@ -250,10 +250,45 @@ impl EavtEngine {
             }
         }
 
-        let eavt_keys = unpack_keys(&self.kv.scan(0, &[]).unwrap_or_default());
-        let eavt_pairs: Vec<(Vec<u8>, Vec<u8>)> =
-            eavt_keys.iter().map(|k| (k.clone(), Vec::new())).collect();
-        resolver.init_ent_id_from_eavt(eavt_pairs, vec![]);
+        self.seed_partition_counters_from_eavt(&mut resolver);
+    }
+
+    /// Seed partition counters by walking the EAVT in reverse (largest eid first).
+    /// The reverse cursor yields eids in descending order, so the first key seen
+    /// for each known partition is that partition's largest eid. We advance_past
+    /// every key until every known partition has been covered. This is O(N_seen)
+    /// where N_seen is bounded by the number of distinct partitions (each
+    /// partition contributes at most one key), never a full scan of all datoms.
+    fn seed_partition_counters_from_eavt(&self, resolver: &mut Resolver) {
+        if let Ok(cursor) = self.kv.open_cursor_reverse_direct(0, b"") {
+            let targets: std::collections::HashSet<u64> =
+                resolver.known_partitions().into_iter().collect();
+            let mut covered: std::collections::HashSet<u64> = std::collections::HashSet::new();
+            let mut buf = Vec::new();
+            while self.kv.cursor_valid(cursor.clone()).unwrap_or(false) {
+                buf.clear();
+                if !self
+                    .kv
+                    .cursor_current_key(cursor.clone(), &mut buf)
+                    .unwrap_or(false)
+                    || buf.len() < 8
+                {
+                    break;
+                }
+                let e = u64::from_be_bytes(buf[0..8].try_into().unwrap());
+                let p = resolver::partition_of(e);
+                if targets.contains(&p) {
+                    resolver.advance_past(e);
+                    covered.insert(p);
+                }
+                if covered.len() >= targets.len() {
+                    break;
+                }
+                if self.kv.cursor_step(cursor.clone()).is_err() {
+                    break;
+                }
+            }
+        }
     }
 
     pub fn persist_bootstrap_schema(&self) {
@@ -1002,3 +1037,62 @@ impl EavtEngine {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    use crate::resolver_consts::{make_entity_id, seq_of, PART_USER};
+
+    fn eavt_key(e: u64) -> Vec<u8> {
+        // minimal EAVT key: [e(8)][a(4)][suffix(8)] — only the leading e matters for seeding
+        let mut k = Vec::with_capacity(20);
+        k.extend_from_slice(&e.to_be_bytes());
+        k.extend_from_slice(&[0u8; 4]);
+        k.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE]);
+        k
+    }
+
+    #[test]
+    fn test_seed_partition_counters_reverse() {
+        let mut cfg = HashMap::new();
+        cfg.insert("backend".to_string(), "memory".to_string());
+        let kv = KVState::open(&cfg).unwrap();
+
+        // Partition USER: largest seq = 50  -> eid = make_entity_id(PART_USER, 50)
+        // Custom partition 64: largest seq = 7 -> eid = make_entity_id(64, 7)
+        let user_e = make_entity_id(PART_USER, 50);
+        let custom_e = make_entity_id(64, 7);
+        kv.put(0, &eavt_key(user_e)).unwrap();
+        kv.put(0, &eavt_key(custom_e)).unwrap();
+        kv.flush().unwrap();
+
+        let engine = EavtEngine::new(Box::new(kv));
+        // register the custom partition so the seed visits it
+        {
+            let mut r = engine.resolver.lock().unwrap();
+            r.declare_partition("custom");
+        }
+        // seed via the same path as bootstrap_resolver
+        {
+            let mut r = engine.resolver.lock().unwrap();
+            engine.seed_partition_counters_from_eavt(&mut r);
+        }
+
+        // Next allocations for each partition must exceed the seeded max.
+        let next_user = engine.allocate_in_partition_locked(PART_USER);
+        assert!(
+            seq_of(next_user) > 50,
+            "user partition should allocate past seq 50, got {}",
+            seq_of(next_user)
+        );
+        let next_custom = engine.allocate_in_partition_locked(64);
+        assert!(
+            seq_of(next_custom) > 7,
+            "custom partition should allocate past seq 7, got {}",
+            seq_of(next_custom)
+        );
+    }
+}
+
