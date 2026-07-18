@@ -1190,24 +1190,6 @@ fn eval_recursive(
     }
 }
 
-
-
-
-fn sexpr_to_int(expr: &SExpr) -> Result<i64, EvalError> {
-    match expr {
-        SExpr::Int(n) => Ok(*n),
-        SExpr::Float(f) => Ok(*f as i64),
-        SExpr::Symbol(name) => Err(EvalError::Type {
-            expected: "int",
-            got: format!("symbol '{name}'"),
-        }),
-        other => Err(EvalError::Type {
-            expected: "int",
-            got: format!("{other:?}"),
-        }),
-    }
-}
-
 fn is_truthy(expr: &SExpr) -> bool {
     !matches!(expr, SExpr::Void | SExpr::Bool(false))
 }

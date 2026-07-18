@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 mod engine;
-pub mod trace;
 
 pub use spier_query_ir::ProgramHandle;
 pub use spier_storage_traits::CursorHandle;
