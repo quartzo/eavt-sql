@@ -729,6 +729,18 @@ impl QueryState {
         })
     }
 
+    /// Parse raw Scheme text and wrap as a `Program::Scheme` (DML host fns:
+    /// `declare-attr`, `save`, `retract`, `alloc-entity`, `lookup-entity`,
+    /// `lookup-value`, `tx-entity`, `param`, `declare-partition`, `result`).
+    pub fn compile_scheme_dml(&self, scheme_text: &str) -> Result<ProgramHandle, String> {
+        let parsed = spier_scheme::parse(scheme_text)
+            .map_err(|e| format!("scheme parse error: {e}"))?;
+        let prog = spier_scheme::SchemeProgram::new(parsed);
+        Ok(ProgramHandle {
+            program: Arc::new(spier_query_ir::Program::Scheme(prog)),
+        })
+    }
+
     /// Run Scheme text and return rows as `Vec<Vec<Value>>` for debugging.
     pub fn compile_scheme_debug(&self, scheme_text: &str) -> Result<Vec<Vec<spier_value::Value>>, String> {
         let parsed = spier_scheme::parse(scheme_text)

@@ -152,6 +152,29 @@ class EAVTEngine:
         result = self._handle.compile_sql_json(query, params_bytes)
         return json.loads(str(result))
 
+    def run_scheme(self, scheme_text: str, *params: Any) -> list[tuple]:
+        """Execute raw Scheme text against the DML host functions and return rows.
+
+        Uses `Program::Scheme` (SchemeSession + SchemeHostFns), so the following
+        host fns are available: `declare-attr`, `declare-partition`,
+        `alloc-entity`, `tx-entity`, `save`, `retract`, `lookup-entity`,
+        `lookup-value`, `param`, `result`.
+
+        A program whose final value is `(result v1 v2 ...)` yields one row
+        `(v1, v2, ...)`; a program returning Void yields no rows.
+        """
+        try:
+            prog = self._handle.compile_scheme_dml(scheme_text)
+        except RuntimeError as e:
+            raise ValueError(str(e)) from None
+        params_bytes = encode_values(list(params))
+        try:
+            out = self._handle.run_vm(prog, params_bytes, U64_MAX, U64_MAX)
+        except RuntimeError as e:
+            raise ValueError(str(e)) from None
+        out = bytes(out) if out is not None else b""
+        return decode_rows(out)
+
     def flush(self) -> None:
         self._handle.flush()
 
