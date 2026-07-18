@@ -140,8 +140,8 @@ themselves.
 | `and` | `(and expr...)` | Evaluate left-to-right; if any falsy, return it (short-circuit); else last value |
 | `or` | `(or expr...)` | Evaluate left-to-right; if any truthy, return it (short-circuit); else last value |
 | `not` | `(not expr)` | Return `#t` if expr is falsy, `#f` otherwise |
-| `depth-run` | `(depth-run (scanners...) ranges (lambda (var) body...))` | Leapfrog triejoin loop — see §11.6 |
-| `depth-fixed` | `(depth-fixed (scanners...) value (lambda () body...))` | Fixed prefix scope — see §11.6 |
+| `scanner-iterate` | `(scanner-iterate (scanners...) (param) [:ranges r] body...)` | Leapfrog triejoin — see §11 |
+| `ranges-create` | `(ranges-create range-tree)` | Desugar a range boolean tree to flat interval form for `:ranges` |
 
 ### 4.2 Examples
 
@@ -810,49 +810,58 @@ the entire statement produces no result.
 ## 11. SELECT via Scheme
 
 SELECT compiles to `Program::SelectScheme(SchemeProgram, SelectSchemeMeta)` with
-a triejoin skeleton built from three layers:
-
-1. **Scanner setup** — `(let* ((s0 (scanner-open INDEX)) ...))`
-2. **Fixed prefix** — `(depth-fixed (s) value (lambda () body))` for bound attributes
-3. **Triejoin nesting** — `(depth-run (scanners) ranges (lambda (var) body))`
+a triejoin skeleton driven by `scanner-iterate` + `scanner-push`/`scanner-pop`.
 
 ### 11.1 Triejoin Skeleton Structure
 
 ```
-(let* ((s0 (scanner-open "INDEX_NAME" [history?])) ...)
-  (depth-fixed (s0) bound-value
-    (lambda ()
-      (depth-run (s0 s1) (and (>= val) (< val))
-        (lambda (depth_var)
-          (depth-run (s1) ()
-            (lambda (depth_var)
-              (result-row (resolve-val depth_var) ...))))))))
+(let* ((s0 (scanner-open "INDEX" [history?])) ...)
+  (scanner-push s0 aid-value)                ;; fixed prefix (was depth-fixed)
+  (scanner-push s1 aid2-value)
+  (scanner-iterate (s0 s1) (shared-var)      ;; leapfrog join (was depth-run)
+    (scanner-push s0 shared-var)             ;; propagate converged value
+    (scanner-push s1 shared-var)
+    (scanner-iterate (s0) (attr-var)         ;; inner iteration
+      (scanner-iterate (s1) (attr2-var)
+        (result-row ...)))
+    (scanner-pop s0)                         ;; symmetric pop
+    (scanner-pop s1))
+  (scanner-pop s1)
+  (scanner-pop s0))
 ```
 
-### 11.2 Projected Result Row
+The iteration level is determined by the caller's `scanner-push` sequence:
+each Fixed entry advances the effective position by one slot in `idx_order`.
+`scanner-iterate` converges scanners at the next free slot.
 
-```scheme
-(result-row _vv_d1 (attr-name _aid) (resolve-val _v_d1_bench_value) ...)
-```
+### 11.2 Host Functions for Scanning
 
-Each `depth-run` lambda parameter binds a variable at that depth. Projections
-reference these variables directly — no `bind-get` indirection needed:
-
-| Helper | Usage | Description |
-|--------|-------|-------------|
-| `attr-name` | `(attr-name aid-var)` | Resolve attribute ID to its name string |
-| `resolve-val` | `(resolve-val raw-var)` | Decode a raw value using the attribute's type |
-| `probe-begin` | `(probe-begin eid aid value)` | Start a fully-bound probe lookup (eid, attr, value) |
+| Function | Usage | Description |
+|----------|-------|-------------|
+| `scanner-open` | `(scanner-open "INDEX" [history?])` | Open a scanner on an index. Returns opaque `Resource`. |
+| `scanner-push` | `(scanner-push scanner value)` | Push a bound value as a Fixed prefix entry. Advances position. |
+| `scanner-pop` | `(scanner-pop scanner)` | Pop the last Fixed prefix entry. |
+| `scanner-read` | `(scanner-read scanner)` | Read the current converged value at the iteration level. |
+| `scanner-prefix` | `(scanner-prefix scanner)` | Return the current prefix as bytes (for debugging). |
+| `intern-a` | `(intern-a attr-name)` | Resolve attribute name to integer ID. |
+| `attr-name` | `(attr-name aid)` | Resolve attribute ID to name string. |
+| `resolve-val` | `(resolve-val value)` | Pass-through (placeholder for type-aware decoding). |
+| `ranges-show` | `(ranges-show flat-ranges)` | Pretty-print flat ranges as string. |
+| `result-row` | `(result-row val...)` | Emit a result row via `EvalStep::Yield`. |
 
 ### 11.3 Range Trees
 
-Ranges are passed as boolean trees directly to `depth-run`:
+Ranges are created via `ranges-create` and passed to `scanner-iterate` via
+the `:ranges` keyword:
+
+```
+(scanner-iterate (s) (v) :ranges (ranges-create (> 10)) (result-row v))
+```
 
 | Operator | Usage | Description |
 |----------|-------|-------------|
 | `and` | `(and (>= val) (< val))` | Conjunction |
 | `or` | `(or (branch) (branch))` | Disjunction |
-| `branch` | `(branch)` | OR branch separator |
 | `=` | `(= val)` | Equality |
 | `!=` | `(!= val)` | Inequality |
 | `>` | `(> val)` | Greater than |
@@ -870,14 +879,15 @@ WHERE company.ceo = %1
 
 ```scheme
 (let* ((s0 (scanner-open "AEVT")))
-  (depth-fixed (s0) (intern-a "company.ceo")
-    (lambda ()
-      (depth-run (s0) ()
-        (lambda (_e_d1)
-          (result-row _e_d1 (attr-name (intern-a "company.name"))))))))
+  (scanner-push s0 (intern-a "company.ceo"))
+  (scanner-iterate (s0) (_e_d1)
+    (scanner-push s0 _e_d1)
+    (result-row _e_d1 (attr-name (intern-a "company.name")))
+    (scanner-pop s0))
+  (scanner-pop s0))
 ```
 
-### 11.5 Example: Range SELECT (the motivating example)
+### 11.5 Example: Range SELECT
 
 ```sql
 SELECT d1.val WHERE d1.bench.value >= %1 AND d1.bench.value < %2
@@ -885,51 +895,77 @@ SELECT d1.val WHERE d1.bench.value >= %1 AND d1.bench.value < %2
 
 ```scheme
 (let* ((s0 (scanner-open "AVET")) (s1 (scanner-open "AEVT")))
-  (depth-fixed (s1) (intern-a "bench.value")
-    (lambda ()
-      (depth-run (s0) ()
-        (lambda (_skip_a_avet)
-          (depth-run (s0) ()
-            (lambda (_vv_d1)
-              (depth-run (s0 s1) ()
-                (lambda (_e_d1)
-                  (depth-run (s1) (and (>= (param 1)) (< (param 2)))
-                    (lambda (_v_d1_bench_value)
-                      (result-row (resolve-val _vv_d1)))))))))))))
+  (scanner-push s1 (intern-a "bench.value"))
+  (scanner-iterate (s0) (_skip_a_avet)
+    (scanner-push s0 _skip_a_avet)
+    (scanner-iterate (s0) (_vv_d1)
+      (scanner-push s0 _vv_d1)
+      (scanner-iterate (s0 s1) (_e_d1)
+        (scanner-push s0 _e_d1)
+        (scanner-push s1 _e_d1)
+        (scanner-iterate (s1) (_v_d1_bench_value)
+          :ranges (ranges-create (and (>= (param 1)) (< (param 2))))
+          (scanner-push s1 _v_d1_bench_value)
+          (result-row (resolve-val _vv_d1))
+          (scanner-pop s1))
+        (scanner-pop s0)
+        (scanner-pop s1))
+      (scanner-pop s0))
+    (scanner-pop s0))
+  (scanner-pop s1))
 ```
 
-### 11.6 Special Forms for Scanning
+### 11.6 Example: 2-Attribute Join
 
-#### `depth-run`
-
-```
-(depth-run (scanner-refs...) range-tree (lambda (var) body...))
+```sql
+SELECT e, name, age WHERE user.name = ? AND user.age = ?
 ```
 
-Internal host call sequence (per iteration):
-1. `(scanner-init scanner var-id)` — for each scanner
-2. `(scheme-leap-init stage-key scanner0 scanner1 ... ranges)` — converge
-3. `(scanner-read scanner)` — read current value, bind to lambda param
-4. Execute body (may call `result-row`, `save`, `retract`, etc.)
-5. `(scheme-leap-next stage-key scanner0 scanner1 ... ranges)` — advance
-6. `(depth-cleanup scanner)` — for each scanner, when loop ends
-
-All host calls are made internally by the evaluator — the generated Scheme
-only shows `(depth-run (s0 s1) (and (>= (param 1)) (< (param 2))) (lambda (_v) ...))`.
-
-#### `depth-fixed`
-
+```scheme
+(let* ((s0 (scanner-open "AEVT")) (s1 (scanner-open "AEVT")))
+  (scanner-push s0 (intern-a "user.name"))
+  (scanner-push s1 (intern-a "user.age"))
+  (scanner-iterate (s0 s1) (e)
+    (scanner-push s0 e)
+    (scanner-push s1 e)
+    (scanner-iterate (s0) (name)
+      (scanner-iterate (s1) (age)
+        (result-row e name age)))
+    (scanner-pop s0)
+    (scanner-pop s1))
+  (scanner-pop s1)
+  (scanner-pop s0))
 ```
-(depth-fixed (scanner-refs...) value-expr (lambda () body...))
+
+### 11.7 Lookup (Fully-Bound Pattern)
+
+When all (e, a, v) slots are constants, the compiler generates a scanner probe
+with an equality range:
+
+```scheme
+(let* ((_s_probe (scanner-open "EAVT")))
+  (scanner-push _s_probe eid)
+  (scanner-push _s_probe aid)
+  (scanner-iterate (_s_probe) (_v)
+    :ranges (ranges-create (= value))
+    (scanner-push _s_probe _v)
+    body
+    (scanner-pop _s_probe))
+  (scanner-pop _s_probe)
+  (scanner-pop _s_probe))
 ```
 
-Internal host call sequence:
-1. `(depth-fixed-begin scanner0 ... value)` — push prefix onto each scanner
-2. Execute body
-3. `(depth-fixed-end scanner0 ...)` — pop prefix from each scanner
+### 11.8 Internal Iterator Loop
 
-This replaces manual `prefix-push`/`pop` and ensures proper scoping of
-prefix bindings on scanner cursors.
+Each `scanner-iterate` internally calls:
+
+1. `scheme-leap-init(stage-key, scanners..., ranges)` — converge all scanners
+2. `scanner-read(scanners[0])` — bind converged value to param
+3. Execute body
+4. `scheme-leap-next(stage-key, scanners..., ranges)` — advance to next value
+5. Repeat from step 2 until exhausted
+
+There is no `depth-cleanup` or `scanner-init` — the caller owns push/pop balance.
 
 ---
 
@@ -940,13 +976,14 @@ calls in the leaf body and a `result-row` yielding the entity ID.
 
 ```scheme
 (let* ((s0 (scanner-open "AEVT")))
-  (depth-fixed (s0) (intern-a "person.name")
-    (lambda ()
-      (depth-run (s0) ()
-        (lambda (_e_d1)
-          (begin
-            (retract _e_d1 "person.name" "Alice")
-            (result-row _e_d1)))))))
+  (scanner-push s0 (intern-a "person.name"))
+  (scanner-iterate (s0) (_e_d1)
+    (scanner-push s0 _e_d1)
+    (begin
+      (retract _e_d1 "person.name" "Alice")
+      (result-row _e_d1))
+    (scanner-pop s0))
+  (scanner-pop s0))
 ```
 
 Direct DELETE (eid condition) compiles to `Program::Scheme` without scanning:
@@ -966,14 +1003,15 @@ and a `result-row` yielding the entity ID.
 
 ```scheme
 (let* ((s0 (scanner-open "AEVT")))
-  (depth-fixed (s0) (intern-a "person.age")
-    (lambda ()
-      (depth-run (s0) ()
-        (lambda (_e_d1)
-          (begin
-            (save _e_d1 "person.age" 30)
-            (save _e_d1 "person.city" "NYC")
-            (result-row _e_d1)))))))
+  (scanner-push s0 (intern-a "person.age"))
+  (scanner-iterate (s0) (_e_d1)
+    (scanner-push s0 _e_d1)
+    (begin
+      (save _e_d1 "person.age" 30)
+      (save _e_d1 "person.city" "NYC")
+      (result-row _e_d1))
+    (scanner-pop s0))
+  (scanner-pop s0))
 ```
 
 ---
@@ -999,48 +1037,31 @@ These are direct DML statements compiled to `Program::Scheme`.
 
 ---
 
-## 15. SelectSchemeHostFns Reference (18 functions)
+## 15. SelectSchemeHostFns Reference
 
 These host functions are used by `SelectSchemeSession` for scanning operations.
-Some are called **directly** in generated Scheme; others are called **internally**
-by the `depth-run` and `depth-fixed` special forms.
-
-### 15.1 Directly Called in Generated Scheme
+All are called **directly** in generated Scheme.
 
 | # | Function | Signature | Description |
 |---|----------|-----------|-------------|
-| 1 | `scanner-open` | `(scanner-open index-name [history?])` | Open a scanner on an index (name: `"EAVT"`, `"AEVT"`, `"AVET"`, `"VAET"`). Returns an opaque `Resource` |
-| 2 | `prefix-push` | `(prefix-push scanner value pos-name)` | Push a bound prefix value at a named position (`"e"`, `"a"`, `"v"`, `"t"`) |
-| 3 | `intern-a` | `(intern-a attr-name)` | Resolve attribute name string to integer ID |
-| 4 | `attr-name` | `(attr-name aid)` | Resolve attribute ID integer to name string |
-| 5 | `resolve-val` | `(resolve-val value)` | Pass-through identity for values (placeholder for type-aware decoding) |
-| 6 | `param` | `(param idx)` | Get parameter by 1-based index |
-| 7 | `probe-begin` | `(probe-begin eid aid value)` | Perform a point lookup via EAVT probe. Returns `Int(tx-eid)` if found, `Void` if not |
-| 8 | `save` | `(save eid attr value)` | Persist one datom (used in UPDATE) |
-| 9 | `retract` | `(retract eid attr value)` | Retract one datom (used in DELETE) |
-| 10 | `result-row` | `(result-row val...)` | Emit a result row via `EvalStep::Yield` |
+| 1 | `scanner-open` | `(scanner-open index-name [history?])` | Open a scanner on an index. Returns `Resource` |
+| 2 | `scanner-push` | `(scanner-push scanner value)` | Push a bound prefix value (Fixed entry) |
+| 3 | `scanner-pop` | `(scanner-pop scanner)` | Pop last Fixed prefix entry |
+| 4 | `scanner-read` | `(scanner-read scanner)` | Read current converged value |
+| 5 | `scanner-prefix` | `(scanner-prefix scanner)` | Get current prefix bytes (debug) |
+| 6 | `intern-a` | `(intern-a attr-name)` | Resolve attribute name to ID |
+| 7 | `attr-name` | `(attr-name aid)` | Resolve attribute ID to name |
+| 8 | `resolve-val` | `(resolve-val value)` | Pass-through identity |
+| 9 | `param` | `(param idx)` | Get parameter by 1-based index |
+| 10 | `save` | `(save eid attr value)` | Persist one datom |
+| 11 | `retract` | `(retract eid attr value)` | Retract one datom |
+| 12 | `result-row` | `(result-row val...)` | Emit a result row via `EvalStep::Yield` |
+| 13 | `ranges-show` | `(ranges-show flat-ranges)` | Pretty-print flat ranges |
+| 14 | `dbg-scanners` | `(dbg-scanners)` | Debug dump scanner states |
 
-### 15.2 Called Internally by `depth-run` / `depth-fixed`
-
-These are **not** written directly in generated Scheme — the evaluator calls them
-when executing the `depth-run` and `depth-fixed` special forms:
-
-| # | Function | Signature | Description |
-|---|----------|-----------|-------------|
-| 11 | `scanner-init` | `(scanner-init scanner var-id)` | Initialize scanner for a depth-run stage: open cursor, build prefix, advance to first key |
-| 12 | `scanner-read` | `(scanner-read scanner)` | Read the current value from the scanner's position |
-| 13 | `scheme-leap-init` | `(scheme-leap-init stage-key scanners... ranges)` | Initialize leapfrog convergence across scanners. Returns `#t` if converged, `#f` if no rows |
-| 14 | `scheme-leap-next` | `(scheme-leap-next stage-key scanners... ranges)` | Advance the minimum scanner and re-converge. Returns `#t` if new row, `#f` if exhausted |
-| 15 | `depth-cleanup` | `(depth-cleanup scanner)` | Pop scanner's position stack after a depth-run completes |
-| 16 | `depth-fixed-begin` | `(depth-fixed-begin scanners... value)` | Push a fixed value as a prefix position onto each scanner |
-| 17 | `depth-fixed-end` | `(depth-fixed-end scanners...)` | Pop the prefix from each scanner |
-
-### 15.3 Shared Functions
-
-`save`, `retract`, `param` are shared with `SchemeHostFns` (section 5.3).
-`alloc-entity`, `tx-entity`, `lookup-entity`, `lookup-value` are available in
-`SelectSchemeHostFns` but rarely used in scan contexts (they exist for
-UPDATE/DELETE with nested lookups).
+`scheme-leap-init` and `scheme-leap-next` are called internally by the
+`scanner-iterate` special form — they are never emitted in generated Scheme.
+`save`, `retract`, `param` are shared with `SchemeHostFns` (§5.3).
 
 ---
 
