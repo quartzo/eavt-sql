@@ -191,11 +191,11 @@ the boundary (numeric codes only — see above).
 
 #### S3 backend status
 
-The S3 backend compiles and passes structural config-validation tests, but is
-**not yet validated end-to-end** against moto or a real S3 endpoint
-(`tests/test_config_s3_moto.py` is skipped pending that validation). SigV4
-vectors in `s3/sha256.nim` (OpenSSL libcrypto) were verified against the
-official RFC 4231 / FIPS test vectors.
+The S3 backend is validated end-to-end against moto
+(`tests/test_config_s3_moto.py` — 3 tests covering put/get, scan+flush, and
+cursor iteration). SigV4 vectors in `s3/sha256.nim` (OpenSSL libcrypto) were
+verified against the official RFC 4231 / FIPS test vectors. Real-world S3
+endpoints (AWS, MinIO) should work but are not exercised in CI.
 
 ### CompileStats Boundary
 

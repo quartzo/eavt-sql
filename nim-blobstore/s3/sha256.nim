@@ -4,6 +4,8 @@
 ## Linked with -lcrypto. Works with OpenSSL 1.1 and 3.x (uses non-deprecated
 ## EVP_Digest / HMAC entry points).
 
+import std/strutils
+
 type
   Sha256Digest* = array[32, byte]
 
@@ -46,17 +48,22 @@ proc sha256String*(s: string): Sha256Digest =
 # HMAC-SHA256
 # ---------------------------------------------------------------------------
 
-proc hmacSha256*(key, msg: openArray[byte]): Sha256Digest =
+## Raw OpenSSL-backed HMAC. Named `rawHmacSha256` so callers in sigv4.nim
+## can layer type-dispatch wrappers without risking infinite recursion.
+proc rawHmacSha256*(key, msg: openArray[byte]): Sha256Digest =
   var mdLen: cuint = 0
   discard HMAC(EVP_sha256(),
                if key.len > 0: unsafeAddr key[0] else: nil, key.len.cint,
                if msg.len > 0: unsafeAddr msg[0] else: nil, msg.len.csize_t,
                addr result[0], addr mdLen)
 
+proc hmacSha256*(key, msg: openArray[byte]): Sha256Digest =
+  rawHmacSha256(key, msg)
+
 proc hmacSha256Strings*(key, msg: string): Sha256Digest =
   let k = if key.len == 0: newSeq[byte](0) else: cast[seq[byte]](key)
   let m = if msg.len == 0: newSeq[byte](0) else: cast[seq[byte]](msg)
-  result = hmacSha256(k, m)
+  result = rawHmacSha256(k, m)
 
 # ---------------------------------------------------------------------------
 # Hex
@@ -82,7 +89,8 @@ when isMainModule:
   # RFC 4231 Test Case 1
   var key0b = newSeq[byte](20)
   for i in 0 ..< key0b.len: key0b[i] = 0x0b
-  let h1 = hmacSha256(key0b, cast[seq[byte]]("Hi There")).toHexLower()
+  let h1 = rawHmacSha256(key0b, cast[seq[byte]]("Hi There")).toHexLower()
   echo "RFC 4231 TC1: ", h1
   doAssert h1 == "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
   echo "sha256 OK"
+

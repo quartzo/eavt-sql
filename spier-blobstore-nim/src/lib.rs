@@ -657,11 +657,9 @@ mod tests {
     // S3 backend tests
     // -----------------------------------------------------------------------
     //
-    // We can't exercise live S3 in unit tests (needs credentials + a real
-    // bucket). The minimal coverage here is the config-validation path:
-    // open_s3 must reject incomplete config with a descriptive error rather
-    // than segfaulting. End-to-end behavior is verified manually against a
-    // MinIO container (see AGENTS.md).
+    // We only exercise the config-validation path here (no live HTTP). The
+    // end-to-end behavior against an S3-compatible server is covered by
+    // tests/test_config_s3_moto.py (Python, uses moto's threaded mock server).
 
     fn s3_config_missing_endpoint() -> HashMap<String, String> {
         let mut m = HashMap::new();

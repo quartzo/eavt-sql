@@ -30,18 +30,21 @@ proc sha256HexLower*(data: Bytes | string): string =
   result = sha256Bytes(data).toHexLower()
 
 proc hmacSha256*(key: Bytes | string, msg: Bytes | string): Digest32 =
+  ## Type-dispatch wrapper around sha256.nim's `rawHmacSha256`. Named the
+  ## same as the underlying proc for API symmetry; the explicit `rawHmacSha256`
+  ## call below avoids infinite recursion.
   when key is string:
     when msg is string:
       result = hmacSha256Strings(key, msg)
     else:
       let kSeq: Bytes = if key.len == 0: @[] else: cast[Bytes](key)
-      result = hmacSha256(kSeq, msg)
+      result = rawHmacSha256(kSeq, msg)
   else:
     when msg is string:
       let mSeq: Bytes = if msg.len == 0: @[] else: cast[Bytes](msg)
-      result = hmacSha256(key, mSeq)
+      result = rawHmacSha256(key, mSeq)
     else:
-      result = hmacSha256(key, msg)
+      result = rawHmacSha256(key, msg)
 
 proc hexLower*(d: Digest32): string =
   result = d.toHexLower()
@@ -94,7 +97,7 @@ type
 proc hmacSha256Seq(key: Digest32, msg: string): Digest32 =
   var keySeq = newSeq[byte](32)
   copyMem(addr keySeq[0], unsafeAddr key[0], 32)
-  result = hmacSha256(keySeq, msg)
+  result = rawHmacSha256(keySeq, cast[seq[byte]](msg))
 
 proc deriveSigningKey(secretKey, dateYyyymmdd, region, service: string): Digest32 =
   ## kSecret → kDate → kRegion → kService → kSigning

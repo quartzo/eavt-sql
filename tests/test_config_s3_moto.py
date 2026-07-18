@@ -4,14 +4,6 @@ import boto3
 import pytest
 from moto.moto_server.threaded_moto_server import ThreadedMotoServer
 
-# NOTE: these tests were written for the Rust S3 backend (rusty-s3 + ureq).
-# After porting to Nim (hand-rolled SigV4 + std/httpclient), they need to be
-# re-validated against moto / MinIO. Skipping until that's done.
-pytestmark = pytest.mark.skip(
-    reason="Nim S3 backend (hand-rolled SigV4) needs validation against moto/MinIO; "
-           "see AGENTS.md",
-)
-
 
 @pytest.fixture
 def s3_endpoint(tmp_path):
