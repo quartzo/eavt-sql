@@ -54,13 +54,12 @@ impl VMResultStream for SchemeSession {
             return Ok(false);
         }
 
-        let as_of_u64 = self.as_of_tx.unwrap_or(u64::MAX);
-        let mut host = SchemeHostFns {
-            engine: Arc::clone(&self.engine),
-            params: &self.params,
-            tx: self.tx,
-            as_of_tx: as_of_u64,
-        };
+        let mut host = SchemeHostFns::new(
+            Arc::clone(&self.engine),
+            self.params.clone(),
+            self.tx,
+            self.as_of_tx,
+        );
         let mut env = Environment::new();
         let tracer = spier_scheme::NullTracer;
 
@@ -107,169 +106,6 @@ fn sexpr_to_value(expr: &SExpr) -> Result<Value, String> {
     }
 }
 
-struct SchemeHostFns<'a> {
-    engine: Arc<QueryEngineInner>,
-    params: &'a [Value],
-    tx: u64,
-    as_of_tx: u64,
-}
-
-impl<'a> spier_scheme::HostFns for SchemeHostFns<'a> {
-    fn is_native(&self, name: &str) -> bool {
-        matches!(
-            name,
-            "alloc-entity"
-                | "tx-entity"
-                | "param"
-                | "lookup-entity"
-                | "lookup-value"
-                | "save"
-                | "retract"
-                | "result"
-                | "declare-attr"
-                | "declare-partition"
-        )
-    }
-
-    fn call(&mut self, name: &str, args: &[SExpr]) -> Result<EvalStep, spier_scheme::EvalError> {
-        match name {
-            "alloc-entity" => {
-                let partition = if args.is_empty() {
-                    4u64
-                } else {
-                    expect_int(&args[0])? as u64
-                };
-                let eid = self
-                    .engine
-                    .tx()
-                    .allocate_in_partition(partition)
-                    .map_err(spier_scheme::EvalError::Host)?;
-                Ok(EvalStep::Done(SExpr::Int(eid as i64)))
-            }
-            "tx-entity" => Ok(EvalStep::Done(SExpr::Int(self.tx as i64))),
-            "param" => {
-                if args.len() != 1 {
-                    return Err(spier_scheme::EvalError::Arity {
-                        name: "param".into(),
-                        expected: "(param idx)",
-                    });
-                }
-                let idx = expect_int(&args[0])? as usize;
-                if idx == 0 || idx > self.params.len() {
-                    return Err(spier_scheme::EvalError::Host(format!(
-                        "param index {} out of range (1..{})",
-                        idx,
-                        self.params.len()
-                    )));
-                }
-                Ok(EvalStep::Done(value_to_sexpr(&self.params[idx - 1])?))
-            }
-            "lookup-entity" => {
-                if args.len() != 2 {
-                    return Err(spier_scheme::EvalError::Arity {
-                        name: "lookup-entity".into(),
-                        expected: "(lookup-entity attr value)",
-                    });
-                }
-                let attr = expect_str(&args[0])?;
-                let val = sexpr_to_value(&args[1]).map_err(spier_scheme::EvalError::Host)?;
-                let is_unique = self.engine
-                    .tx()
-                    .is_unique_attr(&attr)
-                    .unwrap_or(false);
-                if !is_unique {
-                    return Err(spier_scheme::EvalError::Host(format!(
-                        "UPSERT WHERE requires a UNIQUE attribute: '{attr}'"
-                    )));
-                }
-                match self.engine.tx().lookup_entity(&attr, val) {
-                    Ok(Some(eid)) => Ok(EvalStep::Done(SExpr::Int(eid as i64))),
-                    Ok(None) => Ok(EvalStep::Done(SExpr::Void)),
-                    Err(e) => Err(spier_scheme::EvalError::Host(e)),
-                }
-            }
-            "lookup-value" => {
-                if args.len() != 2 {
-                    return Err(spier_scheme::EvalError::Arity {
-                        name: "lookup-value".into(),
-                        expected: "(lookup-value eid attr)",
-                    });
-                }
-                let eid = expect_int(&args[0])? as u64;
-                let attr = expect_str(&args[1])?;
-                let ctx = QueryContext {
-                    as_of_tx: if self.as_of_tx == u64::MAX {
-                        None
-                    } else {
-                        Some(self.as_of_tx)
-                    },
-                    current_t: self.tx,
-                };
-                match self.engine.lookup_value(eid, &attr, &ctx) {
-                    Some(v) => Ok(EvalStep::Done(value_to_sexpr(&v)?)),
-                    None => Ok(EvalStep::Done(SExpr::Void)),
-                }
-            }
-            "save" => {
-                if args.len() != 3 {
-                    return Err(spier_scheme::EvalError::Arity {
-                        name: "save".into(),
-                        expected: "(save eid attr value)",
-                    });
-                }
-                let eid = expect_int(&args[0])? as u64;
-                let attr = expect_str(&args[1])?;
-                let val = sexpr_to_value(&args[2]).map_err(spier_scheme::EvalError::Host)?;
-                self.engine
-                    .tx()
-                    .eavt_save(eid, &attr, val, self.tx, self.as_of_tx)
-                    .map_err(spier_scheme::EvalError::Host)?;
-                Ok(EvalStep::Done(SExpr::Void))
-            }
-            "retract" => {
-                let eid = expect_int(&args[0])? as u64;
-                let attr = expect_str(&args[1])?;
-                let val = sexpr_to_value(&args[2]).map_err(spier_scheme::EvalError::Host)?;
-                self.engine
-                    .retract(&Value::entity_id(eid), &attr, &val, &QueryContext {
-                        as_of_tx: if self.as_of_tx == u64::MAX { None } else { Some(self.as_of_tx) },
-                        current_t: self.tx,
-                    });
-                Ok(EvalStep::Done(SExpr::Void))
-            }
-            "result" => {
-                let mut items = vec![SExpr::Symbol("result".into())];
-                items.extend_from_slice(args);
-                Ok(EvalStep::Done(SExpr::List(items)))
-            }
-            "declare-attr" => {
-                let attr = expect_str(&args[0])?;
-                let vt_name = expect_str(&args[1])?;
-                let many = args.get(2).map_or(false, |a| matches!(a, SExpr::Bool(true)));
-                let unique = args.get(3).map_or(false, |a| matches!(a, SExpr::Bool(true)));
-                let ctx = QueryContext {
-                    as_of_tx: if self.as_of_tx == u64::MAX { None } else { Some(self.as_of_tx) },
-                    current_t: self.tx,
-                };
-                self.engine
-                    .declare_attr_from_sql(&attr, &vt_name, many, unique, &ctx)
-                    .map_err(|e| spier_scheme::EvalError::Host(e.0))?;
-                Ok(EvalStep::Done(SExpr::Void))
-            }
-            "declare-partition" => {
-                let name = expect_str(&args[0])?;
-                let ctx = QueryContext {
-                    as_of_tx: if self.as_of_tx == u64::MAX { None } else { Some(self.as_of_tx) },
-                    current_t: self.tx,
-                };
-                let pid = self.engine.declare_partition(&name, &ctx).unwrap_or(0);
-                Ok(EvalStep::Done(SExpr::Int(pid as i64)))
-            }
-            _ => Err(spier_scheme::EvalError::NotFound(name.into())),
-        }
-    }
-}
-
 fn expect_int(expr: &SExpr) -> Result<i64, spier_scheme::EvalError> {
     match expr {
         SExpr::Int(n) => Ok(*n),
@@ -308,16 +144,16 @@ fn value_to_sexpr(val: &Value) -> Result<SExpr, spier_scheme::EvalError> {
 }
 
 // ---------------------------------------------------------------------------
-// SelectSchemeHostFns — triejoin host functions for SELECT queries
+// SchemeHostFns — unified host functions for the Scheme evaluator
 // ---------------------------------------------------------------------------
 
-pub struct SelectSchemeHostFns {
+pub struct SchemeHostFns {
     engine: Arc<QueryEngineInner>,
     params: Vec<Value>,
     ctx: QueryContext,
 }
 
-impl SelectSchemeHostFns {
+impl SchemeHostFns {
     pub fn new(
         engine: Arc<QueryEngineInner>,
         params: Vec<Value>,
@@ -478,16 +314,19 @@ impl SelectSchemeHostFns {
     }
 }
 
-impl spier_scheme::HostFns for SelectSchemeHostFns {
+impl spier_scheme::HostFns for SchemeHostFns {
     fn is_native(&self, name: &str) -> bool {
         matches!(
             name,
-            "scanner-open" | "scanner-init"
+            "alloc-entity" | "tx-entity" | "param"
+                | "lookup-entity" | "lookup-value"
+                | "save" | "retract" | "result"
+                | "declare-attr" | "declare-partition"
+                | "scanner-open" | "scanner-init" | "scanner-read"
+                | "scanner-push" | "scanner-pop" | "scanner-prefix"
                 | "scheme-leap-init" | "scheme-leap-next" | "depth-cleanup"
-                | "intern-a" | "param"
-                | "result-row"
+                | "intern-a" | "result-row"
                 | "resolve-val" | "attr-name" | "probe-begin"
-                | "save" | "retract" | "scanner-read"
                 | "depth-fixed-begin" | "depth-fixed-end"
                 | "dbg-scanners"
         )
@@ -737,7 +576,7 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                 Ok(EvalStep::Done(SExpr::Void))
             }
 
-            // -- Result emission --
+            // -- Result emission (yield) --
 
             "result-row" => {
                 let mut row = Vec::with_capacity(args.len());
@@ -749,6 +588,102 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
                     row.into_iter().map(|v| value_to_sexpr(&v).unwrap_or(SExpr::Void)).collect()
                 );
                 Ok(EvalStep::Yield(sexpr_row))
+            }
+
+            // -- DML (terminal result) --
+
+            "alloc-entity" => {
+                let partition = if args.is_empty() {
+                    4u64
+                } else {
+                    expect_int(&args[0])? as u64
+                };
+                let eid = self
+                    .engine
+                    .tx()
+                    .allocate_in_partition(partition)
+                    .map_err(|e| he(e.to_string()))?;
+                Ok(EvalStep::Done(SExpr::Int(eid as i64)))
+            }
+            "tx-entity" => Ok(EvalStep::Done(SExpr::Int(self.ctx.current_t as i64))),
+            "lookup-entity" => {
+                if args.len() != 2 {
+                    return Err(spier_scheme::EvalError::Arity {
+                        name: "lookup-entity".into(),
+                        expected: "(lookup-entity attr value)",
+                    });
+                }
+                let attr = expect_str(&args[0])?;
+                let val = sexpr_to_value(&args[1]).map_err(|e| he(e))?;
+                let is_unique = self.engine
+                    .tx()
+                    .is_unique_attr(&attr)
+                    .unwrap_or(false);
+                if !is_unique {
+                    return Err(he(format!(
+                        "UPSERT WHERE requires a UNIQUE attribute: '{attr}'"
+                    )));
+                }
+                match self.engine.tx().lookup_entity(&attr, val) {
+                    Ok(Some(eid)) => Ok(EvalStep::Done(SExpr::Int(eid as i64))),
+                    Ok(None) => Ok(EvalStep::Done(SExpr::Void)),
+                    Err(e) => Err(he(e)),
+                }
+            }
+            "lookup-value" => {
+                if args.len() != 2 {
+                    return Err(spier_scheme::EvalError::Arity {
+                        name: "lookup-value".into(),
+                        expected: "(lookup-value eid attr)",
+                    });
+                }
+                let eid = expect_int(&args[0])? as u64;
+                let attr = expect_str(&args[1])?;
+                match self.engine.lookup_value(eid, &attr, &self.ctx) {
+                    Some(v) => Ok(EvalStep::Done(value_to_sexpr(&v)?)),
+                    None => Ok(EvalStep::Done(SExpr::Void)),
+                }
+            }
+            "result" => {
+                let mut items = vec![SExpr::Symbol("result".into())];
+                items.extend_from_slice(args);
+                Ok(EvalStep::Done(SExpr::List(items)))
+            }
+            "declare-attr" => {
+                let attr = expect_str(&args[0])?;
+                let vt_name = expect_str(&args[1])?;
+                let many = args.get(2).map_or(false, |a| matches!(a, SExpr::Bool(true)));
+                let unique = args.get(3).map_or(false, |a| matches!(a, SExpr::Bool(true)));
+                self.engine
+                    .declare_attr_from_sql(&attr, &vt_name, many, unique, &self.ctx)
+                    .map_err(|e| he(e.0))?;
+                Ok(EvalStep::Done(SExpr::Void))
+            }
+            "declare-partition" => {
+                let name = expect_str(&args[0])?;
+                let pid = self.engine.declare_partition(&name, &self.ctx).unwrap_or(0);
+                Ok(EvalStep::Done(SExpr::Int(pid as i64)))
+            }
+
+            // -- Scanner prefix manipulation (new) --
+
+            "scanner-push" => {
+                let scanner = extract_scanner(&args[0])?;
+                let val = sexpr_to_value(&args[1]).map_err(|e| he(e))?;
+                let mut s = scanner.lock().unwrap();
+                s.save_value(&val);
+                Ok(EvalStep::Done(SExpr::Void))
+            }
+            "scanner-pop" => {
+                let scanner = extract_scanner(&args[0])?;
+                let mut s = scanner.lock().unwrap();
+                s.pop_saved_value();
+                Ok(EvalStep::Done(SExpr::Void))
+            }
+            "scanner-prefix" => {
+                let scanner = extract_scanner(&args[0])?;
+                let s = scanner.lock().unwrap();
+                Ok(EvalStep::Done(SExpr::Bytes(s.prefix_bytes().to_vec())))
             }
 
             _ => Err(spier_scheme::EvalError::NotFound(name.into())),
@@ -763,13 +698,13 @@ impl spier_scheme::HostFns for SelectSchemeHostFns {
 pub struct SelectSchemeSession {
     program: SchemeProgram,
     env: Environment,
-    host: SelectSchemeHostFns,
+    host: SchemeHostFns,
     state: YieldState,
     done: bool,
 }
 
 impl SelectSchemeSession {
-    pub fn new(program: SchemeProgram, host: SelectSchemeHostFns) -> Self {
+    pub fn new(program: SchemeProgram, host: SchemeHostFns) -> Self {
         Self {
             program,
             env: Environment::new(),

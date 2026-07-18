@@ -799,7 +799,7 @@ fn build_select_scheme_session(
     t: u64,
     as_of_tx: Option<u64>,
 ) -> engine::scheme::SelectSchemeSession {
-    let host = engine::scheme::SelectSchemeHostFns::new(
+    let host = engine::scheme::SchemeHostFns::new(
         Arc::clone(engine),
         vm_params,
         t,
