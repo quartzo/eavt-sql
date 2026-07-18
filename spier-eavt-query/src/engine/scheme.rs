@@ -226,7 +226,8 @@ impl SchemeHostFns {
         for _ in 0..max_iters {
             let mut max_val: Option<Value> = None;
             let mut all_equal = true;
-            for scanner in scanners {
+            let mut at_end_indices: Vec<usize> = Vec::new();
+            for (i, scanner) in scanners.iter().enumerate() {
                 let s = scanner.lock().unwrap();
                 if let Some(v) = s.extract_current() {
                     match &max_val {
@@ -238,15 +239,18 @@ impl SchemeHostFns {
                         _ => {}
                     }
                 } else {
-                    return false;
+                    // Scanner is at_end — don't give up yet; seek it later
+                    at_end_indices.push(i);
+                    all_equal = false;
                 }
             }
             if all_equal { return true; }
             if let Some(ref mv) = max_val {
-                for scanner in scanners {
+                // Seek slow scanners AND scanners that were at_end
+                for (i, scanner) in scanners.iter().enumerate() {
                     let needs_seek = {
                         let s = scanner.lock().unwrap();
-                        matches!(s.extract_current(), Some(v) if v < *mv)
+                        matches!(s.extract_current(), Some(v) if v < *mv) || at_end_indices.contains(&i)
                     };
                     if needs_seek {
                         let mut s = scanner.lock().unwrap();
@@ -254,6 +258,9 @@ impl SchemeHostFns {
                         if s.at_end() { return false; }
                     }
                 }
+            } else {
+                // All scanners are at_end — no max_val to seek to
+                return false;
             }
         }
         false
@@ -372,8 +379,7 @@ impl spier_scheme::HostFns for SchemeHostFns {
                 let cf_id: u32 = match upper.as_str() {
                     "AEVT" => 1, "AVET" => 2, "VAET" => 3, _ => 0,
                 };
-                let prefix = scanner.prefix_bytes().to_vec();
-                let cursor = match self.engine.open_raw_cursor(cf_id, &prefix) {
+                let cursor = match self.engine.open_raw_cursor(cf_id, &[]) {
                     Ok(c) => c,
                     Err(_) => Arc::new(std::cell::RefCell::new(
                         crate::engine::scanner::InvalidCursor,
@@ -412,13 +418,10 @@ impl spier_scheme::HostFns for SchemeHostFns {
                 // by the Fixed entries already on the stack.
                 for sm in &scanners {
                     let mut s = sm.lock().unwrap();
-                    s.build_prefix_from_saved();
-                    let prefix = s.prefix_bytes().to_vec();
                     if let Some(aid) = s.attr_id_from_prefix_bytes() {
                         let vt = self.engine.value_type_for(aid);
                         s.set_value_attr_type(vt);
                     }
-                    s.seek_to_prefix_start();
                     s.advance_to_active_at();
                     if s.value_attr_type().is_none() {
                         if let Some(aid) = s.attr_id_from_key() {
@@ -632,7 +635,7 @@ impl spier_scheme::HostFns for SchemeHostFns {
             "scanner-prefix" => {
                 let scanner = extract_scanner(&args[0])?;
                 let s = scanner.lock().unwrap();
-                Ok(EvalStep::Done(SExpr::Bytes(s.prefix_bytes().to_vec())))
+                Ok(EvalStep::Done(SExpr::Bytes(s.prefix_bytes())))
             }
 
             // -- Range debugging --

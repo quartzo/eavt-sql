@@ -348,18 +348,20 @@ fn plan_value_to_sexpr(pv: &PlanValue) -> SExpr {
     }
 }
 
-fn bound_value_to_sexpr(bv: &BoundValue) -> SExpr {
+/// Build a boolean tree SExpr from range bounds.
+
+fn bound_to_sexpr(bv: &spier_datalog::BoundValue) -> SExpr {
     match bv {
-        BoundValue::Int(n) => SExpr::Int(*n),
-        BoundValue::Float(f) => SExpr::Float(*f),
-        BoundValue::Str(s) | BoundValue::Attr(s) => SExpr::Str(s.clone()),
-        BoundValue::ResolvedAttr(id, _, _, _) => SExpr::Int(*id as i64),
-        BoundValue::Param(idx) => SExpr::List(vec![
+        spier_datalog::BoundValue::Int(n) => SExpr::Int(*n),
+        spier_datalog::BoundValue::Float(f) => SExpr::Float(*f),
+        spier_datalog::BoundValue::Str(s) | spier_datalog::BoundValue::Attr(s) => SExpr::Str(s.clone()),
+        spier_datalog::BoundValue::ResolvedAttr(id, _, _, _) => SExpr::Int(*id as i64),
+        spier_datalog::BoundValue::Param(idx) => SExpr::List(vec![
             SExpr::Symbol("param".into()),
             SExpr::Int(*idx as i64),
         ]),
-        BoundValue::Var(name) => SExpr::Symbol(format!("?{name}")),
-        BoundValue::Missing(_) => SExpr::Symbol("_".into()),
+        spier_datalog::BoundValue::Var(name) => SExpr::Symbol(format!("?{name}")),
+        spier_datalog::BoundValue::Missing(_) => SExpr::Symbol("_".into()),
     }
 }
 
@@ -646,9 +648,17 @@ fn build_triejoin_scheme(
     }
 
     // Build list of operations (outermost first) for the triejoin.
+    //
+    // Each op is a "body transformer" expressed via a `__BODY__` placeholder:
+    // - depth-fixed becomes:  (begin (scanner-push s val) __BODY__ (scanner-pop s))
+    // - depth-run becomes:    (scanner-iterate (scanners) (var) [:ranges (ranges-create r)]
+    //                                   (begin (scanner-push s0 var) ... __BODY__ (scanner-pop s0) ...))
+    //
+    // The outer build wraps the leaf_body in these templates inside-out by
+    // substituting __BODY__ (via `replace_body_placeholder`).
     let mut ops: Vec<SExpr> = Vec::new();
 
-    // Track which bound values have been emitted as depth-fixed.
+    // Track which bound values have been emitted as scanner-push (depth-fixed).
     let mut bound_emitted: Vec<HashSet<String>> = vec![HashSet::new(); plan.iter_plans.len()];
 
     // Process each depth in forward order (outermost first).
@@ -657,20 +667,17 @@ fn build_triejoin_scheme(
 
         // Collect scanner refs per clause for this depth.
         let mut scanners: Vec<SExpr> = Vec::new();
-
         for (ip_idx, ip) in plan.iter_plans.iter().enumerate() {
             if ip.var_depths.iter().any(|&(d, _)| d == depth) {
                 scanners.push(SExpr::Symbol(format!("s{ip_idx}")));
             }
         }
-
         if scanners.is_empty() {
             continue;
         }
 
-        // Emit depth-fixed for bound values BEFORE this depth's variable.
-        // Ordering comes from the planner's `bound_positions_before`, which is
-        // aware of each index's column order — the compiler stays agnostic.
+        // Emit scanner-push (depth-fixed) for bound values BEFORE this depth's
+        // variable. Ordering comes from the planner's `bound_positions_before`.
         for (ip_idx, ip) in plan.iter_plans.iter().enumerate() {
             if !ip.var_depths.iter().any(|&(d, _)| d == depth) {
                 continue;
@@ -682,46 +689,127 @@ fn build_triejoin_scheme(
                 if let Some(val_expr) = bind_vals[ip_idx].get(&pos_name) {
                     bound_emitted[ip_idx].insert(pos_name.clone());
                     ops.push(SExpr::List(vec![
-                        SExpr::Symbol("depth-fixed".into()),
-                        SExpr::List(vec![SExpr::Symbol(format!("s{ip_idx}"))]),
-                        val_expr.clone(),
+                        SExpr::Symbol("begin".into()),
                         SExpr::List(vec![
-                            SExpr::Symbol("lambda".into()),
-                            SExpr::List(vec![]),
-                            SExpr::Symbol("__BODY__".into()),
+                            SExpr::Symbol("scanner-push".into()),
+                            SExpr::Symbol(format!("s{ip_idx}")),
+                            val_expr.clone(),
+                        ]),
+                        SExpr::Symbol("__BODY__".into()),
+                        SExpr::List(vec![
+                            SExpr::Symbol("scanner-pop".into()),
+                            SExpr::Symbol(format!("s{ip_idx}")),
                         ]),
                     ]));
                 }
             }
         }
 
-        // Emit depth-run for this variable.
-        let ranges = depth_ranges.get(&depth).cloned().unwrap_or(SExpr::List(vec![]));
-        ops.push(SExpr::List(vec![
-            SExpr::Symbol("depth-run".into()),
-            SExpr::List(scanners),
-            ranges,
-            SExpr::List(vec![SExpr::Symbol("lambda".into()), SExpr::List(vec![SExpr::Symbol(var_name.clone())]), SExpr::Symbol("__BODY__".into())]),
-        ]));
+        // Emit scanner-iterate (depth-run) for this variable.
+        let ranges_tree = depth_ranges.get(&depth).cloned().unwrap_or(SExpr::List(vec![]));
+        let ranges_is_empty = matches!(&ranges_tree, SExpr::List(items) if items.is_empty());
+
+        // Body of scanner-iterate: (begin (scanner-push s0 var) ... __BODY__ (scanner-pop s0) ...)
+        let mut inner_items: Vec<SExpr> = vec![SExpr::Symbol("begin".into())];
+        for s in &scanners {
+            inner_items.push(SExpr::List(vec![
+                SExpr::Symbol("scanner-push".into()),
+                s.clone(),
+                SExpr::Symbol(var_name.clone()),
+            ]));
+        }
+        inner_items.push(SExpr::Symbol("__BODY__".into()));
+        for s in &scanners {
+            inner_items.push(SExpr::List(vec![
+                SExpr::Symbol("scanner-pop".into()),
+                s.clone(),
+            ]));
+        }
+
+        let mut iter_items: Vec<SExpr> = vec![
+            SExpr::Symbol("scanner-iterate".into()),
+            SExpr::List(scanners.clone()),
+            SExpr::List(vec![SExpr::Symbol(var_name.clone())]),
+        ];
+        if !ranges_is_empty {
+            iter_items.push(SExpr::Symbol(":ranges".into()));
+            iter_items.push(SExpr::List(vec![
+                SExpr::Symbol("ranges-create".into()),
+                ranges_tree,
+            ]));
+        }
+        iter_items.push(SExpr::List(inner_items));
+        ops.push(SExpr::List(iter_items));
     }
 
-    // After all depth-runs, emit remaining depth-fixed for bound values that
-    // were NOT before any variable's position.
+    // After all scanner-iterates, emit remaining scanner-push / scanner-iterate
+    // for bound values that were NOT before any variable's position (trailing).
+    // Rule: the LAST un-emitted bound position per scanner becomes a
+    // scanner-iterate with :ranges (ranges-create (= val)) instead of a
+    // plain scanner-push. This ensures even fully-bound lookups (no free
+    // variables) have an existence check — the iterate filters out the body
+    // if the datom doesn't exist.
     for (ip_idx, ip) in plan.iter_plans.iter().enumerate() {
-        for (pos_name, _pv) in ip.all_bound_positions() {
-            if bound_emitted[ip_idx].contains(&pos_name) {
-                continue;
-            }
-            if let Some(val_expr) = bind_vals[ip_idx].get(&pos_name) {
-                bound_emitted[ip_idx].insert(pos_name.clone());
+        let trailing: Vec<(String, SExpr)> = ip
+            .all_bound_positions()
+            .into_iter()
+            .filter_map(|(pos_name, _pv)| {
+                if bound_emitted[ip_idx].contains(&pos_name) {
+                    None
+                } else {
+                    bind_vals[ip_idx]
+                        .get(&pos_name)
+                        .map(|v| (pos_name.clone(), v.clone()))
+                }
+            })
+            .collect();
+        if trailing.is_empty() {
+            continue;
+        }
+        let last_idx = trailing.len() - 1;
+        for (i, (pos_name, val_expr)) in trailing.into_iter().enumerate() {
+            bound_emitted[ip_idx].insert(pos_name.clone());
+            if i == last_idx {
+                // Last position → scanner-iterate with equality range
+                let var_name = format!("_{pos_name}_trail");
                 ops.push(SExpr::List(vec![
-                    SExpr::Symbol("depth-fixed".into()),
+                    SExpr::Symbol("scanner-iterate".into()),
                     SExpr::List(vec![SExpr::Symbol(format!("s{ip_idx}"))]),
-                    val_expr.clone(),
+                    SExpr::List(vec![SExpr::Symbol(var_name.clone())]),
+                    SExpr::Symbol(":ranges".into()),
                     SExpr::List(vec![
-                        SExpr::Symbol("lambda".into()),
-                        SExpr::List(vec![]),
+                        SExpr::Symbol("ranges-create".into()),
+                        SExpr::List(vec![
+                            SExpr::Symbol("=".into()),
+                            val_expr.clone(),
+                        ]),
+                    ]),
+                    SExpr::List(vec![
+                        SExpr::Symbol("begin".into()),
+                        SExpr::List(vec![
+                            SExpr::Symbol("scanner-push".into()),
+                            SExpr::Symbol(format!("s{ip_idx}")),
+                            SExpr::Symbol(var_name),
+                        ]),
                         SExpr::Symbol("__BODY__".into()),
+                        SExpr::List(vec![
+                            SExpr::Symbol("scanner-pop".into()),
+                            SExpr::Symbol(format!("s{ip_idx}")),
+                        ]),
+                    ]),
+                ]));
+            } else {
+                ops.push(SExpr::List(vec![
+                    SExpr::Symbol("begin".into()),
+                    SExpr::List(vec![
+                        SExpr::Symbol("scanner-push".into()),
+                        SExpr::Symbol(format!("s{ip_idx}")),
+                        val_expr.clone(),
+                    ]),
+                    SExpr::Symbol("__BODY__".into()),
+                    SExpr::List(vec![
+                        SExpr::Symbol("scanner-pop".into()),
+                        SExpr::Symbol(format!("s{ip_idx}")),
                     ]),
                 ]));
             }
@@ -734,42 +822,80 @@ fn build_triejoin_scheme(
         body = replace_body_placeholder(op, &body);
     }
 
-    // Emit probe: if plan.lookups has a fully-bound lookup pattern,
-    // wrap the triejoin body in (let* ((t_var (probe-begin ...))) (when t_var body))
+    // Handle fully-bound lookup patterns (from the planner). When all (e, a, v)
+    // slots are constants, the planner produces a "lookup" with no iter_plans.
+    // We generate a scanner-iterate with equality ranges to check existence.
     for pattern in &plan.lookups {
         if !pattern.is_lookup() { continue; }
-        let t_var = match &pattern.t {
-            spier_datalog::DatalogSlot::Var(name) => name.clone(),
-            _ => continue,
-        };
         let e_val = match &pattern.e {
-            spier_datalog::DatalogSlot::Const(bv) => bound_value_to_sexpr(bv),
+            spier_datalog::DatalogSlot::Const(bv) => bound_to_sexpr(bv),
             _ => continue,
         };
         let a_val = match &pattern.a {
-            spier_datalog::DatalogSlot::Const(bv) => bound_value_to_sexpr(bv),
+            spier_datalog::DatalogSlot::Const(bv) => bound_to_sexpr(bv),
             _ => continue,
         };
         let v_val = match &pattern.v {
-            spier_datalog::DatalogSlot::Const(bv) => bound_value_to_sexpr(bv),
+            spier_datalog::DatalogSlot::Const(bv) => bound_to_sexpr(bv),
             _ => continue,
         };
-        let probe_call = SExpr::List(vec![
-            SExpr::Symbol("probe-begin".into()),
-            e_val,
-            a_val,
-            v_val,
-        ]);
+        // Determine the best index: use the bound attr to decide.
+        // Default to EAVT (always works for point lookups).
+        let probe_s_var = "_s_probe".to_string();
         body = SExpr::List(vec![
             SExpr::Symbol("let*".into()),
-            SExpr::List(vec![SExpr::List(vec![
-                SExpr::Symbol(t_var.clone()),
-                probe_call,
-            ])]),
             SExpr::List(vec![
-                SExpr::Symbol("when".into()),
-                SExpr::Symbol(t_var),
-                body,
+                SExpr::List(vec![
+                    SExpr::Symbol(probe_s_var.clone()),
+                    SExpr::List(vec![SExpr::Symbol("scanner-open".into()), SExpr::Str("EAVT".into())]),
+                ]),
+            ]),
+            SExpr::List(vec![
+                SExpr::Symbol("begin".into()),
+                SExpr::List(vec![
+                    SExpr::Symbol("scanner-push".into()),
+                    SExpr::Symbol(probe_s_var.clone()),
+                    e_val,
+                ]),
+                SExpr::List(vec![
+                    SExpr::Symbol("scanner-push".into()),
+                    SExpr::Symbol(probe_s_var.clone()),
+                    a_val,
+                ]),
+                SExpr::List(vec![
+                    SExpr::Symbol("scanner-iterate".into()),
+                    SExpr::List(vec![SExpr::Symbol(probe_s_var.clone())]),
+                    SExpr::List(vec![SExpr::Symbol("_v".into())]),
+                    SExpr::Symbol(":ranges".into()),
+                    SExpr::List(vec![
+                        SExpr::Symbol("ranges-create".into()),
+                        SExpr::List(vec![
+                            SExpr::Symbol("=".into()),
+                            v_val,
+                        ]),
+                    ]),
+                    SExpr::List(vec![
+                        SExpr::Symbol("begin".into()),
+                        SExpr::List(vec![
+                            SExpr::Symbol("scanner-push".into()),
+                            SExpr::Symbol(probe_s_var.clone()),
+                            SExpr::Symbol("_v".into()),
+                        ]),
+                        body,
+                        SExpr::List(vec![
+                            SExpr::Symbol("scanner-pop".into()),
+                            SExpr::Symbol(probe_s_var.clone()),
+                        ]),
+                    ]),
+                ]),
+                SExpr::List(vec![
+                    SExpr::Symbol("scanner-pop".into()),
+                    SExpr::Symbol(probe_s_var.clone()),
+                ]),
+                SExpr::List(vec![
+                    SExpr::Symbol("scanner-pop".into()),
+                    SExpr::Symbol(probe_s_var.clone()),
+                ]),
             ]),
         ]);
     }

@@ -256,7 +256,7 @@ impl QueryEngineInner {
 
         let value_attr_type = bound_attr_id.and_then(|a| self.value_type_for_cached(a));
         let mode = keys::encode_mode_for(value_attr_type);
-        let is_ref_attr = mode == EncodeMode::Ref;
+        let is_ref_attr = value_attr_type == Some(spier_transactor::resolver_consts::DB_TYPE_REF);
 
         let bound_vals: Vec<BoundValue> = bound
             .iter()

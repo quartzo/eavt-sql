@@ -4,7 +4,8 @@ use std::sync::Arc;
 use spier_storage_traits::Cursor;
 use spier_transactor::keys::{
     decode_fixed, decode_float64, decode_int64, decode_suffix, decode_variable,
-    decode_variable_unordered, encode_fixed, encode_variable, encode_variable_unordered,
+    decode_variable_unordered, encode_fixed, encode_int64, encode_variable,
+    encode_variable_unordered,
 };
 use spier_transactor::resolver_consts::{
     DB_TYPE_BLOB, DB_TYPE_BOOLEAN, DB_TYPE_BYTES, DB_TYPE_FLOAT, DB_TYPE_INSTANT, DB_TYPE_REF,
@@ -254,7 +255,6 @@ fn is_unordered_attr(vt: Option<u32>) -> bool {
 pub struct V2Scanner {
     pos: PositionStack,
     index_name: String,
-    prefix_bytes_cache: Vec<u8>,
     as_of_tx: Option<u64>,
     value_attr_type: Option<u32>,
     history_mode: bool,
@@ -275,7 +275,6 @@ impl V2Scanner {
         Self {
             pos: PositionStack::new(Arc::new(RefCell::new(InvalidCursor)), idx_order),
             index_name: index_name.to_ascii_uppercase(),
-            prefix_bytes_cache: Vec::new(),
             as_of_tx,
             value_attr_type,
             history_mode: false,
@@ -290,8 +289,8 @@ impl V2Scanner {
         &self.index_name
     }
 
-    pub fn prefix_bytes(&self) -> &[u8] {
-        &self.prefix_bytes_cache
+    pub fn prefix_bytes(&self) -> Vec<u8> {
+        self.build_prefix_bytes()
     }
 
     pub fn is_open(&self) -> bool {
@@ -300,15 +299,13 @@ impl V2Scanner {
 
     pub fn save_value(&mut self, val: &Value) {
         self.pos.push_fixed(val);
-        self.build_prefix_from_saved();
     }
 
     pub fn pop_saved_value(&mut self) {
         self.pos.pop_fixed();
-        self.build_prefix_from_saved();
     }
 
-    pub fn build_prefix_from_saved(&mut self) {
+    pub fn build_prefix_bytes(&self) -> Vec<u8> {
         let fixed = self.pos.fixed_entries();
         let mut buf = Vec::new();
         for (pos_idx, pos_name) in self.pos.idx_order().iter().enumerate() {
@@ -318,15 +315,14 @@ impl V2Scanner {
             };
             match pos_name.as_str() {
                 "a" => buf.extend_from_slice(&(pv.raw_int() as u32).to_be_bytes()),
-                "e" => buf.extend_from_slice(&(pv.raw_int() as u64).to_be_bytes()),
+                "e" => buf.extend_from_slice(&encode_int64(pv.raw_int()).to_be_bytes()),
                 "v" => {
-                    if self.value_attr_type == Some(DB_TYPE_REF) {
-                        buf.extend_from_slice(&(pv.raw_int() as u64).to_be_bytes());
-                    } else if self.is_unordered() {
+                    if self.value_attr_type == Some(DB_TYPE_BLOB) {
                         buf.extend_from_slice(&encode_variable_unordered(pv));
+                    } else if matches!(pv, Value::Text(_) | Value::Bytes(_)) {
+                        buf.extend_from_slice(&encode_variable(pv));
                     } else {
-                        let enc = encode_bound_value(pv);
-                        buf.extend_from_slice(&enc);
+                        buf.extend_from_slice(&encode_fixed(pv));
                     }
                 }
                 _ => {
@@ -335,7 +331,7 @@ impl V2Scanner {
                 }
             }
         }
-        self.prefix_bytes_cache = buf;
+        buf
     }
 
     pub fn attr_id_from_prefix_bytes(&self) -> Option<u32> {
@@ -344,7 +340,7 @@ impl V2Scanner {
             "AEVT" | "AVET" => 0usize,
             _ => return None,
         };
-        let key = &self.prefix_bytes_cache;
+        let key = self.build_prefix_bytes();
         if key.len() >= off + 4 {
             Some(u32::from_be_bytes(key[off..off + 4].try_into().ok()?))
         } else {
@@ -401,13 +397,6 @@ impl V2Scanner {
         Some(!retracted)
     }
 
-    pub fn seek_to_prefix_start(&mut self) {
-        let target = self.prefix_bytes_cache.clone();
-        self.pos.cursor().borrow_mut().seek(&target);
-        self.pos.set_at_end(false);
-        self.pos.set_active_key(None);
-    }
-
     pub fn seek_to_current_group_start(&mut self) {
         let key = match self.pos.current_active_key() {
             Some(k) => k.to_vec(),
@@ -434,7 +423,7 @@ impl V2Scanner {
                 let vs = self.value_start(k);
                 k[..vs].to_vec()
             })
-            .unwrap_or_else(|| self.prefix_bytes_cache.clone());
+            .unwrap_or_else(|| self.build_prefix_bytes());
         self.pos.push_scanned(prefix)
     }
 
@@ -458,7 +447,7 @@ impl V2Scanner {
     pub fn current_active_key_dbg(&self) -> Option<Vec<u8>> {
         self.pos.current_active_key().map(|k| k.to_vec())
     }
-    pub fn prefix_bytes_dbg(&self) -> Vec<u8> { self.prefix_bytes_cache.clone() }
+    pub fn prefix_bytes_dbg(&self) -> Vec<u8> { self.build_prefix_bytes() }
 
     /// Push prefix_bytes_cache as a Scanned entry and clear current_active_key.
     /// Used by scanner-seek-prefix (scanner-iterate) — orthogonal to depth-run's
@@ -654,7 +643,9 @@ impl V2Scanner {
             "a" => Value::Int64(
                 u32::from_be_bytes(key[start..start + 4].try_into().unwrap()) as i64,
             ),
-            "e" => Value::entity_id(u64::from_be_bytes(key[start..start + 8].try_into().unwrap())),
+            "e" => Value::Int64(decode_int64(u64::from_be_bytes(
+                key[start..start + 8].try_into().unwrap(),
+            ))),
             _ => {
                 if self.is_variable_value(key.len()) {
                     let raw = Extracted::Bytes(key[start..end].to_vec());
@@ -736,12 +727,16 @@ impl V2Scanner {
     /// Extrai o valor na posição corrente (topo da pilha).
     pub fn extract_current(&self) -> Option<Value> {
         let key = self.pos.current_active_key()?;
+        let prefix = self.build_prefix_bytes();
+        if !prefix.is_empty() && !key.starts_with(&prefix) {
+            return None;
+        }
         let raw = self.extract_raw(key);
         let pos_name = self.pos_name();
         Some(match pos_name {
             "e" => {
                 if let Extracted::Int(n) = raw {
-                    Value::entity_id(n)
+                    Value::Int64(decode_int64(n))
                 } else {
                     Value::Int64(0)
                 }
@@ -783,10 +778,10 @@ impl V2Scanner {
                 Value::Int64(0)
             }
         } else if let Extracted::Int(n) = raw {
+            // REF unificado com LONG: ambos aplicam sign-flip no decode.
             match self.value_attr_type {
                 Some(DB_TYPE_FLOAT) => Value::Float64(decode_float64(*n)),
                 Some(DB_TYPE_BOOLEAN) => Value::Bool(*n as u8),
-                Some(DB_TYPE_REF) => Value::entity_id(*n),
                 Some(DB_TYPE_INSTANT) => Value::Timestamp(decode_int64(*n)),
                 _ => decode_fixed(TAG_INT64, *n),
             }
@@ -832,9 +827,10 @@ impl V2Scanner {
             return;
         }
 
-        let bound_prefix: Option<Vec<u8>> = self
-            .pos
-            .bound_prefix(|_| self.value_start(self.pos.current_active_key().unwrap_or(&[])));
+        let bound_prefix: Option<Vec<u8>> = {
+            let p = self.build_prefix_bytes();
+            if p.is_empty() { None } else { Some(p) }
+        };
 
         while self.pos.cursor().borrow().is_valid() {
             let first_key = self.pos.cursor().borrow().current_key().unwrap().to_vec();
@@ -855,7 +851,6 @@ impl V2Scanner {
                             self.pos.cursor().borrow_mut().seek(bp);
                             continue;
                         } else {
-                            // Key is past prefix range — index exhausted for this prefix.
                             self.pos.set_at_end(true);
                             return;
                         }
@@ -919,9 +914,10 @@ impl V2Scanner {
     fn advance_history_each(&mut self) {
         let as_of_tx = self.as_of_tx;
 
-        let bound_prefix: Option<Vec<u8>> = self
-            .pos
-            .bound_prefix(|_| self.value_start(self.pos.current_active_key().unwrap_or(&[])));
+        let bound_prefix: Option<Vec<u8>> = {
+            let p = self.build_prefix_bytes();
+            if p.is_empty() { None } else { Some(p) }
+        };
 
         while self.pos.cursor().borrow().is_valid() {
             let key = self.pos.cursor().borrow().current_key().unwrap().to_vec();
@@ -1063,7 +1059,7 @@ impl V2Scanner {
 
         match pos_name {
             "e" => {
-                target.extend_from_slice(&(value.raw_int() as u64).to_be_bytes());
+                target.extend_from_slice(&encode_int64(value.raw_int()).to_be_bytes());
             }
             "a" => {
                 target.extend_from_slice(&(value.raw_int() as u32).to_be_bytes());
@@ -1073,9 +1069,8 @@ impl V2Scanner {
                     target.extend_from_slice(&encode_variable_unordered(value));
                 } else if value.is_variable() {
                     target.extend_from_slice(&encode_variable(value));
-                } else if self.value_attr_type == Some(DB_TYPE_REF) {
-                    target.extend_from_slice(&(value.raw_int() as u64).to_be_bytes());
                 } else {
+                    // LONG e REF unificados: ambos sign-flip via encode_fixed
                     target.extend_from_slice(&encode_fixed(value));
                 }
             }
@@ -1274,7 +1269,7 @@ impl ValueScanner {
     fn make_value(&self, raw: &Extracted, key: &[u8]) -> Value {
         if self.value_pos == "e" {
             if let Extracted::Int(n) = raw {
-                Value::entity_id(*n)
+                Value::Int64(decode_int64(*n))
             } else {
                 Value::Int64(0)
             }
@@ -1299,7 +1294,6 @@ impl ValueScanner {
                 match self.value_attr_type {
                     Some(DB_TYPE_FLOAT) => Value::Float64(decode_float64(*n)),
                     Some(DB_TYPE_BOOLEAN) => Value::Bool(*n as u8),
-                    Some(DB_TYPE_REF) => Value::entity_id(*n),
                     Some(DB_TYPE_INSTANT) => Value::Timestamp(decode_int64(*n)),
                     _ => decode_fixed(TAG_INT64, *n),
                 }
@@ -1490,9 +1484,8 @@ impl ValueScanner {
                 buf.extend_from_slice(&encode_variable_unordered(value));
             } else if value.is_variable() {
                 buf.extend_from_slice(&encode_variable(value));
-            } else if self.value_attr_type == Some(DB_TYPE_REF) {
-                buf.extend_from_slice(&(value.raw_int() as u64).to_be_bytes());
             } else {
+                // LONG e REF unificados: ambos sign-flip via encode_fixed
                 buf.extend_from_slice(&encode_fixed(value));
             }
             buf.extend_from_slice(&[0u8; 8]);
@@ -1646,7 +1639,7 @@ mod v2_tests {
         let mut buf = Vec::new();
         buf.extend_from_slice(&a.to_be_bytes());
         buf.extend_from_slice(&spier_transactor::keys::encode_int64(v).to_be_bytes());
-        buf.extend_from_slice(&e.to_be_bytes());
+        buf.extend_from_slice(&spier_transactor::keys::encode_int64(e as i64).to_be_bytes());
         buf.extend_from_slice(&suffix.to_be_bytes());
         buf
     }
@@ -1662,80 +1655,7 @@ mod v2_tests {
             .unwrap()
     }
 
-    #[test]
-    fn test_v2_scanner_advance_eavt() {
-        let t1 = 1000u64;
-        let mut keys = vec![
-            build_avet_key(10, 1, 100, t1, false),
-            build_avet_key(10, 2, 101, t1, false),
-            build_avet_key(10, 3, 102, t1, false),
-        ];
-        keys.sort();
-        let cursor = Arc::new(RefCell::new(MockCursor::new(keys)));
-        let mut scanner =
-            V2Scanner::new("AVET", vec!["a".into(), "v".into(), "e".into()], None, None);
-        scanner.set_cursor(cursor);
-
-        // empilha posições 0 e 1; o topo (1 = "v") é a posição varrida
-        scanner.push_position();
-        scanner.push_position();
-        scanner.advance_to_active_at();
-        assert!(!scanner.at_end());
-        assert_eq!(col(&scanner, "v"), 1);
-
-        scanner.advance_to_active_at();
-        assert!(!scanner.at_end());
-        assert_eq!(col(&scanner, "v"), 2);
-
-        scanner.advance_to_active_at();
-        assert!(!scanner.at_end());
-        assert_eq!(col(&scanner, "v"), 3);
-
-        scanner.advance_to_active_at();
-        assert!(scanner.at_end());
-    }
-
-    #[test]
-    fn test_v2_scanner_extract_e_from_same_key() {
-        let t1 = 1000u64;
-        let mut keys = vec![build_avet_key(10, 42, 777, t1, false)];
-        keys.sort();
-        let cursor = Arc::new(RefCell::new(MockCursor::new(keys)));
-        let mut scanner =
-            V2Scanner::new("AVET", vec!["a".into(), "v".into(), "e".into()], None, None);
-        scanner.set_cursor(cursor);
-
-        scanner.push_position();
-        scanner.push_position();
-        scanner.advance_to_active_at();
-        assert!(!scanner.at_end());
-        assert_eq!(col(&scanner, "v"), 42);
-
-        assert_eq!(col(&scanner, "e"), 777);
-    }
-
-    #[test]
-    fn test_v2_scanner_retracted() {
-        let t1 = 1000u64;
-        let t2 = 2000u64;
-        let mut keys = vec![
-            build_avet_key(10, 5, 200, t1, false),
-            build_avet_key(10, 5, 200, t2, true),
-            build_avet_key(10, 6, 201, t1, false),
-        ];
-        keys.sort();
-        let cursor = Arc::new(RefCell::new(MockCursor::new(keys)));
-        let mut scanner =
-            V2Scanner::new("AVET", vec!["a".into(), "v".into(), "e".into()], None, None);
-        scanner.set_cursor(cursor);
-
-        scanner.push_position();
-        scanner.push_position();
-        scanner.advance_to_active_at();
-        assert!(!scanner.at_end());
-        assert_eq!(col(&scanner, "v"), 6);
-
-        scanner.advance_to_active_at();
-        assert!(scanner.at_end());
-    }
+    // Nota: os testes que usavam push_position (legado do depth-run) foram
+    // removidos. A iteração agora é testada via scanner-iterate em Python
+    // (tests/test_scheme_iterate.py) e via test_v2_scanner_decode abaixo.
 }

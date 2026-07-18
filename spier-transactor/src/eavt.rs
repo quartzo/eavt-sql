@@ -344,6 +344,7 @@ impl EavtEngine {
                 false,
                 keys::EncodeMode::Variable,
                 true,
+                false,
             ));
 
             let vt_v = Value::entity_id(vt as u64);
@@ -353,7 +354,8 @@ impl EavtEngine {
                 &vt_v,
                 t,
                 false,
-                keys::EncodeMode::Ref,
+                keys::EncodeMode::Fixed,
+                true,
                 true,
             ));
 
@@ -364,7 +366,8 @@ impl EavtEngine {
                 &card_v,
                 t,
                 false,
-                keys::EncodeMode::Ref,
+                keys::EncodeMode::Fixed,
+                true,
                 true,
             ));
 
@@ -376,7 +379,8 @@ impl EavtEngine {
                     &unique_v,
                     t,
                     false,
-                    keys::EncodeMode::Ref,
+                    keys::EncodeMode::Fixed,
+                    true,
                     true,
                 ));
             }
@@ -589,7 +593,9 @@ impl EavtEngine {
         as_of_tx: Option<u64>,
         resolver: &Resolver,
     ) -> Option<Vec<(usize, Vec<u8>, Vec<u8>)>> {
-        let mode = keys::encode_mode_for(resolver.value_type_for(a_id));
+        let value_type = resolver.value_type_for(a_id);
+        let mode = keys::encode_mode_for(value_type);
+        let is_ref = value_type == Some(resolver::DB_TYPE_REF);
         let indexed = resolver.is_indexed(a_id);
         let prefix = build_ea_prefix(e_id, a_id);
         let active = self.collect_active_raw("eavt", &prefix, as_of_tx, resolver);
@@ -599,7 +605,7 @@ impl EavtEngine {
 
         for dv in &active {
             if is_retract || !values_match(v_new, &dv.v) {
-                let entries = keys::build_entries(dv.e, dv.a, &dv.v, t, true, mode, indexed);
+                let entries = keys::build_entries(dv.e, dv.a, &dv.v, t, true, mode, indexed, is_ref);
                 for (cf, k, val) in entries.entries {
                     let cf_id = cf_name_to_id(&cf);
                     batch.push((cf_id, k, val));
@@ -610,7 +616,7 @@ impl EavtEngine {
         }
 
         if !is_retract && !already_active {
-            let entries = keys::build_entries(e_id, a_id, v_new, t, false, mode, indexed);
+            let entries = keys::build_entries(e_id, a_id, v_new, t, false, mode, indexed, is_ref);
             for (cf, k, val) in entries.entries {
                 let cf_id = cf_name_to_id(&cf);
                 batch.push((cf_id, k, val));
@@ -662,10 +668,12 @@ impl EavtEngine {
         let t = current_t_or_alloc(t, &mut resolver);
 
         if resolver.is_many(a_id) {
-            let mode = keys::encode_mode_for(resolver.value_type_for(a_id));
+            let value_type = resolver.value_type_for(a_id);
+            let mode = keys::encode_mode_for(value_type);
+            let is_ref = value_type == Some(resolver::DB_TYPE_REF);
             let indexed = resolver.is_indexed(a_id);
-            let entries = keys::build_entries(e_id, a_id, &v, t, false, mode, indexed);
-            self.write_entries(entries, mode == EncodeMode::Ref);
+            let entries = keys::build_entries(e_id, a_id, &v, t, false, mode, indexed, is_ref);
+            self.write_entries(entries, is_ref);
         } else if let Some(batch) =
             self.build_retract_entries(e_id, a_id, &v, t, false, as_of_tx, &resolver)
         {
@@ -715,10 +723,12 @@ impl EavtEngine {
         let as_of_tx = self.resolve_as_of_tx(as_of_us, &resolver);
 
         if resolver.is_many(a_id) {
-            let mode = keys::encode_mode_for(resolver.value_type_for(a_id));
+            let value_type = resolver.value_type_for(a_id);
+            let mode = keys::encode_mode_for(value_type);
+            let is_ref = value_type == Some(resolver::DB_TYPE_REF);
             let indexed = resolver.is_indexed(a_id);
-            let entries = keys::build_entries(e_id, a_id, &v, t, true, mode, indexed);
-            self.write_entries(entries, mode == EncodeMode::Ref);
+            let entries = keys::build_entries(e_id, a_id, &v, t, true, mode, indexed, is_ref);
+            self.write_entries(entries, is_ref);
         } else if let Some(batch) =
             self.build_retract_entries(e_id, a_id, &v, t, true, as_of_tx, &resolver)
         {
@@ -768,6 +778,7 @@ impl EavtEngine {
                 false,
                 EncodeMode::Variable,
                 true,
+                false,
             );
             self.put_schema_entries(entries);
 
@@ -778,7 +789,8 @@ impl EavtEngine {
                 &vt_v,
                 t,
                 false,
-                EncodeMode::Ref,
+                EncodeMode::Fixed,
+                true,
                 true,
             );
             self.put_schema_entries(entries);
@@ -795,7 +807,8 @@ impl EavtEngine {
                 &card_v,
                 t,
                 false,
-                EncodeMode::Ref,
+                EncodeMode::Fixed,
+                true,
                 true,
             );
             self.put_schema_entries(entries);
@@ -860,7 +873,8 @@ impl EavtEngine {
                     &old_card_v,
                     t,
                     true,
-                    EncodeMode::Ref,
+                    EncodeMode::Fixed,
+                    true,
                     true,
                 );
                 self.put_schema_entries(entries);
@@ -870,7 +884,8 @@ impl EavtEngine {
                     &card_v,
                     t,
                     false,
-                    EncodeMode::Ref,
+                    EncodeMode::Fixed,
+                    true,
                     true,
                 );
                 self.put_schema_entries(entries);
@@ -893,7 +908,8 @@ impl EavtEngine {
                     &unique_v,
                     t,
                     false,
-                    EncodeMode::Ref,
+                    EncodeMode::Fixed,
+                    true,
                     true,
                 );
                 self.put_schema_entries(entries);
@@ -924,6 +940,7 @@ impl EavtEngine {
             false,
             EncodeMode::Variable,
             true,
+            false,
         );
         self.put_schema_entries(entries);
         let entries = keys::build_entries(
@@ -934,6 +951,7 @@ impl EavtEngine {
             false,
             EncodeMode::Fixed,
             true,
+            false,
         );
         self.put_schema_entries(entries);
         Ok(p)
@@ -951,6 +969,7 @@ impl EavtEngine {
             tx_eid,
             false,
             EncodeMode::Fixed,
+            false,
             false,
         );
         self.put_schema_entries(entries);

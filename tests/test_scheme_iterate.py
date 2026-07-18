@@ -244,12 +244,7 @@ def test_iterate_excludes_retracted(engine):
 
 
 def test_iterate_second_call_empty(engine):
-    """After full iteration, a second scanner-iterate yields no rows.
-
-    The cursor is positioned past the prefix range (exhausted). Since
-    scanner-iterate does NOT reopen the cursor, the second call sees
-    the cursor past the prefix → at_end → empty.
-    """
+    """After full iteration, a second scanner-iterate yields no rows."""
     eid, aid = _setup_tag_data(engine)
     prog = (
         f'(let* ((s (scanner-open "EAVT"))) '
@@ -260,7 +255,6 @@ def test_iterate_second_call_empty(engine):
     )
     rows = engine.run_scheme_select(prog)
     vals = [r[0] for r in rows]
-    # Second iteration is empty — index exhausted
     assert vals == ["a", "b", "c"]
 
 
@@ -283,12 +277,7 @@ def test_iterate_read_after_exhaustion_returns_void(engine):
 
 
 def test_iterate_repush_does_not_reset_cursor(engine):
-    """After exhaustion, scanner-pop + scanner-push does NOT reposition the cursor.
-
-    scanner-push/scanner-pop only manipulate the prefix — they're orthogonal
-    to the cursor. The cursor stays exhausted. A second scanner-iterate
-    after repush is still empty because the cursor hasn't moved.
-    """
+    """After exhaustion, scanner-pop + push does NOT reposition cursor."""
     eid, aid = _setup_tag_data(engine)
     prog = (
         f'(let* ((s (scanner-open "EAVT"))) '
@@ -303,8 +292,6 @@ def test_iterate_repush_does_not_reset_cursor(engine):
     )
     rows = engine.run_scheme_select(prog)
     vals = [r[0] for r in rows]
-    # Second iteration still empty — cursor is past the prefix, push/pop
-    # didn't reposition it
     assert vals == ["a", "b", "c"]
 
 

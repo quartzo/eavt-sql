@@ -46,12 +46,10 @@ pub enum EncodeMode {
     Fixed,
     Variable,
     Blob,
-    Ref,
 }
 
 pub fn encode_mode_for(value_type: Option<u32>) -> EncodeMode {
     match value_type {
-        Some(DB_TYPE_REF) => EncodeMode::Ref,
         Some(DB_TYPE_BLOB) => EncodeMode::Blob,
         Some(DB_TYPE_STRING) | Some(DB_TYPE_KEYWORD) | Some(DB_TYPE_BYTES) => EncodeMode::Variable,
         _ => EncodeMode::Fixed,
@@ -221,14 +219,6 @@ pub fn decode_suffix(bits: u64) -> (u64, bool) {
     (orig >> 1, orig & 1 != 0)
 }
 
-fn encode_entity(e: u64) -> [u8; 8] {
-    e.to_be_bytes()
-}
-
-fn decode_entity(bytes: &[u8]) -> u64 {
-    u64::from_be_bytes(bytes[..8].try_into().unwrap())
-}
-
 pub enum BoundValue {
     Int(u64),
     Attr(u32),
@@ -250,10 +240,11 @@ pub fn build_prefix(index: &str, bound: &[BoundValue], mode: EncodeMode) -> Vec<
             (BoundValue::Attr(a), "a") => buf.extend_from_slice(&a.to_be_bytes()),
             (BoundValue::Int(n), "a") => buf.extend_from_slice(&(*n as u32).to_be_bytes()),
             (BoundValue::Val(v), "a") => buf.extend_from_slice(&(v.raw_int() as u32).to_be_bytes()),
-            (BoundValue::Ref(n), "v") => buf.extend_from_slice(&encode_entity(*n)),
+            (BoundValue::Ref(n), "v") => {
+                buf.extend_from_slice(&encode_int64(*n as i64).to_be_bytes());
+            }
             (BoundValue::Val(v), "v") => {
                 buf.extend_from_slice(&match mode {
-                    EncodeMode::Ref => encode_entity(v.raw_int() as u64).to_vec(),
                     EncodeMode::Variable => encode_variable(v),
                     EncodeMode::Blob => encode_variable_unordered(v),
                     EncodeMode::Fixed => encode_fixed(v),
@@ -266,16 +257,16 @@ pub fn build_prefix(index: &str, bound: &[BoundValue], mode: EncodeMode) -> Vec<
                 buf.extend_from_slice(&encode_int64(*a as i64).to_be_bytes());
             }
             (BoundValue::Ref(n), _) => {
-                buf.extend_from_slice(&encode_entity(*n));
+                buf.extend_from_slice(&encode_int64(*n as i64).to_be_bytes());
             }
             (BoundValue::Val(v), _) => {
-                buf.extend_from_slice(&encode_entity(v.raw_int() as u64));
+                buf.extend_from_slice(&encode_int64(v.raw_int()).to_be_bytes());
             }
             (BoundValue::Int(n), _) => {
-                buf.extend_from_slice(&encode_entity(*n));
+                buf.extend_from_slice(&encode_int64(*n as i64).to_be_bytes());
             }
             (BoundValue::Attr(a), _) => {
-                buf.extend_from_slice(&encode_entity(*a as u64));
+                buf.extend_from_slice(&encode_int64(*a as i64).to_be_bytes());
             }
         }
     }
@@ -319,8 +310,8 @@ fn decode_value_fixed_vt(
     match vt_for(a_id) {
         Some(DB_TYPE_FLOAT) => Value::Float64(decode_float64(bits)),
         Some(DB_TYPE_BOOLEAN) => Value::Bool(bits as u8),
-        Some(DB_TYPE_REF) => Value::entity_id(bits),
         Some(DB_TYPE_INSTANT) => Value::Timestamp(decode_int64(bits)),
+        // REF e LONG ambos aplicam sign-flip no decode agora (encoding unificado)
         _ => Value::Int64(decode_int64(bits)),
     }
 }
@@ -351,7 +342,7 @@ pub fn unpack_key_with_vt(
     let (t, retracted) = decode_suffix(suffix);
 
     if cf_lower == CF_EAVT {
-        let e = decode_entity(&key[0..8]);
+        let e = decode_int64(u64::from_be_bytes(key[0..8].try_into().unwrap())) as u64;
         let a = u32::from_be_bytes(key[8..12].try_into().unwrap());
         let v_start = 12usize;
         let is_unordered = vt_for(a) == Some(DB_TYPE_BLOB);
@@ -372,7 +363,7 @@ pub fn unpack_key_with_vt(
         }
     } else if cf_lower == CF_AEVT {
         let a = u32::from_be_bytes(key[0..4].try_into().unwrap());
-        let e = decode_entity(&key[4..12]);
+        let e = decode_int64(u64::from_be_bytes(key[4..12].try_into().unwrap())) as u64;
         let v_start = 12usize;
         let is_unordered = vt_for(a) == Some(DB_TYPE_BLOB);
         let is_var = key.len() != FIXED_KEY_LEN || is_unordered;
@@ -398,12 +389,12 @@ pub fn unpack_key_with_vt(
         let (v, e) = if is_var {
             let v_end = find_v_end(key, v_start, is_unordered);
             let val = decode_value_var_vt(a, &key[v_start..v_end], &mut vt_for);
-            let ent = decode_entity(&key[v_end..v_end + 8]);
+            let ent = decode_int64(u64::from_be_bytes(key[v_end..v_end + 8].try_into().unwrap())) as u64;
             (val, ent)
         } else {
             let bits = u64::from_be_bytes(key[v_start..v_start + 8].try_into().unwrap());
             let val = decode_value_fixed_vt(a, bits, &mut vt_for);
-            let ent = decode_entity(&key[v_start + 8..v_start + 16]);
+            let ent = decode_int64(u64::from_be_bytes(key[v_start + 8..v_start + 16].try_into().unwrap())) as u64;
             (val, ent)
         };
         RawDatom {
@@ -416,8 +407,9 @@ pub fn unpack_key_with_vt(
     } else if cf_lower == CF_VAET {
         let v_bits = u64::from_be_bytes(key[0..8].try_into().unwrap());
         let a = u32::from_be_bytes(key[8..12].try_into().unwrap());
-        let e = decode_entity(&key[12..20]);
-        let val = Value::entity_id(v_bits);
+        let e = decode_int64(u64::from_be_bytes(key[12..20].try_into().unwrap())) as u64;
+        // v in VAET is a REF (sign-flipped now) — decode with sign-flip
+        let val = Value::Int64(decode_int64(v_bits));
         RawDatom {
             e,
             a,
@@ -436,7 +428,6 @@ pub struct IndexEntries {
 
 pub fn avet_value_prefix(a: u32, v: &Value, mode: EncodeMode) -> Vec<u8> {
     let v_bytes: Vec<u8> = match mode {
-        EncodeMode::Ref => encode_entity(v.raw_int() as u64).to_vec(),
         EncodeMode::Variable => encode_variable(v),
         EncodeMode::Blob => encode_variable_unordered(v),
         EncodeMode::Fixed => encode_fixed(v),
@@ -452,67 +443,48 @@ pub fn build_entries(
     retracted: bool,
     mode: EncodeMode,
     indexed: bool,
+    is_ref: bool,
 ) -> IndexEntries {
     let suffix = encode_suffix(t, retracted);
     let sf = suffix.to_be_bytes();
-    let e_bytes = encode_entity(e);
+    let e_bytes = encode_int64(e as i64).to_be_bytes();
     let a_bytes = a.to_be_bytes();
 
     let v_bytes: Vec<u8> = match mode {
-        EncodeMode::Ref => encode_entity(v.raw_int() as u64).to_vec(),
         EncodeMode::Variable => encode_variable(v),
         EncodeMode::Blob => encode_variable_unordered(v),
         EncodeMode::Fixed => encode_fixed(v),
     };
 
-    if mode == EncodeMode::Ref {
-        let mut entries: Vec<(&str, Vec<u8>, Vec<u8>)> = vec![
-            (
-                CF_EAVT,
-                [&e_bytes[..], &a_bytes[..], &v_bytes[..], &sf[..]].concat(),
-                Vec::new(),
-            ),
-            (
-                CF_AEVT,
-                [&a_bytes[..], &e_bytes[..], &v_bytes[..], &sf[..]].concat(),
-                Vec::new(),
-            ),
-            (
-                CF_VAET,
-                [&v_bytes[..], &a_bytes[..], &e_bytes[..], &sf[..]].concat(),
-                Vec::new(),
-            ),
-        ];
-        if indexed {
-            entries.push((
-                CF_AVET,
-                [&a_bytes[..], &v_bytes[..], &e_bytes[..], &sf[..]].concat(),
-                Vec::new(),
-            ));
-        }
-        IndexEntries { entries }
-    } else {
-        let mut entries: Vec<(&str, Vec<u8>, Vec<u8>)> = vec![
-            (
-                CF_EAVT,
-                [&e_bytes[..], &a_bytes[..], &v_bytes[..], &sf[..]].concat(),
-                Vec::new(),
-            ),
-            (
-                CF_AEVT,
-                [&a_bytes[..], &e_bytes[..], &v_bytes[..], &sf[..]].concat(),
-                Vec::new(),
-            ),
-        ];
-        if indexed {
-            entries.push((
-                CF_AVET,
-                [&a_bytes[..], &v_bytes[..], &e_bytes[..], &sf[..]].concat(),
-                Vec::new(),
-            ));
-        }
-        IndexEntries { entries }
+    let mut entries: Vec<(&str, Vec<u8>, Vec<u8>)> = vec![
+        (
+            CF_EAVT,
+            [&e_bytes[..], &a_bytes[..], &v_bytes[..], &sf[..]].concat(),
+            Vec::new(),
+        ),
+        (
+            CF_AEVT,
+            [&a_bytes[..], &e_bytes[..], &v_bytes[..], &sf[..]].concat(),
+            Vec::new(),
+        ),
+    ];
+    if is_ref {
+        // Reverse index for REF attributes — enables finding entities that
+        // point to a given target.
+        entries.push((
+            CF_VAET,
+            [&v_bytes[..], &a_bytes[..], &e_bytes[..], &sf[..]].concat(),
+            Vec::new(),
+        ));
     }
+    if indexed {
+        entries.push((
+            CF_AVET,
+            [&a_bytes[..], &v_bytes[..], &e_bytes[..], &sf[..]].concat(),
+            Vec::new(),
+        ));
+    }
+    IndexEntries { entries }
 }
 
 #[cfg(test)]
@@ -586,7 +558,7 @@ mod tests {
     #[test]
     fn test_build_entries_ref() {
         let v = Value::Int64(55);
-        let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Ref, true);
+        let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Fixed, true, true);
         assert_eq!(ie.entries.len(), 4);
         assert_eq!(ie.entries[0].0, "eavt");
         assert_eq!(ie.entries[1].0, "aevt");
@@ -597,7 +569,7 @@ mod tests {
     #[test]
     fn test_build_entries_ref_not_indexed() {
         let v = Value::Int64(55);
-        let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Ref, false);
+        let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Fixed, false, true);
         assert_eq!(ie.entries.len(), 3);
         assert_eq!(ie.entries[0].0, "eavt");
         assert_eq!(ie.entries[1].0, "aevt");
@@ -607,7 +579,7 @@ mod tests {
     #[test]
     fn test_build_entries_fixed() {
         let v = Value::Int64(100);
-        let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Fixed, true);
+        let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Fixed, true, false);
         assert_eq!(ie.entries.len(), 3);
         assert_eq!(ie.entries[0].0, "eavt");
     }
@@ -615,7 +587,7 @@ mod tests {
     #[test]
     fn test_build_entries_fixed_not_indexed() {
         let v = Value::Int64(100);
-        let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Fixed, false);
+        let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Fixed, false, false);
         assert_eq!(ie.entries.len(), 2);
         assert_eq!(ie.entries[0].0, "eavt");
         assert_eq!(ie.entries[1].0, "aevt");
@@ -624,7 +596,7 @@ mod tests {
     #[test]
     fn test_build_entries_variable() {
         let v = Value::Text("hello".into());
-        let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Variable, true);
+        let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Variable, true, false);
         assert_eq!(ie.entries.len(), 3);
         for (cf, key, _) in &ie.entries {
             assert!(
@@ -638,7 +610,7 @@ mod tests {
     #[test]
     fn test_build_entries_unordered_bytes() {
         let v = Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE].into());
-        let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Blob, true);
+        let ie = build_entries(42, 5, &v, 1000, false, EncodeMode::Blob, true, false);
         assert_eq!(ie.entries.len(), 3);
         assert_eq!(ie.entries[0].0, "eavt");
         for (cf, key, _) in &ie.entries {
@@ -680,7 +652,8 @@ mod tests {
 
     #[test]
     fn test_encode_mode_for_types() {
-        assert_eq!(encode_mode_for(Some(DB_TYPE_REF)), EncodeMode::Ref);
+        // REF unificado com LONG: ambos são EncodeMode::Fixed agora
+        assert_eq!(encode_mode_for(Some(DB_TYPE_REF)), EncodeMode::Fixed);
         assert_eq!(encode_mode_for(Some(DB_TYPE_BLOB)), EncodeMode::Blob);
         assert_eq!(encode_mode_for(Some(DB_TYPE_STRING)), EncodeMode::Variable);
         assert_eq!(encode_mode_for(Some(DB_TYPE_KEYWORD)), EncodeMode::Variable);
@@ -698,7 +671,7 @@ mod tests {
     #[test]
     fn test_build_prefix_eavt_entity() {
         let result = build_prefix("EAVT", &[BoundValue::Int(42)], EncodeMode::Fixed);
-        assert_eq!(result, encode_entity(42).to_vec());
+        assert_eq!(result, encode_int64(42).to_be_bytes().to_vec());
     }
 
     #[test]
@@ -709,22 +682,25 @@ mod tests {
             EncodeMode::Fixed,
         );
         let mut expected = Vec::new();
-        expected.extend_from_slice(&encode_entity(42));
+        expected.extend_from_slice(&encode_int64(42).to_be_bytes());
         expected.extend_from_slice(&5u32.to_be_bytes());
         assert_eq!(result, expected);
     }
 
     #[test]
     fn test_build_prefix_vaet_ref() {
-        let result = build_prefix("VAET", &[BoundValue::Ref(100)], EncodeMode::Ref);
-        assert_eq!(result, encode_entity(100).to_vec());
+        // REF é codificado como LONG (sign-flip) agora
+        let result = build_prefix("VAET", &[BoundValue::Ref(100)], EncodeMode::Fixed);
+        assert_eq!(result, encode_int64(100).to_be_bytes().to_vec());
     }
 
     #[test]
-    fn test_entity_roundtrip() {
-        for e in [0u64, 1, 100, 999, 1000, u64::MAX] {
-            let encoded = encode_entity(e);
-            let decoded = decode_entity(&encoded);
+    fn test_int64_roundtrip_as_entity() {
+        // Como não há mais encode_entity/decode_entity, o round-trip de
+        // entity ids usa sign-flip igual a LONG.
+        for e in [0i64, 1, 100, 999, 1000, i64::MAX] {
+            let encoded = encode_int64(e).to_be_bytes();
+            let decoded = decode_int64(u64::from_be_bytes(encoded));
             assert_eq!(decoded, e, "entity roundtrip failed for {}", e);
         }
     }
