@@ -1740,3 +1740,114 @@ def test_explain_depth_iterator_mapping():
     assert "scanner-iterate" in text
     assert "scanner-open" in text
     engine.close()
+
+
+# ── Entity existence check regression tests ──────────────────────────
+#
+# Bug: pattern [const, _, _, _, _] (only `e` bound, no attr) is neither
+# a lookup (is_lookup requires e+a+v const) nor a join (no Var). The
+# planner returns iter_plans: Vec::new() and the compiler emits just
+# (result-row X) without any scanner — silently dropping the existence
+# check.
+#
+# Affected queries: anything that depends exclusively on entity existence
+# without an attr-condition:
+#   - SELECT <literal> WHERE d1.eid = X
+#   - SELECT d1.eid     WHERE d1.eid = X
+# Both return X regardless of whether the entity actually exists.
+
+
+def test_select_literal_where_eid_exists():
+    """Baseline: SELECT literal + existing eid emits the literal."""
+    engine = EAVTEngine(":memory:")
+    list(engine.sql("ATTRIBUTE company.name STRING ONE"))
+    list(engine.sql("UPSERT SET company.name = 'ACME'"))
+    eid = list(engine.sql("SELECT d1.eid WHERE d1.company.name = 'ACME'"))[0][0]
+    rows = list(engine.sql("SELECT 1 WHERE d1.eid = %1", eid))
+    assert rows == [(1,)]
+    engine.close()
+
+
+@pytest.mark.xfail(
+    reason="bug: WHERE d1.eid = X without attr-cond emits (result-row 1) "
+           "without an existence check; planner drops e-only pattern."
+)
+def test_select_literal_where_eid_does_not_exist():
+    """Should return [] when eid doesn't exist. Currently returns [(1,)]."""
+    engine = EAVTEngine(":memory:")
+    list(engine.sql("ATTRIBUTE company.name STRING ONE"))
+    list(engine.sql("UPSERT SET company.name = 'ACME'"))
+    rows = list(engine.sql("SELECT 1 WHERE d1.eid = %1", 999999))
+    assert rows == []
+    engine.close()
+
+
+def test_select_eid_where_eid_exists():
+    """Baseline: idiomatic existence check, existing eid."""
+    engine = EAVTEngine(":memory:")
+    list(engine.sql("ATTRIBUTE company.name STRING ONE"))
+    list(engine.sql("UPSERT SET company.name = 'ACME'"))
+    eid = list(engine.sql("SELECT d1.eid WHERE d1.company.name = 'ACME'"))[0][0]
+    rows = list(engine.sql("SELECT d1.eid WHERE d1.eid = %1", eid))
+    assert rows == [(eid,)]
+    engine.close()
+
+
+@pytest.mark.xfail(
+    reason="bug: WHERE d1.eid = X without attr-cond emits (result-row X) "
+           "without an existence check; planner drops e-only pattern."
+)
+def test_select_eid_where_eid_does_not_exist():
+    """Should return [] when eid doesn't exist. Currently returns [(999999,)]."""
+    engine = EAVTEngine(":memory:")
+    list(engine.sql("ATTRIBUTE company.name STRING ONE"))
+    list(engine.sql("UPSERT SET company.name = 'ACME'"))
+    rows = list(engine.sql("SELECT d1.eid WHERE d1.eid = %1", 999999))
+    assert rows == []
+    engine.close()
+
+
+def test_select_literal_where_eid_with_attr_cond_not_exists():
+    """Sanity: with attr-cond, existence check works correctly."""
+    engine = EAVTEngine(":memory:")
+    list(engine.sql("ATTRIBUTE company.name STRING ONE"))
+    list(engine.sql("UPSERT SET company.name = 'ACME'"))
+    rows = list(engine.sql(
+        "SELECT 1 WHERE d1.eid = %1 AND d1.company.name = 'ACME'",
+        999999,
+    ))
+    assert rows == []
+    engine.close()
+
+
+@pytest.mark.xfail(
+    reason="bug: WHERE d1.eid = X without attr-cond emits bare (result-row) "
+           "without scanner-open/scanner-iterate."
+)
+def test_explain_select_literal_where_eid_emits_scanner():
+    """EXPLAIN must show scanner-open + scanner-iterate for e-only pattern."""
+    engine = EAVTEngine(":memory:")
+    list(engine.sql("ATTRIBUTE company.name STRING ONE"))
+    list(engine.sql("UPSERT SET company.name = 'ACME'"))
+    rows = list(engine.sql("EXPLAIN SELECT 1 WHERE d1.eid = %1", 999999))
+    text = "\n".join(row[0] for row in rows)
+    assert "scanner-open" in text
+    assert "scanner-iterate" in text
+    assert "result-row" in text
+    engine.close()
+
+
+@pytest.mark.xfail(
+    reason="bug: WHERE d1.eid = X without attr-cond emits bare (result-row) "
+           "without scanner-open/scanner-iterate."
+)
+def test_explain_select_eid_where_eid_emits_scanner():
+    """EXPLAIN must show scanner-open + scanner-iterate for e-only pattern."""
+    engine = EAVTEngine(":memory:")
+    list(engine.sql("ATTRIBUTE company.name STRING ONE"))
+    list(engine.sql("UPSERT SET company.name = 'ACME'"))
+    rows = list(engine.sql("EXPLAIN SELECT d1.eid WHERE d1.eid = %1", 999999))
+    text = "\n".join(row[0] for row in rows)
+    assert "scanner-open" in text
+    assert "scanner-iterate" in text
+    engine.close()
