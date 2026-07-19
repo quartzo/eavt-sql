@@ -1046,7 +1046,7 @@ proc psRootCount(h: pointer; outCount: ptr uint64;
     except:
       setErr(errOut, ErrIo); return -1
 
-proc psClose(h: pointer) {.cdecl.} =
+proc psClose*(h: pointer) {.cdecl.} =
   var s = cast[ptr PageStoreInner](h)
   # Close blobstore and journal FIRST
   if s.journal != nil: nim_journal_close(s.journal)
