@@ -1,6 +1,6 @@
-## kvstore.nim — Nim Transactor (put, get, scan, flush, GC, cursor merge).
+## transactor.nim — Nim Transactor (put, get, scan, flush, GC, cursor merge).
 ##
-## Operates on an already-opened page store and memtable.
+## Orchestration layer: coordinates MemTable + PageStore + Journal.
 ## Implements all KVStoreEngine operations via C-ABI vtable.
 
 import std/[tables, strformat, strutils, times, monotimes, options]

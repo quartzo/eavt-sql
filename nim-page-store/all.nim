@@ -10,7 +10,7 @@ import journal/all
 import nim_memtable/all
 import ./abi
 import ./backend
-import ./kvstore
+import ./transactor
 
 proc nim_page_store_open*(keys, vals: CStringArr; count: cint;
                            errOut: ptr cint): NimPageStoreVtablePtr

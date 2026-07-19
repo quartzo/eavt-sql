@@ -14,7 +14,7 @@ import ./abi
 import ./pages
 import ./spinlock
 import ./backend
-import ./kvstore
+import ./transactor
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Page serialization tests
