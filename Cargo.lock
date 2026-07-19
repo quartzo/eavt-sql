@@ -1164,10 +1164,8 @@ dependencies = [
 name = "spier-kvstore"
 version = "0.1.0"
 dependencies = [
- "spier-memtable",
  "spier-page-store-nim",
  "spier-storage-traits",
- "tempfile",
 ]
 
 [[package]]

@@ -244,24 +244,34 @@ proc kvScan(s: var KVStoreInner; cf: int; prefix: seq[byte]): seq[seq[byte]] =
   let endB = prefixEnd(prefix)
   return mergeSources(sources, endB)
 
+proc kvScanReverse(s: var KVStoreInner; cf: int; prefix: seq[byte]): seq[seq[byte]] =
+  var result = kvScan(s, cf, prefix)
+  var i = 0; var j = result.len - 1
+  while i < j:
+    swap(result[i], result[j])
+    inc i; dec j
+  return result
+
 proc kvFlush(s: var KVStoreInner): bool =
   if s.readOnly: return false
   if s.flushSnap != 0: return false  # flush already in progress
 
   let numCf = s.numCf
-  var keysByCf: seq[(int, seq[seq[byte]])] = @[]
 
+  # Snapshot + clear memtable ONCE (not per CF)
+  var err: cint
+  discard s.mt.snapshot(s.mt.handle, addr s.flushSnap, addr err)
+  discard s.mt.clear(s.mt.handle, addr err)
+  s.mtSize = 0
+
+  # Scan snapshot for each CF
+  var keysByCf: seq[(int, seq[seq[byte]])] = @[]
   for cf in 0..<numCf:
-    var snap: uint64 = 0
-    var err: cint
-    discard s.mt.snapshot(s.mt.handle, addr snap, addr err)
-    s.flushSnap = snap
-    discard s.mt.clear(s.mt.handle, addr err)
 
     # Scan the snapshot to get all keys for this CF
     var outBuf: pointer = nil
     var outLen: csize_t = 0
-    let rc = s.mt.scanPrefix(s.mt.handle, snap, cf.cuint, nil, 0.csize_t,
+    let rc = s.mt.scanPrefix(s.mt.handle, s.flushSnap, cf.cuint, nil, 0.csize_t,
                               0.cint, addr outBuf, addr outLen, addr err)
     if rc != 0 or outBuf == nil: continue
 
@@ -334,6 +344,30 @@ proc kvGetC(h: pointer; cf: cuint; key: ptr Byte; klen: csize_t;
     except:
       setErr(errOut, ErrIo); return -1
 
+proc kvScanReverseC(h: pointer; cf: cuint; prefix: ptr Byte; plen: csize_t;
+                     outBuf: ptr pointer; outLen: ptr csize_t;
+                     errOut: ptr cint): cint {.cdecl.} =
+  var s = cast[ptr KVStoreInner](h)
+  s.lock.withLock:
+    try:
+      var pfx = newSeq[byte](plen.int)
+      if plen.int > 0: copyMem(addr pfx[0], prefix, plen.int)
+      let keys = kvScanReverse(s[], cf.int, pfx)
+      var packed: seq[byte] = @[]
+      for k in keys:
+        let kl = k.len.uint32
+        packed.add byte(kl shr 24)
+        packed.add byte((kl shr 16) and 0xFF)
+        packed.add byte((kl shr 8) and 0xFF)
+        packed.add byte(kl and 0xFF)
+        packed.add k
+      let buf = allocByteBuf(packed.len)
+      if packed.len > 0: copyMem(buf, addr packed[0], packed.len)
+      outBuf[] = buf; outLen[] = packed.len.csize_t
+      setErr(errOut, ErrOk); return 0
+    except:
+      setErr(errOut, ErrIo); return -1
+
 proc kvScanC(h: pointer; cf: cuint; prefix: ptr Byte; plen: csize_t;
               outBuf: ptr pointer; outLen: ptr csize_t;
               errOut: ptr cint): cint {.cdecl.} =
@@ -402,6 +436,9 @@ proc kvCloseC(h: pointer; errOut: ptr cint): cint {.cdecl.} =
         s.mt = nil
       # Close page store
       psClose(s.ps)
+      # ARC cleanup before raw free
+      s.config = initTable[string, string]()
+      s.path = ""
       setErr(errOut, ErrOk)
     except:
       setErr(errOut, ErrIo)
@@ -452,7 +489,7 @@ proc openKvStore*(keys, vals: CStringArr; count: cint;
   vt.replay = kvBatchWrite  # same format for replay
   vt.get = kvGetC
   vt.scan = kvScanC
-  vt.scanReverse = kvScanC
+  vt.scanReverse = kvScanReverseC
   vt.flush = kvFlushC
   vt.gcFull = kvGCFullC
   vt.memtableSize = kvMemtableSizeC

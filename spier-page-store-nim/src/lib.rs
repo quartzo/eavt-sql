@@ -554,3 +554,261 @@ impl NimPageStore {
         // Drop handles cleanup
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NimKVStoreVtable — unified KVStore C-ABI (mirrors NimKVStoreVtableObj)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[repr(C)]
+pub struct NimKVStoreVtable {
+    pub handle: *mut c_void,
+
+    pub put: extern "C" fn(
+        h: *mut c_void,
+        cf: u32,
+        key: *const u8,
+        klen: usize,
+        err_out: *mut c_int,
+    ) -> c_int,
+
+    pub batch_write: extern "C" fn(
+        h: *mut c_void,
+        ops: *const u8,
+        olen: usize,
+        err_out: *mut c_int,
+    ) -> c_int,
+
+    pub replay: extern "C" fn(
+        h: *mut c_void,
+        ops: *const u8,
+        olen: usize,
+        err_out: *mut c_int,
+    ) -> c_int,
+
+    pub get: extern "C" fn(
+        h: *mut c_void,
+        cf: u32,
+        key: *const u8,
+        klen: usize,
+        out_present: *mut c_int,
+        err_out: *mut c_int,
+    ) -> c_int,
+
+    pub scan: extern "C" fn(
+        h: *mut c_void,
+        cf: u32,
+        prefix: *const u8,
+        plen: usize,
+        out_buf: *mut *mut u8,
+        out_len: *mut usize,
+        err_out: *mut c_int,
+    ) -> c_int,
+
+    pub scan_reverse: extern "C" fn(
+        h: *mut c_void,
+        cf: u32,
+        prefix: *const u8,
+        plen: usize,
+        out_buf: *mut *mut u8,
+        out_len: *mut usize,
+        err_out: *mut c_int,
+    ) -> c_int,
+
+    pub flush: extern "C" fn(
+        h: *mut c_void,
+        err_out: *mut c_int,
+    ) -> c_int,
+
+    pub gc_full: extern "C" fn(
+        h: *mut c_void,
+        max_age_secs: u64,
+        max_root_count: u32,
+        dry_run: c_int,
+        out_buf: *mut *mut u8,
+        out_len: *mut usize,
+        err_out: *mut c_int,
+    ) -> c_int,
+
+    pub memtable_size: extern "C" fn(
+        h: *mut c_void,
+        out_size: *mut u64,
+        err_out: *mut c_int,
+    ) -> c_int,
+
+    pub close: extern "C" fn(
+        h: *mut c_void,
+        err_out: *mut c_int,
+    ) -> c_int,
+
+    pub free_buf: extern "C" fn(p: *mut c_void),
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NimKVStore — Rust wrapper
+// ═══════════════════════════════════════════════════════════════════════════════
+
+extern "C" {
+    fn nim_kvstore_open(
+        keys: *const *const c_char,
+        vals: *const *const c_char,
+        count: c_int,
+        err_out: *mut c_int,
+    ) -> *mut NimKVStoreVtable;
+}
+
+pub struct NimKVStore {
+    vt: *mut NimKVStoreVtable,
+}
+
+unsafe impl Send for NimKVStore {}
+unsafe impl Sync for NimKVStore {}
+
+impl Drop for NimKVStore {
+    fn drop(&mut self) {
+        if !self.vt.is_null() {
+            unsafe {
+                let mut err: c_int = 0;
+                ((*self.vt).close)((*self.vt).handle, &mut err);
+            }
+        }
+    }
+}
+
+impl NimKVStore {
+    pub fn open(config: &HashMap<String, String>) -> Result<Self, String> {
+        ensure_nim_init();
+        let (keys, vals) = pack_config(config);
+        let key_ptrs: Vec<*const c_char> = keys.iter().map(|k| k.as_ptr()).collect();
+        let val_ptrs: Vec<*const c_char> = vals.iter().map(|v| v.as_ptr()).collect();
+
+        let mut err: c_int = 0;
+        let vt = unsafe {
+            nim_kvstore_open(
+                key_ptrs.as_ptr(),
+                val_ptrs.as_ptr(),
+                keys.len() as c_int,
+                &mut err,
+            )
+        };
+
+        if vt.is_null() {
+            return Err(format!("failed to open kvstore: {}", err_to_string(err)));
+        }
+
+        Ok(Self { vt })
+    }
+
+    // ── Writes ──
+
+    pub fn put(&self, cf: u32, key: &[u8]) -> Result<(), String> {
+        let mut err: c_int = 0;
+        let rc = unsafe {
+            ((*self.vt).put)((*self.vt).handle, cf, key.as_ptr(), key.len(), &mut err)
+        };
+        check_err(rc, err)
+    }
+
+    pub fn batch_write(&self, ops: &[u8]) -> Result<(), String> {
+        let mut err: c_int = 0;
+        let rc = unsafe {
+            ((*self.vt).batch_write)((*self.vt).handle, ops.as_ptr(), ops.len(), &mut err)
+        };
+        check_err(rc, err)
+    }
+
+    pub fn replay(&self, ops: &[u8]) -> Result<(), String> {
+        let mut err: c_int = 0;
+        let rc = unsafe {
+            ((*self.vt).replay)((*self.vt).handle, ops.as_ptr(), ops.len(), &mut err)
+        };
+        check_err(rc, err)
+    }
+
+    // ── Reads ──
+
+    pub fn get(&self, cf: u32, key: &[u8]) -> Result<bool, String> {
+        let mut present: c_int = 0;
+        let mut err: c_int = 0;
+        let rc = unsafe {
+            ((*self.vt).get)((*self.vt).handle, cf, key.as_ptr(), key.len(), &mut present, &mut err)
+        };
+        check_err(rc, err)?;
+        Ok(present != 0)
+    }
+
+    pub fn scan(&self, cf: u32, prefix: &[u8]) -> Result<Vec<u8>, String> {
+        let mut out_buf: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut err: c_int = 0;
+        let rc = unsafe {
+            ((*self.vt).scan)(
+                (*self.vt).handle, cf,
+                prefix.as_ptr(), prefix.len(),
+                &mut out_buf, &mut out_len, &mut err,
+            )
+        };
+        check_err(rc, err)?;
+        let result = unsafe { std::slice::from_raw_parts(out_buf, out_len) }.to_vec();
+        unsafe { ((*self.vt).free_buf)(out_buf as *mut c_void) };
+        Ok(result)
+    }
+
+    pub fn scan_reverse(&self, cf: u32, prefix: &[u8]) -> Result<Vec<u8>, String> {
+        let mut out_buf: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut err: c_int = 0;
+        let rc = unsafe {
+            ((*self.vt).scan_reverse)(
+                (*self.vt).handle, cf,
+                prefix.as_ptr(), prefix.len(),
+                &mut out_buf, &mut out_len, &mut err,
+            )
+        };
+        check_err(rc, err)?;
+        let result = unsafe { std::slice::from_raw_parts(out_buf, out_len) }.to_vec();
+        unsafe { ((*self.vt).free_buf)(out_buf as *mut c_void) };
+        Ok(result)
+    }
+
+    // ── Flush / GC / Admin ──
+
+    pub fn flush(&self) -> Result<(), String> {
+        let mut err: c_int = 0;
+        let rc = unsafe { ((*self.vt).flush)((*self.vt).handle, &mut err) };
+        check_err(rc, err)
+    }
+
+    pub fn gc_full(
+        &self,
+        max_age_secs: u64,
+        max_root_count: u32,
+        dry_run: bool,
+    ) -> Result<Vec<u8>, String> {
+        let mut out_buf: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut err: c_int = 0;
+        let rc = unsafe {
+            ((*self.vt).gc_full)(
+                (*self.vt).handle,
+                max_age_secs,
+                max_root_count,
+                if dry_run { 1 } else { 0 },
+                &mut out_buf,
+                &mut out_len,
+                &mut err,
+            )
+        };
+        check_err(rc, err)?;
+        let result = unsafe { std::slice::from_raw_parts(out_buf, out_len) }.to_vec();
+        unsafe { ((*self.vt).free_buf)(out_buf as *mut c_void) };
+        Ok(result)
+    }
+
+    pub fn memtable_size(&self) -> Result<u64, String> {
+        let mut out_size: u64 = 0;
+        let mut err: c_int = 0;
+        let rc = unsafe { ((*self.vt).memtable_size)((*self.vt).handle, &mut out_size, &mut err) };
+        check_err(rc, err)?;
+        Ok(out_size)
+    }
+}

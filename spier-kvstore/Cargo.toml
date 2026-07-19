@@ -2,7 +2,7 @@
 name = "spier-kvstore"
 version = "0.1.0"
 edition = "2021"
-description = "Pure key-only multi-CF KV store (MemTable + PageStore + flush + tx_delta)"
+description = "KVStore backed by Nim (blobstore + journal + memtable + page-store + transactor)"
 
 [lib]
 crate-type = ["rlib"]
@@ -10,7 +10,3 @@ crate-type = ["rlib"]
 [dependencies]
 spier-storage-traits = { path = "../spier-storage-traits" }
 spier-page-store-nim = { path = "../spier-page-store-nim" }
-spier-memtable = { path = "../spier-memtable" }
-
-[dev-dependencies]
-tempfile = "3"

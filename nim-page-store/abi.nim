@@ -148,12 +148,23 @@ type
     cursorNext*: proc(h: pointer; cursor: uint64;
                       outKey: ptr pointer; outLen: ptr csize_t;
                       outValid: ptr cint; errOut: ptr cint): cint {.cdecl.}
+    cursorSeek*: proc(h: pointer; cursor: uint64; target: ptr Byte; tlen: csize_t;
+                      errOut: ptr cint): cint {.cdecl.}
+    cursorAdvanceTo*: proc(h: pointer; cursor: uint64; target: ptr Byte; tlen: csize_t;
+                            errOut: ptr cint): cint {.cdecl.}
+    cursorSkipGroup*: proc(h: pointer; cursor: uint64; group: ptr Byte; glen: csize_t;
+                            errOut: ptr cint): cint {.cdecl.}
+    cursorUpdateEnd*: proc(h: pointer; cursor: uint64; endp: ptr Byte; elen: csize_t;
+                            errOut: ptr cint): cint {.cdecl.}
     cursorFree*: proc(h: pointer; cursor: uint64) {.cdecl.}
     contains*: proc(h: pointer; id: uint64; cf: cuint; key: ptr Byte; klen: csize_t;
                     outPresent: ptr cint; errOut: ptr cint): cint {.cdecl.}
+    countPrefix*: proc(h: pointer; id: uint64; cf: cuint; prefix: ptr Byte; plen: csize_t;
+                        outCount: ptr uint64; errOut: ptr cint): cint {.cdecl.}
     scanPrefix*: proc(h: pointer; id: uint64; cf: cuint; prefix: ptr Byte; plen: csize_t;
                        reverse: cint; outBuf: ptr pointer; outLen: ptr csize_t;
                        errOut: ptr cint): cint {.cdecl.}
+    debugCountNodes*: proc(h: pointer; outCount: ptr uint64): cint {.cdecl.}
     freeBuf*: proc(p: pointer) {.cdecl.}
 
   MtVtablePtr* = ptr MtVtableObj
