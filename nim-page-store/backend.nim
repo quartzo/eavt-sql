@@ -9,7 +9,7 @@ import ./spinlock
 
 # ── seq[byte] comparison helpers ──
 
-proc cmpSeq(a, b: seq[byte]): int =
+proc cmpSeq*(a, b: seq[byte]): int =
   let n = min(a.len, b.len)
   for i in 0..<n:
     if a[i] < b[i]: return -1
@@ -132,12 +132,12 @@ proc fmtHex(data: openArray[byte]; maxLen: int): string =
 # ══════════════════════════════════════════════════════════════════════════════
 
 type
-  CfTree = object
-    rootUuid: array[16, byte]
-    height: uint8
-    numLeaves: uint32
+  CfTree* = object
+    rootUuid*: array[16, byte]
+    height*: uint8
+    numLeaves*: uint32
 
-proc serializeRoot(trees: seq[CfTree]): seq[byte] =
+proc serializeRoot*(trees: seq[CfTree]): seq[byte] =
   result = newSeqOfCap[byte](8 + trees.len * 21)
   result.add RootMagic
   result.add byte(RootVersion shr 8)
@@ -154,7 +154,7 @@ proc serializeRoot(trees: seq[CfTree]): seq[byte] =
     result.add byte((nl shr 8) and 0xFF)
     result.add byte(nl and 0xFF)
 
-proc deserializeRoot(data: openArray[byte]): seq[CfTree] =
+proc deserializeRoot*(data: openArray[byte]): seq[CfTree] =
   if data.len < 8 or data[0..3] != RootMagic:
     raise newException(ValueError, "invalid root magic")
   let version = uint16(data[4]) shl 8 or uint16(data[5])
@@ -224,7 +224,7 @@ proc deserializeIndexPage(data: openArray[byte]): seq[(seq[byte], array[16, byte
 # Root name helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-proc makeRootName(): string =
+proc makeRootName*(): string =
   let ts = getTime().toUnix * 1_000_000_000 + getTime().nanosecond.int64
   let neg = cast[uint64]((not ts) + 1)
   &"root_{neg:016x}"
@@ -1048,6 +1048,7 @@ proc psRootCount(h: pointer; outCount: ptr uint64;
 
 proc psClose(h: pointer) {.cdecl.} =
   var s = cast[ptr PageStoreInner](h)
+  # Close blobstore and journal FIRST
   if s.journal != nil: nim_journal_close(s.journal)
   if s.blobs != nil:
     case s.backendType:
@@ -1055,6 +1056,15 @@ proc psClose(h: pointer) {.cdecl.} =
     of "file": nim_blob_file_close(s.blobs)
     of "s3": nim_blob_s3_close(s.blobs)
     else: discard
+  # ARC cleanup: empty all seq/string/table fields so destructors run
+  # BEFORE deallocShared (which is a raw free that skips ARC).
+  s.trees = @[]
+  s.cache.map = initTable[array[16, byte], CacheEntry]()
+  s.cache.currentBytes = 0
+  s.currentRoot = ""
+  s.backendType = ""
+  s.blobs = nil
+  s.journal = nil
   deallocShared(h)
 
 proc initVtable(vt: NimPageStoreVtablePtr; s: ptr PageStoreInner) =

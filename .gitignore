@@ -36,3 +36,4 @@ nim-blobstore/*/sha256
 # Test artifacts
 /journal/
 **/journal/journal
+/nim-page-store/tests

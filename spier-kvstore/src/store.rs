@@ -67,9 +67,11 @@ impl Default for TransactorConfig {
 
 struct StoreInner {
     store: Option<Arc<NimPageStore>>,
+    // flush_snap MUST be dropped before mt — snapshot_free needs the memtable alive.
+    // Rust drops fields in declaration order, so flush_snap comes before mt.
+    flush_snap: Option<MemTableSnapshot>,
     mt: Arc<spier_memtable::MemTable>,
     mt_size: u64,
-    flush_snap: Option<MemTableSnapshot>,
     config: TransactorConfig,
     path: String,
     read_only: bool,
