@@ -37,14 +37,13 @@ impl spier_storage_traits::Cursor for InvalidCursor {
 // prefix of the current Fixed entries.
 // ---------------------------------------------------------------------------
 
-/// Entrada da pilha de posições. Agnóstica ao tipo: tanto posições *iteradas*
-/// (varridas pelo cursor) quanto posições *fixas* (bound values) vivem na mesma
-/// LIFO, na ordem em que foram empilhadas (que o compilador garante ser
-/// crescente em `idx_order`). A posição de cada entrada é o seu índice no
-/// vetor `stack` — não há `pos_idx` solto para evitar mal uso.
+/// Entrada da pilha de posições. Todas as posições empilhadas são *fixas*
+/// (bound values) — a iteração de cada nível varrido é controlada pelo
+// compilador via `advance_to_active_at` / `leap_next_at`, sem entries
+// `Scanned`. A posição de cada entrada é o seu índice no vetor `stack`
+// (== posição em `idx_order`).
 pub enum StackEntry {
-    Scanned(Vec<u8>), // prefixo truncado da chave ativa
-    Fixed(Value),    // valor exato (bound)
+    Fixed(Value),
 }
 
 pub struct PositionStack {
@@ -84,46 +83,16 @@ impl PositionStack {
 
     // -- pilha única (agnóstica ao tipo) --
 
-    /// Próxima posição livre: simplesmente o tamanho da pilha. Como fixos e
-    /// iterados compartilham a mesma LIFO, não há contador `fixed_count`
-    /// separado para dessincronizar.
-    pub fn next_free_pos(&self) -> usize {
-        self.stack.len()
-    }
-
-    /// Empilha uma posição *iterada* com o prefixo `prefix`.
-    pub fn push_scanned(&mut self, prefix: Vec<u8>) -> bool {
-        self.stack.push(StackEntry::Scanned(prefix));
-        false
-    }
-
     /// Empilha uma posição *fixa* com o valor exato.
     pub fn push_fixed(&mut self, val: &Value) {
         self.stack.push(StackEntry::Fixed(val.clone()));
     }
 
-    /// Remove o topo da pilha (LIFO, serve para ambos os tipos). Restaura o
-    /// estado ao da posição pai. O cursor em si não é reposicionado aqui — o
-    /// chamador reassume a posição correta a partir do novo topo.
-    pub fn pop(&mut self) -> Option<StackEntry> {
-        self.stack.pop()
-    }
-
-    /// Remove o topo *se* for um `Fixed`; caso contrário procura o `Fixed` mais
-    /// recente na pilha (defesa contra ordem assimétrica de desempilhamento).
+    /// Remove e devolve o valor do topo da pilha.
     pub fn pop_fixed(&mut self) -> Option<Value> {
-        if let Some(StackEntry::Fixed(_)) = self.stack.last() {
-            if let StackEntry::Fixed(v) = self.stack.pop().unwrap() {
-                return Some(v);
-            }
-        }
-        // fallback: procura o Fixed mais recente
-        if let Some(i) = self.stack.iter().rposition(|e| matches!(e, StackEntry::Fixed(_))) {
-            if let StackEntry::Fixed(v) = self.stack.remove(i) {
-                return Some(v);
-            }
-        }
-        None
+        self.stack.pop().map(|e| match e {
+            StackEntry::Fixed(v) => v,
+        })
     }
 
     /// Entradas fixas com sua posição (índice no vetor == posição em `idx_order`),
@@ -142,22 +111,8 @@ impl PositionStack {
                     );
                     Some((i, v.clone()))
                 }
-                _ => None,
             })
             .collect()
-    }
-
-    /// Prefixo do topo da pilha (posição corrente), se for uma posição iterada.
-    pub fn top_prefix(&self) -> Option<&[u8]> {
-        match self.stack.last() {
-            Some(StackEntry::Scanned(p)) => Some(p.as_slice()),
-            _ => None,
-        }
-    }
-
-    /// Entrada do topo da pilha (para distinguir Scanned de Fixed).
-    pub fn top_entry(&self) -> Option<&StackEntry> {
-        self.stack.last()
     }
 
     // -- estado ativo --
@@ -178,36 +133,12 @@ impl PositionStack {
         self.at_end = v;
     }
 
-    pub fn is_open(&self) -> bool {
-        !self.at_end || self.current_active_key.is_some()
-    }
-
     /// Posição corrente para iteração = próximo slot livre da pilha
     /// (stack.len()). Toda entrada na pilha vem de scanner-push (Fixed), e
     /// scanner-iterate itera no nível imediatamente após o último Fixed
     /// empilhado — i.e., o primeiro slot de `idx_order` ainda sem Fixed.
     pub fn current_position(&self) -> usize {
         self.stack.len()
-    }
-
-    pub fn stack_len(&self) -> usize {
-        self.stack.len()
-    }
-
-    /// Prefixo restritivo para `advance` na posição corrente (topo da pilha).
-    ///
-    /// No original o bound era derivado da chave ativa atual
-    /// (`current_active_key[..value_start(pos)]`), o que permite avançar
-    /// iterativamente dentro da mesma posição. Quando não há chave ativa (primeira
-    /// vez / primeiro nível) usamos o prefixo do topo da pilha (grupo pai).
-    pub fn bound_prefix(&self, value_start: impl Fn(usize) -> usize) -> Option<Vec<u8>> {
-        let pos = self.current_position();
-        if let Some(key) = self.current_active_key.as_ref() {
-            let end = value_start(pos).min(key.len());
-            Some(key[..end].to_vec())
-        } else {
-            self.top_prefix().map(|p| p.to_vec())
-        }
     }
 }
 
@@ -279,16 +210,8 @@ impl V2Scanner {
         self.history_mode = true;
     }
 
-    pub fn index_name(&self) -> &str {
-        &self.index_name
-    }
-
     pub fn prefix_bytes(&self) -> Vec<u8> {
         self.build_prefix_bytes()
-    }
-
-    pub fn is_open(&self) -> bool {
-        self.pos.is_open()
     }
 
     pub fn save_value(&mut self, val: &Value) {
@@ -365,92 +288,8 @@ impl V2Scanner {
         self.value_attr_type = vt;
     }
 
-    pub fn clear_at_end(&mut self) {
-        self.pos.set_at_end(false);
-    }
-
-    #[allow(dead_code)]
-    pub fn current_timestamp(&self) -> Option<u64> {
-        let key = self.pos.current_active_key()?;
-        if key.len() < 8 {
-            return None;
-        }
-        let suffix = Self::extract_suffix(key);
-        let (t, _) = decode_suffix(suffix);
-        Some(t)
-    }
-
-    #[allow(dead_code)]
-    pub fn current_added(&self) -> Option<bool> {
-        let key = self.pos.current_active_key()?;
-        if key.len() < 8 {
-            return None;
-        }
-        let suffix = Self::extract_suffix(key);
-        let (_, retracted) = decode_suffix(suffix);
-        Some(!retracted)
-    }
-
-    pub fn seek_to_current_group_start(&mut self) {
-        let key = match self.pos.current_active_key() {
-            Some(k) => k.to_vec(),
-            None => {
-                self.pos.cursor().borrow_mut().invalidate();
-                return;
-            }
-        };
-        let vs = self.value_start(&key);
-        let target = key[..vs].to_vec();
-        self.pos.cursor().borrow_mut().seek(&target);
-        self.pos.set_at_end(false);
-    }
-
-    /// Empilha a próxima posição varrida, salvando o prefixo atual da chave
-    /// ativa. Retorna `true` se a posição já estava na pilha (reentrada).
-    /// (Legacy, unused.) Deriva prefixo da chave ativa.
-    pub fn push_position(&mut self) -> bool {
-        let prefix = self
-            .pos
-            .current_active_key()
-            .map(|k| {
-                let vs = self.value_start(k);
-                k[..vs].to_vec()
-            })
-            .unwrap_or_else(|| self.build_prefix_bytes());
-        self.pos.push_scanned(prefix)
-    }
-
     pub fn current_position(&self) -> usize {
         self.pos.current_position()
-    }
-
-    pub fn pop_position(&mut self) {
-        // Nada a fazer aqui — o caller gerencia prefixos via scanner-push/pop
-        // (Fixed entries). Este método existe só para retro-compatibilidade
-        // com o frame handler que o chamava; sem Scanned para desempilhar, é
-        // um no-op. (Pode ser removido quando o handler for limpo.)
-        let _ = self.pos.top_entry();
-    }
-
-    // -- DEBUG HELPERS (temporário) --
-    pub fn pos_len(&self) -> usize { self.pos.stack_len() }
-    pub fn pos_name_dbg(&self) -> String {
-        self.pos_name().to_string()
-    }
-    pub fn current_active_key_dbg(&self) -> Option<Vec<u8>> {
-        self.pos.current_active_key().map(|k| k.to_vec())
-    }
-    pub fn prefix_bytes_dbg(&self) -> Vec<u8> { self.build_prefix_bytes() }
-
-    /// Push prefix_bytes_cache as a Scanned entry and clear current_active_key.
-    /// (Legacy, unused.)
-    pub fn pos_push_scanned_prefix(&mut self, prefix: Vec<u8>) {
-        self.pos.set_active_key(None);
-        self.pos.push_scanned(prefix);
-    }
-
-    pub fn clear_active_key(&mut self) {
-        self.pos.set_active_key(None);
     }
 
     pub fn set_cursor(&mut self, cursor: Arc<RefCell<dyn Cursor>>) {
@@ -589,130 +428,6 @@ impl V2Scanner {
                     ))
                 }
             }
-        }
-    }
-
-    /// Dump de debug para inspeção aberta da chave ativa: lista todas as
-    /// colunas decodificadas por nome (idx_order + "t" + "added"). Substitui o
-    /// antigo `extract_value(pos_idx)`, que exigia um índice solto.
-    #[allow(dead_code)]
-    pub fn dump_key(&self) -> Option<Vec<(String, Value)>> {
-        let key = self.pos.current_active_key()?;
-        let n = self.pos.idx_order().len();
-        let mut out: Vec<(String, Value)> = Vec::with_capacity(n + 2);
-        for (i, name) in self.pos.idx_order().iter().enumerate() {
-            out.push((name.clone(), self.decode_at(key, i)));
-        }
-        out.push(("t".to_string(), self.decode_at(key, n)));
-        out.push(("added".to_string(), self.decode_at(key, n + 1)));
-        Some(out)
-    }
-
-    /// Decodifica a coluna no índice `pos_idx` da chave (uso interno do dump).
-    #[allow(dead_code)]
-    fn decode_at(&self, key: &[u8], pos_idx: usize) -> Value {
-        let pos_name = if pos_idx >= self.pos.idx_order().len() {
-            if pos_idx == self.pos.idx_order().len() {
-                "t"
-            } else {
-                "added"
-            }
-        } else {
-            self.pos.idx_order().get(pos_idx).map(|s| s.as_str()).unwrap_or("v")
-        };
-        if pos_idx >= self.pos.idx_order().len() || pos_name == "t" || pos_name == "added" {
-            let suffix = Self::extract_suffix(key);
-            let (t, retracted) = decode_suffix(suffix);
-            return if pos_name == "added" {
-                Value::Bool(if retracted { 0 } else { 1 })
-            } else {
-                Value::Int64(t as i64)
-            };
-        }
-        let start = self.value_start_at(key, pos_idx);
-        let end = self.value_end_at(key, pos_idx);
-        match pos_name {
-            "a" => Value::Int64(
-                u32::from_be_bytes(key[start..start + 4].try_into().unwrap()) as i64,
-            ),
-            "e" => Value::Int64(decode_int64(u64::from_be_bytes(
-                key[start..start + 8].try_into().unwrap(),
-            ))),
-            _ => {
-                if self.is_variable_value(key.len()) {
-                    let raw = Extracted::Bytes(key[start..end].to_vec());
-                    self.decode_v(&raw, key)
-                } else {
-                    let raw = Extracted::Int(u64::from_be_bytes(key[start..start + 8].try_into().unwrap()));
-                    self.decode_v(&raw, key)
-                }
-            }
-        }
-    }
-
-    /// Offset de início do valor na posição `pos_idx` (helper de dump, índice
-    /// passado explicitamente apenas para iteração por nome).
-    #[allow(dead_code)]
-    fn value_start_at(&self, key: &[u8], pos_idx: usize) -> usize {
-        let pos_name = if pos_idx >= self.pos.idx_order().len() {
-            "t"
-        } else {
-            self.pos.idx_order().get(pos_idx).map(|s| s.as_str()).unwrap_or("v")
-        };
-        if pos_idx >= self.pos.idx_order().len() || pos_name == "t" || pos_name == "added" {
-            return key.len() - 8;
-        }
-        match self.index_name.as_str() {
-            "EAVT" => match pos_idx {
-                0 => 0,
-                1 => 8,
-                _ => 12,
-            },
-            "AEVT" => match pos_idx {
-                0 => 0,
-                1 => 4,
-                _ => 12,
-            },
-            "AVET" => match pos_idx {
-                0 => 0,
-                1 => 4,
-                _ => {
-                    let vs = 4usize;
-                    if self.is_variable_value(key.len()) {
-                        find_v_end(key, vs, self.is_unordered())
-                    } else {
-                        vs + 8
-                    }
-                }
-            },
-            "VAET" => match pos_idx {
-                0 => 0,
-                1 => 8,
-                _ => 12,
-            },
-            _ => 12,
-        }
-    }
-
-    /// Offset de fim do valor na posição `pos_idx` (helper de dump).
-    #[allow(dead_code)]
-    fn value_end_at(&self, key: &[u8], pos_idx: usize) -> usize {
-        if pos_idx >= self.pos.idx_order().len() {
-            return key.len();
-        }
-        let pos_name = self.pos.idx_order().get(pos_idx).map(|s| s.as_str()).unwrap_or("v");
-        let start = self.value_start_at(key, pos_idx);
-        match pos_name {
-            "e" => start + 8,
-            "a" => start + 4,
-            "v" => {
-                if self.is_variable_value(key.len()) {
-                    find_v_end(key, start, self.is_unordered())
-                } else {
-                    start + 8
-                }
-            }
-            _ => key.len(),
         }
     }
 
@@ -1080,94 +795,3 @@ pub enum Extracted {
     Bytes(Vec<u8>),
 }
 
-#[cfg(test)]
-mod v2_tests {
-    use super::*;
-    use std::cell::RefCell;
-
-    struct MockCursor {
-        keys: Vec<Vec<u8>>,
-        pos: usize,
-        end_prefix: Option<Vec<u8>>,
-    }
-
-    impl MockCursor {
-        fn new(keys: Vec<Vec<u8>>) -> Self {
-            Self {
-                keys,
-                pos: 0,
-                end_prefix: None,
-            }
-        }
-    }
-
-    impl Cursor for MockCursor {
-        fn is_valid(&self) -> bool {
-            if self.pos >= self.keys.len() {
-                return false;
-            }
-            if let Some(ref end) = self.end_prefix {
-                let k = &self.keys[self.pos];
-                if k.starts_with(end) {
-                    return false;
-                }
-            }
-            true
-        }
-
-        fn current_key(&self) -> Option<&[u8]> {
-            self.keys.get(self.pos).map(|k| k.as_slice())
-        }
-
-        fn step(&mut self) {
-            self.pos += 1;
-        }
-
-        fn skip_group(&mut self, group_end: usize) {
-            if self.pos >= self.keys.len() {
-                return;
-            }
-            let cur = &self.keys[self.pos][..group_end];
-            while self.pos < self.keys.len() && self.keys[self.pos][..group_end] == *cur {
-                self.pos += 1;
-            }
-        }
-
-        fn seek(&mut self, target: &[u8]) {
-            self.pos = self.keys.partition_point(|k| k.as_slice() < target);
-        }
-
-        fn update_end(&mut self, end: &[u8]) {
-            self.end_prefix = Some(end.to_vec());
-        }
-
-        fn invalidate(&mut self) {
-            self.pos = self.keys.len();
-        }
-    }
-
-    fn build_avet_key(a: u32, v: i64, e: u64, t: u64, retracted: bool) -> Vec<u8> {
-        let suffix = spier_transactor::keys::encode_suffix(t, retracted);
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&a.to_be_bytes());
-        buf.extend_from_slice(&spier_transactor::keys::encode_int64(v).to_be_bytes());
-        buf.extend_from_slice(&spier_transactor::keys::encode_int64(e as i64).to_be_bytes());
-        buf.extend_from_slice(&suffix.to_be_bytes());
-        buf
-    }
-
-    /// Inspeciona uma coluna da chave ativa por nome (dump de debug aberto).
-    fn col(scanner: &V2Scanner, name: &str) -> i64 {
-        scanner
-            .dump_key()
-            .unwrap()
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, v)| v.raw_int())
-            .unwrap()
-    }
-
-    // Nota: os testes que usavam push_position foram removidos.
-    // A iteração agora é testada via scanner-iterate em Python
-    // (tests/test_scheme_iterate.py).
-}
