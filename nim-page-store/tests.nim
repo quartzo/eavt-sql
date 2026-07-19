@@ -5,6 +5,10 @@
 
 import std/[unittest, options, tables, strutils]
 
+import memory/all
+import file/all
+import s3/all
+import journal/all
 import ./abi
 import ./pages
 import ./spinlock
@@ -170,3 +174,72 @@ suite "config parsing":
     check config.len == 0  # nil entries skipped
     deallocShared(keys)
     deallocShared(vals)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Lifecycle tests — isolate open/close use-after-free
+# ═══════════════════════════════════════════════════════════════════════════════
+
+proc makeConfig(t: Table[string, string]): tuple[keys: CStringArr, vals: CStringArr, count: cint] =
+  let n = t.len
+  result.keys = cast[CStringArr](allocShared0(n * sizeof(cstring)))
+  result.vals = cast[CStringArr](allocShared0(n * sizeof(cstring)))
+  result.count = n.cint
+  var i = 0
+  for k, v in t:
+    result.keys[i] = k.cstring
+    result.vals[i] = v.cstring
+    inc i
+
+proc freeConfig(cfg: tuple[keys: CStringArr, vals: CStringArr, count: cint]) =
+  deallocShared(cfg.keys)
+  deallocShared(cfg.vals)
+
+suite "lifecycle: page-store open/close":
+  test "single open/close memory":
+    var err: cint
+    let cfg = makeConfig({"backend": "memory"}.toTable)
+    var vt = openPageStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    check vt != nil
+    check err == ErrOk
+    if vt != nil:
+      psClose(vt.handle)
+      freeVtable(vt)
+    freeConfig(cfg)
+
+  test "5 open/close cycles memory":
+    for i in 0..<5:
+      var err: cint
+      let cfg = makeConfig({"backend": "memory"}.toTable)
+      var vt = openPageStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      check vt != nil
+      if vt != nil:
+        psClose(vt.handle)
+        freeVtable(vt)
+      freeConfig(cfg)
+
+  test "3 open/write/scan/close cycles memory":
+    for i in 0..<3:
+      var err: cint
+      let cfg = makeConfig({"backend": "memory"}.toTable)
+      var vt = openPageStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      check vt != nil
+      if vt != nil:
+        if vt.getKeysInPrefix != nil:
+          var outBuf: pointer = nil
+          var outLen: csize_t = 0
+          discard vt.getKeysInPrefix(vt.handle, 0'u32, nil, 0.csize_t, addr outBuf, addr outLen, addr err)
+          if outBuf != nil: vt.freeBuf(outBuf)
+        psClose(vt.handle)
+        freeVtable(vt)
+      freeConfig(cfg)
+
+suite "lifecycle: blobstore memory alone":
+  test "10 open/close cycles":
+    for i in 0..<10:
+      var err: cint
+      let cfg = makeConfig({"backend": "memory"}.toTable)
+      let bs = nim_blob_memory_open(cfg.keys, cfg.vals, cfg.count, addr err)
+      check bs != nil
+      if bs != nil:
+        var outBuf: pointer = nil
+        var outLen: csize_t = 0

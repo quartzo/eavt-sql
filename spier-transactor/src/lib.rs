@@ -472,4 +472,17 @@ mod tests {
         let h = state.open_cursor_direct(1, b"").unwrap();
         assert!(state.cursor_valid(h).unwrap(), "cursor on CF 1 should be valid");
     }
+
+    #[test]
+    fn test_multiple_open_close_cycles() {
+        for i in 0..5 {
+            let mut cfg = HashMap::new();
+            cfg.insert("backend".to_string(), "memory".to_string());
+            let state = TransactorState::open(&cfg).unwrap();
+            state.put(0, b"sequential-key").unwrap();
+            let data = state.scan(0, b"sequential-").unwrap();
+            assert!(!data.is_empty(), "iter {}: should find key", i);
+            state.close().unwrap();
+        }
+    }
 }
