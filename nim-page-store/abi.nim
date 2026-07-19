@@ -133,6 +133,31 @@ type
 
   NimJournalVtablePtr* = ptr NimJournalVtableObj
 
+  # MemTable vtable mirror (renamed to avoid conflict with nim-memtable/abi)
+  MtVtableObj* {.pure, bycopy.} = object
+    handle*: pointer
+    put*: proc(h: pointer; cf: cuint; key: ptr Byte; klen: csize_t;
+               outSize: ptr uint64; errOut: ptr cint): cint {.cdecl.}
+    batch*: proc(h: pointer; ops: ptr Byte; olen: csize_t;
+                 outSize: ptr uint64; errOut: ptr cint): cint {.cdecl.}
+    clear*: proc(h: pointer; errOut: ptr cint): cint {.cdecl.}
+    snapshot*: proc(h: pointer; outId: ptr uint64; errOut: ptr cint): cint {.cdecl.}
+    snapshotFree*: proc(h: pointer; id: uint64) {.cdecl.}
+    scan*: proc(h: pointer; id: uint64; cf: cuint; prefix: ptr Byte; plen: csize_t;
+                reverse: cint; outCursor: ptr uint64; errOut: ptr cint): cint {.cdecl.}
+    cursorNext*: proc(h: pointer; cursor: uint64;
+                      outKey: ptr pointer; outLen: ptr csize_t;
+                      outValid: ptr cint; errOut: ptr cint): cint {.cdecl.}
+    cursorFree*: proc(h: pointer; cursor: uint64) {.cdecl.}
+    contains*: proc(h: pointer; id: uint64; cf: cuint; key: ptr Byte; klen: csize_t;
+                    outPresent: ptr cint; errOut: ptr cint): cint {.cdecl.}
+    scanPrefix*: proc(h: pointer; id: uint64; cf: cuint; prefix: ptr Byte; plen: csize_t;
+                       reverse: cint; outBuf: ptr pointer; outLen: ptr csize_t;
+                       errOut: ptr cint): cint {.cdecl.}
+    freeBuf*: proc(p: pointer) {.cdecl.}
+
+  MtVtablePtr* = ptr MtVtableObj
+
 proc newVtable*(): NimPageStoreVtablePtr =
   result = cast[NimPageStoreVtablePtr](allocShared0(sizeof(NimPageStoreVtableObj)))
 
@@ -158,3 +183,48 @@ proc parseConfig*(keys, vals: CStringArr; n: csize_t): Table[string, string] =
   for i in 0 ..< n.int:
     if keys[i] != nil and vals[i] != nil:
       result[$keys[i]] = $vals[i]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NimKVStoreVtable — unified KVStore C-ABI
+# ═══════════════════════════════════════════════════════════════════════════════
+
+type
+  KVPutFn* = proc(h: pointer; cf: cuint; key: ptr Byte; klen: csize_t;
+                   errOut: ptr cint): cint {.cdecl.}
+  KVBatchFn* = proc(h: pointer; ops: ptr Byte; olen: csize_t;
+                     errOut: ptr cint): cint {.cdecl.}
+  KVReplayFn* = proc(h: pointer; ops: ptr Byte; olen: csize_t;
+                      errOut: ptr cint): cint {.cdecl.}
+  KVGetFn* = proc(h: pointer; cf: cuint; key: ptr Byte; klen: csize_t;
+                   outPresent: ptr cint; errOut: ptr cint): cint {.cdecl.}
+  KVScanFn* = proc(h: pointer; cf: cuint; prefix: ptr Byte; plen: csize_t;
+                    outBuf: ptr pointer; outLen: ptr csize_t; errOut: ptr cint): cint {.cdecl.}
+  KVFlushFn* = proc(h: pointer; errOut: ptr cint): cint {.cdecl.}
+  KVGCFullFn* = proc(h: pointer; maxAgeSecs: uint64; maxRootCount: cuint;
+                      dryRun: cint; outBuf: ptr pointer; outLen: ptr csize_t;
+                      errOut: ptr cint): cint {.cdecl.}
+  KVMemtableSizeFn* = proc(h: pointer; outSize: ptr uint64; errOut: ptr cint): cint {.cdecl.}
+  KVCloseFn* = proc(h: pointer; errOut: ptr cint): cint {.cdecl.}
+  KVFreeBufFn* = proc(p: pointer) {.cdecl.}
+
+  NimKVStoreVtableObj* {.pure, bycopy.} = object
+    handle*: pointer
+    put*: KVPutFn
+    batchWrite*: KVBatchFn
+    replay*: KVReplayFn
+    get*: KVGetFn
+    scan*: KVScanFn
+    scanReverse*: KVScanFn
+    flush*: KVFlushFn
+    gcFull*: KVGCFullFn
+    memtableSize*: KVMemtableSizeFn
+    close*: KVCloseFn
+    freeBuf*: KVFreeBufFn
+
+  NimKVStoreVtablePtr* = ptr NimKVStoreVtableObj
+
+proc newKVVtable*(): NimKVStoreVtablePtr =
+  result = cast[NimKVStoreVtablePtr](allocShared0(sizeof(NimKVStoreVtableObj)))
+
+proc freeKVVtable*(vt: NimKVStoreVtablePtr) =
+  if vt != nil: deallocShared(vt)

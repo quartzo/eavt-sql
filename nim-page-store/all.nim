@@ -10,6 +10,7 @@ import journal/all
 import nim_memtable/all
 import ./abi
 import ./backend
+import ./kvstore
 
 proc nim_page_store_open*(keys, vals: CStringArr; count: cint;
                            errOut: ptr cint): NimPageStoreVtablePtr
@@ -20,3 +21,8 @@ proc nim_page_store_commit_merge*(handle: pointer; data: ptr Byte; dlen: csize_t
                                    clearJournal: cint; errOut: ptr cint): cint
     {.exportc: "nim_page_store_commit_merge", cdecl.} =
   result = psCommitMerge(handle, data, dlen, clearJournal, errOut)
+
+proc nim_kvstore_open*(keys, vals: CStringArr; count: cint;
+                        errOut: ptr cint): NimKVStoreVtablePtr
+    {.exportc: "nim_kvstore_open", cdecl.} =
+  result = openKvStore(keys, vals, count, errOut)

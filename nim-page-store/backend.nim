@@ -326,7 +326,7 @@ proc put(cc: var PageCache; uuid: array[16, byte]; keys: seq[seq[byte]]) =
 # ══════════════════════════════════════════════════════════════════════════════
 
 type
-  PageStoreInner = object
+  PageStoreInner* = object
     blobs: NimBlobVtablePtr
     journal: NimJournalVtablePtr
     trees: seq[CfTree]
@@ -492,7 +492,7 @@ proc collectKeysFromIndex(s: var PageStoreInner; pageUuid: array[16, byte];
     else:
       result.add collectKeysFromIndex(s, childUuid, height - 1, prefix)
 
-proc getKeysInPrefix(s: var PageStoreInner; cf: int; prefix: seq[byte]): seq[seq[byte]] =
+proc getKeysInPrefix*(s: var PageStoreInner; cf: int; prefix: seq[byte]): seq[seq[byte]] =
   if cf >= s.numCf: return @[]
   let tree = s.trees[cf]
   if tree.rootUuid == default(array[16, byte]): return @[]
@@ -504,7 +504,7 @@ proc getKeysInPrefix(s: var PageStoreInner; cf: int; prefix: seq[byte]): seq[seq
   else:
     result = collectKeysFromIndex(s, tree.rootUuid, tree.height, prefix)
 
-proc keyExists(s: var PageStoreInner; cf: int; key: seq[byte]): bool =
+proc keyExists*(s: var PageStoreInner; cf: int; key: seq[byte]): bool =
   let keys = getKeysInPrefix(s, cf, key)
   for k in keys:
     if k == key: return true
@@ -641,7 +641,7 @@ proc mergeSubtree(s: var PageStoreInner; nodeUuid: array[16, byte];
   if not changed: return none(seq[(seq[byte], array[16, byte])])
   return some(writeIndexLevel(s, newEntries))
 
-proc commitMerge(s: var PageStoreInner; keysByCf: seq[(int, seq[seq[byte]])];
+proc commitMerge*(s: var PageStoreInner; keysByCf: seq[(int, seq[seq[byte]])];
                   clearJournal: bool) =
   if s.readOnly:
     raise newException(IOError, "read-only")
@@ -713,7 +713,7 @@ proc hasOldRoots(s: var PageStoreInner; maxAgeSecs: uint64; maxRootCount: int): 
     if latestUs - us > maxAgeUs: return true
   return false
 
-proc gcFull(s: var PageStoreInner; maxAgeSecs: uint64; maxRootCount: int;
+proc gcFull*(s: var PageStoreInner; maxAgeSecs: uint64; maxRootCount: int;
              dryRun: bool): seq[byte] =
   if s.readOnly:
     raise newException(IOError, "read-only")
