@@ -266,11 +266,13 @@ fn explore_ordering_depth(
             1.0
         };
 
-        // Synthetic var (same-var confirmation): custo zero — é só um filter
-        // scanner-iterate com equality range. Cardinalidade permanece a mesma
-        // (top_elements) já que a confirmação poda mas não gera novos elementos.
+        // Synthetic var (same-var confirmation): step_cost cresce com depth.
+        // Não reduz top_elements (continua sendo um filter, não gerador), mas
+        // paga um bônus proporcional ao depth pra desencorajar colocação tardia.
+        // Justificativa: em depth maior, mais scanner state acumulado por row.
+        let depth = path.len();
         let (level_elements, step_cost) = if is_synthetic.is_some() {
-            (top_elements, 0.0)
+            (top_elements, depth as f64 * 0.1)
         } else if is_blind {
             let el = total_records * range_sel;
             if path.is_empty() {
