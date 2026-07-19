@@ -17,6 +17,13 @@ import pytest
 
 from eavt_sql.engine import EAVTEngine
 
+_EID_SIGN_FLIP = 0x8000_0000_0000_0000
+
+
+def _decode_eid(data: bytes) -> int:
+    """Decode sign-flipped entity ID (encode_int64) back to unsigned."""
+    return int.from_bytes(data, "big") ^ _EID_SIGN_FLIP
+
 
 @pytest.fixture
 def engine():
@@ -70,7 +77,7 @@ def test_scanner_push_eid_in_eavt(engine):
     )
     pref = rows[0][0]
     assert len(pref) == 8, f"expected 8 bytes, got {len(pref)}"
-    assert int.from_bytes(pref, "big") == 1000
+    assert _decode_eid(pref) == 1000
 
 
 def test_scanner_push_eid_in_aevt(engine):
@@ -85,7 +92,7 @@ def test_scanner_push_eid_in_aevt(engine):
     pref = rows[0][0]
     # prefix = [4 bytes aid][8 bytes eid] = 12 bytes
     assert len(pref) == 12, f"expected 12 bytes, got {len(pref)}"
-    assert int.from_bytes(pref[4:12], "big") == 999
+    assert _decode_eid(pref[4:12]) == 999
 
 
 def test_scanner_push_eid_in_avet(engine):
@@ -99,7 +106,7 @@ def test_scanner_push_eid_in_avet(engine):
     )
     pref = rows[0][0]
     assert len(pref) >= 20  # 4 + 8 + 8
-    assert int.from_bytes(pref[12:20], "big") == 777
+    assert _decode_eid(pref[12:20]) == 777
 
 
 def test_scanner_push_eid_in_vaet(engine):
@@ -112,8 +119,8 @@ def test_scanner_push_eid_in_vaet(engine):
         '(result (scanner-prefix s)))'
     )
     pref = rows[0][0]
-    assert len(pref) >= 20
-    assert int.from_bytes(pref[16:24], "big") == 555
+    assert len(pref) >= 20  # v(8)+a(4)+e(8)
+    assert _decode_eid(pref[12:20]) == 555
 
 
 # ── scanner-push (eid + attr) ────────────────────────────────────────────────
@@ -129,7 +136,7 @@ def test_scanner_push_eid_and_attr(engine):
     )
     pref = rows[0][0]
     assert len(pref) == 12, f"expected 12 bytes, got {len(pref)}"
-    eid = int.from_bytes(pref[:8], "big")
+    eid = _decode_eid(pref[:8])
     aid = int.from_bytes(pref[8:12], "big")
     assert eid == 1000
     assert aid == 42
@@ -149,7 +156,7 @@ def test_scanner_pop_restores_prefix(engine):
     )
     pref = rows[0][0]
     assert len(pref) == 8, f"expected 8 bytes after pop, got {len(pref)}"
-    assert int.from_bytes(pref, "big") == 1000
+    assert _decode_eid(pref) == 1000
 
 
 def test_scanner_pop_on_empty_no_error(engine):
@@ -198,7 +205,7 @@ def test_scanner_push_with_intern_a_and_string(engine):
     aid = int.from_bytes(pref[:4], "big")
     assert aid > 0
     # Next 8 bytes = eid
-    eid = int.from_bytes(pref[4:12], "big")
+    eid = _decode_eid(pref[4:12])
     assert eid == 99999
     # Remaining = encode_variable("Alice") = 8-byte block + control byte
     rest = pref[12:]
@@ -221,8 +228,8 @@ def test_scanner_multiple_independent(engine):
         '    (result (scanner-prefix s0) (scanner-prefix s1))))'
     )
     pref0, pref1 = rows[0]
-    assert int.from_bytes(pref0, "big") == 100
-    assert int.from_bytes(pref1, "big") == 200
+    assert _decode_eid(pref0) == 100
+    assert _decode_eid(pref1) == 200
 
 
 # ── scanner-push return value ────────────────────────────────────────────────
@@ -289,4 +296,4 @@ def test_scanner_push_large_eid(engine):
         f'(result (scanner-prefix s)))'
     )
     pref = rows[0][0]
-    assert int.from_bytes(pref, "big") == large
+    assert _decode_eid(pref) == large
