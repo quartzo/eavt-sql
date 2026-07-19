@@ -275,7 +275,7 @@ impl EavtEngine {
                 {
                     break;
                 }
-                let e = u64::from_be_bytes(buf[0..8].try_into().unwrap());
+                let e = keys::decode_int64(u64::from_be_bytes(buf[0..8].try_into().unwrap())) as u64;
                 let p = resolver::partition_of(e);
                 if targets.contains(&p) {
                     resolver.advance_past(e);
