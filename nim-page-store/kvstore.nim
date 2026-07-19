@@ -176,9 +176,12 @@ proc mergeSources(sources: var seq[MergeSource]; endBound: seq[byte];
 # ═══════════════════════════════════════════════════════════════════════════════
 
 proc prefixEnd(prefix: seq[byte]): seq[byte] =
-  if prefix.len == 0: return newSeq[byte](64)
-  for i in 0..<64: result.add 0xFF
-  result = prefix & result[0..31]
+  if prefix.len == 0:
+    result = newSeq[byte](64)
+    for i in 0..<64: result[i] = 0xFF
+  else:
+    for i in 0..<32: result.add 0xFF
+    result = prefix & result
 
 proc kvPut(s: var KVStoreInner; cf: int; key: seq[byte]) =
   var outSize: uint64 = 0
