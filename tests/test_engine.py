@@ -1509,7 +1509,6 @@ def test_lookup_text_not_exists():
 # ── Same-variable constraints & variable ordering stress tests ─────
 
 
-@pytest.mark.xfail(reason="pre-existing: self-reference join filter broken")
 def test_same_var_e_and_v_filters_non_self_ref():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.partner REF MANY"))
