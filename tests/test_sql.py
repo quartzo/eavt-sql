@@ -3,10 +3,6 @@ from datetime import datetime, timedelta, timezone
 
 from eavt_sql.engine import EAVTEngine
 
-# VM bytecode has been removed — Scheme IR is the only path.
-# These tests checked bytecode-level output and are no longer applicable.
-skip_explain_format = pytest.mark.skip(reason="EXPLAIN is Scheme S-expr (VM bytecode removed)")
-
 @pytest.fixture
 def engine():
     e = EAVTEngine(":memory:")
@@ -276,7 +272,6 @@ def test_sql_text_value_lookup():
     engine.close()
 
 
-@skip_explain_format
 def test_explain_sql_variable_order():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.partner REF MANY"))
@@ -291,12 +286,13 @@ def test_explain_sql_variable_order():
         eid_a,
     ))
     text = "\n".join(row[0] for row in rows)
-    assert "LEAP_INIT" in text
-    assert text.count("DEPTH_OPEN") + text.count("DEPTH_ENTER") >= 2
+    assert "scanner-open" in text
+    # Two scanners opened (one per pattern) and ≥2 scanner-iterate nesting levels.
+    assert text.count("scanner-open") >= 2
+    assert text.count("scanner-iterate") >= 2
     engine.close()
 
 
-@skip_explain_format
 def test_explain_sql_index_selection():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.partner REF MANY"))
@@ -311,12 +307,11 @@ def test_explain_sql_index_selection():
         eid_a,
     ))
     text = "\n".join(row[0] for row in rows)
-    assert "CURSOR_DECLARE" in text or "SCANNER_OPEN" in text
-    assert text.count("CURSOR_DECLARE") + text.count("SCANNER_OPEN") >= 2
+    # Each pattern opens its own scanner.
+    assert text.count("scanner-open") >= 2
     engine.close()
 
 
-@skip_explain_format
 def test_explain_sql_range_bounds():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE item.score LONG MANY"))
@@ -327,16 +322,25 @@ def test_explain_sql_range_bounds():
         20,
     ))
     text = "\n".join(row[0] for row in rows)
-    assert "RANGE_OP" in text
+    assert ":ranges" in text
+    assert "ranges-create" in text
+    assert ">" in text  # operator appears in the range expression
     engine.close()
 
 
-@skip_explain_format
+@pytest.mark.xfail(
+    reason="bug: SELECT literal WHERE d1.eid = %1 compiles to (result-row 1) "
+           "without an existence check on the eid — should emit a scanner-iterate."
+)
 def test_explain_sql_no_patterns():
     engine = EAVTEngine(":memory:")
+    list(engine.sql("ATTRIBUTE company.name STRING ONE"))
+    list(engine.sql("UPSERT SET company.name = 'ACME'"))
     rows = list(engine.sql("EXPLAIN SELECT 1 WHERE d1.eid = %1", 999999))
     text = "\n".join(row[0] for row in rows)
-    assert "HALT" in text
+    # The eid must actually be looked up — a bare (result-row 1) is wrong.
+    assert "scanner-open" in text
+    assert "scanner-iterate" in text
     engine.close()
 
 
@@ -482,7 +486,6 @@ def test_sql_in_with_join():
     engine.close()
 
 
-@skip_explain_format
 def test_sql_explain_neq():
     engine = _score_engine()
     rows = list(engine.sql(
@@ -490,11 +493,15 @@ def test_sql_explain_neq():
         50,
     ))
     text = "\n".join(row[0] for row in rows)
-    assert "RANGE_OP" in text
+    assert ":ranges" in text
+    assert "!=" in text
     engine.close()
 
 
-@skip_explain_format
+@pytest.mark.xfail(
+    reason="bug: IN (a, b) is compiled as (= a b) instead of a disjunction; "
+           "should emit (or (= a) (= b)) or a multi-value range."
+)
 def test_sql_explain_in():
     engine = _score_engine()
     rows = list(engine.sql(
@@ -502,7 +509,10 @@ def test_sql_explain_in():
         30, 50,
     ))
     text = "\n".join(row[0] for row in rows)
-    assert "RANGE_OP" in text
+    assert ":ranges" in text
+    # IN (a, b) should produce a disjunction (or ...) over the values,
+    # not a single equality with multiple params.
+    assert "(or " in text or "(in " in text
     engine.close()
 
 
@@ -562,7 +572,6 @@ def test_sql_or_join_blocked():
     engine.close()
 
 
-@skip_explain_format
 def test_sql_explain_or():
     engine = _score_engine()
     rows = list(engine.sql(
@@ -570,7 +579,8 @@ def test_sql_explain_or():
         30, 70,
     ))
     text = "\n".join(row[0] for row in rows)
-    assert "RANGE_OP" in text
+    assert ":ranges" in text
+    assert "(or " in text
     engine.close()
 
 
@@ -1136,7 +1146,6 @@ def test_insert_ref_integer_literal():
 # ── EXPLAIN integration tests ──
 
 
-@skip_explain_format
 def test_explain_select():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.name STRING ONE"))
@@ -1144,19 +1153,17 @@ def test_explain_select():
     eid = rows_i[0][0]
     rows = list(engine.sql("EXPLAIN SELECT d1.company.name WHERE d1.eid = %1", eid))
     text = "\n".join(row[0] for row in rows)
-    assert "CURSOR_DECLARE" in text or "SCANNER_OPEN" in text
-    assert "LEAP_INIT" in text
-    assert "HALT" in text
+    assert "scanner-open" in text
+    assert "scanner-iterate" in text
     engine.close()
 
 
-@skip_explain_format
 def test_explain_join():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.name STRING ONE"))
     list(engine.sql("ATTRIBUTE company.partner REF ONE"))
     list(engine.sql("ATTRIBUTE person.name STRING ONE"))
-    rows_i = list(engine.sql(
+    list(engine.sql(
         "UPSERT AS D1 SET company.name = 'ACME', company.partner = d2, "
         "AS D2 SET person.name = 'John'"
     ))
@@ -1166,9 +1173,8 @@ def test_explain_join():
         eid,
     ))
     text = "\n".join(row[0] for row in rows)
-    assert "CURSOR_DECLARE" in text or "SCANNER_OPEN" in text
-    assert text.count("CURSOR_DECLARE") + text.count("SCANNER_OPEN") >= 2
-    assert "HALT" in text
+    # JOIN of 2 patterns → ≥2 scanner-open forms.
+    assert text.count("scanner-open") >= 2
     engine.close()
 
 
@@ -1181,12 +1187,12 @@ def test_explain_insert():
     engine.close()
 
 
-@skip_explain_format
 def test_explain_attribute():
     engine = EAVTEngine(":memory:")
     rows = list(engine.sql("EXPLAIN ATTRIBUTE ns.attr STRING MANY"))
     text = "\n".join(row[0] for row in rows)
-    assert "ATTRIBUTE" in text
+    assert "declare-attr" in text
+    assert "ns.attr" in text
     engine.close()
 
 
@@ -1313,7 +1319,6 @@ def test_select_star_with_where():
     engine.close()
 
 
-@skip_explain_format
 def test_explain_select_star():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE ns.name STRING ONE"))
@@ -1321,7 +1326,7 @@ def test_explain_select_star():
     result = list(engine.sql("EXPLAIN SELECT *"))
     text = "\n".join(row[0] for row in result)
     # SELECT * expands to d1.eid, d1.attr, d1.val — produces a real plan
-    assert "SCANNER_OPEN" in text
+    assert "scanner-open" in text
     engine.close()
 
 
@@ -1560,13 +1565,12 @@ def test_delete_where_with_ref():
     engine.close()
 
 
-@skip_explain_format
 def test_explain_delete():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE ns.attr STRING ONE"))
     rows = list(engine.sql("EXPLAIN DELETE WHERE d1.eid = 42 AND d1.ns.attr = 'x'"))
     text = "\n".join(row[0] for row in rows)
-    assert "EXEC_RETRACT" in text
+    assert "retract" in text
     engine.close()
 
 

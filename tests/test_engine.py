@@ -9,8 +9,6 @@ from datetime import datetime, timedelta, timezone
 from eavt_sql.engine import EAVTEngine
 from eavt_sql.types import ref
 
-skip_if_scheme = pytest.mark.skip(reason="EXPLAIN is Scheme S-expr (VM bytecode removed)")
-
 ATTR_PARTNER = "company.partner"
 ATTR_HQ = "company.hq"
 ATTR_ACTIVE = "company.active"
@@ -1653,39 +1651,40 @@ def test_same_var_1000_entities_self_ref():
 # ── Query explain ──────────────────────────────────────────────────
 
 
-@skip_if_scheme
 def test_explain_variable_order_and_estimates():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.partner REF MANY"))
     list(engine.sql("ATTRIBUTE person.name STRING ONE"))
-    r = list(engine.sql("UPSERT AS D1 SET company.partner = d2, AS D2 SET person.name = 'Bob', AS D3 SET person.name = 'Carol'"))
+    list(engine.sql("UPSERT AS D1 SET company.partner = d2, AS D2 SET person.name = 'Bob', AS D3 SET person.name = 'Carol'"))
 
     rows = list(engine.sql(
         "EXPLAIN SELECT d2.person.name WHERE d1.company.partner = d2.eid",
     ))
     assert rows
     text = "\n".join(row[0] for row in rows)
-    assert "LEAP_INIT" in text
+    # Scheme IR: scanner-open + scanner-iterate replace LEAP_INIT/DEPTH_OPEN.
+    assert "scanner-open" in text
+    assert "scanner-iterate" in text
     engine.close()
 
 
-@skip_if_scheme
 def test_explain_same_var_constraints():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.partner REF MANY"))
     list(engine.sql("ATTRIBUTE person.name STRING ONE"))
-    r = list(engine.sql("UPSERT AS D1 SET company.partner = d1, person.name = 'Alice'"))
+    list(engine.sql("UPSERT AS D1 SET company.partner = d1, person.name = 'Alice'"))
 
     rows = list(engine.sql(
         "EXPLAIN SELECT d2.person.name WHERE d1.eid = d2.eid AND d1.company.partner = d1.eid",
     ))
     assert rows
     text = "\n".join(row[0] for row in rows)
-    assert "CURSOR_DECLARE" in text or "SCANNER_OPEN" in text
+    assert "scanner-open" in text
+    # same-var constraint emits a synthetic with equality range.
+    assert ":ranges" in text and "= " in text
     engine.close()
 
 
-@skip_if_scheme
 def test_explain_lookups():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.partner REF MANY"))
@@ -1701,11 +1700,12 @@ def test_explain_lookups():
     ))
     assert rows
     text = "\n".join(row[0] for row in rows)
-    assert "PROBE" in text or "CURSOR_DECLARE" in text or "SCANNER_OPEN" in text
+    # Fully-bound lookups compile to scanner-iterate with :ranges.
+    assert "scanner-open" in text
+    assert ":ranges" in text or "scanner-iterate" in text
     engine.close()
 
 
-@skip_if_scheme
 def test_explain_index_selection():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.partner REF MANY"))
@@ -1721,22 +1721,22 @@ def test_explain_index_selection():
     ))
     assert rows
     text = "\n".join(row[0] for row in rows)
-    assert "CURSOR_DECLARE" in text or "SCANNER_OPEN" in text
+    assert "scanner-open" in text
     engine.close()
 
 
-@skip_if_scheme
 def test_explain_depth_iterator_mapping():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.partner REF MANY"))
     list(engine.sql("ATTRIBUTE person.name STRING ONE"))
-    r = list(engine.sql("UPSERT AS D1 SET company.partner = d2, AS D2 SET person.name = 'Bob'"))
+    list(engine.sql("UPSERT AS D1 SET company.partner = d2, AS D2 SET person.name = 'Bob'"))
 
     rows = list(engine.sql(
         "EXPLAIN SELECT d2.person.name WHERE d1.company.partner = d2.eid",
     ))
     assert rows
     text = "\n".join(row[0] for row in rows)
-    assert "DEPTH_OPEN" in text or "DEPTH_ENTER" in text
-    assert "LEAP_INIT" in text
+    # scanner-iterate replaces DEPTH_OPEN/DEPTH_ENTER.
+    assert "scanner-iterate" in text
+    assert "scanner-open" in text
     engine.close()

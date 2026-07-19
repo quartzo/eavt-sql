@@ -1,20 +1,19 @@
 """Tests for compiler introspection via compile_sql_json.
 
-These tests verify the compiler's bytecode output (VMProgram) directly,
-without executing the program. They check:
-- Deferred resolution: InternA emits symbolic names, not baked IDs
-- eid is always an integer (ConstInt, no entity ref resolution)
-- Cursor plan structure (index selection, variable bindings)
-- Instruction sequences for different SQL statement types
-"""
+These tests verify the compiler's Scheme IR output directly, without
+executing the program. They check that:
+- Attribute declarations emit `declare-attr` with the attr name as a string
+- The planner picks a valid index ("AEVT" / "EAVT" / etc.) for SELECT
+- ATTRIBUTE / PARTITION statements compile to the expected Scheme forms
 
-import os
+The old bytecode-VM tests (InternA, ConstInt, PrefixPush, ScannerOpen p2,
+Halt, num_registers) were removed when the compiler migrated to Scheme IR.
+"""
 
 import pytest
 
 from eavt_sql.engine import EAVTEngine
-
-skip_if_scheme = pytest.mark.skip(reason="EXPLAIN is Scheme S-expr (VM bytecode removed)")
+from eavt_sql.query_codec import encode_values
 
 
 @pytest.fixture
@@ -26,127 +25,68 @@ def engine(tmp_path):
     return e
 
 
-def opcodes(program):
-    return [inst["op"] for inst in program["instructions"]]
+def _compile_scheme(engine, sql, *params):
+    """Bypass the JSON wrapper — compile_sql_json returns raw Scheme text
+    for Scheme-IR programs. Pass encoded params directly to the Rust handle."""
+    params_bytes = encode_values(list(params))
+    return str(engine._handle.compile_sql_json(sql, params_bytes))
 
 
-def find_op(program, op_name):
-    return [inst for inst in program["instructions"] if inst["op"] == op_name]
+class TestSchemeIRStructure:
+    """Scheme IR structural assertions for compiled programs."""
 
-
-def find_p4_str(program, op_name):
-    return [inst["p4"] for inst in find_op(program, op_name) if inst["p4"] is not None]
-
-
-class TestDeferredResolution:
-    """Compiler resolves attr names to IDs at compile time (DatalogNumIR).
-    Attrs emit ConstInt(id), not InternA(name). Entities are always integers."""
-
-    @skip_if_scheme
-    def test_resolved_attr_uses_const_int(self, engine):
-        """Resolved attrs emit ConstInt with the attr ID, not InternA with the name."""
-        program = engine.compile_sql_json(
+    def test_resolved_attr_emits_scanner_push(self, engine):
+        """Compiled SELECT references the resolved attr via scanner-push with
+        the attr id. InternA-style name resolution is gone in Scheme IR."""
+        s = _compile_scheme(
+            engine,
             "SELECT d1.company.name WHERE d1.company.name = 'ACME'"
         )
-        intern_as = find_p4_str(program, "InternA")
-        assert "company.name" not in intern_as, \
-            "InternA should not be emitted for resolved attrs"
-        const_ints = find_op(program, "ConstInt")
-        assert len(const_ints) > 0, "expected ConstInt for resolved attr ID"
+        assert "scanner-open" in s or "scanner-push" in s, (
+            f"expected scanner-open/scanner-push in compiled output, got: {s}"
+        )
 
-    @skip_if_scheme
-    def test_no_baked_attr_id(self, engine):
-        program = engine.compile_sql_json(
+    def test_select_uses_valid_index(self, engine):
+        """SELECT by attribute should pick a valid index — never an
+        out-of-range column family id. The index name appears as a string
+        literal in scanner-open."""
+        s = _compile_scheme(
+            engine,
             "SELECT d1.company.name WHERE d1.company.name = 'ACME'"
         )
-        prefix_push = find_op(program, "PrefixPush")
-        assert len(prefix_push) > 0, "expected PrefixPush for resolved attr"
-
-    @skip_if_scheme
-    def test_eid_integer_uses_const_int(self, engine):
-        """eid is always an integer — compiler emits ConstInt, never ConstStr for eid."""
-        program = engine.compile_sql_json(
-            "SELECT d1.company.name WHERE d1.eid = 100"
+        assert any(idx in s for idx in ('"AEVT"', '"EAVT"', '"AVET"', '"VAET"')), (
+            f"expected a valid index name in scanner-open, got: {s}"
         )
-        const_ints = find_op(program, "ConstInt")
-        assert any(i["p4"] == 100 for i in const_ints), \
-            "expected ConstInt(100) for integer eid"
 
-
-class TestCursorPlan:
-    """Cursor plans contain index selection and variable binding info."""
-
-    @skip_if_scheme
-    def test_cursor_plan_has_index(self, engine):
-        program = engine.compile_sql_json(
-            "SELECT d1.company.name WHERE d1.company.name = 'ACME'"
-        )
-        opens = find_op(program, "ScannerOpen")
-        assert len(opens) >= 1
-        cf_id = opens[0]["p2"]
-        assert cf_id in (0, 1, 2, 3)
-
-    @skip_if_scheme
-    def test_cursor_plan_idx_order(self, engine):
-        program = engine.compile_sql_json(
-            "SELECT d1.company.name WHERE d1.company.name = 'ACME'"
-        )
-        opens = find_op(program, "ScannerOpen")
-        assert len(opens) >= 1
-
-    @skip_if_scheme
-    def test_cursor_plan_specs(self, engine):
-        program = engine.compile_sql_json(
-            "SELECT d1.company.name WHERE d1.company.name = 'ACME'"
-        )
-        opens = find_op(program, "ScannerOpen")
-        assert len(opens) >= 1
-
-
-class TestInstructionStructure:
-    """Basic structural assertions on instruction sequences."""
-
-    @skip_if_scheme
-    def test_select_has_halt(self, engine):
-        program = engine.compile_sql_json(
-            "SELECT d1.company.name WHERE d1.company.name = 'ACME'"
-        )
-        ops = opcodes(program)
-        assert ops[-1] == "Halt"
-
-    @skip_if_scheme
-    def test_program_has_registers(self, engine):
-        program = engine.compile_sql_json(
-            "SELECT d1.company.name WHERE d1.company.name = 'ACME'"
-        )
-        assert program["num_registers"] > 0
-
-    @skip_if_scheme
-    def test_attribute_compiles(self, engine):
-        program = engine.compile_sql_json(
+    def test_attribute_compiles_to_declare_attr(self, engine):
+        s = _compile_scheme(
+            engine,
             "ATTRIBUTE company.revenue FLOAT ONE"
         )
-        ops = opcodes(program)
-        assert "ExecAttribute" in ops
+        assert "declare-attr" in s, (
+            f"expected declare-attr in ATTRIBUTE output, got: {s}"
+        )
+        assert "company.revenue" in s
 
-    @skip_if_scheme
-    def test_partition_compiles(self, engine):
-        program = engine.compile_sql_json(
+    def test_partition_compiles_to_declare_partition(self, engine):
+        s = _compile_scheme(
+            engine,
             "PARTITION my_partition"
         )
-        ops = opcodes(program)
-        assert "DeclarePartition" in ops
+        assert "declare-partition" in s, (
+            f"expected declare-partition in PARTITION output, got: {s}"
+        )
+        assert "my_partition" in s
 
     def test_upsert_compiles_to_scheme(self, engine):
-        """UPSERT now compiles to a Scheme program, not VM bytecode."""
-        from eavt_sql.query_codec import encode_values
-        params_bytes = encode_values([])
-        raw = engine._handle.compile_sql_json(
-            "UPSERT AS D1 SET company.name = 'Test Co'", params_bytes
+        """UPSERT compiles to a Scheme program with alloc-entity/save forms."""
+        s = _compile_scheme(
+            engine,
+            "UPSERT AS D1 SET company.name = 'Test Co'"
         )
-        program = str(raw)
-        assert program.startswith("("), \
+        assert s.startswith("("), \
             "UPSERT should produce Scheme S-expression text"
-        assert "alloc-entity" in program
-        assert "save" in program
-        assert "company.name" in program
+        assert "alloc-entity" in s
+        assert "save" in s
+        assert "company.name" in s
+
