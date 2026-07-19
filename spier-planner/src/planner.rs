@@ -407,6 +407,36 @@ fn build_iter_plan(
     active_depths.sort();
     var_depths.sort_by_key(|(d, _)| *d);
 
+    // Filtrar var_depths: remover entradas onde a variável não é alcançável
+    // no índice escolhido neste depth. Ex: _t_d1 (depth 1, pos 3) em AEVT
+    // com _v_razao (Var, depth 2) no slot v (pos 2) bloqueando o caminho.
+    // Filtrar var_depths: remover entradas onde a variável não é alcançável
+    // no índice neste depth. Usar is_prefix_ok (Missing=ok) pois os slots
+    // Missing já foram preenchidos com _skip_* sintéticos.
+    var_depths.retain(|(depth, pos)| {
+        let slot = pattern.slot(pos);
+        let var_name = match slot {
+            Slot::Var(name) => name,
+            _ => return true, // Missing/Const: sempre ok
+        };
+        let resolved: HashSet<String> = global_var_order[..*depth].iter().cloned().collect();
+        let idx_entry = match INDEX_ORDERS.iter().find(|(n, _)| *n == idx_name) {
+            Some(e) => e,
+            None => return false,
+        };
+        let pos_in_idx = match idx_entry.1.iter().position(|p| *p == pos.as_str()) {
+            Some(p) => p,
+            None => return false,
+        };
+        idx_entry.1[..pos_in_idx]
+            .iter()
+            .all(|p| is_prefix_ok(pattern.slot(p), &resolved))
+    });
+    // Rebuild active_depths após filtro
+    active_depths = var_depths.iter().map(|(d, _)| *d).collect();
+    active_depths.sort();
+    active_depths.dedup();
+
     let global_var_order = global_var_order.to_vec();
     let trailing_bindings: Vec<(String, PlanValue)> = Vec::new();
 

@@ -679,11 +679,16 @@ fn build_triejoin_scheme(
         }
 
         // Emit scanner-push for bound values BEFORE this depth's variable.
-        // variable. Ordering comes from the planner's `bound_positions_before`.
         for (ip_idx, ip) in plan.iter_plans.iter().enumerate() {
             if !ip.var_depths.iter().any(|&(d, _)| d == depth) {
                 continue;
             }
+            // Determine the variable's position name for this scanner at this depth.
+            let var_pos = ip.var_depths.iter()
+                .find(|(d, _)| *d == depth)
+                .map(|(_, p)| p.as_str())
+                .unwrap_or("");
+
             for (pos_name, _pv) in ip.bound_positions_before(depth) {
                 if bound_emitted[ip_idx].contains(&pos_name) {
                     continue;
@@ -705,6 +710,42 @@ fn build_triejoin_scheme(
                         ]),
                     ]));
                 }
+            }
+
+            // The scanner needs to be at the variable's physical position in
+            // idx_order to iterate it. If `scan_pos` is lagging (because
+            // intermediate slots are not bound by this scanner), emit proxy
+            // scanner-iterates for the gap positions.
+            let target_idx = ip.idx_order.iter()
+                .position(|s| s == var_pos)
+                .unwrap_or(ip.idx_order.len());
+            while scan_pos[ip_idx] < target_idx {
+                let gap_slot = &ip.idx_order[scan_pos[ip_idx]];
+                if bound_emitted[ip_idx].contains(gap_slot) || ip.var_depths.iter().any(|(d, s)| *d <= depth && s == gap_slot) {
+                    // Already handled or will be handled at a different depth.
+                    scan_pos[ip_idx] += 1;
+                    continue;
+                }
+                let gap_var = format!("_skip_{}_{}", gap_slot, ip.index_name.to_ascii_lowercase());
+                scan_pos[ip_idx] += 1;
+                ops.push(SExpr::List(vec![
+                    SExpr::Symbol("scanner-iterate".into()),
+                    SExpr::List(vec![SExpr::Symbol(format!("s{ip_idx}"))]),
+                    SExpr::List(vec![SExpr::Symbol(gap_var.clone())]),
+                    SExpr::List(vec![
+                        SExpr::Symbol("begin".into()),
+                        SExpr::List(vec![
+                            SExpr::Symbol("scanner-push".into()),
+                            SExpr::Symbol(format!("s{ip_idx}")),
+                            SExpr::Symbol(gap_var.clone()),
+                        ]),
+                        SExpr::Symbol("__BODY__".into()),
+                        SExpr::List(vec![
+                            SExpr::Symbol("scanner-pop".into()),
+                            SExpr::Symbol(format!("s{ip_idx}")),
+                        ]),
+                    ]),
+                ]));
             }
         }
 
