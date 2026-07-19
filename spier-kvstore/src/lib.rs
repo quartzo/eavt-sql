@@ -3,6 +3,7 @@
 // transactor (flush/GC/scan), and cursor merge.
 
 pub mod page_store;  // cf_name_for helper
+pub mod transactor;  // EAVT engine + resolver (merged from spier-transactor)
 
 pub use spier_storage_traits::KVStoreEngine;
 

@@ -13,5 +13,5 @@ pyo3 = { version = "0.25", features = ["extension-module"] }
 spier-eavt-query = { path = "../spier-eavt-query" }
 spier-page-store-nim = { path = "../spier-page-store-nim" }
 spier-query-ir = { path = "../spier-query-ir" }
-spier-transactor = { path = "../spier-transactor" }
+spier-kvstore = { path = "../spier-kvstore" }
 spier-value = { path = "../spier-value" }

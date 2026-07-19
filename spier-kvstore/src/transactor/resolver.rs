@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 // Re-export constants and pure functions from resolver_consts
-pub use crate::resolver_consts::{
+pub use crate::transactor::resolver_consts::{
     make_entity_id, normalize_attr, partition_of, seq_of, BOOTSTRAP_FIRST_USER_ID,
     DB_CARDINALITY_AID, DB_CARDINALITY_MANY, DB_CARDINALITY_ONE, DB_IDENT_AID, DB_INDEX_AID,
     DB_PART_ID_AID, DB_TX_INSTANT_AID, DB_TYPE_BLOB, DB_TYPE_BOOLEAN, DB_TYPE_BYTES,

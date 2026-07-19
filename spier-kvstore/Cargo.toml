@@ -10,3 +10,4 @@ crate-type = ["rlib"]
 [dependencies]
 spier-storage-traits = { path = "../spier-storage-traits" }
 spier-page-store-nim = { path = "../spier-page-store-nim" }
+spier-value = { path = "../spier-value" }

@@ -16,8 +16,8 @@ use spier_datalog::{
 use spier_query_ir::SpecKind;
 use spier_sql_frontend::SqlFrontendEngine;
 use spier_sql_parse::RustStmt;
-use spier_transactor::TransactorEngine;
-pub use spier_transactor::ValueType;
+use spier_kvstore::transactor::TransactorEngine;
+pub use spier_kvstore::transactor::ValueType;
 use spier_value::{query_codec, Value};
 
 pub trait VMResultStream {
@@ -159,7 +159,7 @@ impl<'a> CompileStats for TxStats<'a> {
     }
 
     fn estimate_index_size(&self, index: &str, bound: &[u64]) -> f64 {
-        use spier_transactor::keys;
+        use spier_kvstore::transactor::keys;
         let cf = keys::cf_for_index(index);
         let cf_id = keys::cf_name_to_id(cf) as u32;
         let idx_order = keys::index_order(index);
@@ -202,12 +202,12 @@ impl<'a> CompileStats for TxStats<'a> {
     }
 
     fn is_ref_attr(&self, name: &str) -> bool {
-        use spier_transactor::resolver_consts::DB_TYPE_REF;
+        use spier_kvstore::transactor::resolver_consts::DB_TYPE_REF;
         if let Some(aid) = TransactorEngine::lookup_attr(self.tx, name).ok().flatten() {
             TransactorEngine::value_type_for(self.tx, aid)
                 .ok()
                 .flatten()
-                .map(|vt| spier_transactor::value_type_to_eid(vt) == DB_TYPE_REF)
+                .map(|vt| spier_kvstore::transactor::value_type_to_eid(vt) == DB_TYPE_REF)
                 .unwrap_or(false)
         } else {
             false
@@ -555,7 +555,7 @@ impl QueryEngine for QueryState {
         // so Ref/Boolean/Instant/etc. are decoded correctly instead of as raw Int64 bits.
         let eavt_keys = engine.tx().scan(0, b"").unwrap_or_default();
         let mut pos = 0;
-        let mut all: Vec<spier_transactor::keys::RawDatom> = Vec::new();
+        let mut all: Vec<spier_kvstore::transactor::keys::RawDatom> = Vec::new();
         while pos + 4 <= eavt_keys.len() {
             let klen = u32::from_be_bytes([
                 eavt_keys[pos],
@@ -570,13 +570,13 @@ impl QueryEngine for QueryState {
             let key = &eavt_keys[pos..pos + klen];
             pos += klen;
 
-            let raw = spier_transactor::keys::unpack_key_with_vt("eavt", key, |aid| {
+            let raw = spier_kvstore::transactor::keys::unpack_key_with_vt("eavt", key, |aid| {
                 engine
                     .tx()
                     .value_type_for(aid)
                     .ok()
                     .flatten()
-                    .map(spier_transactor::value_type_to_eid)
+                    .map(spier_kvstore::transactor::value_type_to_eid)
             });
             all.push(raw);
         }
@@ -584,7 +584,7 @@ impl QueryEngine for QueryState {
         // Keep only active (non-retracted) datoms, applying as-of if requested.
         // Group by (e, a, v) and take the latest t.
         use std::collections::HashMap;
-        let mut groups: HashMap<(u64, u32, Value), spier_transactor::keys::RawDatom> =
+        let mut groups: HashMap<(u64, u32, Value), spier_kvstore::transactor::keys::RawDatom> =
             HashMap::new();
         for raw in all {
             if let Some(as_of) = as_of_tx {
@@ -601,7 +601,7 @@ impl QueryEngine for QueryState {
             }
         }
 
-        let mut active: Vec<&spier_transactor::keys::RawDatom> =
+        let mut active: Vec<&spier_kvstore::transactor::keys::RawDatom> =
             groups.values().filter(|d| !d.retracted).collect();
         active.sort_by(|a, b| a.e.cmp(&b.e).then_with(|| a.a.cmp(&b.a)).then_with(|| format!("{:?}", a.v).cmp(&format!("{:?}", b.v))));
 

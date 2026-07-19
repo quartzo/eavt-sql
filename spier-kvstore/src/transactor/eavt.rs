@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
-use crate::keys::{self, EncodeMode, RawDatom};
-use crate::resolver::{self, Resolver};
+use crate::transactor::keys::{self, EncodeMode, RawDatom};
+use crate::transactor::resolver::{self, Resolver};
 use spier_storage_traits::KVStoreEngine;
 use spier_value::{self, Value};
 
@@ -311,7 +311,7 @@ impl EavtEngine {
         let resolver = self.resolver.lock().unwrap();
 
         fn bootstrap_meta(name: &str) -> (u32, u32, Option<u32>) {
-            use crate::resolver_consts as r;
+            use crate::transactor::resolver_consts as r;
             let vt = match name {
                 "db.ident" | "db.part/id" => r::DB_TYPE_STRING,
                 "db.txInstant" => r::DB_TYPE_INSTANT,
@@ -1062,8 +1062,8 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    use crate::resolver_consts::{make_entity_id, seq_of, PART_USER};
-    use spier_kvstore::KVState;
+    use crate::transactor::resolver_consts::{make_entity_id, seq_of, PART_USER};
+    use crate::KVState;
 
     fn eavt_key(e: u64) -> Vec<u8> {
         let mut k = Vec::with_capacity(20);

@@ -1,4 +1,4 @@
-// --- EAVT Transactor — constructs spier-kvstore directly ---
+// --- EAVT Transactor — lives in spier-kvstore ---
 pub mod constants;
 pub mod eavt;
 pub mod keys;
@@ -10,7 +10,7 @@ pub use resolver::Resolver;
 
 use std::collections::HashMap;
 
-use spier_kvstore::KVState;
+use crate::KVState;
 use spier_storage_traits::{CursorHandle, KVStoreEngine};
 use spier_value::Value;
 

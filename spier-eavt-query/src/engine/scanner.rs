@@ -2,12 +2,12 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use spier_storage_traits::Cursor;
-use spier_transactor::keys::{
+use spier_kvstore::transactor::keys::{
     decode_fixed, decode_float64, decode_int64, decode_suffix, decode_variable,
     decode_variable_unordered, encode_fixed, encode_int64, encode_suffix, encode_variable,
     encode_variable_unordered,
 };
-use spier_transactor::resolver_consts::{
+use spier_kvstore::transactor::resolver_consts::{
     DB_TYPE_BLOB, DB_TYPE_BOOLEAN, DB_TYPE_BYTES, DB_TYPE_FLOAT, DB_TYPE_INSTANT,
     DB_TYPE_STRING,
 };

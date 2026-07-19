@@ -1,6 +1,6 @@
 use spier_value::{Value, TAG_BOOL, TAG_BYTES, TAG_FLOAT64, TAG_INT64, TAG_STR};
 
-use crate::resolver_consts::{
+use crate::transactor::resolver_consts::{
     DB_TYPE_BLOB, DB_TYPE_BOOLEAN, DB_TYPE_BYTES, DB_TYPE_FLOAT, DB_TYPE_INSTANT, DB_TYPE_KEYWORD,
     DB_TYPE_REF, DB_TYPE_STRING,
 };
@@ -328,7 +328,7 @@ fn decode_value_var_vt(
     }
 }
 
-pub fn unpack_key(cf: &str, key: &[u8], resolver: &crate::Resolver) -> RawDatom {
+pub fn unpack_key(cf: &str, key: &[u8], resolver: &crate::transactor::resolver::Resolver) -> RawDatom {
     unpack_key_with_vt(cf, key, |aid| resolver.value_type_for(aid))
 }
 
@@ -490,7 +490,7 @@ pub fn build_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolver_consts::DB_TYPE_LONG;
+    use crate::transactor::resolver_consts::DB_TYPE_LONG;
 
     #[test]
     fn test_encode_decode_int64() {
