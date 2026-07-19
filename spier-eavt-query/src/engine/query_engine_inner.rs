@@ -426,7 +426,7 @@ impl EngineOps for QueryEngineInner {
 
     fn lookup_value(&self, eid: u64, attr_name: &str, ctx: &QueryContext) -> Option<Value> {
         let aid = self.lookup_attr_cached(attr_name)?;
-        let prefix: Vec<u8> = eid
+        let prefix: Vec<u8> = spier_transactor::keys::encode_int64(eid as i64)
             .to_be_bytes()
             .iter()
             .chain(aid.to_be_bytes().iter())

@@ -171,7 +171,7 @@ impl<'a> CompileStats for TxStats<'a> {
             if *pos == "a" {
                 prefix.extend_from_slice(&(val as u32).to_be_bytes());
             } else {
-                prefix.extend_from_slice(&val.to_be_bytes());
+                prefix.extend_from_slice(&keys::encode_int64(val as i64).to_be_bytes());
             }
         }
 
