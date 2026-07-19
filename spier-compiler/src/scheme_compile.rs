@@ -827,6 +827,10 @@ fn build_triejoin_scheme(
     // We generate a scanner-iterate with equality ranges to check existence.
     for pattern in &plan.lookups {
         if !pattern.is_lookup() { continue; }
+        let t_param = match &pattern.t {
+            spier_datalog::DatalogSlot::Var(name) => name.clone(),
+            _ => "_t".to_string(),
+        };
         let e_val = match &pattern.e {
             spier_datalog::DatalogSlot::Const(bv) => bound_to_sexpr(bv),
             _ => continue,
@@ -863,23 +867,20 @@ fn build_triejoin_scheme(
                     a_val,
                 ]),
                 SExpr::List(vec![
+                    SExpr::Symbol("scanner-push".into()),
+                    SExpr::Symbol(probe_s_var.clone()),
+                    v_val,
+                ]),
+                SExpr::List(vec![
                     SExpr::Symbol("scanner-iterate".into()),
                     SExpr::List(vec![SExpr::Symbol(probe_s_var.clone())]),
-                    SExpr::List(vec![SExpr::Symbol("_v".into())]),
-                    SExpr::Symbol(":ranges".into()),
-                    SExpr::List(vec![
-                        SExpr::Symbol("ranges-create".into()),
-                        SExpr::List(vec![
-                            SExpr::Symbol("=".into()),
-                            v_val,
-                        ]),
-                    ]),
+                    SExpr::List(vec![SExpr::Symbol(t_param.clone())]),
                     SExpr::List(vec![
                         SExpr::Symbol("begin".into()),
                         SExpr::List(vec![
                             SExpr::Symbol("scanner-push".into()),
                             SExpr::Symbol(probe_s_var.clone()),
-                            SExpr::Symbol("_v".into()),
+                            SExpr::Symbol(t_param.clone()),
                         ]),
                         body,
                         SExpr::List(vec![
@@ -887,6 +888,10 @@ fn build_triejoin_scheme(
                             SExpr::Symbol(probe_s_var.clone()),
                         ]),
                     ]),
+                ]),
+                SExpr::List(vec![
+                    SExpr::Symbol("scanner-pop".into()),
+                    SExpr::Symbol(probe_s_var.clone()),
                 ]),
                 SExpr::List(vec![
                     SExpr::Symbol("scanner-pop".into()),
