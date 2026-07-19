@@ -432,7 +432,8 @@ proc journalRead(s: var PageStoreInner): seq[byte] =
   let rc = s.journal.read(s.journal.handle, addr outBuf, addr outLen, addr err)
   if rc != 0: return @[]
   result = newSeq[byte](outLen.int)
-  copyMem(unsafeAddr result[0], outBuf, outLen.int)
+  if outLen.int > 0:
+    copyMem(unsafeAddr result[0], outBuf, outLen.int)
   s.journal.freeBuf(outBuf)
 
 proc journalSize(s: var PageStoreInner): uint64 =
@@ -847,7 +848,8 @@ proc psGetKeysInPrefix(h: pointer; cf: cuint; prefix: ptr Byte; plen: csize_t;
         packed.add byte(kl and 0xFF)
         packed.add k
       let buf = allocByteBuf(packed.len)
-      copyMem(buf, unsafeAddr packed[0], packed.len)
+      if packed.len > 0:
+        copyMem(buf, unsafeAddr packed[0], packed.len)
       outBuf[] = buf
       outLen[] = packed.len.csize_t
       setErr(errOut, ErrOk)
@@ -862,7 +864,8 @@ proc psKeyExists(h: pointer; cf: cuint; key: ptr Byte; klen: csize_t;
   s.lock.withLock:
     try:
       var k = newSeq[byte](klen.int)
-      copyMem(unsafeAddr k[0], key, klen.int)
+      if klen.int > 0:
+        copyMem(unsafeAddr k[0], key, klen.int)
       let present = keyExists(s[], cf.int, k)
       outPresent[] = if present: 1 else: 0
       setErr(errOut, ErrOk)
@@ -893,8 +896,10 @@ proc psPageCountInRange(h: pointer; cf: cuint; start: ptr Byte; slen: csize_t;
     try:
       var st = newSeq[byte](slen.int)
       var en = newSeq[byte](elen.int)
-      copyMem(unsafeAddr st[0], start, slen.int)
-      copyMem(unsafeAddr en[0], endp, elen.int)
+      if slen.int > 0:
+        copyMem(unsafeAddr st[0], start, slen.int)
+      if elen.int > 0:
+        copyMem(unsafeAddr en[0], endp, elen.int)
       outCount[] = pageCountInRange(s[], cf.int, st, en)
       setErr(errOut, ErrOk)
       return 0
@@ -911,7 +916,8 @@ proc psCommitMerge*(h: pointer; data: ptr Byte; dlen: csize_t;
   s.lock.withLock:
     try:
       var buf = newSeq[byte](dlen.int)
-      copyMem(unsafeAddr buf[0], data, dlen.int)
+      if dlen.int > 0:
+        copyMem(unsafeAddr buf[0], data, dlen.int)
       var keysByCf: seq[(int, seq[seq[byte]])] = @[]
       var pos = 0
       while pos + 5 <= buf.len:
@@ -944,8 +950,10 @@ proc psJournalPut(h: pointer; key: ptr Byte; klen: csize_t;
     try:
       var k = newSeq[byte](klen.int)
       var v = newSeq[byte](vlen.int)
-      copyMem(unsafeAddr k[0], key, klen.int)
-      copyMem(unsafeAddr v[0], val, vlen.int)
+      if klen.int > 0:
+        copyMem(unsafeAddr k[0], key, klen.int)
+      if vlen.int > 0:
+        copyMem(unsafeAddr v[0], val, vlen.int)
       journalAppend(s[], k, v)
       setErr(errOut, ErrOk); return 0
     except:
@@ -958,7 +966,8 @@ proc psJournalScan(h: pointer; outBuf: ptr pointer; outLen: ptr csize_t;
     try:
       let data = journalRead(s[])
       let buf = allocByteBuf(data.len)
-      copyMem(buf, unsafeAddr data[0], data.len)
+      if data.len > 0:
+        copyMem(buf, unsafeAddr data[0], data.len)
       outBuf[] = buf; outLen[] = data.len.csize_t
       setErr(errOut, ErrOk); return 0
     except:
@@ -982,7 +991,8 @@ proc psGcFull(h: pointer; maxAgeSecs: uint64; maxRootCount: cuint;
     try:
       let result = gcFull(s[], maxAgeSecs, maxRootCount.int, dryRun != 0)
       let buf = allocByteBuf(result.len)
-      copyMem(buf, unsafeAddr result[0], result.len)
+      if result.len > 0:
+        copyMem(buf, unsafeAddr result[0], result.len)
       outBuf[] = buf; outLen[] = result.len.csize_t
       setErr(errOut, ErrOk); return 0
     except:
@@ -995,7 +1005,8 @@ proc psCfStats(h: pointer; cf: cuint; outBuf: ptr pointer; outLen: ptr csize_t;
     try:
       let data = cfStats(s[], cf.int)
       let buf = allocByteBuf(data.len)
-      copyMem(buf, unsafeAddr data[0], data.len)
+      if data.len > 0:
+        copyMem(buf, unsafeAddr data[0], data.len)
       outBuf[] = buf; outLen[] = data.len.csize_t
       setErr(errOut, ErrOk); return 0
     except:
@@ -1008,7 +1019,8 @@ proc psDbStats(h: pointer; outBuf: ptr pointer; outLen: ptr csize_t;
     try:
       let data = dbStats(s[])
       let buf = allocByteBuf(data.len)
-      copyMem(buf, unsafeAddr data[0], data.len)
+      if data.len > 0:
+        copyMem(buf, unsafeAddr data[0], data.len)
       outBuf[] = buf; outLen[] = data.len.csize_t
       setErr(errOut, ErrOk); return 0
     except:

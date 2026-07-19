@@ -440,3 +440,19 @@ impl TransactorEngine for TransactorState {
         Ok(self.eavt.resolve_as_of_tx(Some(as_of_us), &resolver))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_transactor_state_open_memory() {
+        let mut cfg = HashMap::new();
+        cfg.insert("backend".to_string(), "memory".to_string());
+        let state = TransactorState::open(&cfg).unwrap();
+        // If we get here, bootstrap_resolver + persist_bootstrap_schema worked.
+        // Try a basic operation.
+        let attrs = state.lookup_attr("db.ident").unwrap();
+        assert!(attrs.is_some(), "db.ident should be declared after bootstrap");
+    }
+}
