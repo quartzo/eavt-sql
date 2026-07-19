@@ -660,6 +660,8 @@ fn build_triejoin_scheme(
 
     // Track which bound values have been emitted as scanner-push.
     let mut bound_emitted: Vec<HashSet<String>> = vec![HashSet::new(); plan.iter_plans.len()];
+    // Track current position per scanner in idx_order. Each push/iterate advances.
+    let mut scan_pos: Vec<usize> = vec![0; plan.iter_plans.len()];
 
     // Process each depth in forward order (outermost first).
     for depth in 0..num_depths {
@@ -688,6 +690,7 @@ fn build_triejoin_scheme(
                 }
                 if let Some(val_expr) = bind_vals[ip_idx].get(&pos_name) {
                     bound_emitted[ip_idx].insert(pos_name.clone());
+                    scan_pos[ip_idx] += 1;
                     ops.push(SExpr::List(vec![
                         SExpr::Symbol("begin".into()),
                         SExpr::List(vec![

@@ -17,15 +17,24 @@ fn select_scheme_result(
     CompileResultSt {
         program: Program::SelectScheme(scheme_program, meta),
         traces: plan.plan_traces.clone(),
+        iter_plans: plan.iter_plans.clone(),
+        lookups: plan.lookups.clone(),
+        ordered_vars: plan.ordered_vars.clone(),
+        history: plan.history,
+        exists_mode: plan.exists_mode,
     }
 }
 
 /// Compiler output — crosses FFI as 1 boxed pointer.
-/// Carries the compiled program and plan traces (for EXPLAIN).
 #[derive(Clone)]
 pub struct CompileResultSt {
     pub program: Program,
     pub traces: Vec<spier_planner::PlanTrace>,
+    pub iter_plans: Vec<spier_planner::IterPlanData>,
+    pub lookups: Vec<spier_datalog::Pattern>,
+    pub ordered_vars: Vec<String>,
+    pub history: bool,
+    pub exists_mode: bool,
 }
 
 pub trait CompilerEngine: Send + Sync {
@@ -144,6 +153,11 @@ impl CompilerEngine for Compiler {
                 Ok(CompileResultSt {
                     program: Program::Scheme(scheme),
                     traces: Vec::new(),
+                    iter_plans: Vec::new(),
+                    lookups: Vec::new(),
+                    ordered_vars: Vec::new(),
+                    history: false,
+                    exists_mode: false,
                 })
             }
             RustStmt::Attribute(attr_stmt) => {
@@ -151,6 +165,11 @@ impl CompilerEngine for Compiler {
                 Ok(CompileResultSt {
                     program: Program::Scheme(scheme),
                     traces: Vec::new(),
+                    iter_plans: Vec::new(),
+                    lookups: Vec::new(),
+                    ordered_vars: Vec::new(),
+                    history: false,
+                    exists_mode: false,
                 })
             }
             RustStmt::Partition(part_stmt) => {
@@ -158,6 +177,11 @@ impl CompilerEngine for Compiler {
                 Ok(CompileResultSt {
                     program: Program::Scheme(scheme),
                     traces: Vec::new(),
+                    iter_plans: Vec::new(),
+                    lookups: Vec::new(),
+                    ordered_vars: Vec::new(),
+                    history: false,
+                    exists_mode: false,
                 })
             }
             RustStmt::Delete(delete_stmt) => {
@@ -167,6 +191,11 @@ impl CompilerEngine for Compiler {
                 Ok(CompileResultSt {
                     program: Program::Scheme(scheme),
                     traces: Vec::new(),
+                    iter_plans: Vec::new(),
+                    lookups: Vec::new(),
+                    ordered_vars: Vec::new(),
+                    history: false,
+                    exists_mode: false,
                 })
             }
             _ => Err(

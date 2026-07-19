@@ -13,6 +13,7 @@ use spier_datalog::{
     resolve::{compute_plan_stats, resolve_ir},
     DatalogIR, DatalogNumIR, DatalogNumIRSt,
 };
+use spier_query_ir::SpecKind;
 use spier_sql_frontend::SqlFrontendEngine;
 use spier_sql_parse::RustStmt;
 use spier_transactor::TransactorEngine;
@@ -418,6 +419,57 @@ impl QueryEngine for QueryState {
         let mut out = String::new();
         if let Some(ir) = num_ir {
             out.push_str(&format!("{}\n", ir));
+        }
+        if !result.iter_plans.is_empty() {
+            out.push_str("Plan:\n");
+            let hist_tag = if result.history { " (history)" } else { "" };
+            let exists_tag = if result.exists_mode { " (exists)" } else { "" };
+            out.push_str(&format!(
+                "  Join order: [{}]{}{}\n",
+                result.ordered_vars.join(", "),
+                hist_tag,
+                exists_tag,
+            ));
+            for (i, ip) in result.iter_plans.iter().enumerate() {
+                let idx_order = &ip.idx_order;
+                out.push_str(&format!("  p{i} @ {}\n", ip.index_name));
+                for (pos, slot) in idx_order.iter().enumerate() {
+                    let datalog_pos = match slot.as_str() {
+                        "e" => 0, "a" => 1, "v" => 2, "t" => 3, "added" => 4,
+                        _ => pos,
+                    };
+                    let spec = &ip.specs[datalog_pos];
+                    let bound_val = ip.bound_ints.get(slot);
+                    let var_label = ip.var_depths
+                        .iter()
+                        .find(|(_, ref p)| p == slot)
+                        .map(|(d, _)| format!(" [depth {d}]"));
+                        match spec {
+                            SpecKind::Var(name) => {
+                                out.push_str(&format!("    {} = ?{}{}\n",
+                                    slot, name, var_label.as_deref().unwrap_or("")));
+                            }
+                            SpecKind::Bound(0) => {
+                                out.push_str(&format!("    {} = _\n", slot));
+                            }
+                            SpecKind::BoundAttr(aid) => {
+                                out.push_str(&format!("    {} = attr(id={})\n", slot, aid));
+                            }
+                            SpecKind::BoundParam(idx) => {
+                                out.push_str(&format!("    {} = %{}\n", slot, idx));
+                            }
+                            _ => {
+                                out.push_str(&format!("    {} = {}\n", slot,
+                                    match spec {
+                                        SpecKind::Bound(n) => format!("#{n}"),
+                                        SpecKind::BoundValue(v) => format!("{v:?}"),
+                                        _ => format!("{:?}", spec),
+                                    }));
+                            }
+                    }
+                }
+            }
+            out.push_str("\n");
         }
         for t in &result.traces {
             out.push_str(&format!("{t}\n"));

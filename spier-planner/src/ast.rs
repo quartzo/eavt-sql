@@ -175,6 +175,7 @@ pub struct QueryPlanResult {
 fn fmt_spec(spec: &SpecKind) -> String {
     match spec {
         SpecKind::Var(name) => format!("?{name}"),
+        SpecKind::Bound(0) => "_".into(),
         SpecKind::Bound(n) => format!("#{n}"),
         SpecKind::BoundAttr(aid) => format!("attr({aid})"),
         SpecKind::BoundValue(v) => format!("{v:?}"),
@@ -206,29 +207,30 @@ impl std::fmt::Display for QueryPlanResult {
         if !self.iter_plans.is_empty() {
             writeln!(f, "Iter plans:")?;
             for (i, ip) in self.iter_plans.iter().enumerate() {
-                let specs: Vec<String> = ip.specs.iter().map(fmt_spec).collect();
-                let bound: Vec<String> = ip
-                    .bound_ints
-                    .iter()
-                    .map(|(k, pv)| format!("{k}={pv:?}"))
-                    .collect();
-                let depths: Vec<String> = ip
-                    .var_depths
-                    .iter()
-                    .map(|(d, pos)| format!("{pos}@d{d}"))
-                    .collect();
-                writeln!(
-                    f,
-                    "  p{i} @ {} [{}] depths=[{}]{}",
-                    ip.index_name,
-                    specs.join(", "),
-                    depths.join(", "),
-                    if bound.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" bound={{{}}}", bound.join(", "))
+                writeln!(f, "  p{i} @ {}", ip.index_name)?;
+                for (pos, slot) in ip.idx_order.iter().enumerate() {
+                    let spec = &ip.specs[pos];
+                    let var_label = ip.var_depths
+                        .iter()
+                        .find(|(d, ref p)| p == slot)
+                        .map(|(d, _)| format!("  [depth {d}]"));
+                    match spec {
+                        SpecKind::Var(name) => {
+                            writeln!(f, "    {slot} = ?{name}{}",
+                                var_label.as_deref().unwrap_or(""))?;
+                        }
+                        SpecKind::BoundAttr(_) | SpecKind::BoundValue(_) | SpecKind::Bound(_) | SpecKind::BoundParam(_) => {
+                            let bound_val = ip.bound_ints.get(slot);
+                            writeln!(f, "    {slot} = {}{}",
+                                fmt_spec(spec),
+                                if let Some(pv) = bound_val {
+                                    format!("  (attr: {pv:?})")
+                                } else {
+                                    String::new()
+                                })?;
+                        }
                     }
-                )?;
+                }
             }
         }
 
