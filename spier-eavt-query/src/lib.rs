@@ -291,6 +291,27 @@ fn do_compile(
     }
 }
 
+// Additional KVStore-adjacent methods for PyO3 (not part of QueryEngine trait)
+impl QueryState {
+    pub fn allocate_in_partition(&self, partition_id: u64) -> Result<u64, String> {
+        let inner = self.inner.read().unwrap();
+        let engine = inner.engine.as_ref().ok_or("engine not open")?;
+        engine.tx().allocate_in_partition(partition_id)
+    }
+
+    pub fn is_unique(&self, aid: u32) -> Result<bool, String> {
+        let inner = self.inner.read().unwrap();
+        let engine = inner.engine.as_ref().ok_or("engine not open")?;
+        engine.tx().is_unique(aid)
+    }
+
+    pub fn default_user_partition(&self) -> Result<u64, String> {
+        let inner = self.inner.read().unwrap();
+        let engine = inner.engine.as_ref().ok_or("engine not open")?;
+        engine.tx().default_user_partition()
+    }
+}
+
 impl QueryEngine for QueryState {
     // ------------------------------------------------------------------
     // 1. QUERY

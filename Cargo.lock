@@ -1215,17 +1215,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "spier-transactor-py"
-version = "0.1.0"
-dependencies = [
- "pyo3",
- "spier-page-store-nim",
- "spier-storage-traits",
- "spier-transactor",
- "spier-value",
-]
-
-[[package]]
 name = "spier-value"
 version = "0.1.0"
 dependencies = [

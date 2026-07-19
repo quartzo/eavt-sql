@@ -260,6 +260,21 @@ impl PyEngine {
             .map_err(to_string_err)
     }
 
+    fn allocate_in_partition(&self, py: Python<'_>, partition_id: u64) -> PyResult<u64> {
+        py.allow_threads(|| self.inner.allocate_in_partition(partition_id))
+            .map_err(to_string_err)
+    }
+
+    fn is_unique(&self, py: Python<'_>, aid: u32) -> PyResult<bool> {
+        py.allow_threads(|| self.inner.is_unique(aid))
+            .map_err(to_string_err)
+    }
+
+    fn default_user_partition(&self, py: Python<'_>) -> PyResult<u64> {
+        py.allow_threads(|| self.inner.default_user_partition())
+            .map_err(to_string_err)
+    }
+
     fn lookup_entity(
         &self,
         py: Python<'_>,

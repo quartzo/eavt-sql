@@ -5,7 +5,7 @@ import struct
 
 import pytest
 
-import spier_transactor_py
+import spier_eavt_query_py
 from eavt_sql.engine import EAVTEngine
 
 U64_MAX = 0xFFFFFFFFFFFFFFFF
@@ -28,7 +28,7 @@ def _scan_via_sql(path, eid, handle=None):
 
 @pytest.fixture
 def handle(tmp_path):
-    h = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
+    h = spier_eavt_query_py.Engine({"backend": "file", "path": str(tmp_path)})
     yield h
     h.close()
 
@@ -36,16 +36,16 @@ def handle(tmp_path):
 class TestEavtSchemaReflection:
     def test_eavt_methods_exist(self):
         expected = {
-            "eavt_save", "eavt_retract",
-            "eavt_declare_attr", "eavt_declare_attr_from_sql",
-            "eavt_declare_partition", "eavt_allocate_tx",
+            "save", "retract",
+            "declare_attr", "declare_attr_from_sql",
+            "declare_partition", "allocate_tx",
             "lookup_attr", "is_declared", "attr_name",
             "value_type_for", "is_many", "is_unique",
-            "is_unique_attr", "default_user_partition",
+            "allocate_in_partition", "is_unique_attr", "default_user_partition",
             "partition_id_for", "lookup_entity",
-            "allocate_entity_id", "allocate_in_partition", "allocate_t",
+            "allocate_entity_id", "allocate_tx",
         }
-        missing = {n for n in expected if not hasattr(spier_transactor_py.Engine, n)}
+        missing = {n for n in expected if not hasattr(spier_eavt_query_py.Engine, n)}
         assert not missing, f"missing typed methods: {missing}"
 
 # ---------------------------------------------------------------------------
@@ -55,7 +55,7 @@ class TestEavtSchemaReflection:
 class TestEavtDeclareAttr:
     def test_declare_attr_returns_aid(self, handle):
         h = handle
-        aid = h.eavt_declare_attr(**{
+        aid = h.declare_attr(**{
             "name": "company.name", "value_type": "String",
             "many": False, "current_t": U64_MAX,
         })
@@ -64,11 +64,11 @@ class TestEavtDeclareAttr:
 
     def test_declare_attr_idempotent(self, handle):
         h = handle
-        aid1 = h.eavt_declare_attr(**{
+        aid1 = h.declare_attr(**{
             "name": "company.name", "value_type": "String",
             "many": False, "current_t": U64_MAX,
         })
-        aid2 = h.eavt_declare_attr(**{
+        aid2 = h.declare_attr(**{
             "name": "company.name", "value_type": "String",
             "many": False, "current_t": U64_MAX,
         })
@@ -76,7 +76,7 @@ class TestEavtDeclareAttr:
 
     def test_declare_attr_many(self, handle):
         h = handle
-        aid = h.eavt_declare_attr(**{
+        aid = h.declare_attr(**{
             "name": "company.tags", "value_type": "String",
             "many": True, "current_t": U64_MAX,
         })
@@ -84,7 +84,7 @@ class TestEavtDeclareAttr:
 
     def test_declare_attr_cardinality_one(self, handle):
         h = handle
-        aid = h.eavt_declare_attr(**{
+        aid = h.declare_attr(**{
             "name": "company.name", "value_type": "String",
             "many": False, "current_t": U64_MAX,
         })
@@ -98,7 +98,7 @@ class TestEavtDeclareAttr:
 class TestEavtResolver:
     def test_lookup_attr_found(self, handle):
         h = handle
-        h.eavt_declare_attr(**{
+        h.declare_attr(**{
             "name": "company.name", "value_type": "String",
             "many": False, "current_t": U64_MAX,
         })
@@ -114,7 +114,7 @@ class TestEavtResolver:
 
     def test_is_declared_true(self, handle):
         h = handle
-        aid = h.eavt_declare_attr(**{
+        aid = h.declare_attr(**{
             "name": "company.name", "value_type": "String",
             "many": False, "current_t": U64_MAX,
         })
@@ -126,7 +126,7 @@ class TestEavtResolver:
 
     def test_attr_name(self, handle):
         h = handle
-        aid = h.eavt_declare_attr(**{
+        aid = h.declare_attr(**{
             "name": "person.age", "value_type": "Long",
             "many": False, "current_t": U64_MAX,
         })
@@ -135,7 +135,7 @@ class TestEavtResolver:
 
     def test_value_type_for(self, handle):
         h = handle
-        aid = h.eavt_declare_attr(**{
+        aid = h.declare_attr(**{
             "name": "person.age", "value_type": "Long",
             "many": False, "current_t": U64_MAX,
         })
@@ -148,7 +148,7 @@ class TestEavtResolver:
 
     def test_is_unique_false_by_default(self, handle):
         h = handle
-        aid = h.eavt_declare_attr(**{
+        aid = h.declare_attr(**{
             "name": "company.name", "value_type": "String",
             "many": False, "current_t": U64_MAX,
         })
@@ -166,7 +166,7 @@ class TestEavtResolver:
 class TestEavtDeclareAttrFromSql:
     def test_declare_string_from_sql(self, handle):
         h = handle
-        h.eavt_declare_attr_from_sql(**{
+        h.declare_attr_from_sql(**{
             "attr": "company.name", "type_name": "STRING",
             "many": False, "unique": False, "current_t": U64_MAX,
         })
@@ -177,7 +177,7 @@ class TestEavtDeclareAttrFromSql:
 
     def test_declare_unique_from_sql(self, handle):
         h = handle
-        h.eavt_declare_attr_from_sql(**{
+        h.declare_attr_from_sql(**{
             "attr": "company.cnpj", "type_name": "STRING",
             "many": False, "unique": True, "current_t": U64_MAX,
         })
@@ -188,7 +188,7 @@ class TestEavtDeclareAttrFromSql:
 
     def test_declare_long_from_sql(self, handle):
         h = handle
-        h.eavt_declare_attr_from_sql(**{
+        h.declare_attr_from_sql(**{
             "attr": "person.age", "type_name": "LONG",
             "many": False, "unique": False, "current_t": U64_MAX,
         })
@@ -198,7 +198,7 @@ class TestEavtDeclareAttrFromSql:
 
     def test_declare_many_from_sql(self, handle):
         h = handle
-        h.eavt_declare_attr_from_sql(**{
+        h.declare_attr_from_sql(**{
             "attr": "company.tags", "type_name": "STRING",
             "many": True, "unique": False, "current_t": U64_MAX,
         })
@@ -207,7 +207,7 @@ class TestEavtDeclareAttrFromSql:
 
     def test_declare_bytes_from_sql(self, handle):
         h = handle
-        h.eavt_declare_attr_from_sql(**{
+        h.declare_attr_from_sql(**{
             "attr": "file.data", "type_name": "BYTES",
             "many": False, "unique": False, "current_t": U64_MAX,
         })
@@ -234,20 +234,20 @@ class TestEntityAllocation:
 
     def test_allocate_t(self, handle):
         h = handle
-        t1 = h.allocate_t()
-        t2 = h.allocate_t()
+        t1 = h.allocate_tx()
+        t2 = h.allocate_tx()
         assert t2 > t1
 
     def test_allocate_tx(self, handle):
         h = handle
-        t = h.eavt_allocate_tx()
+        t = h.allocate_tx()
         assert isinstance(t, int)
         assert t > 0
 
     def test_allocate_tx_creates_tx_entity(self, handle):
         h = handle
-        t1 = h.eavt_allocate_tx()
-        t2 = h.eavt_allocate_tx()
+        t1 = h.allocate_tx()
+        t2 = h.allocate_tx()
         assert t2 > t1
 
 
@@ -258,24 +258,24 @@ class TestEntityAllocation:
 class TestEavtPartitions:
     def test_declare_partition(self, handle):
         h = handle
-        pid = h.eavt_declare_partition(**{
+        pid = h.declare_partition(**{
             "name": "cnpj", "current_t": U64_MAX,
         })
         assert isinstance(pid, int)
 
     def test_declare_partition_idempotent(self, handle):
         h = handle
-        pid1 = h.eavt_declare_partition(**{
+        pid1 = h.declare_partition(**{
             "name": "cnpj", "current_t": U64_MAX,
         })
-        pid2 = h.eavt_declare_partition(**{
+        pid2 = h.declare_partition(**{
             "name": "cnpj", "current_t": U64_MAX,
         })
         assert pid1 == pid2
 
     def test_partition_id_for(self, handle):
         h = handle
-        pid = h.eavt_declare_partition(**{
+        pid = h.declare_partition(**{
             "name": "cnpj", "current_t": U64_MAX,
         })
         result = h.partition_id_for(**{"name": "cnpj"})
@@ -292,7 +292,7 @@ class TestEavtPartitions:
 
     def test_allocate_in_partition(self, handle):
         h = handle
-        pid = h.eavt_declare_partition(**{
+        pid = h.declare_partition(**{
             "name": "cnpj", "current_t": U64_MAX,
         })
         eid1 = h.allocate_in_partition(**{"partition_id": pid})
@@ -309,12 +309,12 @@ class TestEavtPartitions:
 class TestEavtSave:
     def test_save_text_value(self, handle, tmp_path):
         h = handle
-        h.eavt_declare_attr(**{
+        h.declare_attr(**{
             "name": "company.name", "value_type": "String",
             "many": False, "current_t": U64_MAX,
         })
         eid = h.allocate_entity_id()
-        h.eavt_save(**{
+        h.save(**{
             "e_id": eid, "attr": "company.name",
             "v": "Acme Inc",
             "t": U64_MAX, "as_of_us": U64_MAX,
@@ -324,12 +324,12 @@ class TestEavtSave:
 
     def test_save_long_value(self, handle, tmp_path):
         h = handle
-        h.eavt_declare_attr(**{
+        h.declare_attr(**{
             "name": "person.age", "value_type": "Long",
             "many": False, "current_t": U64_MAX,
         })
         eid = h.allocate_entity_id()
-        h.eavt_save(**{
+        h.save(**{
             "e_id": eid, "attr": "person.age",
             "v": 42,
             "t": U64_MAX, "as_of_us": U64_MAX,
@@ -339,12 +339,12 @@ class TestEavtSave:
 
     def test_save_boolean_value(self, handle, tmp_path):
         h = handle
-        h.eavt_declare_attr(**{
+        h.declare_attr(**{
             "name": "flag.active", "value_type": "Boolean",
             "many": False, "current_t": U64_MAX,
         })
         eid = h.allocate_entity_id()
-        h.eavt_save(**{
+        h.save(**{
             "e_id": eid, "attr": "flag.active",
             "v": True,
             "t": U64_MAX, "as_of_us": U64_MAX,
@@ -354,12 +354,12 @@ class TestEavtSave:
 
     def test_save_float_value(self, handle, tmp_path):
         h = handle
-        h.eavt_declare_attr(**{
+        h.declare_attr(**{
             "name": "sensor.temp", "value_type": "Float",
             "many": False, "current_t": U64_MAX,
         })
         eid = h.allocate_entity_id()
-        h.eavt_save(**{
+        h.save(**{
             "e_id": eid, "attr": "sensor.temp",
             "v": 23.5,
             "t": U64_MAX, "as_of_us": U64_MAX,
@@ -369,12 +369,12 @@ class TestEavtSave:
 
     def test_save_bytes_value(self, handle, tmp_path):
         h = handle
-        h.eavt_declare_attr(**{
+        h.declare_attr(**{
             "name": "file.data", "value_type": "Bytes",
             "many": False, "current_t": U64_MAX,
         })
         eid = h.allocate_entity_id()
-        h.eavt_save(**{
+        h.save(**{
             "e_id": eid, "attr": "file.data",
             "v": b"\x00\x01\x02\xff",
             "t": U64_MAX, "as_of_us": U64_MAX,
@@ -384,12 +384,12 @@ class TestEavtSave:
 
     def test_save_cardinality_one_overwrites(self, handle, tmp_path):
         h = handle
-        h.eavt_declare_attr(**{
+        h.declare_attr(**{
             "name": "company.name", "value_type": "String",
             "many": False, "current_t": U64_MAX,
         })
         eid = h.allocate_entity_id()
-        h.eavt_save(**{
+        h.save(**{
             "e_id": eid, "attr": "company.name",
             "v": "Old Name",
             "t": U64_MAX, "as_of_us": U64_MAX,
@@ -397,7 +397,7 @@ class TestEavtSave:
         rows_before = _scan_via_sql(str(tmp_path), eid, h)
         assert any(r[1] == "Old Name" for r in rows_before)
 
-        h.eavt_save(**{
+        h.save(**{
             "e_id": eid, "attr": "company.name",
             "v": "New Name",
             "t": U64_MAX, "as_of_us": U64_MAX,
@@ -409,12 +409,12 @@ class TestEavtSave:
 
     def test_save_cardinality_many_adds(self, handle, tmp_path):
         h = handle
-        h.eavt_declare_attr(**{
+        h.declare_attr(**{
             "name": "company.tags", "value_type": "String",
             "many": True, "current_t": U64_MAX,
         })
         eid = h.allocate_entity_id()
-        h.eavt_save(**{
+        h.save(**{
             "e_id": eid, "attr": "company.tags",
             "v": "tag1",
             "t": U64_MAX, "as_of_us": U64_MAX,
@@ -422,7 +422,7 @@ class TestEavtSave:
         rows1 = _scan_via_sql(str(tmp_path), eid, h)
         assert any(r[1] == "tag1" for r in rows1)
 
-        h.eavt_save(**{
+        h.save(**{
             "e_id": eid, "attr": "company.tags",
             "v": "tag2",
             "t": U64_MAX, "as_of_us": U64_MAX,
@@ -441,17 +441,17 @@ class TestEavtSave:
 class TestEavtRetract:
     def test_retract_removes_datom(self, handle, tmp_path):
         h = handle
-        h.eavt_declare_attr(**{
+        h.declare_attr(**{
             "name": "company.tags", "value_type": "String",
             "many": True, "current_t": U64_MAX,
         })
         eid = h.allocate_entity_id()
-        h.eavt_save(**{
+        h.save(**{
             "e_id": eid, "attr": "company.tags",
             "v": "tag1",
             "t": U64_MAX, "as_of_us": U64_MAX,
         })
-        h.eavt_save(**{
+        h.save(**{
             "e_id": eid, "attr": "company.tags",
             "v": "tag2",
             "t": U64_MAX, "as_of_us": U64_MAX,
@@ -461,7 +461,7 @@ class TestEavtRetract:
         assert "tag1" in values_before
         assert "tag2" in values_before
 
-        h.eavt_retract(**{
+        h.retract(**{
             "e_id": eid, "attr": "company.tags",
             "v": "tag1",
             "current_t": U64_MAX, "as_of_us": U64_MAX,
@@ -479,12 +479,12 @@ class TestEavtRetract:
 class TestEavtLookupEntity:
     def test_lookup_entity_found(self, handle):
         h = handle
-        h.eavt_declare_attr_from_sql(**{
+        h.declare_attr_from_sql(**{
             "attr": "company.cnpj", "type_name": "STRING",
             "many": False, "unique": True, "current_t": U64_MAX,
         })
         eid = h.allocate_entity_id()
-        h.eavt_save(**{
+        h.save(**{
             "e_id": eid, "attr": "company.cnpj",
             "v": "12345678000190",
             "t": U64_MAX, "as_of_us": U64_MAX,
@@ -497,7 +497,7 @@ class TestEavtLookupEntity:
 
     def test_lookup_entity_not_found(self, handle):
         h = handle
-        h.eavt_declare_attr_from_sql(**{
+        h.declare_attr_from_sql(**{
             "attr": "company.cnpj", "type_name": "STRING",
             "many": False, "unique": True, "current_t": U64_MAX,
         })
@@ -514,29 +514,29 @@ class TestEavtLookupEntity:
 
 class TestEavtPersistence:
     def test_declare_attr_survives_reopen(self, tmp_path):
-        h = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
+        h = spier_eavt_query_py.Engine({"backend": "file", "path": str(tmp_path)})
 
-        aid1 = h.eavt_declare_attr(**{
+        aid1 = h.declare_attr(**{
             "name": "company.name", "value_type": "String",
             "many": False, "current_t": U64_MAX,
         })
         h.flush()
         h.close()
 
-        h2 = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
+        h2 = spier_eavt_query_py.Engine({"backend": "file", "path": str(tmp_path)})
         aid2 = h2.lookup_attr(**{"name": "company.name"})
         assert aid2 == aid1
         h2.close()
 
     def test_saved_data_survives_reopen(self, tmp_path):
-        h = spier_transactor_py.Engine({"backend": "file", "path": str(tmp_path)})
+        h = spier_eavt_query_py.Engine({"backend": "file", "path": str(tmp_path)})
 
-        h.eavt_declare_attr(**{
+        h.declare_attr(**{
             "name": "company.name", "value_type": "String",
             "many": False, "current_t": U64_MAX,
         })
         eid = h.allocate_entity_id()
-        h.eavt_save(**{
+        h.save(**{
             "e_id": eid, "attr": "company.name",
             "v": "Acme",
             "t": U64_MAX, "as_of_us": U64_MAX,
