@@ -225,8 +225,8 @@ proc deserializeIndexPage(data: openArray[byte]): seq[(seq[byte], array[16, byte
 # ══════════════════════════════════════════════════════════════════════════════
 
 proc makeRootName(): string =
-  let ts = getMonoTime().ticks
-  let neg = (not ts) + 1
+  let ts = getTime().toUnix * 1_000_000_000 + getTime().nanosecond.int64
+  let neg = cast[uint64]((not ts) + 1)
   &"root_{neg:016x}"
 
 proc parseRootUs(name: string): int64 =
@@ -1080,20 +1080,33 @@ proc initVtable(vt: NimPageStoreVtablePtr; s: ptr PageStoreInner) =
 
 proc openPageStore*(keys, vals: CStringArr; count: cint;
                      errOut: ptr cint): NimPageStoreVtablePtr =
-  let backend = "memory"
+  let config = parseConfig(keys, vals, count.csize_t)
+  let backend = config.getOrDefault("backend", "memory")
+  let readOnly = config.getOrDefault("read_only", "false") == "true"
+  let pageCacheSize = parseInt(config.getOrDefault("page_cache_size", "67108864"))
   let numCf = 4
 
-  let blobs = nim_blob_memory_open(keys, vals, count, errOut)
+  let blobs =
+    case backend:
+    of "memory": nim_blob_memory_open(keys, vals, count, errOut)
+    of "file": nim_blob_file_open(keys, vals, count, errOut)
+    of "s3": nim_blob_s3_open(keys, vals, count, errOut)
+    else: nil
+
   if blobs == nil:
     setErr(errOut, ErrConfig)
     return nil
 
+  let journal =
+    if backend == "memory": nil
+    else: nim_journal_open(keys, vals, count, errOut)
+
   let s = cast[ptr PageStoreInner](allocShared0(sizeof(PageStoreInner)))
   s.blobs = blobs
-  s.journal = nil
+  s.journal = journal
   s.numCf = numCf
-  s.readOnly = false
-  s.cache = initCache(64 * 1024 * 1024)
+  s.readOnly = readOnly
+  s.cache = initCache(pageCacheSize)
   s.backendType = backend
   initSpinLock(s.lock)
 
@@ -1110,7 +1123,7 @@ proc openPageStore*(keys, vals: CStringArr; count: cint;
     else:
       setErr(errOut, ErrIo); deallocShared(s); return nil
   else:
-    s.trees = newSeq[CfTree](numCf)
+    s.trees = @[]
     for _ in 0..<numCf: s.trees.add emptyTree()
     let name = makeRootName()
     blobPutRoot(blobs, name, serializeRoot(s.trees))
