@@ -16,7 +16,6 @@ import spier_kvstore_py
 import spier_eavt_query_py
 from helpers import unpack_keys
 
-U64_MAX = 0xFFFFFFFFFFFFFFFF
 LARGE_SIZE = 70_000
 
 
@@ -53,17 +52,10 @@ class TestLargeValueSaveFlushScan:
 
     def test_70kb_text_save_scan(self, tmp_path):
         h = spier_eavt_query_py.Engine({"backend": "file", "path": str(tmp_path)})
-        h.declare_attr(**{
-            "name": "doc.body", "value_type": "String",
-            "many": False, "current_t": U64_MAX,
-        })
+        h.declare_attr("doc.body", "String", False)
         eid = h.allocate_entity_id()
         payload = _make_payload(LARGE_SIZE, "ABCD")
-        h.save(**{
-            "e_id": eid, "attr": "doc.body",
-            "v": payload.decode(),
-            "t": U64_MAX, "as_of_us": U64_MAX,
-        })
+        h.save(eid, "doc.body", payload.decode(), 0xFFFFFFFFFFFFFFFF)
 
         h.flush()
 
@@ -78,20 +70,13 @@ class TestLargeValueSaveFlushScan:
 
     def test_multiple_70kb_values_flush(self, tmp_path):
         h = spier_eavt_query_py.Engine({"backend": "file", "path": str(tmp_path)})
-        h.declare_attr(**{
-            "name": "doc.data", "value_type": "String",
-            "many": True, "current_t": U64_MAX,
-        })
+        h.declare_attr("doc.data", "String", True)
         eids = []
         payloads = []
         for i in range(5):
             eid = h.allocate_entity_id()
             payload = _make_payload(LARGE_SIZE, chr(65 + i))
-            h.save(**{
-                "e_id": eid, "attr": "doc.data",
-                "v": payload.decode(),
-                "t": U64_MAX, "as_of_us": U64_MAX,
-            })
+            h.save(eid, "doc.data", payload.decode(), 0xFFFFFFFFFFFFFFFF)
             eids.append(eid)
             payloads.append(payload)
 
@@ -104,17 +89,10 @@ class TestLargeValueSaveFlushScan:
 
     def test_70kb_value_survives_reopen(self, tmp_path):
         h = spier_eavt_query_py.Engine({"backend": "file", "path": str(tmp_path)})
-        h.declare_attr(**{
-            "name": "doc.persisted", "value_type": "String",
-            "many": False, "current_t": U64_MAX,
-        })
+        h.declare_attr("doc.persisted", "String", False)
         eid = h.allocate_entity_id()
         payload = _make_payload(LARGE_SIZE, "Z")
-        h.save(**{
-            "e_id": eid, "attr": "doc.persisted",
-            "v": payload.decode(),
-            "t": U64_MAX, "as_of_us": U64_MAX,
-        })
+        h.save(eid, "doc.persisted", payload.decode(), 0xFFFFFFFFFFFFFFFF)
         h.flush()
         h.close()
 
@@ -130,17 +108,10 @@ class TestLargeValueJournalRecovery:
         from eavt_sql.engine import EAVTEngine
 
         h = spier_eavt_query_py.Engine({"backend": "file", "path": str(tmp_path)})
-        h.declare_attr(**{
-            "name": "doc.journaled", "value_type": "String",
-            "many": False, "current_t": U64_MAX,
-        })
+        h.declare_attr("doc.journaled", "String", False)
         eid = h.allocate_entity_id()
         payload = _make_payload(LARGE_SIZE, "J")
-        h.save(**{
-            "e_id": eid, "attr": "doc.journaled",
-            "v": payload.decode(),
-            "t": U64_MAX, "as_of_us": U64_MAX,
-        })
+        h.save(eid, "doc.journaled", payload.decode(), 0xFFFFFFFFFFFFFFFF)
         h.close()
 
         # Reopen via EAVTEngine which replays the journal
