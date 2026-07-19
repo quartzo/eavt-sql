@@ -556,6 +556,11 @@ pub fn build_query_plan(
     for (pat_idx, pattern) in join_patterns.iter().enumerate() {
         // seen_in_pattern rastreia duplicatas DENTRO deste pattern; resetado a cada iteração.
         let mut seen_in_pattern: HashSet<String> = HashSet::new();
+        // occurrences_in_pattern rastreia posições por var neste pattern; usada pra
+        // rejeitar 3+ ocorrências da mesma var (caso não suportado, sem teste, sem
+        // uso real em EAVT). Limite atual: 2 ocorrências (same-var confirmation).
+        let mut occurrences_in_pattern: std::collections::HashMap<String, Vec<&str>> =
+            std::collections::HashMap::new();
         for (pos_name, slot) in [
             ("e", &pattern.e),
             ("a", &pattern.a),
@@ -564,6 +569,18 @@ pub fn build_query_plan(
             ("added", &pattern.added),
         ] {
             if let Slot::Var(name) = slot {
+                let positions = occurrences_in_pattern.entry(name.clone()).or_default();
+                positions.push(pos_name);
+                if positions.len() > 2 {
+                    return Err(format!(
+                        "variable '{}' appears in {} positions ({}) in pattern {}; \
+                         only 2 occurrences (same-var confirmation) are supported",
+                        name,
+                        positions.len(),
+                        positions.join(", "),
+                        pat_idx
+                    ));
+                }
                 if !seen.contains(name) {
                     seen.insert(name.clone());
                     var_order.push(name.clone());

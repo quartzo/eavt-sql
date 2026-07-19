@@ -319,4 +319,48 @@ mod tests {
         let stats = FixedStats::new();
         compile_only_accepts_compile_stats(&stats);
     }
+
+    #[test]
+    fn test_reject_three_positions_same_var_in_one_pattern() {
+        // Variável "x" aparece em 3 slots do mesmo pattern — não suportado.
+        // Mensagem deve mencionar a variável, o número de posições, as posições
+        // e o índice do pattern.
+        let ir = DatalogIR {
+            patterns: vec![DatalogPattern {
+                e: DatalogSlot::Var("x".to_string()),
+                a: DatalogSlot::Const(BoundValue::Attr("user.name".to_string())),
+                v: DatalogSlot::Var("x".to_string()),
+                t: DatalogSlot::Var("x".to_string()),
+                added: DatalogSlot::Missing,
+            }],
+            find_vars: vec![FindVar::Var("x".to_string())],
+            range_bounds: HashMap::new(),
+            star: false,
+            exists_mode: false,
+            has_conditions: false,
+            history: false,
+        };
+        let stats = FixedStats::new();
+        let resolved = resolve_ir(ir, &stats).expect("resolve_ir should succeed");
+        let plan_stats = compute_plan_stats(&resolved, &stats);
+        let st = DatalogNumIRSt {
+            num_ir: DatalogNumIR {
+                ir: resolved,
+                stats: plan_stats,
+            },
+        };
+        let err = match Planner::new().plan(st) {
+            Ok(_) => panic!("planner should reject 3-position same-var pattern"),
+            Err(msg) => msg,
+        };
+        let msg = err.to_lowercase();
+        assert!(msg.contains("variable"), "msg should mention variable: {err}");
+        assert!(msg.contains("'x'"), "msg should mention var name: {err}");
+        assert!(msg.contains("3 positions"), "msg should mention count: {err}");
+        assert!(
+            msg.contains("e") && msg.contains("v") && msg.contains("t"),
+            "msg should list conflicting positions: {err}"
+        );
+        assert!(msg.contains("pattern 0"), "msg should mention pattern idx: {err}");
+    }
 }
