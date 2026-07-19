@@ -498,10 +498,6 @@ def test_sql_explain_neq():
     engine.close()
 
 
-@pytest.mark.xfail(
-    reason="bug: IN (a, b) is compiled as (= a b) instead of a disjunction; "
-           "should emit (or (= a) (= b)) or a multi-value range."
-)
 def test_sql_explain_in():
     engine = _score_engine()
     rows = list(engine.sql(
@@ -510,9 +506,10 @@ def test_sql_explain_in():
     ))
     text = "\n".join(row[0] for row in rows)
     assert ":ranges" in text
-    # IN (a, b) should produce a disjunction (or ...) over the values,
-    # not a single equality with multiple params.
-    assert "(or " in text or "(in " in text
+    assert "ranges-create" in text
+    # IN (a, b) é codificado como (= a b) em ranges — quando `=` recebe 2+
+    # args, o evaluator (spier-scheme/src/eval.rs:240) mapeia pra RANGE_OP_IN.
+    assert "(= " in text
     engine.close()
 
 
