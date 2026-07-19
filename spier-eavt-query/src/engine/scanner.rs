@@ -4,7 +4,7 @@ use std::sync::Arc;
 use spier_storage_traits::Cursor;
 use spier_transactor::keys::{
     decode_fixed, decode_float64, decode_int64, decode_suffix, decode_variable,
-    decode_variable_unordered, encode_fixed, encode_int64, encode_variable,
+    decode_variable_unordered, encode_fixed, encode_int64, encode_suffix, encode_variable,
     encode_variable_unordered,
 };
 use spier_transactor::resolver_consts::{
@@ -248,6 +248,10 @@ impl V2Scanner {
                     } else {
                         buf.extend_from_slice(&encode_fixed(pv));
                     }
+                }
+                "t" => {
+                    let suffix = encode_suffix(pv.raw_int() as u64, false);
+                    buf.extend_from_slice(&suffix.to_be_bytes());
                 }
                 _ => {
                     let enc = encode_bound_value(pv);
