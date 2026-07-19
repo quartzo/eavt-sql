@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.25", features = ["extension-module"] }
 spier-journal-file = { path = "../spier-journal-file" }
+spier-page-store-nim = { path = "../spier-page-store-nim" }
 spier-storage-traits = { path = "../spier-storage-traits" }
 spier-transactor = { path = "../spier-transactor" }
 spier-value = { path = "../spier-value" }

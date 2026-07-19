@@ -1145,6 +1145,7 @@ version = "0.1.0"
 dependencies = [
  "pyo3",
  "spier-eavt-query",
+ "spier-page-store-nim",
  "spier-query-ir",
  "spier-transactor",
  "spier-value",
@@ -1266,6 +1267,7 @@ version = "0.1.0"
 dependencies = [
  "pyo3",
  "spier-journal-file",
+ "spier-page-store-nim",
  "spier-storage-traits",
  "spier-transactor",
  "spier-value",

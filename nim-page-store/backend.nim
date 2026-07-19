@@ -826,7 +826,13 @@ proc pageCountInRange(s: var PageStoreInner; cf: int;
 proc psGetKeysInPrefix(h: pointer; cf: cuint; prefix: ptr Byte; plen: csize_t;
                         outBuf: ptr pointer; outLen: ptr csize_t;
                         errOut: ptr cint): cint {.cdecl.} =
+  if h == nil:
+    setErr(errOut, ErrInvalidHandle)
+    return -1
   var s = cast[ptr PageStoreInner](h)
+  if cf.int >= s.numCf:
+    setErr(errOut, ErrInvalidArg)
+    return -1
   s.lock.withLock:
     try:
       let pfx = if plen > 0: newSeq[byte](plen.int) else: newSeq[byte](0)
