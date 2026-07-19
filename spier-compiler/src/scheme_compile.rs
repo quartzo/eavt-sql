@@ -972,6 +972,11 @@ fn build_triejoin_scheme(
         ])
     };
 
+    // Flatten right-nested begins left by the __BODY__ substitution chain.
+    // Evaluator handles either form equivalently; flat is easier to read in
+    // EXPLAIN and trace.
+    let full_body = flatten_begins(full_body);
+
     let meta = SelectSchemeMeta {
         num_vars: var_names_list.len(),
         depth_var_pairs,
@@ -987,6 +992,43 @@ fn replace_body_placeholder(expr: &SExpr, replacement: &SExpr) -> SExpr {
         SExpr::Symbol(s) if s == "__BODY__" => replacement.clone(),
         SExpr::List(items) => SExpr::List(items.iter().map(|item| replace_body_placeholder(item, replacement)).collect()),
         other => other.clone(),
+    }
+}
+
+/// Flatten right/left-nested `(begin ...)` forms: a begin whose last (or only)
+/// non-head item is itself a begin gets inlined. Idempotent on already-flat
+/// begins. Preserves begins inside other forms (scanner-iterate, when, let*,
+/// etc.) — those are structurally required by the host form.
+///
+/// Rationale: `replace_body_placeholder` chains produce right-nested begins
+/// like `(begin A (begin B (begin C D)))`. The evaluator handles either form
+/// equivalently, but a flat begin is easier to read in EXPLAIN and to debug.
+fn flatten_begins(expr: SExpr) -> SExpr {
+    match expr {
+        SExpr::List(items) => {
+            // Recurse top-down so inner begins are already flat when the
+            // outer begin inspects them.
+            let items: Vec<SExpr> = items.into_iter().map(flatten_begins).collect();
+            if let Some(SExpr::Symbol(s)) = items.first() {
+                if s == "begin" {
+                    let mut result: Vec<SExpr> = vec![items[0].clone()];
+                    for item in items.into_iter().skip(1) {
+                        match item {
+                            SExpr::List(inner)
+                                if matches!(inner.first(),
+                                    Some(SExpr::Symbol(s)) if s == "begin") =>
+                            {
+                                result.extend(inner.into_iter().skip(1));
+                            }
+                            other => result.push(other),
+                        }
+                    }
+                    return SExpr::List(result);
+                }
+            }
+            SExpr::List(items)
+        }
+        other => other,
     }
 }
 
@@ -1152,5 +1194,96 @@ mod tests {
         let s = write_scheme(&prog.body);
         let reparsed = spier_scheme::parse(&s).unwrap();
         assert_eq!(reparsed, prog.body);
+    }
+
+    // Helper para construir SExpr::List de forma concisa nos testes abaixo.
+    fn list(items: Vec<SExpr>) -> SExpr {
+        SExpr::List(items)
+    }
+    fn sym(s: &str) -> SExpr {
+        SExpr::Symbol(s.into())
+    }
+    fn begin(items: Vec<SExpr>) -> SExpr {
+        let mut v = vec![sym("begin")];
+        v.extend(items);
+        list(v)
+    }
+
+    #[test]
+    fn flatten_begins_right_nested() {
+        // (begin A (begin B C)) → (begin A B C)
+        let input = begin(vec![sym("A"), begin(vec![sym("B"), sym("C")])]);
+        let expected = begin(vec![sym("A"), sym("B"), sym("C")]);
+        assert_eq!(flatten_begins(input), expected);
+    }
+
+    #[test]
+    fn flatten_begins_deep_recursion() {
+        // (begin A (begin B (begin C D))) → (begin A B C D)
+        let input = begin(vec![
+            sym("A"),
+            begin(vec![sym("B"), begin(vec![sym("C"), sym("D")])]),
+        ]);
+        let expected = begin(vec![sym("A"), sym("B"), sym("C"), sym("D")]);
+        assert_eq!(flatten_begins(input), expected);
+    }
+
+    #[test]
+    fn flatten_begins_left_nested() {
+        // (begin (begin A B) C) → (begin A B C)
+        let input = begin(vec![begin(vec![sym("A"), sym("B")]), sym("C")]);
+        let expected = begin(vec![sym("A"), sym("B"), sym("C")]);
+        assert_eq!(flatten_begins(input), expected);
+    }
+
+    #[test]
+    fn flatten_begins_idempotent_on_flat() {
+        // (begin A B C) → (begin A B C)
+        let input = begin(vec![sym("A"), sym("B"), sym("C")]);
+        let result = flatten_begins(input.clone());
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn flatten_begins_preserves_inside_non_begin() {
+        // (scanner-iterate (s0) (x) (begin A B)) → inalterado
+        // O begin interno é body do scanner-iterate, NÃO deve ser achatado.
+        let input = list(vec![
+            sym("scanner-iterate"),
+            list(vec![sym("s0")]),
+            list(vec![sym("x")]),
+            begin(vec![sym("A"), sym("B")]),
+        ]);
+        let result = flatten_begins(input.clone());
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn flatten_begins_preserves_inside_when() {
+        // (when cond (begin A B)) → inalterado
+        let input = list(vec![
+            sym("when"),
+            sym("cond"),
+            begin(vec![sym("A"), sym("B")]),
+        ]);
+        let result = flatten_begins(input.clone());
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn flatten_begins_nested_inside_let_star() {
+        // (let* (...) (begin A (begin B C))) → (let* (...) (begin A B C))
+        // O begin dentro do let* deve ser achatado (recursão top-down).
+        let input = list(vec![
+            sym("let*"),
+            list(vec![]),
+            begin(vec![sym("A"), begin(vec![sym("B"), sym("C")])]),
+        ]);
+        let expected = list(vec![
+            sym("let*"),
+            list(vec![]),
+            begin(vec![sym("A"), sym("B"), sym("C")]),
+        ]);
+        assert_eq!(flatten_begins(input), expected);
     }
 }
