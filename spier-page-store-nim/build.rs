@@ -6,7 +6,7 @@ const NIM_FLAGS: &[&str] = &[
     "--app:staticlib",
     "--noMain",
     "--mm:arc",
-    "--threads:off",
+    "--threads:on",
     "-d:release",
     "--panics:on",
     "--warning:UnusedImport:off",

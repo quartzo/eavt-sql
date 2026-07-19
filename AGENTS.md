@@ -182,16 +182,29 @@ allocated on Nim's shared heap).
 #### Nim build flags
 
 ```
-nim c --app:staticlib --noMain --mm:arc --threads:off -d:release --panics:on \
+nim c --app:staticlib --noMain --mm:arc --threads:on -d:release --panics:on \
       --noNimblePath --passC:-fPIC --passL:-fPIC \
       [--passL:-lcrypto for s3] \
-      --out:libnim_blobstore_<backend>.a nim-blobstore/<backend>/all.nim
+      --out:libnim_page_store.a nim-page-store/all.nim
 ```
 
-`--threads:off` is critical: `--threads:on` (with `--tlsEmulation:on`) caused
-SIGSEGV when Rust foreign threads entered Nim code. Because `--threads:off`
-makes `std/locks` unavailable, each backend's `spinlock.nim` provides a raw
-`pthread_mutex_t` binding instead.
+**`--threads:on` is MANDATORY.** The entire storage stack (blobstore, journal,
+memtable, page-store, transactor) is compiled into a single `.a` with one
+`NimMain`. Rust threads (request handlers, poller, test runner) call Nim
+functions concurrently through C-ABI vtables. With `--threads:off` the Nim
+runtime is NOT thread-safe: allocator state (`allocShared0`) and module
+globals (blobstore registry) are shared without synchronization, causing
+SIGSEGV under concurrent Rust threads.
+
+`--threads:on` works correctly with PyO3 cdylib — the old warning about
+`--threads:on` causing SIGSEGV was specific to `--tlsEmulation:on` (which
+combined Nim-emulated TLS with native C TLS, causing double-init issues).
+Plain `--threads:on` uses native C TLS and dlopen handles it correctly on
+Linux x86_64 with glibc.
+
+Because `--threads:on` makes `std/locks` available, each backend's
+`spinlock.nim` provides a raw `pthread_mutex_t` binding to avoid depending
+on Nim's `std/locks` (which brings in additional Nim thread machinery).
 
 #### Linking 3 self-contained archives
 
