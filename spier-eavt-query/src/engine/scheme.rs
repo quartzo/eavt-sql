@@ -6,7 +6,7 @@ use spier_value::Value;
 
 use crate::engine::query_engine_inner::QueryEngineInner;
 use crate::engine::scanner::V2Scanner;
-use crate::engine::types::{ops_to_intervals, merge_intervals, BoundPart, EngineOps, QueryContext, RangeSpec, RANGE_LO_OPEN, RANGE_HI_OPEN, probe_value_matches};
+use crate::engine::types::{ops_to_intervals, merge_intervals, EngineOps, QueryContext, RangeSpec, RANGE_LO_OPEN, RANGE_HI_OPEN};
 use crate::VMResultStream;
 
 fn extract_scanner<'a>(expr: &'a SExpr) -> Result<&'a Mutex<V2Scanner>, spier_scheme::EvalError> {

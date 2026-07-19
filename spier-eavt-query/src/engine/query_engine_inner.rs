@@ -3,14 +3,13 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use spier_storage_traits::invalid_cursor_handle;
-use spier_transactor::keys::{self, BoundValue, EncodeMode};
+use spier_transactor::keys::{self};
 use spier_transactor::resolver_consts as resolver;
 use spier_transactor::TransactorEngine;
 use spier_transactor::TransactorState;
 use spier_value::Value;
 
-use crate::engine::scanner::ValueScanner;
-use crate::engine::types::{BoundPart, EngineError, EngineOps, QueryContext, RawDatomView};
+use crate::engine::types::{EngineError, EngineOps, QueryContext, RawDatomView};
 
 fn cf_name_to_id() -> HashMap<String, usize> {
     spier_transactor::constants::cf_name_map()
@@ -212,85 +211,6 @@ impl QueryEngineInner {
         aid
     }
 
-    fn attr_type_from_prefix(&self, cf: &str, prefix: &[u8]) -> Option<u32> {
-        let a_off = match cf {
-            "eavt" | "vaet" => 8,
-            "aevt" | "avet" => 0,
-            _ => return None,
-        };
-        if prefix.len() >= a_off + 4 {
-            let a_id = u32::from_be_bytes(prefix[a_off..a_off + 4].try_into().ok()?);
-            self.value_type_for_cached(a_id)
-        } else {
-            None
-        }
-    }
-
-    fn resolve_bound_prefix(
-        &self,
-        index: &str,
-        bound: &[BoundPart],
-    ) -> (String, usize, Vec<u8>, Option<u32>) {
-        let cf = keys::cf_for_index(index).to_string();
-        let cf_id = self.cf_id(&cf);
-        let idx_order = keys::index_order(index);
-
-        let bound_attr_id: Option<u32> = bound.iter().enumerate().find_map(|(i, b)| {
-            let pos = idx_order.get(i).copied().unwrap_or("");
-            if pos == "a" {
-                match b {
-                    BoundPart::Attr(a) => Some(*a),
-                    BoundPart::Val(v) => {
-                        if let Value::Text(ref s) = v {
-                            self.lookup_attr_cached(s.as_str())
-                        } else {
-                            Some(v.raw_int() as u32)
-                        }
-                    }
-                    _ => None,
-                }
-            } else {
-                None
-            }
-        });
-
-        let value_attr_type = bound_attr_id.and_then(|a| self.value_type_for_cached(a));
-        let mode = keys::encode_mode_for(value_attr_type);
-        let is_ref_attr = value_attr_type == Some(spier_transactor::resolver_consts::DB_TYPE_REF);
-
-        let bound_vals: Vec<BoundValue> = bound
-            .iter()
-            .enumerate()
-            .map(|(i, b)| match b {
-                BoundPart::Int(n) => BoundValue::Int(*n),
-                BoundPart::Attr(a) => BoundValue::Attr(*a),
-                BoundPart::Val(v) => {
-                    let pos = idx_order.get(i).copied().unwrap_or("v");
-                    match pos {
-                        "v" => {
-                            if is_ref_attr {
-                                BoundValue::Ref(v.raw_int() as u64)
-                            } else {
-                                BoundValue::Val(v.clone())
-                            }
-                        }
-                        "a" => {
-                            if let Value::Text(ref s) = v {
-                                BoundValue::Attr(self.lookup_attr_cached(s.as_str()).unwrap_or(0))
-                            } else {
-                                BoundValue::Attr(v.raw_int() as u32)
-                            }
-                        }
-                        _ => BoundValue::Int(v.raw_int() as u64),
-                    }
-                }
-            })
-            .collect();
-
-        let prefix = keys::build_prefix(index, &bound_vals, mode);
-        (cf, cf_id, prefix, value_attr_type)
-    }
-
 }
 
 impl EngineOps for QueryEngineInner {
@@ -319,40 +239,65 @@ impl EngineOps for QueryEngineInner {
     }
 
     fn collect_active(&self, cf: &str, prefix: &[u8], ctx: &QueryContext) -> Vec<RawDatomView> {
-        let cf_id = self.cf_id(cf);
+        // Direct cursor iteration mirroring `TransactorEngine::collect_active_raw`
+        // (spier-transactor/src/eavt.rs). One datom per group is returned — the
+        // one with the greatest `t` not exceeding `as_of_tx` — and only if that
+        // latest datom is non-retracted. The cursor is prefix-bounded by
+        // `MergedInner`, so no explicit prefix check is needed here.
+        let cf_id = self.cf_id(cf) as u32;
         let prefix = prefix.to_vec();
-        let attr_type = self.attr_type_from_prefix(cf, &prefix);
-        let cursor = match self.tx.open_cursor_direct(cf_id as u32, &prefix) {
+        let cursor = match self.tx.open_cursor_direct(cf_id, &prefix) {
             Ok(h) => h.cursor,
             Err(_) => invalid_cursor_handle().cursor,
         };
-        let mut scanner =
-            ValueScanner::new(cursor, prefix.clone(), cf, "v", ctx.as_of_tx, attr_type);
-        let mut results = Vec::new();
-        while !scanner.at_end() {
-            if let Some(key) = scanner.current_key() {
-                let raw = keys::unpack_key_with_vt(cf, key, |aid| self.value_type_for_cached(aid));
-                if !raw.retracted {
-                    results.push(RawDatomView {
+        let as_of_tx = ctx.as_of_tx;
+        let mut results: Vec<RawDatomView> = Vec::new();
+        let mut prev_group: Option<Vec<u8>> = None;
+        let mut best: Option<RawDatomView> = None;
+        while cursor.borrow().is_valid() {
+            let key = cursor.borrow().current_key().unwrap().to_vec();
+            if key.len() < 8 {
+                cursor.borrow_mut().step();
+                continue;
+            }
+            let raw = keys::unpack_key_with_vt(cf, &key, |aid| self.value_type_for_cached(aid));
+            if let Some(as_of) = as_of_tx {
+                if raw.t > as_of {
+                    cursor.borrow_mut().step();
+                    continue;
+                }
+            }
+            let group_end = key.len() - 8;
+            let group = key[..group_end].to_vec();
+            if Some(&group) != prev_group.as_ref() {
+                if let Some(b) = best.take() {
+                    if !b.retracted {
+                        results.push(b);
+                    }
+                }
+                prev_group = Some(group);
+                best = Some(RawDatomView {
+                    v: raw.v,
+                    t: raw.t,
+                    retracted: raw.retracted,
+                });
+            } else if let Some(ref mut b) = best {
+                if raw.t > b.t {
+                    *b = RawDatomView {
                         v: raw.v,
                         t: raw.t,
                         retracted: raw.retracted,
-                    });
+                    };
                 }
             }
-            scanner.next();
+            cursor.borrow_mut().step();
+        }
+        if let Some(b) = best {
+            if !b.retracted {
+                results.push(b);
+            }
         }
         results
-    }
-
-    fn probe_collect(
-        &self,
-        index: &str,
-        bound: &[BoundPart],
-        ctx: &QueryContext,
-    ) -> Vec<RawDatomView> {
-        let (cf, _, prefix, _) = self.resolve_bound_prefix(index, bound);
-        self.collect_active(&cf, &prefix, ctx)
     }
 
     fn save_with_t(

@@ -31,12 +31,6 @@ pub trait EngineOps: Send + Sync {
         prefix: &[u8],
     ) -> Result<std::sync::Arc<std::cell::RefCell<dyn spier_storage_traits::Cursor>>, String>;
     fn collect_active(&self, cf: &str, prefix: &[u8], ctx: &QueryContext) -> Vec<RawDatomView>;
-    fn probe_collect(
-        &self,
-        index: &str,
-        bound: &[BoundPart],
-        ctx: &QueryContext,
-    ) -> Vec<RawDatomView>;
     fn save_with_t(
         &self,
         e: &Value,
@@ -272,20 +266,4 @@ pub(crate) fn ops_to_intervals(ops: &[(i32, Value)]) -> Vec<(Option<Value>, Opti
     }
 
     merge_intervals(intervals)
-}
-
-#[derive(Debug)]
-pub enum BoundPart {
-    Int(u64),
-    Attr(u32),
-    #[allow(dead_code)]
-    Val(Value),
-}
-
-pub(crate) fn probe_value_matches(dv: &Value, pv: &Value) -> bool {
-    match pv {
-        Value::Int64(_) | Value::Bool(_) | Value::Timestamp(_) => dv.raw_int() == pv.raw_int(),
-        Value::Float64(_) => dv.raw_float() == pv.raw_float(),
-        _ => dv == pv,
-    }
 }
