@@ -198,6 +198,11 @@ pub struct V2Scanner {
     value_attr_type: Option<u32>,
     history_mode: bool,
     prefix_cache: Vec<u8>,
+    /// True quando a posição "t" está entre as Fixed empilhadas. Nesse caso,
+    /// o LSB do último byte do prefixo carrega o bit 'added' (em vez de um
+    /// bit significativo de t) e o comparador deve ignorá-lo para casar
+    /// ambas as variantes (retracted=true/false) do mesmo t.
+    t_in_prefix: bool,
 }
 
 
@@ -219,6 +224,7 @@ impl V2Scanner {
             value_attr_type,
             history_mode: false,
             prefix_cache: Vec::new(),
+            t_in_prefix: false,
         }
     }
 
@@ -244,7 +250,18 @@ impl V2Scanner {
             return KeyVsPrefix::NoPrefix;
         }
         let n = bp.len().min(key.len());
-        match key[..n].cmp(&bp[..n]) {
+        let ord = if self.t_in_prefix {
+            // LSB do último byte carrega o bit 'added' — ignorar para casar
+            // ambas as variantes (retracted=true/false) do mesmo t.
+            let last = n - 1;
+            match key[..last].cmp(&bp[..last]) {
+                std::cmp::Ordering::Equal => (key[last] & 0xFE).cmp(&(bp[last] & 0xFE)),
+                other => other,
+            }
+        } else {
+            key[..n].cmp(&bp[..n])
+        };
+        match ord {
             std::cmp::Ordering::Less => KeyVsPrefix::Before,
             std::cmp::Ordering::Greater => KeyVsPrefix::After,
             std::cmp::Ordering::Equal => {
@@ -273,6 +290,7 @@ impl V2Scanner {
     fn recompute_prefix(&mut self) {
         let fixed = self.pos.fixed_entries();
         let mut buf = Vec::new();
+        let mut t_in_prefix = false;
         for (pos_idx, pos_name) in self.pos.idx_order().iter().enumerate() {
             let pv = match fixed.iter().find(|(idx, _)| *idx == pos_idx) {
                 Some((_, v)) => v,
@@ -293,6 +311,7 @@ impl V2Scanner {
                 "t" => {
                     let suffix = encode_suffix(pv.raw_int() as u64, false);
                     buf.extend_from_slice(&suffix.to_be_bytes());
+                    t_in_prefix = true;
                 }
                 _ => {
                     let enc = encode_bound_value(pv);
@@ -301,6 +320,7 @@ impl V2Scanner {
             }
         }
         self.prefix_cache = buf;
+        self.t_in_prefix = t_in_prefix;
     }
 
     pub fn attr_id_from_prefix_bytes(&self) -> Option<u32> {
