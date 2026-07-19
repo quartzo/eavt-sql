@@ -37,3 +37,4 @@ nim-blobstore/*/sha256
 /journal/
 **/journal/journal
 /nim-page-store/tests
+/nim-page-store/resolver
