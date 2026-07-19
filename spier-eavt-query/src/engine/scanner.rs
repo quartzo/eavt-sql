@@ -183,6 +183,7 @@ pub struct V2Scanner {
     as_of_tx: Option<u64>,
     value_attr_type: Option<u32>,
     history_mode: bool,
+    prefix_cache: Vec<u8>,
 }
 
 
@@ -203,6 +204,7 @@ impl V2Scanner {
             as_of_tx,
             value_attr_type,
             history_mode: false,
+            prefix_cache: Vec::new(),
         }
     }
 
@@ -210,19 +212,24 @@ impl V2Scanner {
         self.history_mode = true;
     }
 
-    pub fn prefix_bytes(&self) -> Vec<u8> {
-        self.build_prefix_bytes()
+    pub fn prefix_bytes(&self) -> &[u8] {
+        &self.prefix_cache
     }
 
     pub fn save_value(&mut self, val: &Value) {
         self.pos.push_fixed(val);
+        self.recompute_prefix();
     }
 
     pub fn pop_saved_value(&mut self) {
         self.pos.pop_fixed();
+        self.recompute_prefix();
     }
 
-    pub fn build_prefix_bytes(&self) -> Vec<u8> {
+    /// Recalcula `prefix_cache` a partir das Fixed entries empilhadas e do
+    /// `value_attr_type` atual. Deve ser chamado após qualquer mutação que
+    /// afete o resultado do encode (push/pop da pilha ou troca do tipo).
+    fn recompute_prefix(&mut self) {
         let fixed = self.pos.fixed_entries();
         let mut buf = Vec::new();
         for (pos_idx, pos_name) in self.pos.idx_order().iter().enumerate() {
@@ -248,7 +255,7 @@ impl V2Scanner {
                 }
             }
         }
-        buf
+        self.prefix_cache = buf;
     }
 
     pub fn attr_id_from_prefix_bytes(&self) -> Option<u32> {
@@ -257,7 +264,7 @@ impl V2Scanner {
             "AEVT" | "AVET" => 0usize,
             _ => return None,
         };
-        let key = self.build_prefix_bytes();
+        let key = &self.prefix_cache;
         if key.len() >= off + 4 {
             Some(u32::from_be_bytes(key[off..off + 4].try_into().ok()?))
         } else {
@@ -286,6 +293,7 @@ impl V2Scanner {
 
     pub fn set_value_attr_type(&mut self, vt: Option<u32>) {
         self.value_attr_type = vt;
+        self.recompute_prefix();
     }
 
     pub fn current_position(&self) -> usize {
@@ -434,8 +442,8 @@ impl V2Scanner {
     /// Extrai o valor na posição corrente (topo da pilha).
     pub fn extract_current(&self) -> Option<Value> {
         let key = self.pos.current_active_key()?;
-        let prefix = self.build_prefix_bytes();
-        if !prefix.is_empty() && !key.starts_with(&prefix) {
+        let prefix = &self.prefix_cache;
+        if !prefix.is_empty() && !key.starts_with(prefix) {
             return None;
         }
         let raw = self.extract_raw(key);
@@ -534,9 +542,8 @@ impl V2Scanner {
             return;
         }
 
-        let bound_prefix: Option<Vec<u8>> = {
-            let p = self.build_prefix_bytes();
-            if p.is_empty() { None } else { Some(p) }
+        let bound_prefix: Option<&[u8]> = {
+            if self.prefix_cache.is_empty() { None } else { Some(&self.prefix_cache) }
         };
 
         while self.pos.cursor().borrow().is_valid() {
@@ -545,7 +552,7 @@ impl V2Scanner {
                 self.pos.cursor().borrow_mut().step();
                 continue;
             }
-            if let Some(ref bp) = bound_prefix {
+            if let Some(bp) = bound_prefix {
                 if bp.is_empty() {
                     // No prefix constraint — accept all keys.
                 } else {
@@ -621,9 +628,8 @@ impl V2Scanner {
     fn advance_history_each(&mut self) {
         let as_of_tx = self.as_of_tx;
 
-        let bound_prefix: Option<Vec<u8>> = {
-            let p = self.build_prefix_bytes();
-            if p.is_empty() { None } else { Some(p) }
+        let bound_prefix: Option<&[u8]> = {
+            if self.prefix_cache.is_empty() { None } else { Some(&self.prefix_cache) }
         };
 
         while self.pos.cursor().borrow().is_valid() {
@@ -632,7 +638,7 @@ impl V2Scanner {
                 self.pos.cursor().borrow_mut().step();
                 continue;
             }
-            if let Some(ref bp) = bound_prefix {
+            if let Some(bp) = bound_prefix {
                 let bs = self.value_start(&key).min(bp.len());
                 if bs != bp.len() || key[..bp.len()] != bp[..] {
                     self.pos.set_at_end(true);

@@ -653,7 +653,7 @@ impl spier_scheme::HostFns for SchemeHostFns {
             "scanner-prefix" => {
                 let scanner = extract_scanner(&args[0])?;
                 let s = scanner.lock().unwrap();
-                Ok(EvalStep::Done(SExpr::Bytes(s.prefix_bytes())))
+                Ok(EvalStep::Done(SExpr::Bytes(s.prefix_bytes().to_vec())))
             }
 
             // -- Range debugging --
