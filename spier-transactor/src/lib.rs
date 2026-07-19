@@ -441,6 +441,7 @@ impl TransactorEngine for TransactorState {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,9 +451,25 @@ mod tests {
         let mut cfg = HashMap::new();
         cfg.insert("backend".to_string(), "memory".to_string());
         let state = TransactorState::open(&cfg).unwrap();
-        // If we get here, bootstrap_resolver + persist_bootstrap_schema worked.
-        // Try a basic operation.
         let attrs = state.lookup_attr("db.ident").unwrap();
         assert!(attrs.is_some(), "db.ident should be declared after bootstrap");
+    }
+
+    #[test]
+    fn test_transactor_state_scan_after_bootstrap() {
+        let mut cfg = HashMap::new();
+        cfg.insert("backend".to_string(), "memory".to_string());
+        let state = TransactorState::open(&cfg).unwrap();
+        let data = state.scan(1, b"").unwrap();
+        let mut count = 0;
+        let mut pos = 0;
+        while pos + 4 <= data.len() {
+            let klen = u32::from_be_bytes([data[pos],data[pos+1],data[pos+2],data[pos+3]]) as usize;
+            pos += 4 + klen;
+            count += 1;
+        }
+        assert!(count > 0, "bootstrap should write keys to CF 1, got {}", count);
+        let h = state.open_cursor_direct(1, b"").unwrap();
+        assert!(state.cursor_valid(h).unwrap(), "cursor on CF 1 should be valid");
     }
 }
