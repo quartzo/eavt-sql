@@ -201,8 +201,7 @@ impl Drop for NimBlobStore {
 // ---------------------------------------------------------------------------
 
 impl NimBlobStore {
-    /// Open the in-memory backend. Config is ignored (matches Rust's
-    /// `MemoryBlobStore::new()`).
+    /// Open the in-memory backend.
     pub fn open_memory(config: &HashMap<String, String>) -> Result<Self, String> {
         ensure_nim_init();
         let (keys_c, vals_c) = pack_config(config);
@@ -548,7 +547,6 @@ impl Drop for NimJournalStore {
 
 impl NimJournalStore {
     /// Open the journal backed by a file at `<path>/journal/journal`.
-    /// `path` is the same `path` config key used by the blobstore/file backend.
     pub fn open(config: &HashMap<String, String>) -> Result<Self, String> {
         ensure_nim_init();
         let path = config

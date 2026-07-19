@@ -7,3 +7,4 @@ description = "File-backed Journal backend (Nim-backed via spier-blobstore-nim)"
 [dependencies]
 spier-storage-traits = { path = "../spier-storage-traits" }
 spier-blobstore-nim = { path = "../spier-blobstore-nim" }
+spier-page-store-nim = { path = "../spier-page-store-nim" }

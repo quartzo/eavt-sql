@@ -1,39 +1,20 @@
 // --- KVStore implementation modules ---
-pub mod blob_store;
 pub mod error;
-pub mod generic_page_store;
 pub mod merge_iter;
-pub mod page_store;
-pub mod pages;
+pub mod page_store;  // cf_name_for helper
 pub mod store;
 
-pub use blob_store::make_root_name;
 pub use error::{TransactorError, TransactorResult};
-pub use generic_page_store::GenericPageStore;
 pub use merge_iter::{
     merge_collect, Cursor, MergedInner, PageStoreIter, ReverseMergedInner, ReversePageStoreIter,
     ReverseScanSource, ReverseSourceKind, ScanSource, SourceKind,
 };
-pub use page_store::PageStore;
 pub use store::{Transactor, TransactorConfig};
-
-// --- Generated storage-layer host code (BlobStore, Journal, MemTable) ---
-// These traits and tower clients are generated locally — no other crate
-// outside spier-kvstore needs them.
-
-pub mod blobstore {
-    pub use spier_storage_traits::blobstore::*;
-}
-
-pub mod journal {
-    pub use spier_storage_traits::journal::*;
-}
+pub use spier_storage_traits::KVStoreEngine;
 
 pub mod memtable {
     pub use spier_storage_traits::memtable::*;
 }
-
-pub use spier_storage_traits::KVStoreEngine;
 
 use std::collections::HashMap;
 use std::sync::mpsc;
@@ -41,8 +22,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use spier_blobstore_nim::NimBlobStore;
-use spier_journal_file::JournalFile;
+use spier_page_store_nim::NimPageStore;
 use spier_memtable::MemTable;
 use spier_storage_traits::CursorHandle;
 
@@ -95,13 +75,13 @@ fn make_transactor_config(config: &HashMap<String, String>) -> TransactorConfig 
 }
 
 fn open_memory(read_only: bool, config: &HashMap<String, String>) -> Result<Transactor, String> {
-    let blobs = NimBlobStore::open_memory(config)?;
+    let store = NimPageStore::open(config)?;
     let mt = load_memtable()?;
     let config_obj = TransactorConfig::default();
     if read_only {
-        Transactor::open_read_only(Box::new(blobs), None, mt, ":memory:", config_obj)
+        Transactor::open_read_only(Arc::new(store), mt, ":memory:", config_obj)
     } else {
-        Transactor::open(Box::new(blobs), None, mt, ":memory:", config_obj)
+        Transactor::open(Arc::new(store), mt, ":memory:", config_obj)
     }
     .map_err(|e| format!("open memory: {e}"))
 }
@@ -116,20 +96,13 @@ fn open_file(config: &HashMap<String, String>) -> Result<Transactor, String> {
         .map(|v| v == "true")
         .unwrap_or(false);
 
-    let blobs = NimBlobStore::open_file(config)?;
-    let j = JournalFile::new(config)?;
-    let journal =
-        Some(Box::new(j)
-            as Box<
-                dyn spier_storage_traits::journal::JournalEngine + Send + Sync,
-            >);
-
+    let store = NimPageStore::open(config)?;
     let mt = load_memtable()?;
     let tc = make_transactor_config(config);
     if read_only {
-        Transactor::open_read_only(Box::new(blobs), journal, mt, path, tc)
+        Transactor::open_read_only(Arc::new(store), mt, path, tc)
     } else {
-        Transactor::open(Box::new(blobs), journal, mt, path, tc)
+        Transactor::open(Arc::new(store), mt, path, tc)
     }
     .map_err(|e| format!("open file: {e}"))
 }
@@ -144,23 +117,14 @@ fn open_s3(config: &HashMap<String, String>) -> Result<Transactor, String> {
         return Err("s3 backend requires endpoint and bucket_name in config".into());
     }
 
-    let blobs = NimBlobStore::open_s3(config)?;
-
-    let local_path = config.get("path").map(|s| s.as_str()).unwrap_or(".");
-
-    let j = JournalFile::new(config)?;
-    let journal =
-        Some(Box::new(j)
-            as Box<
-                dyn spier_storage_traits::journal::JournalEngine + Send + Sync,
-            >);
-
+    let store = NimPageStore::open(config)?;
     let mt = load_memtable()?;
+    let local_path = config.get("path").map(|s| s.as_str()).unwrap_or(".");
     let tc = make_transactor_config(config);
     if read_only {
-        Transactor::open_read_only(Box::new(blobs), journal, mt, local_path, tc)
+        Transactor::open_read_only(Arc::new(store), mt, local_path, tc)
     } else {
-        Transactor::open(Box::new(blobs), journal, mt, local_path, tc)
+        Transactor::open(Arc::new(store), mt, local_path, tc)
     }
     .map_err(|e| format!("open s3: {e}"))
 }

@@ -6,6 +6,7 @@ description = "MemTableEngine backend implemented in Nim (persistent treap, COW 
 
 [dependencies]
 spier-storage-traits = { path = "../spier-storage-traits" }
+spier-page-store-nim = { path = "../spier-page-store-nim" }
 
 [lib]
 name = "spier_memtable_nim"
