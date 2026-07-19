@@ -775,7 +775,20 @@ fn build_triejoin_scheme(
             SExpr::List(scanners.clone()),
             SExpr::List(vec![SExpr::Symbol(var_name.clone())]),
         ];
-        if !ranges_is_empty {
+        // Synthetic var (same-var confirmation): força range (= source_var).
+        // Prevalece sobre qualquer range vinda de depth_ranges (synthetics
+        // não tem ranges externas hoje).
+        let synthetic = plan.synthetic_vars.iter().find(|s| s.name == *var_name);
+        if let Some(synth) = synthetic {
+            iter_items.push(SExpr::Symbol(":ranges".into()));
+            iter_items.push(SExpr::List(vec![
+                SExpr::Symbol("ranges-create".into()),
+                SExpr::List(vec![
+                    SExpr::Symbol("=".into()),
+                    SExpr::Symbol(synth.source_var.clone()),
+                ]),
+            ]));
+        } else if !ranges_is_empty {
             iter_items.push(SExpr::Symbol(":ranges".into()));
             iter_items.push(SExpr::List(vec![
                 SExpr::Symbol("ranges-create".into()),

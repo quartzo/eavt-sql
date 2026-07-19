@@ -155,6 +155,23 @@ impl IterPlanData {
 
 pub type RangeBoundsMap = HashMap<String, Vec<Vec<(String, PlanValue)>>>;
 
+/// Variável sintética que representa uma ocorrência duplicada de uma Var real
+/// dentro da mesma cláusula (ex: `e = ?x` e `v = ?x` em p0). A duplicata é
+/// inserida em `all_vars` como um passo de busca separado, com custo zero e
+/// restrição de viabilidade (`source_var` precisa estar resolvido antes).
+/// O compiler a traduz como `scanner-iterate` com `:ranges (ranges-create (= source_var))`.
+#[derive(Clone, Debug)]
+pub struct SyntheticVar {
+    /// Nome único no formato `{source_var}@p{pattern_idx}.{position}`.
+    pub name: String,
+    /// Nome da Var real que esta synthetic confirma (ex: `_e_d2`).
+    pub source_var: String,
+    /// Índice da cláusula em `join_patterns` (mesmo índice usado em `iter_plans`).
+    pub pattern_idx: usize,
+    /// Posição na idx_order desta cláusula (`e`/`a`/`v`/`t`/`added`).
+    pub position: String,
+}
+
 #[derive(Clone)]
 pub struct QueryPlanResult {
     pub iter_plans: Vec<IterPlanData>,
@@ -170,6 +187,9 @@ pub struct QueryPlanResult {
     pub exists_mode: bool,
     pub find_vars: Vec<FindVar>,
     pub range_bounds: RangeBoundsMap,
+    /// Var sintéticas para confirmação same-var. Chaveada por nome p/ lookup
+    /// rápido no compiler e no EXPLAIN.
+    pub synthetic_vars: Vec<SyntheticVar>,
 }
 
 fn fmt_spec(spec: &SpecKind) -> String {
@@ -210,13 +230,29 @@ impl std::fmt::Display for QueryPlanResult {
                 writeln!(f, "  p{i} @ {}", ip.index_name)?;
                 for (pos, slot) in ip.idx_order.iter().enumerate() {
                     let spec = &ip.specs[pos];
+                    let var_at_pos = match spec {
+                        SpecKind::Var(name) => Some(name.clone()),
+                        _ => None,
+                    };
                     let var_label = ip.var_depths
                         .iter()
-                        .find(|(d, ref p)| p == slot)
-                        .map(|(d, _)| format!("  [depth {d}]"));
+                        .find(|(_, ref p)| p == slot)
+                        .map(|(d, _)| {
+                            if let Some(ref name) = var_at_pos {
+                                if let Some(at) = name.find("@p") {
+                                    let source = &name[..at];
+                                    return format!("  [depth {d} - confirmation: range [{source}, {source}]]");
+                                }
+                            }
+                            format!("  [depth {d}]")
+                        });
                     match spec {
                         SpecKind::Var(name) => {
-                            writeln!(f, "    {slot} = ?{name}{}",
+                            let display_name = match name.find("@p") {
+                                Some(at) => &name[..at],
+                                None => name.as_str(),
+                            };
+                            writeln!(f, "    {slot} = ?{display_name}{}",
                                 var_label.as_deref().unwrap_or(""))?;
                         }
                         SpecKind::BoundAttr(_) | SpecKind::BoundValue(_) | SpecKind::Bound(_) | SpecKind::BoundParam(_) => {

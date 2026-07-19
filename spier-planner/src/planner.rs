@@ -157,6 +157,7 @@ fn explore_ordering_depth(
     stats: &PlanStats,
     join_indices: &[usize],
     ref_attrs: &HashSet<String>,
+    synthetic_vars: &[crate::ast::SyntheticVar],
     state: &mut SearchState,
     path: &mut Vec<String>,
     depth_traces: &mut Vec<DepthTrace>,
@@ -218,6 +219,15 @@ fn explore_ordering_depth(
     });
 
     for current_var in candidates {
+        // Synthetic vars (same-var confirmation): inviável se source_var ainda
+        // não foi resolvido. Pula sem recursão.
+        let is_synthetic = synthetic_vars.iter().find(|s| s.name == current_var);
+        if let Some(synth) = is_synthetic {
+            if !bound_vars.contains(&synth.source_var) {
+                continue;
+            }
+        }
+
         let mut active_clauses: Vec<(usize, String)> = Vec::new();
         let mut clause_sizes: Vec<f64> = Vec::new();
         let mut new_clause_indexes: Vec<Option<String>> = clause_index_map.to_vec();
@@ -256,7 +266,12 @@ fn explore_ordering_depth(
             1.0
         };
 
-        let (level_elements, step_cost) = if is_blind {
+        // Synthetic var (same-var confirmation): custo zero — é só um filter
+        // scanner-iterate com equality range. Cardinalidade permanece a mesma
+        // (top_elements) já que a confirmação poda mas não gera novos elementos.
+        let (level_elements, step_cost) = if is_synthetic.is_some() {
+            (top_elements, 0.0)
+        } else if is_blind {
             let el = total_records * range_sel;
             if path.is_empty() {
                 (el, el * el)
@@ -314,6 +329,7 @@ fn explore_ordering_depth(
             stats,
             join_indices,
             ref_attrs,
+            synthetic_vars,
             state,
             path,
             depth_traces,
@@ -326,12 +342,22 @@ fn explore_ordering_depth(
 
 fn build_iter_plan(
     pattern: &Pattern,
+    pattern_idx: usize,
     idx_name: &str,
     bound_ints: HashMap<String, PlanValue>,
     global_var_order: &[String],
+    synthetic_vars: &[crate::ast::SyntheticVar],
 ) -> IterPlanData {
     let idx_entry = INDEX_ORDERS.iter().find(|(n, _)| *n == idx_name).unwrap();
     let idx_order: [String; 5] = idx_entry.1.map(|s| s.to_string());
+
+    // Helper: se a posição `pos` deste pattern for uma duplicata same-var,
+    // devolve o nome synthetic (que tem entrada própria em global_var_order).
+    let synth_name_for = |pos: &str| -> Option<String> {
+        synthetic_vars.iter()
+            .find(|s| s.pattern_idx == pattern_idx && s.position == pos)
+            .map(|s| s.name.clone())
+    };
 
     let slots = [
         &pattern.e,
@@ -375,10 +401,21 @@ fn build_iter_plan(
         match slot {
             Slot::Var(name) => {
                 seen_real_var = true;
-                if let Some(depth) = global_var_order.iter().position(|v| v == name) {
+                // Se esta for uma posição duplicada (same-var) neste pattern,
+                // procurar o nome synthetic correspondente e usá-lo para que
+                // `var_depths` aponte para a entrada synthetic em global_var_order
+                // (que tem depth próprio, definido pela busca).
+                let effective_name = synth_name_for(pos).unwrap_or_else(|| name.clone());
+                if let Some(depth) = global_var_order.iter().position(|v| *v == effective_name) {
                     if !active_depths_set.contains(&depth) {
                         var_depths.push((depth, pos.clone()));
                         active_depths_set.insert(depth);
+                        // Sobrepor a SpecKind: se for synthetic, a spec carrega o
+                        // nome synthetic (mesmo valor, mas referenciando a entrada
+                        // sintética no plano).
+                        if effective_name != *name {
+                            specs[spec_idx] = SpecKind::Var(effective_name.clone());
+                        }
                     } else {
                         same_var_constraints
                             .entry(depth)
@@ -506,25 +543,43 @@ pub fn build_query_plan(
             exists_mode: false,
             find_vars: Vec::new(),
             range_bounds: HashMap::new(),
+            synthetic_vars: Vec::new(),
         });
     }
 
     let mut seen: HashSet<String> = HashSet::new();
     let mut var_order: Vec<String> = Vec::new();
     let mut all_vars: Vec<String> = Vec::new();
-    for pattern in &join_patterns {
-        for slot in [
-            &pattern.e,
-            &pattern.a,
-            &pattern.v,
-            &pattern.t,
-            &pattern.added,
+    let mut synthetic_vars: Vec<crate::ast::SyntheticVar> = Vec::new();
+    for (pat_idx, pattern) in join_patterns.iter().enumerate() {
+        // seen_in_pattern rastreia duplicatas DENTRO deste pattern; resetado a cada iteração.
+        let mut seen_in_pattern: HashSet<String> = HashSet::new();
+        for (pos_name, slot) in [
+            ("e", &pattern.e),
+            ("a", &pattern.a),
+            ("v", &pattern.v),
+            ("t", &pattern.t),
+            ("added", &pattern.added),
         ] {
             if let Slot::Var(name) = slot {
                 if !seen.contains(name) {
                     seen.insert(name.clone());
                     var_order.push(name.clone());
                     all_vars.push(name.clone());
+                    seen_in_pattern.insert(name.clone());
+                } else if !seen_in_pattern.contains(name) {
+                    // Primeira ocorrência desta var NESTE pattern — ainda não é duplicata.
+                    seen_in_pattern.insert(name.clone());
+                } else {
+                    // Ocorrência duplicada dentro do mesmo pattern → synthetic.
+                    let synth_name = format!("{name}@p{pat_idx}.{pos_name}");
+                    all_vars.push(synth_name.clone());
+                    synthetic_vars.push(crate::ast::SyntheticVar {
+                        name: synth_name,
+                        source_var: name.clone(),
+                        pattern_idx: pat_idx,
+                        position: pos_name.to_string(),
+                    });
                 }
             }
         }
@@ -577,6 +632,7 @@ pub fn build_query_plan(
         stats,
         &join_indices,
         &ref_attrs,
+        &synthetic_vars,
         &mut state,
         &mut path,
         &mut depth_traces,
@@ -691,9 +747,11 @@ pub fn build_query_plan(
 
             iter_plans.push(build_iter_plan(
                 pattern,
+                pat_idx,
                 &idx_name,
                 bound_ints,
                 &ordered_vars,
+                &synthetic_vars,
             ));
         }
     }
@@ -750,5 +808,6 @@ pub fn build_query_plan(
         exists_mode: false,
         find_vars: Vec::new(),
         range_bounds: HashMap::new(),
+        synthetic_vars,
     })
 }

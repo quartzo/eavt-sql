@@ -440,14 +440,33 @@ impl QueryEngine for QueryState {
                     };
                     let spec = &ip.specs[datalog_pos];
                     let bound_val = ip.bound_ints.get(slot);
+                    // Para descobrir se esta posição é synthetic, olhar a SpecKind
+                    // (var_depths guarda position_name, não var_name).
+                    let var_at_pos = match spec {
+                        SpecKind::Var(name) => Some(name.clone()),
+                        _ => None,
+                    };
                     let var_label = ip.var_depths
                         .iter()
                         .find(|(_, ref p)| p == slot)
-                        .map(|(d, _)| format!(" [depth {d}]"));
+                        .map(|(d, _)| {
+                            if let Some(ref name) = var_at_pos {
+                                if let Some(at) = name.find("@p") {
+                                    let source = &name[..at];
+                                    return format!(" [depth {d} - confirmation: range [{source}, {source}]]");
+                                }
+                            }
+                            format!(" [depth {d}]")
+                        });
                         match spec {
                             SpecKind::Var(name) => {
+                                // Para synthetics, mostrar source_var em vez do nome synthetic.
+                                let display_name = match name.find("@p") {
+                                    Some(at) => &name[..at],
+                                    None => name.as_str(),
+                                };
                                 out.push_str(&format!("    {} = ?{}{}\n",
-                                    slot, name, var_label.as_deref().unwrap_or("")));
+                                    slot, display_name, var_label.as_deref().unwrap_or("")));
                             }
                             SpecKind::Bound(0) => {
                                 out.push_str(&format!("    {} = _\n", slot));
