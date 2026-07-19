@@ -177,6 +177,20 @@ fn is_unordered_attr(vt: Option<u32>) -> bool {
 // V2Scanner — scanner-centric triejoin: one scanner per clause, position-aware
 // ---------------------------------------------------------------------------
 
+/// Resultado da comparação de uma chave contra o prefixo fixo corrente do
+/// scanner. Os callers decidem como reagir a cada caso (seek, abort, aceitar).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KeyVsPrefix {
+    /// Scanner sem entradas Fixed — qualquer chave é aceitável.
+    NoPrefix,
+    /// Chave estritamente anterior à faixa do prefixo (cursor pode seek-to-prefix).
+    Before,
+    /// Chave começa com o prefixo (está dentro da faixa).
+    Match,
+    /// Chave estritamente posterior à faixa do prefixo (faixa esgotada).
+    After,
+}
+
 pub struct V2Scanner {
     pos: PositionStack,
     index_name: String,
@@ -212,8 +226,35 @@ impl V2Scanner {
         self.history_mode = true;
     }
 
-    pub fn prefix_bytes(&self) -> &[u8] {
+    /// Prefixo codificado corrente (debug-only: exposto ao Scheme evaluator
+    /// via host fn `scanner-prefix`). Lê direto de `prefix_cache`; callers
+    /// internos devem preferir `classify_key` em vez de inspecionar os bytes.
+    pub(crate) fn prefix_bytes(&self) -> &[u8] {
         &self.prefix_cache
+    }
+
+    /// Compara `key` contra o prefixo fixo corrente. Caso degenerado
+    /// (`prefix_cache` vazio) devolve `NoPrefix`; callers tratam cada
+    /// variante como preferirem (seek / set_at_end / aceitar). Lida com
+    /// chaves mais curtas que o prefixo: nesse cenário a chave ordena
+    /// lexicograficamente antes do prefixo, então devolve `Before`.
+    fn classify_key(&self, key: &[u8]) -> KeyVsPrefix {
+        let bp = &self.prefix_cache;
+        if bp.is_empty() {
+            return KeyVsPrefix::NoPrefix;
+        }
+        let n = bp.len().min(key.len());
+        match key[..n].cmp(&bp[..n]) {
+            std::cmp::Ordering::Less => KeyVsPrefix::Before,
+            std::cmp::Ordering::Greater => KeyVsPrefix::After,
+            std::cmp::Ordering::Equal => {
+                if key.len() < bp.len() {
+                    KeyVsPrefix::Before
+                } else {
+                    KeyVsPrefix::Match
+                }
+            }
+        }
     }
 
     pub fn save_value(&mut self, val: &Value) {
@@ -446,8 +487,7 @@ impl V2Scanner {
     /// Extrai o valor na posição corrente (topo da pilha).
     pub fn extract_current(&self) -> Option<Value> {
         let key = self.pos.current_active_key()?;
-        let prefix = &self.prefix_cache;
-        if !prefix.is_empty() && !key.starts_with(prefix) {
+        if !matches!(self.classify_key(key), KeyVsPrefix::Match | KeyVsPrefix::NoPrefix) {
             return None;
         }
         let raw = self.extract_raw(key);
@@ -546,33 +586,23 @@ impl V2Scanner {
             return;
         }
 
-        let bound_prefix: Option<&[u8]> = {
-            if self.prefix_cache.is_empty() { None } else { Some(&self.prefix_cache) }
-        };
-
         while self.pos.cursor().borrow().is_valid() {
             let first_key = self.pos.cursor().borrow().current_key().unwrap().to_vec();
             if first_key.len() < 8 {
                 self.pos.cursor().borrow_mut().step();
                 continue;
             }
-            if let Some(bp) = bound_prefix {
-                if bp.is_empty() {
-                    // No prefix constraint — accept all keys.
-                } else {
-                    let cmp_len = bp.len().min(first_key.len());
-                    let key_prefix = &first_key[..cmp_len];
-                    if key_prefix != &bp[..] {
-                        // Key doesn't match prefix.
-                        if key_prefix < &bp[..] {
-                            // Key is before prefix range — seek forward to prefix.
-                            self.pos.cursor().borrow_mut().seek(bp);
-                            continue;
-                        } else {
-                            self.pos.set_at_end(true);
-                            return;
-                        }
-                    }
+            match self.classify_key(&first_key) {
+                KeyVsPrefix::NoPrefix | KeyVsPrefix::Match => {}
+                KeyVsPrefix::Before => {
+                    // Cursor antes da faixa do prefixo — pula direto pra ela.
+                    self.pos.cursor().borrow_mut().seek(&self.prefix_cache);
+                    continue;
+                }
+                KeyVsPrefix::After => {
+                    // Passou do fim da faixa — sem mais resultados.
+                    self.pos.set_at_end(true);
+                    return;
                 }
             }
             let first_raw = self.extract_raw(&first_key);
@@ -632,19 +662,17 @@ impl V2Scanner {
     fn advance_history_each(&mut self) {
         let as_of_tx = self.as_of_tx;
 
-        let bound_prefix: Option<&[u8]> = {
-            if self.prefix_cache.is_empty() { None } else { Some(&self.prefix_cache) }
-        };
-
         while self.pos.cursor().borrow().is_valid() {
             let key = self.pos.cursor().borrow().current_key().unwrap().to_vec();
             if key.len() < 8 {
                 self.pos.cursor().borrow_mut().step();
                 continue;
             }
-            if let Some(bp) = bound_prefix {
-                let bs = self.value_start(&key).min(bp.len());
-                if bs != bp.len() || key[..bp.len()] != bp[..] {
+            // history_mode itera monoticamente — qualquer divergência do
+            // prefixo (antes ou depois) encerra a iteração, sem seek-forward.
+            match self.classify_key(&key) {
+                KeyVsPrefix::NoPrefix | KeyVsPrefix::Match => {}
+                KeyVsPrefix::Before | KeyVsPrefix::After => {
                     self.pos.set_at_end(true);
                     return;
                 }
