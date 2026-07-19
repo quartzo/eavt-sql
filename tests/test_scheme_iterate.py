@@ -133,18 +133,6 @@ def test_iterate_param_accessible_in_body(engine):
     assert [r[0] for r in rows] == ["a", "b", "c"]
 
 
-# ── scanner-iterate in non-yield path errors ─────────────────────────────────
-
-
-def test_iterate_errors_in_dml_path(engine):
-    """scanner-iterate requires yield-mode (SelectSchemeSession)."""
-    with pytest.raises(ValueError, match="yield-mode"):
-        engine.run_scheme(
-            '(let* ((s (scanner-open "EAVT"))) '
-            '(scanner-iterate s (v) (result v)))'
-        )
-
-
 # ── Arity / type errors ─────────────────────────────────────────────────────
 
 

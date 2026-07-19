@@ -29,6 +29,12 @@ def _scan(h, prefix):
     raise RuntimeError("handle has no scan method")
 
 
+def _pack_eid(eid: int) -> bytes:
+    """Encode entity ID with sign-flip for KV store key prefix matching."""
+    flipped = eid ^ 0x8000_0000_0000_0000
+    return struct.pack(">Q", flipped)
+
+
 def _scan_kv(path, prefix):
     """Open a KV-only engine on the same path for raw key inspection."""
     kv = spier_kvstore_py.Engine({"backend": "file", "path": path})
@@ -61,11 +67,11 @@ class TestLargeValueSaveFlushScan:
 
         h.flush()
 
-        keys = _scan_kv(str(tmp_path), struct.pack(">Q", eid))
+        keys = _scan_kv(str(tmp_path), _pack_eid(eid))
         assert len(keys) == 1
         assert len(keys[0]) > LARGE_SIZE, f"key should embed 70KB+ value, got {len(keys[0])}"
 
-        keys_after_flush = _scan_kv(str(tmp_path), struct.pack(">Q", eid))
+        keys_after_flush = _scan_kv(str(tmp_path), _pack_eid(eid))
         assert len(keys_after_flush) == 1
         assert keys_after_flush == keys, "scan after flush must match scan before flush"
         h.close()
@@ -112,7 +118,7 @@ class TestLargeValueSaveFlushScan:
         h.flush()
         h.close()
 
-        keys = _scan_kv(str(tmp_path), struct.pack(">Q", eid))
+        keys = _scan_kv(str(tmp_path), _pack_eid(eid))
         assert len(keys) == 1
         assert len(keys[0]) > LARGE_SIZE, "70KB key must survive flush + reopen"
 
@@ -141,7 +147,7 @@ class TestLargeValueJournalRecovery:
         e = EAVTEngine(str(tmp_path))
         kv = spier_kvstore_py.Engine({"backend": "file", "path": str(tmp_path)})
         try:
-            keys = unpack_keys(bytes(kv.scan(**{"cf": 0, "prefix": struct.pack(">Q", eid)})))
+            keys = unpack_keys(bytes(kv.scan(**{"cf": 0, "prefix": _pack_eid(eid)})))
         finally:
             kv.close()
         e.close()
@@ -181,7 +187,7 @@ class TestLargeValueCursorScan:
         h = spier_kvstore_py.Engine({"backend": "file", "path": str(tmp_path)})
         keys_in = []
         for i in range(3):
-            k = struct.pack(">Q", 100 + i) + _make_payload(LARGE_SIZE, chr(65 + i))
+            k = _pack_eid(100 + i) + _make_payload(LARGE_SIZE, chr(65 + i))
             keys_in.append(k)
             h.put(**{"cf": 0, "key": k})
         h.flush()
