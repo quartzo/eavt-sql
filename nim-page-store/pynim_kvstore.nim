@@ -20,6 +20,8 @@ import nim_memtable/all
 import resolver
 import transactor
 import abi
+import eavt
+import keys
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Constants
@@ -184,3 +186,95 @@ proc gcFull(e: PyEngine; maxAgeSecs: uint64; maxRootCount: uint32; dryRun: bool)
 proc batchWrite(e: PyEngine; ops: seq[byte]) {.exportpy.} =
   var err: cint
   discard e.vt.batchWrite(e.handle, addr ops[0], ops.len.csize_t, addr err)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EAVT engine — wraps EavtEngine (resolver + keys + KVStore)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+type
+  PyEavtEngine* = ref object
+    vt: NimKVStoreVtablePtr
+    eng: EavtEngine
+
+proc newEavtEngine*(config: openArray[(string, string)]): PyEavtEngine {.exportpy.} =
+  let n = config.len
+  var keys = cast[CStringArr](allocShared0(n * sizeof(cstring)))
+  var vals = cast[CStringArr](allocShared0(n * sizeof(cstring)))
+  for i, (k, v) in config:
+    keys[i] = k.cstring
+    vals[i] = v.cstring
+  var err: cint
+  let vt = openKvStore(keys, vals, n.cint, addr err)
+  deallocShared(keys)
+  deallocShared(vals)
+  if vt == nil:
+    raise newException(ValueError, "failed to open kvstore: err=" & $err)
+  let eng = newEavtEngine(vt)
+  PyEavtEngine(vt: vt, eng: eng)
+
+proc close(e: PyEavtEngine) {.exportpy.} =
+  var err: cint
+  discard e.vt.close(e.vt.handle, addr err)
+  freeKVVtable(e.vt)
+
+proc eavtSave(e: PyEavtEngine; eid: uint64; attrName: string; value: string;
+               t: uint64): uint64 {.exportpy.} =
+  e.eng.eavtSave(eid, attrName, value, t)
+
+proc eavtRetract(e: PyEavtEngine; eid: uint64; attrName: string;
+                  value: string; t: uint64) {.exportpy.} =
+  e.eng.eavtRetract(eid, attrName, value, t)
+
+proc eavtDeclareAttr(e: PyEavtEngine; name: string; valueType: uint32;
+                      many: bool): uint32 {.exportpy.} =
+  let (aid, _) = e.eng.eavtDeclareAttr(name, valueType, many)
+  return aid
+
+proc lookupAttr(e: PyEavtEngine; name: string): Option[uint32] {.exportpy.} =
+  e.eng.lookupAttr(name)
+
+proc attrName(e: PyEavtEngine; aid: uint32): string {.exportpy.} =
+  e.eng.attrName(aid)
+
+proc allocateEntityId(e: PyEavtEngine): uint64 {.exportpy.} =
+  e.eng.allocateEntityId()
+
+proc allocateInPartition(e: PyEavtEngine; pid: uint64): uint64 {.exportpy.} =
+  e.eng.allocateInPartition(pid)
+
+proc declarePartition(e: PyEavtEngine; name: string): uint64 {.exportpy.} =
+  e.eng.declarePartition(name)
+
+proc partitionIdFor(e: PyEavtEngine; name: string): Option[uint64] {.exportpy.} =
+  e.eng.partitionIdFor(name)
+
+proc isDeclared(e: PyEavtEngine; aid: uint32): bool {.exportpy.} =
+  e.eng.isDeclared(aid)
+
+proc isMany(e: PyEavtEngine; aid: uint32): bool {.exportpy.} =
+  e.eng.isMany(aid)
+
+proc valueTypeFor(e: PyEavtEngine; aid: uint32): Option[uint32] {.exportpy.} =
+  e.eng.valueTypeFor(aid)
+
+proc defaultUserPartition(e: PyEavtEngine): uint64 {.exportpy.} = PartUser
+
+proc isUnique(e: PyEavtEngine; aid: uint32): bool {.exportpy.} =
+  e.eng.resolver.isUnique(aid)
+
+proc isUniqueAttr(e: PyEavtEngine; name: string): bool {.exportpy.} =
+  let aid = e.eng.lookupAttr(name)
+  if aid.isSome: return e.eng.resolver.isUnique(aid.get(DbTypeString))
+  return false
+
+proc allocateTx(e: PyEavtEngine): uint64 {.exportpy.} =
+  # Allocate a transaction ID from PART_TX
+  e.eng.resolver.allocateInPartition(PartTx)
+
+proc flush(e: PyEavtEngine) {.exportpy.} =
+  var err: cint
+  discard e.vt.flush(e.vt.handle, addr err)
+
+proc kvPut(e: PyEavtEngine; cf: uint32; key: seq[byte]) {.exportpy.} =
+  var err: cint
+  discard e.vt.put(e.vt.handle, cf, addr key[0], key.len.csize_t, addr err)
