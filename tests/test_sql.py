@@ -328,10 +328,6 @@ def test_explain_sql_range_bounds():
     engine.close()
 
 
-@pytest.mark.xfail(
-    reason="bug: SELECT literal WHERE d1.eid = %1 compiles to (result-row 1) "
-           "without an existence check on the eid — should emit a scanner-iterate."
-)
 def test_explain_sql_no_patterns():
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.name STRING ONE"))

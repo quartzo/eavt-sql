@@ -1768,12 +1768,8 @@ def test_select_literal_where_eid_exists():
     engine.close()
 
 
-@pytest.mark.xfail(
-    reason="bug: WHERE d1.eid = X without attr-cond emits (result-row 1) "
-           "without an existence check; planner drops e-only pattern."
-)
 def test_select_literal_where_eid_does_not_exist():
-    """Should return [] when eid doesn't exist. Currently returns [(1,)]."""
+    """Should return [] when eid doesn't exist."""
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.name STRING ONE"))
     list(engine.sql("UPSERT SET company.name = 'ACME'"))
@@ -1793,12 +1789,8 @@ def test_select_eid_where_eid_exists():
     engine.close()
 
 
-@pytest.mark.xfail(
-    reason="bug: WHERE d1.eid = X without attr-cond emits (result-row X) "
-           "without an existence check; planner drops e-only pattern."
-)
 def test_select_eid_where_eid_does_not_exist():
-    """Should return [] when eid doesn't exist. Currently returns [(999999,)]."""
+    """Should return [] when eid doesn't exist."""
     engine = EAVTEngine(":memory:")
     list(engine.sql("ATTRIBUTE company.name STRING ONE"))
     list(engine.sql("UPSERT SET company.name = 'ACME'"))
@@ -1820,10 +1812,6 @@ def test_select_literal_where_eid_with_attr_cond_not_exists():
     engine.close()
 
 
-@pytest.mark.xfail(
-    reason="bug: WHERE d1.eid = X without attr-cond emits bare (result-row) "
-           "without scanner-open/scanner-iterate."
-)
 def test_explain_select_literal_where_eid_emits_scanner():
     """EXPLAIN must show scanner-open + scanner-iterate for e-only pattern."""
     engine = EAVTEngine(":memory:")
@@ -1837,10 +1825,6 @@ def test_explain_select_literal_where_eid_emits_scanner():
     engine.close()
 
 
-@pytest.mark.xfail(
-    reason="bug: WHERE d1.eid = X without attr-cond emits bare (result-row) "
-           "without scanner-open/scanner-iterate."
-)
 def test_explain_select_eid_where_eid_emits_scanner():
     """EXPLAIN must show scanner-open + scanner-iterate for e-only pattern."""
     engine = EAVTEngine(":memory:")

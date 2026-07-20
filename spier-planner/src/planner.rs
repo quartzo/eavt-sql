@@ -659,9 +659,49 @@ pub fn build_query_plan(
 
     let best_ordering_orig = state.best_ordering.clone();
     let mut ordered_vars = state.best_ordering.unwrap_or_else(|| all_vars.clone());
-    let clause_indexes = state
+    let mut clause_indexes = state
         .best_clause_indexes
         .unwrap_or_else(|| clause_index_map);
+
+    // Validation-only patterns: cláusulas sem nenhuma Var (só Const/Missing)
+    // que não são lookup. Esses patterns não entram em explore_ordering_depth
+    // (que é orientado a Vars) e portanto não recebem idx. Escolhemos o idx
+    // com maior prefix contíguo de Const para maximizar seletividade do scan.
+    // O compiler emite scanner-iterate com (= const) na última posição bound
+    // (trailing iterate), o que serve como existence check.
+    for (pat_idx, pattern) in join_patterns.iter().enumerate() {
+        if clause_indexes[pat_idx].is_some() {
+            continue;
+        }
+        let has_var = matches!(pattern.e, Slot::Var(_))
+            || matches!(pattern.a, Slot::Var(_))
+            || matches!(pattern.v, Slot::Var(_))
+            || matches!(pattern.t, Slot::Var(_))
+            || matches!(pattern.added, Slot::Var(_));
+        if has_var || pattern.is_lookup() {
+            continue;
+        }
+        let mut best_idx: Option<&str> = None;
+        let mut best_score = 0;
+        for (idx_name, idx_order) in INDEX_ORDERS.iter() {
+            let mut score = 0;
+            for pos in idx_order.iter() {
+                match pattern.slot(pos) {
+                    Slot::Const(_) => score += 1,
+                    _ => break,
+                }
+            }
+            if score > best_score {
+                best_score = score;
+                best_idx = Some(idx_name);
+            }
+        }
+        if best_score > 0 {
+            if let Some(idx) = best_idx {
+                clause_indexes[pat_idx] = Some(idx.to_string());
+            }
+        }
+    }
 
     // Pre-compute skip vars for Missing gaps so all iter_plans share consistent depth numbering
     for (pat_idx, pattern) in join_patterns.iter().enumerate() {
@@ -698,81 +738,79 @@ pub fn build_query_plan(
     }
 
     let mut iter_plans: Vec<IterPlanData> = Vec::new();
-    if !ordered_vars.is_empty() {
-        for (pat_idx, pattern) in join_patterns.iter().enumerate() {
-            let idx_name = match &clause_indexes[pat_idx] {
-                Some(idx) => idx.clone(),
-                None => continue,
-            };
+    for (pat_idx, pattern) in join_patterns.iter().enumerate() {
+        let idx_name = match &clause_indexes[pat_idx] {
+            Some(idx) => idx.clone(),
+            None => continue,
+        };
 
-            let mut bound_ints: HashMap<String, PlanValue> = HashMap::new();
-            if let Slot::Const(bv) = &pattern.e {
-                match bv {
-                    BoundValue::Int(n) => {
-                        bound_ints.insert("e".to_string(), PlanValue::Value(Value::Int64(*n)));
-                    }
-                    BoundValue::Str(s) | BoundValue::Attr(s) => {
-                        bound_ints.insert(
-                            "e".to_string(),
-                            PlanValue::Value(Value::Text(s.clone().into())),
-                        );
-                    }
-                    BoundValue::Param(idx) => {
-                        bound_ints.insert("e".to_string(), PlanValue::Param(*idx));
-                    }
-                    _ => {}
+        let mut bound_ints: HashMap<String, PlanValue> = HashMap::new();
+        if let Slot::Const(bv) = &pattern.e {
+            match bv {
+                BoundValue::Int(n) => {
+                    bound_ints.insert("e".to_string(), PlanValue::Value(Value::Int64(*n)));
                 }
-            }
-            if let Slot::Const(bv) = &pattern.a {
-                match bv {
-                    BoundValue::ResolvedAttr(id, _, _, _) => {
-                        bound_ints
-                            .insert("a".to_string(), PlanValue::Value(Value::Int64(*id as i64)));
-                    }
-                    BoundValue::Str(s) | BoundValue::Attr(s) => {
-                        bound_ints.insert(
-                            "a".to_string(),
-                            PlanValue::Value(Value::Text(s.clone().into())),
-                        );
-                    }
-                    BoundValue::Param(idx) => {
-                        bound_ints.insert("a".to_string(), PlanValue::Param(*idx));
-                    }
-                    _ => {}
+                BoundValue::Str(s) | BoundValue::Attr(s) => {
+                    bound_ints.insert(
+                        "e".to_string(),
+                        PlanValue::Value(Value::Text(s.clone().into())),
+                    );
                 }
-            }
-            if let Slot::Const(bv) = &pattern.v {
-                match bv {
-                    BoundValue::Int(n) => {
-                        bound_ints.insert("v".to_string(), PlanValue::Value(Value::Int64(*n)));
-                    }
-                    BoundValue::Float(f) => {
-                        bound_ints.insert("v".to_string(), PlanValue::Value(Value::Float64(*f)));
-                    }
-                    BoundValue::Str(s) => {
-                        bound_ints
-                            .insert("v".to_string(), PlanValue::Value(Value::text(s.clone())));
-                    }
-                    BoundValue::Attr(s) => {
-                        bound_ints
-                            .insert("v".to_string(), PlanValue::Value(Value::text(s.clone())));
-                    }
-                    BoundValue::Param(idx) => {
-                        bound_ints.insert("v".to_string(), PlanValue::Param(*idx));
-                    }
-                    _ => {}
+                BoundValue::Param(idx) => {
+                    bound_ints.insert("e".to_string(), PlanValue::Param(*idx));
                 }
+                _ => {}
             }
-
-            iter_plans.push(build_iter_plan(
-                pattern,
-                pat_idx,
-                &idx_name,
-                bound_ints,
-                &ordered_vars,
-                &synthetic_vars,
-            ));
         }
+        if let Slot::Const(bv) = &pattern.a {
+            match bv {
+                BoundValue::ResolvedAttr(id, _, _, _) => {
+                    bound_ints
+                        .insert("a".to_string(), PlanValue::Value(Value::Int64(*id as i64)));
+                }
+                BoundValue::Str(s) | BoundValue::Attr(s) => {
+                    bound_ints.insert(
+                        "a".to_string(),
+                        PlanValue::Value(Value::Text(s.clone().into())),
+                    );
+                }
+                BoundValue::Param(idx) => {
+                    bound_ints.insert("a".to_string(), PlanValue::Param(*idx));
+                }
+                _ => {}
+            }
+        }
+        if let Slot::Const(bv) = &pattern.v {
+            match bv {
+                BoundValue::Int(n) => {
+                    bound_ints.insert("v".to_string(), PlanValue::Value(Value::Int64(*n)));
+                }
+                BoundValue::Float(f) => {
+                    bound_ints.insert("v".to_string(), PlanValue::Value(Value::Float64(*f)));
+                }
+                BoundValue::Str(s) => {
+                    bound_ints
+                        .insert("v".to_string(), PlanValue::Value(Value::text(s.clone())));
+                }
+                BoundValue::Attr(s) => {
+                    bound_ints
+                        .insert("v".to_string(), PlanValue::Value(Value::text(s.clone())));
+                }
+                BoundValue::Param(idx) => {
+                    bound_ints.insert("v".to_string(), PlanValue::Param(*idx));
+                }
+                _ => {}
+            }
+        }
+
+        iter_plans.push(build_iter_plan(
+            pattern,
+            pat_idx,
+            &idx_name,
+            bound_ints,
+            &ordered_vars,
+            &synthetic_vars,
+        ));
     }
 
     let mut t_lookup_vars: Vec<String> = Vec::new();
