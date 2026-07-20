@@ -1063,6 +1063,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::resolver_consts::{make_entity_id, seq_of, PART_USER};
+    use spier_kvstore::KVState;
 
     fn eavt_key(e: u64) -> Vec<u8> {
         let mut k = Vec::with_capacity(20);
