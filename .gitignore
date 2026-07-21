@@ -39,3 +39,5 @@ nim-blobstore/*/sha256
 /nim-page-store/tests
 /nim-page-store/resolver
 /pynim_kvstore.so
+nim-page-store/scheme
+nim-page-store/tests

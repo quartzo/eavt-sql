@@ -3,7 +3,7 @@
 ## Port of spier-scheme (~1500 lines Rust → Nim).
 ## Stack-based VM with yield/resume for streaming queries.
 
-import std/[tables, strutils, strformat, options, sequtils, parseutils]
+import std/[tables, strutils, options, sequtils]
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SExpr — the universal value type
@@ -422,7 +422,6 @@ proc evalExpr(expr: SExpr; env: var Environment; host: HostFns;
         return host.call(name, args)
       raise newException(EvalError, "unknown function: " & name)
     raise newException(EvalError, "cannot apply non-symbol as function")
-  else: discard
   return done(newVoid())
 
 # ═══════════════════════════════════════════════════════════════════════════════
