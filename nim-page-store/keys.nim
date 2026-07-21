@@ -3,7 +3,8 @@
 ## Port of spier-transactor/src/keys.rs (~839 lines Rust → Nim).
 
 import std/[strutils, strformat]
-import ./resolver  # for PartDb, PartUser, PartTx, partitionOf, makeEntityId
+import ./resolver
+import ./scheme  # for PartDb, PartUser, PartTx, partitionOf, makeEntityId
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Encode mode
@@ -212,3 +213,91 @@ proc buildEavtEntries*(eid: uint64; attr: uint32; encodedValue: seq[byte];
   else:
     if indexed:
       result.add EavtEntry(cf: 2, key: aBytes & encodedValue & eBytes & sfBytes)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Decoding (used by query engine scanner)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+proc decodeSuffix*(encoded: uint64): (uint64, bool) =
+  ## Returns (t, retracted) from an encoded suffix.
+  let t = encoded shr 1
+  let retracted = (encoded and 1) != 0
+  (t, retracted)
+
+proc decodeInt64*(raw: uint64): int64 =
+  ## Reverse of encodeInt — reverse sign-flip.
+  cast[int64](raw xor (1'u64 shl 63))
+
+proc decodeFloat64*(raw: uint64): float64 =
+  ## Reverse of encodeFloat — reverse sign-flip.
+  var x = raw
+  if (x shr 63) == 1:
+    x = x xor (1'u64 shl 63)
+  else:
+    x = not x
+  cast[float64](x)
+
+proc beUint64*(data: openArray[byte]; start: int): uint64 =
+  for i in 0..7:
+    result = (result shl 8) or uint64(data[start + i])
+
+proc beUint32*(data: openArray[byte]; start: int): uint32 =
+  for i in 0..3:
+    result = (result shl 8) or uint32(data[start + i])
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Fixed-size encoding (for query engine scanner — sign-flip for int, float, bool, instant)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+proc encodeFixed*(val: SExpr): seq[byte] =
+  ## Encodes a value with sign-flip for fixed-size ordering (int, float, bool, timestamp).
+  case val.kind:
+  of sInt:
+    var x = cast[uint64](val.ival xor (1'i64 shl 63))
+    result = newSeqOfCap[byte](8)
+    for i in countdown(7, 0): result.add byte((x shr (i * 8)) and 0xFF)
+  of sFloat:
+    var x = cast[uint64](val.fval)
+    if (x shr 63) == 1: x = not x
+    else: x = x xor (1'u64 shl 63)
+    result = newSeqOfCap[byte](8)
+    for i in countdown(7, 0): result.add byte((x shr (i * 8)) and 0xFF)
+  of sBool:
+    result = newSeqOfCap[byte](8)
+    result.add byte(if val.bval: 0x80 else: 0x00)
+    for _ in 1..7: result.add byte(0)
+  else:
+    result = newSeqOfCap[byte](8)
+    for _ in 0..7: result.add byte(0)
+
+proc encodeBoundValue*(val: SExpr): seq[byte] =
+  ## Encodes a value for scanner prefix building.
+  case val.kind:
+  of sStr:  encodeVariable(val.sval)
+  of sBytes: encodeVariableUnordered(val.bytesval)
+  else:     encodeFixed(val)
+
+# CF index helpers
+proc cfNameToId*(name: string): int =
+  case name:
+  of "eavt": 0
+  of "aevt": 1
+  of "avet": 2
+  of "vaet": 3
+  else: 0
+
+proc cfForIndex*(index: string): string =
+  case index.toLowerAscii():
+  of "eavt": "eavt"
+  of "aevt": "aevt"
+  of "avet": "avet"
+  of "vaet": "vaet"
+  else: "eavt"
+
+proc indexOrder*(index: string): seq[string] =
+  case index.toLowerAscii():
+  of "eavt": @["e", "a", "v"]
+  of "aevt": @["a", "e", "v"]
+  of "avet": @["a", "v", "e"]
+  of "vaet": @["v", "a", "e"]
+  else: @["e", "a", "v"]

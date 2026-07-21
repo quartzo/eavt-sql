@@ -22,7 +22,7 @@ type
     of sBytes:  bytesval*: seq[byte]
     of sSymbol: symval*: string
     of sList:   items*: seq[SExpr]
-    of sResource: rptr*: pointer
+    of sResource: rid*: int
     of sVoid:   discard
 
   SchemeProgram* = object
@@ -36,7 +36,7 @@ proc newStr*(s: string): SExpr = SExpr(kind: sStr, sval: s)
 proc newBytes*(b: seq[byte]): SExpr = SExpr(kind: sBytes, bytesval: b)
 proc newSymbol*(s: string): SExpr = SExpr(kind: sSymbol, symval: s)
 proc newList*(items: seq[SExpr]): SExpr = SExpr(kind: sList, items: items)
-proc newResource*(p: pointer): SExpr = SExpr(kind: sResource, rptr: p)
+proc newResource*(r: int): SExpr = SExpr(kind: sResource, rid: r)
 
 proc isTruthy*(e: SExpr): bool =
   not (e.kind == sVoid or (e.kind == sBool and not e.bval))

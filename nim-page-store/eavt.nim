@@ -57,7 +57,7 @@ proc newEavtEngine*(kv: NimKVStoreVtablePtr): EavtEngine =
 
 # ── Batch write helper ──
 
-proc batchWrite(eng: EavtEngine; entries: seq[EavtEntry]) =
+proc batchWrite*(eng: EavtEngine; entries: seq[EavtEntry]) =
   if entries.len == 0: return
   var ops: seq[byte] = @[]
   for e in entries:
@@ -71,7 +71,7 @@ proc batchWrite(eng: EavtEngine; entries: seq[EavtEntry]) =
 
 # ── Scan helper ──
 
-proc scan(eng: EavtEngine; cf: uint32; prefix: seq[byte]): seq[seq[byte]] =
+proc scan*(eng: EavtEngine; cf: uint32; prefix: seq[byte]): seq[seq[byte]] =
   var outBuf: pointer = nil
   var outLen: csize_t = 0
   var err: cint
