@@ -37,7 +37,7 @@ proc ensureInit(b: S3BlobStore; cfg: Table[string, string]): Option[string] =
   b.accessKey = cfg["access_key"]
   b.secretKey = cfg["secret_key"]
   b.prefix = if cfg.hasKey("prefix"): cfg["prefix"] else: ""
-  b.pathStyle = not (cfg.hasKey("path_style") and cfg["path_style"] == "true")
+  b.pathStyle = cfg.getOrDefault("path_style", "true") == "true"
   b.initialized = true
   result = none(string)
 
@@ -108,13 +108,11 @@ proc doRequest(b: S3BlobStore; httpMethod, objectKey, queryString: string;
   except OSError, IOError:
     return (0, @[], some("httpClient create: " & getCurrentExceptionMsg()))
   defer: client.close()
-  client.headers = newHttpHeaders({
-    "Authorization": signed.authorization,
-    "x-amz-date": signed.xAmzDate,
-    "x-amz-content-sha256": signed.xAmzContentSha256,
-    "Content-Type": "application/octet-stream",
-    "Host": host,
-  })
+  client.headers["Authorization"] = signed.authorization
+  client.headers["x-amz-date"] = signed.xAmzDate
+  client.headers["x-amz-content-sha256"] = signed.xAmzContentSha256
+  client.headers["Content-Type"] = "application/octet-stream"
+  client.headers["Host"] = host
   let httpVerb = parseEnum[HttpMethod](httpMethod.toUpperAscii())
   let bodyStr = if payload.len == 0: "" else: cast[string](payload)
   var resp: Response
@@ -219,12 +217,10 @@ method createBucket*(s: S3BlobStore) =
   except OSError, IOError:
     raise newException(IOError, "createBucket http: " & getCurrentExceptionMsg())
   defer: client.close()
-  client.headers = newHttpHeaders({
-    "Authorization": signed.authorization,
-    "x-amz-date": signed.xAmzDate,
-    "x-amz-content-sha256": signed.xAmzContentSha256,
-    "Host": host,
-  })
+  client.headers["Authorization"] = signed.authorization
+  client.headers["x-amz-date"] = signed.xAmzDate
+  client.headers["x-amz-content-sha256"] = signed.xAmzContentSha256
+  client.headers["Host"] = host
   let resp = client.request(url, HttpPut, "")
   if resp.code != Http200:
     raise newException(IOError, "createBucket failed: HTTP " & $resp.code)

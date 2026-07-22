@@ -29,13 +29,13 @@ proc startServer() =
     options = {poParentStreams})
   # Wait for server to be ready
   var ready = false
-  for attempt in 1..30:
-    sleep(200)
+  for attempt in 1..60:
+    sleep(250)
     try:
       let c = newHttpClient(timeout = 2000)
-      let r = c.request("http://127.0.0.1:" & $gPort & "/", HttpGet, "")
+      let r = c.request("http://127.0.0.1:" & $gPort & "/health/ready", HttpGet, "")
       c.close()
-      if r.code == Http200 or r.code == Http403:
+      if r.code == Http200:
         ready = true
         break
     except OSError, IOError:
@@ -76,7 +76,7 @@ proc `==`(a, b: openArray[byte]): bool =
 suite "s3: put + get":
   setup:
     startServer()
-    var tmpS = newS3BlobStore(cfg(), autoCreateBucket = true)
+    var tmpS = newS3BlobStore(cfg(), autoCreateBucket = false)
 
   teardown:
     stopServer()
@@ -115,7 +115,7 @@ suite "s3: put + get":
 suite "s3: overwrite":
   setup:
     startServer()
-    var tmpS = newS3BlobStore(cfg(), autoCreateBucket = true)
+    var tmpS = newS3BlobStore(cfg(), autoCreateBucket = false)
 
   teardown:
     stopServer()
@@ -135,7 +135,7 @@ suite "s3: overwrite":
 suite "s3: delete":
   setup:
     startServer()
-    var tmpS = newS3BlobStore(cfg(), autoCreateBucket = true)
+    var tmpS = newS3BlobStore(cfg(), autoCreateBucket = false)
 
   teardown:
     stopServer()
@@ -154,7 +154,7 @@ suite "s3: delete":
 suite "s3: list":
   setup:
     startServer()
-    var tmpS = newS3BlobStore(cfg(), autoCreateBucket = true)
+    var tmpS = newS3BlobStore(cfg(), autoCreateBucket = false)
 
   teardown:
     stopServer()
@@ -170,7 +170,7 @@ suite "s3: list":
 suite "s3: roots":
   setup:
     startServer()
-    var tmpS = newS3BlobStore(cfg(), autoCreateBucket = true)
+    var tmpS = newS3BlobStore(cfg(), autoCreateBucket = false)
 
   teardown:
     stopServer()
