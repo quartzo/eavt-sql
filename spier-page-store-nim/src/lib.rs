@@ -658,6 +658,24 @@ extern "C" {
         count: c_int,
         err_out: *mut c_int,
     ) -> *mut NimKVStoreVtable;
+    fn kvJournalAppendC(
+        h: *mut c_void,
+        key: *const u8,
+        klen: usize,
+        val: *const u8,
+        vlen: usize,
+        err_out: *mut c_int,
+    ) -> c_int;
+    fn kvJournalReadC(
+        h: *mut c_void,
+        out_buf: *mut *mut u8,
+        out_len: *mut usize,
+        err_out: *mut c_int,
+    ) -> c_int;
+    fn kvJournalTruncateC(
+        h: *mut c_void,
+        err_out: *mut c_int,
+    ) -> c_int;
 }
 
 pub struct NimKVStore {
@@ -814,6 +832,39 @@ impl NimKVStore {
         let rc = unsafe { ((*self.vt).memtable_size)((*self.vt).handle, &mut out_size, &mut err) };
         check_err(rc, err)?;
         Ok(out_size)
+    }
+
+    pub fn journal_append(&self, key: &[u8], val: &[u8]) -> Result<(), String> {
+        let mut err: c_int = 0;
+        let rc = unsafe {
+            kvJournalAppendC(
+                (*self.vt).handle,
+                key.as_ptr(), key.len(),
+                val.as_ptr(), val.len(),
+                &mut err,
+            )
+        };
+        check_err(rc, err)
+    }
+
+    pub fn journal_read(&self) -> Result<Vec<u8>, String> {
+        let mut out_buf: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut err: c_int = 0;
+        let rc = unsafe {
+            kvJournalReadC((*self.vt).handle, &mut out_buf, &mut out_len, &mut err)
+        };
+        check_err(rc, err)?;
+        if out_buf.is_null() { return Ok(Vec::new()); }
+        let data = unsafe { std::slice::from_raw_parts(out_buf, out_len).to_vec() };
+        unsafe { ((*self.vt).free_buf)(out_buf as *mut c_void); }
+        Ok(data)
+    }
+
+    pub fn journal_truncate(&self) -> Result<(), String> {
+        let mut err: c_int = 0;
+        let rc = unsafe { kvJournalTruncateC((*self.vt).handle, &mut err) };
+        check_err(rc, err)
     }
 }
 

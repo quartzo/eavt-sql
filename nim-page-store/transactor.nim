@@ -340,36 +340,25 @@ proc kvBatchWrite(h: pointer; ops: ptr Byte; olen: csize_t;
       s.mtSize = outSize
       # Journal each key-value entry for crash recovery
       if s.path.len > 0 and not s.readOnly:
-        let journalPath = s.path / "journal" / "journal"
-        try:
-          createDir(parentDir(journalPath))
-          var f: File
-          if open(f, journalPath, fmAppend):
-            var pos = 0
-            while pos + 1 <= olen.int:
-              let cf = cast[ptr UncheckedArray[byte]](ops)[pos]
-              inc pos
-              if pos + 4 > olen.int: break
-              let klen = int(uint32(cast[ptr UncheckedArray[byte]](ops)[pos]) shl 24 or
-                             uint32(cast[ptr UncheckedArray[byte]](ops)[pos+1]) shl 16 or
-                             uint32(cast[ptr UncheckedArray[byte]](ops)[pos+2]) shl 8 or
-                             uint32(cast[ptr UncheckedArray[byte]](ops)[pos+3]))
-              pos += 4
-              if pos + klen > olen.int: break
-              let keyStart = pos
-              pos += klen
-              # Write journal entry: [u32 klen][cf+key][u32 1][flag=0]
-              var jentry = newSeq[byte](4 + 1 + klen + 4 + 1)
-              jentry[0] = byte((1 + klen) shr 24); jentry[1] = byte(((1 + klen) shr 16) and 0xFF)
-              jentry[2] = byte(((1 + klen) shr 8) and 0xFF); jentry[3] = byte((1 + klen) and 0xFF)
-              jentry[4] = cf
-              copyMem(addr jentry[5], addr cast[ptr UncheckedArray[byte]](ops)[keyStart], klen)
-              jentry[5 + klen + 0] = 0; jentry[5 + klen + 1] = 0
-              jentry[5 + klen + 2] = 0; jentry[5 + klen + 3] = 1 # vlen = 1
-              jentry[5 + klen + 4] = 0 # flag = 0
-              discard f.writeBytes(jentry, 0, jentry.len)
-            close(f)
-        except: discard
+        var pos = 0
+        while pos + 1 <= olen.int:
+          let cf = cast[ptr UncheckedArray[byte]](ops)[pos]
+          inc pos
+          if pos + 4 > olen.int: break
+          let klen = int(uint32(cast[ptr UncheckedArray[byte]](ops)[pos]) shl 24 or
+                         uint32(cast[ptr UncheckedArray[byte]](ops)[pos+1]) shl 16 or
+                         uint32(cast[ptr UncheckedArray[byte]](ops)[pos+2]) shl 8 or
+                         uint32(cast[ptr UncheckedArray[byte]](ops)[pos+3]))
+          pos += 4
+          if pos + klen > olen.int: break
+          let keyStart = pos
+          pos += klen
+          # Build journal key: cf_byte + key_bytes, value: flag byte
+          var jk = newSeq[byte](1 + klen)
+          jk[0] = cf
+          copyMem(addr jk[1], addr cast[ptr UncheckedArray[byte]](ops)[keyStart], klen)
+          var flag: byte = 0
+          discard kvJournalAppendC(h, addr jk[0], jk.len.csize_t, addr flag, 1, errOut)
       setErr(errOut, ErrOk); return 0
     except:
       setErr(errOut, ErrIo); return -1
@@ -467,6 +456,57 @@ proc kvMemtableSizeC(h: pointer; outSize: ptr uint64;
       setErr(errOut, ErrOk); return 0
     except:
       setErr(errOut, ErrIo); return -1
+
+proc kvJournalAppendC*(h: pointer; key: ptr Byte; klen: csize_t;
+    `val`: ptr Byte; vlen: csize_t;
+    errOut: ptr cint): cint {.exportc: "kvJournalAppendC", cdecl.} =
+  var s = cast[ptr KVStoreInner](h)
+  if s.path.len == 0:
+    setErr(errOut, ErrConfig); return -1
+  let journalPath = s.path / "journal" / "journal"
+  try:
+    createDir(parentDir(journalPath))
+    var f: File
+    if open(f, journalPath, fmAppend):
+      var hdr = newSeq[byte](4 + klen.int + 4 + vlen.int)
+      let ku = klen.uint32
+      hdr[0] = byte(ku shr 24); hdr[1] = byte((ku shr 16) and 0xFF)
+      hdr[2] = byte((ku shr 8) and 0xFF); hdr[3] = byte(ku and 0xFF)
+      copyMem(addr hdr[4], key, klen.int)
+      let vu = vlen.uint32; let voff = 4 + klen.int
+      hdr[voff] = byte(vu shr 24); hdr[voff+1] = byte((vu shr 16) and 0xFF)
+      hdr[voff+2] = byte((vu shr 8) and 0xFF); hdr[voff+3] = byte(vu and 0xFF)
+      copyMem(addr hdr[voff+4], `val`, vlen.int)
+      discard f.writeBytes(hdr, 0, hdr.len); close(f)
+    setErr(errOut, ErrOk); return 0
+  except: setErr(errOut, ErrIo); return -1
+
+proc kvJournalReadC*(h: pointer; outBuf: ptr pointer; outLen: ptr csize_t;
+    errOut: ptr cint): cint {.exportc: "kvJournalReadC", cdecl.} =
+  var s = cast[ptr KVStoreInner](h)
+  if s.path.len == 0:
+    setErr(errOut, ErrConfig); return -1
+  let journalPath = s.path / "journal" / "journal"
+  try:
+    if not fileExists(journalPath):
+      outBuf[] = nil; outLen[] = 0; setErr(errOut, ErrOk); return 0
+    let data = readFile(journalPath)
+    let buf = allocByteBuf(data.len)
+    if data.len > 0: copyMem(buf, addr data[0], data.len)
+    outBuf[] = buf; outLen[] = data.len.csize_t
+    setErr(errOut, ErrOk); return 0
+  except: setErr(errOut, ErrIo); return -1
+
+proc kvJournalTruncateC*(h: pointer; errOut: ptr cint): cint
+    {.exportc: "kvJournalTruncateC", cdecl.} =
+  var s = cast[ptr KVStoreInner](h)
+  if s.path.len == 0:
+    setErr(errOut, ErrConfig); return -1
+  let journalPath = s.path / "journal" / "journal"
+  try:
+    if fileExists(journalPath): removeFile(journalPath)
+    setErr(errOut, ErrOk); return 0
+  except: setErr(errOut, ErrIo); return -1
 
 proc kvCloseC(h: pointer; errOut: ptr cint): cint {.cdecl.} =
   var s = cast[ptr KVStoreInner](h)

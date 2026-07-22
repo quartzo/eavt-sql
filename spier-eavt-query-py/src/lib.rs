@@ -1,7 +1,4 @@
 use std::collections::HashMap;
-use std::fs;
-use std::io::Write;
-use std::path::PathBuf;
 use std::sync::Mutex;
 
 use pyo3::prelude::*;
@@ -409,48 +406,11 @@ impl PyEngine {
     }
 }
 
-// ── PyJournal — standalone journal (mirrors original spier-kvstore-py) ──
-
-struct JournalInner {
-    base: PathBuf,
-}
-
-impl JournalInner {
-    fn new(config: &HashMap<String, String>) -> Result<Self, String> {
-        let path = config.get("path").ok_or("path required")?;
-        let base = PathBuf::from(format!("{path}/journal"));
-        fs::create_dir_all(&base).map_err(|e| e.to_string())?;
-        Ok(Self { base })
-    }
-
-    fn append(&self, key: &[u8], value: &[u8]) -> Result<(), String> {
-        let path = self.base.join("journal");
-        let mut buf = Vec::with_capacity(8 + key.len() + value.len());
-        buf.extend_from_slice(&(key.len() as u32).to_be_bytes());
-        buf.extend_from_slice(key);
-        buf.extend_from_slice(&(value.len() as u32).to_be_bytes());
-        buf.extend_from_slice(value);
-        let mut file = fs::OpenOptions::new().create(true).append(true)
-            .open(&path).map_err(|e| e.to_string())?;
-        file.write_all(&buf).map_err(|e| e.to_string())
-    }
-
-    fn read(&self) -> Result<Vec<u8>, String> {
-        let path = self.base.join("journal");
-        if !path.exists() { return Ok(Vec::new()); }
-        fs::read(&path).map_err(|e| e.to_string())
-    }
-
-    fn truncate(&self) -> Result<(), String> {
-        let path = self.base.join("journal");
-        if path.exists() { fs::remove_file(&path).map_err(|e| e.to_string())?; }
-        Ok(())
-    }
-}
+// ── PyJournal — wraps NimKVStore journal operations ──
 
 #[pyclass(name = "Journal", unsendable)]
 pub struct PyJournal {
-    inner: Mutex<Option<JournalInner>>,
+    inner: Mutex<Option<spier_page_store_nim::NimKVStore>>,
 }
 
 #[pymethods]
@@ -466,7 +426,7 @@ impl PyJournal {
                 cfg.insert(key, val);
             }
         }
-        let inner = py.allow_threads(|| JournalInner::new(&cfg))
+        let inner = py.allow_threads(|| spier_page_store_nim::NimKVStore::open(&cfg))
             .map_err(to_string_err)?;
         Ok(Self { inner: Mutex::new(Some(inner)) })
     }
@@ -476,7 +436,7 @@ impl PyJournal {
         let guard = self.inner.lock().unwrap();
         let inner = guard.as_ref().ok_or("journal closed")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
-        py.allow_threads(|| inner.append(&key, &value))
+        py.allow_threads(|| inner.journal_append(&key, &value))
             .map_err(to_string_err)
     }
 
@@ -484,7 +444,7 @@ impl PyJournal {
         let guard = self.inner.lock().unwrap();
         let inner = guard.as_ref().ok_or("journal closed")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
-        py.allow_threads(|| inner.read())
+        py.allow_threads(|| inner.journal_read())
             .map_err(to_string_err)
     }
 
@@ -492,7 +452,7 @@ impl PyJournal {
         let guard = self.inner.lock().unwrap();
         let inner = guard.as_ref().ok_or("journal closed")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
-        py.allow_threads(|| inner.truncate())
+        py.allow_threads(|| inner.journal_truncate())
             .map_err(to_string_err)
     }
 
