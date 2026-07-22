@@ -225,11 +225,8 @@ suite "lifecycle: page-store open/close":
       var vt = newPageStore(cfg.keys, cfg.vals, cfg.count, addr err)
       check vt != nil
       if vt != nil:
-        if vt.getKeysInPrefix != nil:
-          var outBuf: pointer = nil
-          var outLen: csize_t = 0
-          discard vt.getKeysInPrefix(vt.handle, 0'u32, nil, 0.csize_t, addr outBuf, addr outLen, addr err)
-          if outBuf != nil: vt.freeBuf(outBuf)
+        let keys = getKeysInPrefix(vt[], 0, newSeq[byte]())
+        check keys.len == 0
         closePageStore(vt)
       freeConfig(cfg)
 
@@ -242,237 +239,6 @@ suite "lifecycle: blobstore memory alone":
 # ═══════════════════════════════════════════════════════════════════════════════
 # KVStore integration tests — put, get, scan, flush end-to-end
 # ═══════════════════════════════════════════════════════════════════════════════
-
-suite "kvstore: open/close":
-  test "open memory and close":
-    var err: cint
-    let cfg = makeConfig({"backend": "memory"}.toTable)
-    let vt = openKvStore(cfg.keys, cfg.vals, cfg.count, addr err)
-    check vt != nil
-    check err == ErrOk
-    if vt != nil:
-      discard vt.close(vt.handle, addr err)
-      freeKVVtable(vt)
-    freeConfig(cfg)
-
-suite "kvstore: put + get":
-  test "put and get key in CF 0":
-    var err: cint
-    let cfg = makeConfig({"backend": "memory"}.toTable)
-    let vt = openKvStore(cfg.keys, cfg.vals, cfg.count, addr err)
-    check vt != nil
-    if vt != nil:
-      let key = @[byte 1, 2, 3, 4]
-      check vt.put(vt.handle, 0'u32, addr key[0], key.len.csize_t, addr err) == 0
-      var present: cint = 0
-      check vt.get(vt.handle, 0'u32, addr key[0], key.len.csize_t, addr present, addr err) == 0
-      check present == 1
-      discard vt.close(vt.handle, addr err)
-      freeKVVtable(vt)
-    freeConfig(cfg)
-
-  test "put and get in all CFs":
-    var err: cint
-    let cfg = makeConfig({"backend": "memory"}.toTable)
-    let vt = openKvStore(cfg.keys, cfg.vals, cfg.count, addr err)
-    check vt != nil
-    if vt != nil:
-      for cf in 0'u32 .. 3'u32:
-        let key = @[byte cf, 0xAA, 0xBB]
-        check vt.put(vt.handle, cf, addr key[0], key.len.csize_t, addr err) == 0
-        var present: cint = 0
-        check vt.get(vt.handle, cf, addr key[0], key.len.csize_t, addr present, addr err) == 0
-        check present == 1
-      discard vt.close(vt.handle, addr err)
-      freeKVVtable(vt)
-    freeConfig(cfg)
-
-  test "get non-existent returns false":
-    var err: cint
-    let cfg = makeConfig({"backend": "memory"}.toTable)
-    let vt = openKvStore(cfg.keys, cfg.vals, cfg.count, addr err)
-    check vt != nil
-    if vt != nil:
-      let key = @[byte 0xFF, 0xFF]
-      var present: cint = 0
-      check vt.get(vt.handle, 0'u32, addr key[0], key.len.csize_t, addr present, addr err) == 0
-      check present == 0
-      discard vt.close(vt.handle, addr err)
-      freeKVVtable(vt)
-    freeConfig(cfg)
-
-suite "kvstore: scan":
-  test "scan CF 0 with empty prefix finds inserted keys":
-    var err: cint
-    let cfg = makeConfig({"backend": "memory"}.toTable)
-    let vt = openKvStore(cfg.keys, cfg.vals, cfg.count, addr err)
-    check vt != nil
-    if vt != nil:
-      # Insert 3 keys
-      for i in 0'u32 .. 2'u32:
-        let key = @[byte 0xAA, 0xBB, byte(i)]
-        check vt.put(vt.handle, 0'u32, addr key[0], key.len.csize_t, addr err) == 0
-      # Scan CF 0
-      var outBuf: pointer = nil
-      var outLen: csize_t = 0
-      check vt.scan(vt.handle, 0'u32, nil, 0.csize_t, addr outBuf, addr outLen, addr err) == 0
-      # Unpack: [u32 klen][key]
-      var count = 0
-      var pos = 0
-      while pos + 4 <= outLen.int:
-        let klen = (uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos]) shl 24 or
-                     uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+1]) shl 16 or
-                     uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+2]) shl 8 or
-                     uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+3])).int
-        pos += 4 + klen
-        inc count
-      if outBuf != nil: vt.freeBuf(outBuf)
-      check count >= 3  # bootstrap also writes keys, so may be > 3
-      discard vt.close(vt.handle, addr err)
-      freeKVVtable(vt)
-    freeConfig(cfg)
-
-  test "scan with binary prefix filters correctly":
-    var err: cint
-    let cfg = makeConfig({"backend": "memory"}.toTable)
-    let vt = openKvStore(cfg.keys, cfg.vals, cfg.count, addr err)
-    check vt != nil
-    if vt != nil:
-      # Insert matching keys
-      let prefixSeq = @[byte 0x00, 0x00, 0x00, 0x05]
-      for i in 0'u32 .. 2'u32:
-        var k = prefixSeq
-        k.add @[byte byte(i)]
-        check vt.put(vt.handle, 0'u32, addr k[0], k.len.csize_t, addr err) == 0
-      # Insert non-matching key
-      var nk = @[byte 0xFF, 0xFF]
-      check vt.put(vt.handle, 0'u32, addr nk[0], 2.csize_t, addr err) == 0
-      # Scan with prefix
-      var outBuf: pointer = nil
-      var outLen: csize_t = 0
-      check vt.scan(vt.handle, 0'u32, addr prefixSeq[0], prefixSeq.len.csize_t,
-                     addr outBuf, addr outLen, addr err) == 0
-      var count = 0
-      var pos = 0
-      while pos + 4 <= outLen.int:
-        let klen = (uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos]) shl 24 or
-                     uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+1]) shl 16 or
-                     uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+2]) shl 8 or
-                     uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+3])).int
-        pos += 4 + klen
-        inc count
-      if outBuf != nil: vt.freeBuf(outBuf)
-      check count == 3  # exactly 3 matching keys
-      discard vt.close(vt.handle, addr err)
-      freeKVVtable(vt)
-    freeConfig(cfg)
-
-
-suite "kvstore: flush":
-  test "put 3 keys, flush, scan finds all":
-    var err: cint
-    let cfg = makeConfig({"backend": "memory"}.toTable)
-    let vt = openKvStore(cfg.keys, cfg.vals, cfg.count, addr err)
-    check vt != nil
-    if vt != nil:
-      let prefix = @[byte 0xCC, 0xDD]
-      for i in 0'u32 .. 2'u32:
-        var key = prefix
-        key.add byte(i)
-        check vt.put(vt.handle, 0'u32, addr key[0], key.len.csize_t, addr err) == 0
-      # Scan before flush
-      var outBuf: pointer = nil; var outLen: csize_t = 0
-      check vt.scan(vt.handle, 0'u32, addr prefix[0], prefix.len.csize_t,
-                     addr outBuf, addr outLen, addr err) == 0
-      var before = 0; var pos = 0
-      while pos + 4 <= outLen.int:
-        let klen = (uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos]) shl 24 or
-                     uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+1]) shl 16 or
-                     uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+2]) shl 8 or
-                     uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+3])).int
-        pos += 4 + klen; inc before
-      if outBuf != nil: vt.freeBuf(outBuf)
-      check before == 3
-      # Flush
-      check vt.flush(vt.handle, addr err) == 0
-      # Scan after flush
-      outBuf = nil; outLen = 0
-      check vt.scan(vt.handle, 0'u32, addr prefix[0], prefix.len.csize_t,
-                     addr outBuf, addr outLen, addr err) == 0
-      var after = 0; pos = 0
-      while pos + 4 <= outLen.int:
-        let klen = (uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos]) shl 24 or
-                     uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+1]) shl 16 or
-                     uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+2]) shl 8 or
-                     uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+3])).int
-        pos += 4 + klen; inc after
-      if outBuf != nil: vt.freeBuf(outBuf)
-      check after == 3
-      discard vt.close(vt.handle, addr err)
-      freeKVVtable(vt)
-    freeConfig(cfg)
-
-  test "put in CFs 0-3, flush, scan all CFs finds keys":
-    var err: cint
-    let cfg = makeConfig({"backend": "memory"}.toTable)
-    let vt = openKvStore(cfg.keys, cfg.vals, cfg.count, addr err)
-    check vt != nil
-    if vt != nil:
-      for cf in 0'u32 .. 3'u32:
-        for i in 0'u32 .. 1'u32:
-          var key = @[byte cf, byte(i)]
-          check vt.put(vt.handle, cf, addr key[0], key.len.csize_t, addr err) == 0
-      check vt.flush(vt.handle, addr err) == 0
-      for cf in 0'u32 .. 3'u32:
-        var outBuf: pointer = nil; var outLen: csize_t = 0
-        var cfb = @[byte cf]
-        check vt.scan(vt.handle, cf, addr cfb[0], 1.csize_t,
-                       addr outBuf, addr outLen, addr err) == 0
-        var count = 0; var pos = 0
-        while pos + 4 <= outLen.int:
-          let klen = (uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos]) shl 24 or
-                       uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+1]) shl 16 or
-                       uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+2]) shl 8 or
-                       uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+3])).int
-          pos += 4 + klen; inc count
-        if outBuf != nil: vt.freeBuf(outBuf)
-        check count == 2
-      discard vt.close(vt.handle, addr err)
-      freeKVVtable(vt)
-    freeConfig(cfg)
-
-  test "batch_write + flush + scan":
-    var err: cint
-    let cfg = makeConfig({"backend": "memory"}.toTable)
-    let vt = openKvStore(cfg.keys, cfg.vals, cfg.count, addr err)
-    check vt != nil
-    if vt != nil:
-      var ops: seq[byte] = @[]
-      for i in 0'u32 .. 4'u32:
-        let key = @[byte 0xEE, byte(i)]
-        ops.add 0'u8
-        let kl = key.len.uint32
-        ops.add byte(kl shr 24); ops.add byte((kl shr 16) and 0xFF)
-        ops.add byte((kl shr 8) and 0xFF); ops.add byte(kl and 0xFF)
-        ops.add key[0]; ops.add key[1]
-      check vt.batchWrite(vt.handle, addr ops[0], ops.len.csize_t, addr err) == 0
-      check vt.flush(vt.handle, addr err) == 0
-      var outBuf: pointer = nil; var outLen: csize_t = 0
-      var pfx = @[byte 0xEE]
-      check vt.scan(vt.handle, 0'u32, addr pfx[0], pfx.len.csize_t,
-                     addr outBuf, addr outLen, addr err) == 0
-      var count = 0; var pos = 0
-      while pos + 4 <= outLen.int:
-        let klen = (uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos]) shl 24 or
-                     uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+1]) shl 16 or
-                     uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+2]) shl 8 or
-                     uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+3])).int
-        pos += 4 + klen; inc count
-      if outBuf != nil: vt.freeBuf(outBuf)
-      check count == 5
-      discard vt.close(vt.handle, addr err)
-      freeKVVtable(vt)
-    freeConfig(cfg)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Scheme evaluator tests
@@ -584,3 +350,140 @@ suite "scheme.errors":
     expect EvalError:
       var env = newEnvironment()
       discard eval(SchemeProgram(body: parse"(nope 1 2)"), env, NilHost())
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PageStore Nim API tests (newPageStore → ptr PageStoreInner directly)
+# ══════════════════════════════════════════════════════════════════════════════
+
+suite "pagestore: Nim API (newPageStore)":
+  test "single open/close memory":
+    var err: cint
+    let cfg = makeConfig({"backend": "memory"}.toTable)
+    let ps = newPageStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    check ps != nil
+    check err == ErrOk
+    closePageStore(ps)
+
+  test "getKeysInPrefix on empty store returns empty":
+    var err: cint
+    let cfg = makeConfig({"backend": "memory"}.toTable)
+    let ps = newPageStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    check ps != nil
+    check getKeysInPrefix(ps[], 0, newSeq[byte]()).len == 0
+    closePageStore(ps)
+
+  test "put blob + getKeysInPrefix finds key":
+    var err: cint
+    let cfg = makeConfig({"backend": "memory"}.toTable)
+    let ps = newPageStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    check ps != nil
+    # Write a key via blobPut + commitMerge
+    let keys = @[@[byte(1), 2, 3], @[byte(4), 5]]
+    commitMerge(ps[], @[(0, keys)], false)
+    let scanned = getKeysInPrefix(ps[], 0, newSeq[byte]())
+    check scanned.len == 2
+    check scanned[0] == @[byte(1), 2, 3]
+    check scanned[1] == @[byte(4), 5]
+    closePageStore(ps)
+
+  test "commitMerge + keyExists round-trip":
+    var err: cint
+    let cfg = makeConfig({"backend": "memory"}.toTable)
+    let ps = newPageStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    let keys = @[@[byte(7), 8]]
+    commitMerge(ps[], @[(0, keys)], false)
+    check keyExists(ps[], 0, @[byte(7), 8])
+    check not keyExists(ps[], 0, @[byte(7)])
+    closePageStore(ps)
+
+  test "5 open/close cycles via newPageStore":
+    for i in 0..<5:
+      var err: cint
+      let cfg = makeConfig({"backend": "memory"}.toTable)
+      let ps = newPageStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      check ps != nil
+      closePageStore(ps)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# KVStore Nim API tests (KVStore ref directly)
+# ══════════════════════════════════════════════════════════════════════════════
+
+suite "kvstore: Nim API (KVStore ref)":
+  test "new + close memory":
+    let cfg = makeConfig({"backend": "memory"}.toTable)
+    var err: cint
+    let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    check kv != nil
+    kv.close()
+
+  test "put + get round-trip":
+    let cfg = makeConfig({"backend": "memory"}.toTable)
+    var err: cint
+    let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    check kv != nil
+    kv.put(0, @[byte(1), 2, 3])
+    check kv.get(0, @[byte(1), 2, 3])
+    check not kv.get(0, @[byte(1), 2])
+    check not kv.get(0, @[byte(9)])
+    kv.close()
+
+  test "scan returns keys in order":
+    let cfg = makeConfig({"backend": "memory"}.toTable)
+    var err: cint
+    let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    kv.put(0, @[byte(3)])
+    kv.put(0, @[byte(1)])
+    kv.put(0, @[byte(2)])
+    let keys = kv.scan(0, newSeq[byte]())
+    check keys.len == 3
+    check keys[0] == @[byte(1)]
+    check keys[1] == @[byte(2)]
+    check keys[2] == @[byte(3)]
+    kv.close()
+
+  test "scan with prefix":
+    let cfg = makeConfig({"backend": "memory"}.toTable)
+    var err: cint
+    let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    kv.put(0, @[byte(0), 10])
+    kv.put(0, @[byte(0), 20])
+    kv.put(0, @[byte(1), 30])
+    let keys = kv.scan(0, @[byte(0)])
+    check keys.len == 2
+    check keys[0] == @[byte(0), 10]
+    check keys[1] == @[byte(0), 20]
+    kv.close()
+
+  test "flush makes data visible after scan":
+    let cfg = makeConfig({"backend": "memory"}.toTable)
+    var err: cint
+    let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    kv.put(0, @[byte(5)])
+    kv.put(0, @[byte(2)])
+    kv.flush()
+    let keys = kv.scan(0, newSeq[byte]())
+    check keys == @[@[byte(2)], @[byte(5)]]
+    kv.close()
+
+  test "memtableSize reflects puts":
+    let cfg = makeConfig({"backend": "memory"}.toTable)
+    var err: cint
+    let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    check kv.memtableSize() == 0
+    kv.put(0, @[byte(1), 2, 3])
+    check kv.memtableSize() == 3
+    kv.put(0, @[byte(4)])
+    check kv.memtableSize() == 4
+    kv.close()
+
+  test "separate CFs are independent":
+    let cfg = makeConfig({"backend": "memory"}.toTable)
+    var err: cint
+    let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    kv.put(0, @[byte(1)])
+    kv.put(1, @[byte(2)])
+    check kv.get(0, @[byte(1)])
+    check kv.get(1, @[byte(2)])
+    check not kv.get(0, @[byte(2)])
+    check not kv.get(1, @[byte(1)])
+    kv.close()

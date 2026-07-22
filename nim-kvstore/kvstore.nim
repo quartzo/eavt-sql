@@ -58,23 +58,27 @@ proc pop(h: var MinHeap): HeapEntry =
 proc len*(h: MinHeap): int = h.data.len
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# KVStoreInner — the kvstore state
+# KVStore — Nim-native ref type
 # ═══════════════════════════════════════════════════════════════════════════════
 
 type
-  KVStoreInner = object
-    ps: ptr PageStoreInner        # page store (already opened)
-    mt: mt_be.MemTable         # Nim ref — no vtable
-    mtSize: uint64                # approximate memtable byte size
-    flushSnap: uint64             # snapshot id during active flush (0 = none)
-    lock: SpinLock                # guards all state
-    config: Table[string, string] # parsed config
-    path: string
-    readOnly: bool
-    numCf: int
-    flushThreshold: uint64    # bytes
-    gcMaxAgeSecs: uint64      # max root age before GC
-    gcMaxRootCount: int       # max root count before GC
+  KVStore* = ref object
+    ps*: ptr PageStoreInner        # page store
+    mt*: mt_be.MemTable            # Nim ref — no vtable
+    mtSize*: uint64
+    flushSnap*: uint64
+    lock: SpinLock
+    config*: Table[string, string]
+    path*: string
+    readOnly*: bool
+    numCf*: int
+    flushThreshold*: uint64
+    gcMaxAgeSecs*: uint64
+    gcMaxRootCount*: int
+
+# ── Internal alias (shared implementation) ──
+type
+  S* = KVStore  # short alias used throughout the file
 
   MergeSourceKind = enum
     mskPageStore
@@ -126,15 +130,15 @@ proc prefixEnd(prefix: seq[byte]): seq[byte] =
     for i in 0..<32: result.add 0xFF
     result = prefix & result
 
-proc kvPut(s: var KVStoreInner; cf: int; key: seq[byte]) =
+proc kvPut(s: var S; cf: int; key: seq[byte]) =
   s.mtSize = s.mt.put(cf, key)
 
-proc kvGet(s: var KVStoreInner; cf: int; key: seq[byte]): bool =
+proc kvGet(s: var S; cf: int; key: seq[byte]): bool =
   if s.mt.contains(0, cf, key): return true
   if s.flushSnap != 0 and s.mt.contains(s.flushSnap, cf, key): return true
   return keyExists(s.ps[], cf, key)
 
-proc buildScanSources(s: var KVStoreInner; cf: int;
+proc buildScanSources(s: var S; cf: int;
                        prefix: seq[byte]): seq[MergeSource] =
   # 1. Page store source
   let psKeys = getKeysInPrefix(s.ps[], cf, prefix)
@@ -154,12 +158,12 @@ proc buildScanSources(s: var KVStoreInner; cf: int;
   if liveKeys.len > 0:
     result.add MergeSource(kind: mskMemTable, keys: liveKeys, idx: 0)
 
-proc kvScan(s: var KVStoreInner; cf: int; prefix: seq[byte]): seq[seq[byte]] =
+proc kvScan(s: var S; cf: int; prefix: seq[byte]): seq[seq[byte]] =
   var sources = buildScanSources(s, cf, prefix)
   let endB = prefixEnd(prefix)
   return mergeSources(sources, endB)
 
-proc kvScanReverse(s: var KVStoreInner; cf: int; prefix: seq[byte]): seq[seq[byte]] =
+proc kvScanReverse(s: var S; cf: int; prefix: seq[byte]): seq[seq[byte]] =
   var result = kvScan(s, cf, prefix)
   var i = 0; var j = result.len - 1
   while i < j:
@@ -167,7 +171,7 @@ proc kvScanReverse(s: var KVStoreInner; cf: int; prefix: seq[byte]): seq[seq[byt
     inc i; dec j
   return result
 
-proc kvFlush(s: var KVStoreInner): bool =
+proc kvFlush(s: var S): bool =
   if s.readOnly: return false
   if s.flushSnap != 0: return false
   let numCf = s.numCf
@@ -184,7 +188,7 @@ proc kvFlush(s: var KVStoreInner): bool =
   s.mtSize = 0
   return true
 
-proc kvGCFull(s: var KVStoreInner; maxAgeSecs: uint64; maxRootCount: int;
+proc kvGCFull(s: var S; maxAgeSecs: uint64; maxRootCount: int;
                dryRun: bool): seq[byte] =
   return gcFull(s.ps[], maxAgeSecs, maxRootCount, dryRun)
 
@@ -198,7 +202,7 @@ proc kvJournalAppendC*(h: pointer; key: ptr Byte; klen: csize_t;
 
 proc kvPutC(h: pointer; cf: cuint; key: ptr Byte; klen: csize_t;
              errOut: ptr cint): cint {.cdecl.} =
-  var s = cast[ptr KVStoreInner](h)
+  var s = cast[ptr S](h)
   if s.readOnly: setErr(errOut, ErrReadOnly); return -1
   s.lock.withLock:
     try:
@@ -219,7 +223,7 @@ proc kvPutC(h: pointer; cf: cuint; key: ptr Byte; klen: csize_t;
 
 proc kvBatchWrite(h: pointer; ops: ptr Byte; olen: csize_t;
                    errOut: ptr cint): cint {.cdecl.} =
-  var s = cast[ptr KVStoreInner](h)
+  var s = cast[ptr S](h)
   s.lock.withLock:
     try:
       # Journal for crash recovery (TODO: also persist AEVT entries correctly)
@@ -258,7 +262,7 @@ proc kvBatchWrite(h: pointer; ops: ptr Byte; olen: csize_t;
 
 proc kvGetC(h: pointer; cf: cuint; key: ptr Byte; klen: csize_t;
              outPresent: ptr cint; errOut: ptr cint): cint {.cdecl.} =
-  var s = cast[ptr KVStoreInner](h)
+  var s = cast[ptr S](h)
   s.lock.withLock:
     try:
       var k = newSeq[byte](klen.int)
@@ -271,7 +275,7 @@ proc kvGetC(h: pointer; cf: cuint; key: ptr Byte; klen: csize_t;
 proc kvScanReverseC(h: pointer; cf: cuint; prefix: ptr Byte; plen: csize_t;
                      outBuf: ptr pointer; outLen: ptr csize_t;
                      errOut: ptr cint): cint {.cdecl.} =
-  var s = cast[ptr KVStoreInner](h)
+  var s = cast[ptr S](h)
   s.lock.withLock:
     try:
       var pfx = newSeq[byte](plen.int)
@@ -295,7 +299,7 @@ proc kvScanReverseC(h: pointer; cf: cuint; prefix: ptr Byte; plen: csize_t;
 proc kvScanC(h: pointer; cf: cuint; prefix: ptr Byte; plen: csize_t;
               outBuf: ptr pointer; outLen: ptr csize_t;
               errOut: ptr cint): cint {.cdecl.} =
-  var s = cast[ptr KVStoreInner](h)
+  var s = cast[ptr S](h)
   s.lock.withLock:
     try:
       var pfx = newSeq[byte](plen.int)
@@ -318,7 +322,7 @@ proc kvScanC(h: pointer; cf: cuint; prefix: ptr Byte; plen: csize_t;
       setErr(errOut, ErrIo); return -1
 
 proc kvFlushC(h: pointer; errOut: ptr cint): cint {.cdecl.} =
-  var s = cast[ptr KVStoreInner](h)
+  var s = cast[ptr S](h)
   if s.readOnly: setErr(errOut, ErrReadOnly); return -1
   s.lock.withLock:
     try:
@@ -330,7 +334,7 @@ proc kvFlushC(h: pointer; errOut: ptr cint): cint {.cdecl.} =
 proc kvGCFullC(h: pointer; maxAgeSecs: uint64; maxRootCount: cuint;
                 dryRun: cint; outBuf: ptr pointer; outLen: ptr csize_t;
                 errOut: ptr cint): cint {.cdecl.} =
-  var s = cast[ptr KVStoreInner](h)
+  var s = cast[ptr S](h)
   s.lock.withLock:
     try:
       let result = kvGCFull(s[], maxAgeSecs, maxRootCount.int, dryRun != 0)
@@ -343,7 +347,7 @@ proc kvGCFullC(h: pointer; maxAgeSecs: uint64; maxRootCount: cuint;
 
 proc kvMemtableSizeC(h: pointer; outSize: ptr uint64;
                       errOut: ptr cint): cint {.cdecl.} =
-  var s = cast[ptr KVStoreInner](h)
+  var s = cast[ptr S](h)
   s.lock.withLock:
     try:
       outSize[] = s.mtSize
@@ -354,7 +358,7 @@ proc kvMemtableSizeC(h: pointer; outSize: ptr uint64;
 proc kvJournalAppendC*(h: pointer; key: ptr Byte; klen: csize_t;
     `val`: ptr Byte; vlen: csize_t;
     errOut: ptr cint): cint {.exportc: "kvJournalAppendC", cdecl.} =
-  var s = cast[ptr KVStoreInner](h)
+  var s = cast[ptr S](h)
   if s.path in ["", ":memory:"] or s.config.getOrDefault("backend", "") == "memory":
     setErr(errOut, ErrConfig); return -1
   let journalPath = s.path / "journal" / "journal"
@@ -378,7 +382,7 @@ proc kvJournalAppendC*(h: pointer; key: ptr Byte; klen: csize_t;
 
 proc kvJournalReadC*(h: pointer; outBuf: ptr pointer; outLen: ptr csize_t;
     errOut: ptr cint): cint {.exportc: "kvJournalReadC", cdecl.} =
-  var s = cast[ptr KVStoreInner](h)
+  var s = cast[ptr S](h)
   if s.path in ["", ":memory:"] or s.config.getOrDefault("backend", "") == "memory":
     setErr(errOut, ErrConfig); return -1
   let journalPath = s.path / "journal" / "journal"
@@ -394,7 +398,7 @@ proc kvJournalReadC*(h: pointer; outBuf: ptr pointer; outLen: ptr csize_t;
 
 proc kvJournalTruncateC*(h: pointer; errOut: ptr cint): cint
     {.exportc: "kvJournalTruncateC", cdecl.} =
-  var s = cast[ptr KVStoreInner](h)
+  var s = cast[ptr S](h)
   if s.path.len == 0: setErr(errOut, ErrConfig); return -1
   let journalPath = s.path / "journal" / "journal"
   try:
@@ -403,7 +407,7 @@ proc kvJournalTruncateC*(h: pointer; errOut: ptr cint): cint
   except: setErr(errOut, ErrIo); return -1
 
 proc kvCloseC(h: pointer; errOut: ptr cint): cint {.cdecl.} =
-  var s = cast[ptr KVStoreInner](h)
+  var s = cast[ptr S](h)
   s.lock.withLock:
     try:
       # Close memtable
@@ -415,10 +419,10 @@ proc kvCloseC(h: pointer; errOut: ptr cint): cint {.cdecl.} =
       # ARC cleanup before raw free
       s.config = initTable[string, string]()
       s.path = ""
+      GC_unref(cast[KVStore](s))
       setErr(errOut, ErrOk)
     except:
       setErr(errOut, ErrIo)
-  deallocShared(h)
   return 0
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -442,7 +446,8 @@ proc openKvStore*(keys, vals: CStringArr; count: cint;
     setErr(errOut, ErrIo)
     return nil
 
-  let s = cast[ptr KVStoreInner](allocShared0(sizeof(KVStoreInner)))
+  let s = KVStore()
+  GC_ref(s)  # keep alive past openKvStore return (handle is raw pointer)
   s.ps = ps
   s.mt = mt
   s.mtSize = 0
@@ -500,7 +505,7 @@ proc openKvStore*(keys, vals: CStringArr; count: cint;
       except: discard
 
   let vt = newKVVtable()
-  vt.handle = s
+  vt.handle = cast[pointer](s)
   vt.put = kvPutC
   vt.batchWrite = kvBatchWrite
   vt.replay = kvBatchWrite  # same format for replay
@@ -514,3 +519,124 @@ proc openKvStore*(keys, vals: CStringArr; count: cint;
   vt.freeBuf = freeShared
   setErr(errOut, ErrOk)
   return vt
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Nim-native API (constructs + methods on KVStore ref)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+proc newKVStore*(keys, vals: CStringArr; count: cint;
+                  errOut: ptr cint): KVStore =
+  let config = parseConfig(keys, vals, count.csize_t)
+  let readOnly = config.getOrDefault("read_only", "false") == "true"
+  let ps = newPageStore(keys, vals, count, errOut)
+  if ps == nil: return nil
+  let mt = mt_be.newMemTable(4)
+  if mt == nil: closePageStore(ps); return nil
+  result = KVStore()
+  result.ps = ps; result.mt = mt
+  result.config = config
+  result.path = config.getOrDefault("path", ":memory:")
+  result.readOnly = readOnly
+  result.numCf = 4
+  result.flushThreshold = parseUInt(config.getOrDefault("flush_threshold", "67108864")).uint64
+  result.gcMaxAgeSecs = parseUInt(config.getOrDefault("gc_max_age_secs", "43200")).uint64
+  result.gcMaxRootCount = parseInt(config.getOrDefault("gc_max_root_count", "10"))
+  initSpinLock(result.lock)
+  # Replay journal
+  if result.path.len > 0 and result.path != ":memory:" and result.path != "":
+    let journalPath = result.path / "journal" / "journal"
+    if fileExists(journalPath):
+      try:
+        let data = readFile(journalPath)
+        var pos = 0; var ops = newSeq[byte](0)
+        while pos + 4 <= data.len:
+          let klen = int(uint32(byte(data[pos])) shl 24 or uint32(byte(data[pos+1])) shl 16 or
+                         uint32(byte(data[pos+2])) shl 8 or uint32(byte(data[pos+3])))
+          pos += 4
+          if pos + klen + 4 > data.len: break
+          let jkey = data[pos..<pos + klen]; pos += klen
+          let vlen = int(uint32(byte(data[pos])) shl 24 or uint32(byte(data[pos+1])) shl 16 or
+                         uint32(byte(data[pos+2])) shl 8 or uint32(byte(data[pos+3])))
+          pos += 4; if pos + vlen > data.len: break; pos += vlen
+          if klen >= 20:
+            ops.add(0'u8); ops.add(byte((klen shr 24) and 0xFF))
+            ops.add(byte((klen shr 16) and 0xFF)); ops.add(byte((klen shr 8) and 0xFF))
+            ops.add(byte(klen and 0xFF)); for b in jkey: ops.add(byte(b))
+          elif klen >= 1 and byte(jkey[0]) <= 3:
+            ops.add(byte(jkey[0])); ops.add(byte(((klen-1) shr 24) and 0xFF))
+            ops.add(byte(((klen-1) shr 16) and 0xFF)); ops.add(byte(((klen-1) shr 8) and 0xFF))
+            ops.add(byte((klen-1) and 0xFF)); for b in jkey[1..^1]: ops.add(byte(b))
+        if ops.len > 0: result.mtSize = result.mt.batch(ops)
+      except: discard
+
+proc close*(kv: KVStore) =
+  if kv != nil:
+    if kv.mt != nil: kv.mt.close(); kv.mt = nil
+    if kv.ps != nil: closePageStore(kv.ps); kv.ps = nil
+
+proc put*(kv: KVStore; cf: int; key: openArray[byte]) =
+  var k = newSeq[byte](key.len)
+  if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
+  kv.mtSize = kv.mt.put(cf, k)
+
+proc get*(kv: KVStore; cf: int; key: openArray[byte]): bool =
+  var k = newSeq[byte](key.len)
+  if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
+  if kv.mt.contains(0, cf, k): return true
+  if kv.flushSnap != 0 and kv.mt.contains(kv.flushSnap, cf, k): return true
+  keyExists(kv.ps[], cf, k)
+
+proc scan*(kv: KVStore; cf: int; prefix: openArray[byte]): seq[seq[byte]] =
+  var pfx: seq[byte] = @[]
+  for b in prefix: pfx.add(b)
+  # Build sources exactly like the internal kvScan
+  var sources: seq[MergeSource] = @[]
+  let psKeys = getKeysInPrefix(kv.ps[], cf, pfx)
+  if psKeys.len > 0: sources.add MergeSource(kind: mskPageStore, keys: psKeys, idx: 0)
+  if kv.flushSnap != 0:
+    let snapKeys = kv.mt.scanAll(kv.flushSnap, cf, pfx, false)
+    if snapKeys.len > 0: sources.add MergeSource(kind: mskMemTable, keys: snapKeys, idx: 0)
+  let liveSnap = kv.mt.snapshot()
+  let liveKeys = kv.mt.scanAll(liveSnap, cf, pfx, false)
+  kv.mt.snapshotFree(liveSnap)
+  if liveKeys.len > 0: sources.add MergeSource(kind: mskMemTable, keys: liveKeys, idx: 0)
+  let endB = prefixEnd(pfx)
+  mergeSources(sources, endB)
+
+proc flush*(kv: KVStore) =
+  if kv.readOnly: return
+  if kv.flushSnap != 0: return
+  kv.flushSnap = kv.mt.snapshot()
+  kv.mt.clear(); kv.mtSize = 0
+  var keysByCf: seq[(int, seq[seq[byte]])] = @[]
+  for cf in 0..<kv.numCf:
+    let keys = kv.mt.scanAll(kv.flushSnap, cf, @[], false)
+    if keys.len > 0: keysByCf.add (cf, keys)
+  if keysByCf.len > 0: commitMerge(kv.ps[], keysByCf, true)
+  kv.flushSnap = 0; kv.mtSize = 0
+
+proc batchWrite*(kv: KVStore; ops: openArray[byte]) =
+  if kv.path.len > 0 and kv.path != ":memory:" and not kv.readOnly:
+    var journalPath = kv.path / "journal" / "journal"
+    try:
+      createDir(parentDir(journalPath)); var f = open(journalPath, fmAppend)
+      let raw = cast[ptr UncheckedArray[byte]](unsafeAddr ops[0]); var pos = 0
+      while pos + 5 <= ops.len:
+        let cf = raw[pos]
+        let klen = int(uint32(raw[pos+1]) shl 24 or uint32(raw[pos+2]) shl 16 or
+                      uint32(raw[pos+3]) shl 8 or uint32(raw[pos+4]))
+        let totKlen = 1 + klen
+        var hdr = newSeq[byte](4 + totKlen + 4 + 1)
+        hdr[0] = byte((totKlen shr 24) and 0xFF); hdr[1] = byte((totKlen shr 16) and 0xFF)
+        hdr[2] = byte((totKlen shr 8) and 0xFF); hdr[3] = byte(totKlen and 0xFF)
+        hdr[4] = cf
+        if klen > 0: copyMem(addr hdr[5], addr raw[pos+5], klen)
+        hdr[5+klen] = 0; hdr[6+klen] = 0; hdr[7+klen] = 0; hdr[8+klen] = 1; hdr[9+klen] = 0
+        discard f.writeBytes(hdr, 0, hdr.len); pos += 5 + klen
+      f.close()
+    except: discard
+  kv.mtSize = kv.mt.batch(ops)
+
+proc memtableSize*(kv: KVStore): uint64 = kv.mtSize
+

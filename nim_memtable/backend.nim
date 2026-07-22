@@ -246,38 +246,49 @@ proc snapshotFree*(mt: MemTable; id: uint64) =
 
 proc scanAll*(mt: MemTable; snapId: uint64; cf: int; prefix: openArray[byte];
               reverse = false): seq[seq[byte]] =
-  if snapId == 0 or snapId.int > mt.hnd.snaps.len: return @[]
-  let snap = addr mt.hnd.snaps[snapId.int - 1]
-  if not snap.inUse or cf < 0 or cf >= snap.roots.len: return @[]
+  if cf < 0 or cf >= mt.hnd.live.len: return @[]
+  let root =
+    if snapId == 0: mt.hnd.live[cf]
+    elif snapId.int <= mt.hnd.snaps.len and mt.hnd.snaps[snapId.int - 1].inUse:
+      mt.hnd.snaps[snapId.int - 1].roots[cf]
+    else: nil
+  if root == nil: return @[]
   var pfx = newSeq[byte](prefix.len)
   if prefix.len > 0: copyMem(addr pfx[0], unsafeAddr prefix[0], prefix.len)
   let upper = if pfx.len == 0: @[byte(0xFF), 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
               else: prefixUpperBound(pfx)
   var collected: seq[Key] = @[]
   mt.hnd.lock.withLock:
-    let root = snap.roots[cf]
     if reverse: collectReverse(root, pfx, upper, collected)
     else: collectForward(root, pfx, upper, collected)
   for k in collected: result.add(k)
 
 proc contains*(mt: MemTable; snapId: uint64; cf: int; key: openArray[byte]): bool =
-  if snapId == 0 or snapId.int > mt.hnd.snaps.len: return false
-  let snap = addr mt.hnd.snaps[snapId.int - 1]
-  if not snap.inUse or cf < 0 or cf >= snap.roots.len: return false
+  if cf < 0 or cf >= mt.hnd.live.len: return false
+  let root =
+    if snapId == 0: mt.hnd.live[cf]
+    elif snapId.int <= mt.hnd.snaps.len and mt.hnd.snaps[snapId.int - 1].inUse:
+      mt.hnd.snaps[snapId.int - 1].roots[cf]
+    else: nil
+  if root == nil: return false
   var k = newSeq[byte](key.len)
   if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
   mt.hnd.lock.withLock:
-    result = contains(snap.roots[cf], k)
+    result = contains(root, k)
 
 proc countPrefix*(mt: MemTable; snapId: uint64; cf: int; prefix: openArray[byte]): uint64 =
-  if snapId == 0 or snapId.int > mt.hnd.snaps.len: return 0
-  let snap = addr mt.hnd.snaps[snapId.int - 1]
-  if not snap.inUse or cf < 0 or cf >= snap.roots.len: return 0
+  if cf < 0 or cf >= mt.hnd.live.len: return 0
+  let root =
+    if snapId == 0: mt.hnd.live[cf]
+    elif snapId.int <= mt.hnd.snaps.len and mt.hnd.snaps[snapId.int - 1].inUse:
+      mt.hnd.snaps[snapId.int - 1].roots[cf]
+    else: nil
+  if root == nil: return 0
   var pfx = newSeq[byte](prefix.len)
   if prefix.len > 0: copyMem(addr pfx[0], unsafeAddr prefix[0], prefix.len)
   mt.hnd.lock.withLock:
-    result = if pfx.len == 0: cast[uint64](countAll(snap.roots[cf]))
-             else: cast[uint64](countInRange(snap.roots[cf], pfx, prefixUpperBound(pfx)))
+    result = if pfx.len == 0: cast[uint64](countAll(root))
+             else: cast[uint64](countInRange(root, pfx, prefixUpperBound(pfx)))
 
 proc debugCountNodes*(mt: MemTable): uint64 =
   var seen: HashSet[int] = initHashSet[int]()
