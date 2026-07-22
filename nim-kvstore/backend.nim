@@ -231,12 +231,14 @@ proc findPrefixRange*(entries: seq[(seq[byte], array[16, byte])];
   (min(startIdx, endIdx), endIdx)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PageCache — simple LRU via access-order counter
-# ══════════════════════════════════════════════════════════════════════════════
+# PageCache — simple LRU via access-order counter.
+# Stores zstd-compressed page bytes (as returned by blobstore).
+# 3-5× smaller than decompressed → 3-5× more pages in cache → fewer I/Os.
+# Decompression is paid on cache hit (~0.5ms) but I/O saving dominates.
 
 type
   CacheEntry = object
-    keys: seq[seq[byte]]
+    compressed: seq[byte]    ## zstd-compressed page (from blobstore)
     accessOrder: int64
 
   PageCache = object
@@ -246,25 +248,22 @@ type
     nextOrder: int64
     lock: Lock
 
-proc keysSize(keys: seq[seq[byte]]): int =
-  for k in keys: result += k.len + 8
-
 proc initCache(maxBytes: int): PageCache =
   result = PageCache(maxBytes: maxBytes, currentBytes: 0, nextOrder: 1)
   initLock(result.lock)
 
-proc get(cc: var PageCache; uuid: array[16, byte]): Option[seq[seq[byte]]] =
+proc get(cc: var PageCache; uuid: array[16, byte]): Option[seq[byte]] =
   cc.lock.withLock:
     if uuid in cc.map:
       cc.map[uuid].accessOrder = cc.nextOrder
       inc cc.nextOrder
-      return some(cc.map[uuid].keys)
-    return none(seq[seq[byte]])
+      return some(cc.map[uuid].compressed)
+    return none(seq[byte])
 
-proc put(cc: var PageCache; uuid: array[16, byte]; keys: seq[seq[byte]]) =
+proc put(cc: var PageCache; uuid: array[16, byte]; compressed: seq[byte]) =
   cc.lock.withLock:
     if uuid in cc.map: return
-    let sz = keysSize(keys)
+    let sz = compressed.len
     while cc.currentBytes + sz > cc.maxBytes and cc.map.len > 0:
       var minKey: array[16, byte]
       var minOrder = high(int64)
@@ -272,16 +271,14 @@ proc put(cc: var PageCache; uuid: array[16, byte]; keys: seq[seq[byte]]) =
         if v.accessOrder < minOrder:
           minOrder = v.accessOrder
           minKey = k
-      cc.currentBytes -= keysSize(cc.map[minKey].keys)
+      cc.currentBytes -= cc.map[minKey].compressed.len
       cc.map.del(minKey)
     if sz <= cc.maxBytes:
       cc.currentBytes += sz
-      cc.map[uuid] = CacheEntry(keys: keys, accessOrder: cc.nextOrder)
+      cc.map[uuid] = CacheEntry(compressed: compressed, accessOrder: cc.nextOrder)
       inc cc.nextOrder
 
-# ══════════════════════════════════════════════════════════════════════════════
-# PageStoreInner — the B-tree engine state
-# ══════════════════════════════════════════════════════════════════════════════
+
 
 type
   PageStoreInner* = object
@@ -335,22 +332,29 @@ proc journalTruncate(s: var PageStoreInner) =
 # B-tree operations
 # ══════════════════════════════════════════════════════════════════════════════
 
-proc loadLeafKeys*(s: var PageStoreInner; uuid: array[16, byte]): seq[seq[byte]] =
+proc loadLeafRaw*(s: var PageStoreInner; uuid: array[16, byte]): seq[byte] =
+  ## Return decompressed (prefix-compressed, NOT expanded) page bytes.
+  ## Caches zstd-compressed bytes. Decompresses on every call —
+  ## the cache exists to avoid I/O, not CPU.
   let cached = s.cache.get(uuid)
-  if cached.isSome: return cached.get
-  let data = blobGet(s.blobs, uuid)
-  if data.isNone:
+  if cached.isSome:
+    return decompress(cached.get)       # decompress from cache
+  let compressed = s.blobs.get(uuid)     # raw blobstore call (no zstd)
+  if compressed.isNone:
     raise newException(IOError, "leaf blob not found")
-  result = deserializePage(data.get)
-  s.cache.put(uuid, result)
+  s.cache.put(uuid, compressed.get)     # cache zstd-compressed
+  return decompress(compressed.get)
+
+proc loadLeafKeys*(s: var PageStoreInner; uuid: array[16, byte]): seq[seq[byte]] =
+  let raw = loadLeafRaw(s, uuid)
+  deserializePage(raw)
 
 proc loadLeafKeysNoput(s: var PageStoreInner; uuid: array[16, byte]): seq[seq[byte]] =
-  let cached = s.cache.get(uuid)
-  if cached.isSome: return cached.get
-  let data = blobGet(s.blobs, uuid)
-  if data.isNone:
+  ## Load leaf keys from blobstore without putting into cache (used by COW merge).
+  let compressed = s.blobs.get(uuid)
+  if compressed.isNone:
     raise newException(IOError, "leaf blob not found")
-  return deserializePage(data.get)
+  deserializePage(decompress(compressed.get))
 
 proc loadRootEntries(s: var PageStoreInner; tree: CfTree): seq[(seq[byte], array[16, byte])] =
   if tree.rootUuid == default(array[16, byte]) or tree.height == 0:

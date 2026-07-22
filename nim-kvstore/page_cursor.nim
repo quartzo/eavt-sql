@@ -1,23 +1,26 @@
 ## page_cursor.nim — Lazy forward cursor over PageStore B-tree leaf pages.
-## Each peek/next yields one key; pages are decompressed on demand via LRU cache.
+##
+## Loads one leaf page at a time (expanded keys), iterates via array index.
+## The LRU cache stores zstd-compressed bytes; the cursor holds the current
+## page expanded for cache locality and fast iteration.
 
 import std/[options]
 import ./backend
 
 type
   IndexPos = object
-    entries*: seq[(seq[byte], array[16, byte])]   ## index page children
-    pos*: int                                      ## current child index within entries
+    entries*: seq[(seq[byte], array[16, byte])]
+    pos*: int
 
   PageStoreCursor* = ref object
     s*: ptr PageStoreInner
     cf*: int
     prefix*: seq[byte]
     atEnd*: bool
-    indexStack: seq[IndexPos]          ## path from root to current leaf's parent
-    leafKeys: seq[seq[byte]]           ## decompressed keys of current leaf
-    leafIdx: int                       ## 0-based position within leafKeys (next() increments this)
-    curKey: Option[seq[byte]]          ## peeked key (consumed by next())
+    indexStack: seq[IndexPos]
+    leafKeys: seq[seq[byte]]     ## expanded keys of current leaf
+    leafIdx: int
+    curKey: Option[seq[byte]]
 
 # ── Helpers ──
 
@@ -30,7 +33,11 @@ proc loadIndexPage(s: var PageStoreInner; uuid: array[16, byte]): seq[(seq[byte]
     raise newException(IOError, "index blob not found")
   deserializeIndexPage(data.get)
 
-# ── Forward descent: walk index tree → first leaf covering prefix ──
+proc loadLeaf(c: PageStoreCursor; uuid: array[16, byte]) =
+  c.leafKeys = loadLeafKeys(c.s[], uuid)
+  c.leafIdx = -1
+
+# ── Forward descent ──
 
 proc descendToFirstLeaf(c: PageStoreCursor; uuid: array[16, byte]; height: uint8) =
   var curUuid = uuid
@@ -38,21 +45,16 @@ proc descendToFirstLeaf(c: PageStoreCursor; uuid: array[16, byte]; height: uint8
   c.indexStack = @[]
   while h > 0:
     let entries = loadIndexPage(c.s[], curUuid)
-    # Find first child whose key prefix can cover our prefix
     var idx = 0
     while idx < entries.len:
       let (k, _) = entries[idx]
-      if cmpSeq(k, c.prefix) < 0:
-        inc idx
-      else:
-        break
+      if cmpSeq(k, c.prefix) < 0: inc idx
+      else: break
     if idx >= entries.len: idx = entries.len - 1
     c.indexStack.add IndexPos(entries: entries, pos: idx)
     curUuid = entries[idx][1]
     dec h
-  # curUuid is now a leaf
-  c.leafKeys = loadLeafKeys(c.s[], curUuid)
-  c.leafIdx = -1
+  loadLeaf(c, curUuid)
 
 # ── Advance to next leaf ──
 
@@ -61,28 +63,19 @@ proc advanceToNextLeaf(c: PageStoreCursor) =
     var top = addr c.indexStack[^1]
     inc top.pos
     if top.pos < top.entries.len:
-      # Descend from this child to its first leaf
       var curUuid = top.entries[top.pos][1]
-      var h = 1'u8
-      # Keep descending through index pages until we hit a leaf
       while true:
         let entries = loadIndexPage(c.s[], curUuid)
         var idx = 0
         while idx < entries.len:
           let (k, _) = entries[idx]
-          if cmpSeq(k, c.prefix) < 0:
-            inc idx
-          else:
-            break
+          if cmpSeq(k, c.prefix) < 0: inc idx
+          else: break
         if idx < entries.len:
           c.indexStack.add IndexPos(entries: entries, pos: idx)
           curUuid = entries[idx][1]
-          inc h
-        else:
-          # This child is probably a leaf — stop descending
-          break
-      c.leafKeys = loadLeafKeys(c.s[], curUuid)
-      c.leafIdx = -1
+        else: break
+      loadLeaf(c, curUuid)
       return
     c.indexStack.setLen(c.indexStack.len - 1)
   c.atEnd = true
@@ -99,8 +92,7 @@ proc newPageStoreCursor*(s: ptr PageStoreInner; cf: int; prefix: seq[byte]): Pag
   if tree.rootUuid == default(array[16, byte]):
     result.atEnd = true; return
   if tree.height == 0:
-    result.leafKeys = loadLeafKeys(s[], tree.rootUuid)
-    result.leafIdx = -1
+    loadLeaf(result, tree.rootUuid)
   else:
     descendToFirstLeaf(result, tree.rootUuid, tree.height)
 
@@ -113,7 +105,7 @@ proc peek*(c: PageStoreCursor): Option[seq[byte]] =
     if keyHasPrefix(k, c.prefix):
       c.curKey = some(k)
       return c.curKey
-  # Exhausted current leaf, try next sibling
+    return c.peek()  # skip non-matching, try next
   if c.indexStack.len > 0:
     advanceToNextLeaf(c)
     if not c.atEnd: return c.peek()
@@ -126,26 +118,17 @@ proc next*(c: PageStoreCursor): Option[seq[byte]] =
   k
 
 proc seek*(c: PageStoreCursor; target: seq[byte]) =
-  ## Reposition cursor to first key >= target.
   if c.atEnd: return
   if cmpSeq(target, c.prefix) < 0: return
-  # Skip forward within current leaf
-  while c.leafIdx + 1 < c.leafKeys.len and
-        cmpSeq(c.leafKeys[c.leafIdx + 1], target) < 0:
-    inc c.leafIdx
-  c.curKey = none(seq[byte])
-  # Re-navigate from root for precise positioning (rare — leapfrog only)
   let tree = c.s[].trees[c.cf]
   if tree.rootUuid == default(array[16, byte]):
     c.atEnd = true; return
   if tree.height == 0:
-    c.leafKeys = loadLeafKeys(c.s[], tree.rootUuid)
-    c.leafIdx = -1
+    loadLeaf(c, tree.rootUuid)
   else:
     descendToFirstLeaf(c, tree.rootUuid, tree.height)
   c.atEnd = false
   c.curKey = none(seq[byte])
-  # Skip to target
   while not c.atEnd:
     let nk = c.next()
     if nk.isSome and cmpSeq(nk.get, target) >= 0:

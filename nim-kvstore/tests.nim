@@ -15,6 +15,7 @@ import ./pages
 import ./backend
 import ./kvstore
 import ./scheme
+import ./page_cursor
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Page serialization tests
@@ -731,8 +732,6 @@ suite "kvstore: journal recovery":
 # ══════════════════════════════════════════════════════════════════════════════
 # PageStoreCursor tests
 # ══════════════════════════════════════════════════════════════════════════════
-
-import ./page_cursor
 
 suite "page_cursor: forward scan":
   test "empty page store → atEnd":
