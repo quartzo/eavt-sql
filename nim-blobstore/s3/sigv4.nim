@@ -75,10 +75,11 @@ proc encodePathSegment*(s: string): string =
       result.add(toHex(ord(c), 2))
 
 proc encodeQueryKey*(s: string): string =
-  ## Encode for query parameter keys/values; slash IS encoded here.
+  ## Encode for query parameter keys/values; `%` is preserved to avoid
+  ## double-encoding already-encoded values (e.g. `%2F` stays `%2F`).
   for c in s:
     case c
-    of 'A'..'Z', 'a'..'z', '0'..'9', '-', '_', '.', '~':
+    of 'A'..'Z', 'a'..'z', '0'..'9', '-', '_', '.', '~', '%':
       result.add(c)
     else:
       result.add('%')
@@ -148,9 +149,12 @@ proc signAwsRequestV4*(
   let dateStamp = now.format("yyyyMMdd")
   let amzDate = now.format("yyyyMMdd'T'HHmmss'Z'")
 
-  # Build host header (path-style: endpoint host + bucket; vhost-style: bucket.host)
+  # Build host header (include port for non-standard ports, matching buildHost)
   let endpointUri = parseUri(endpoint)
-  let host = endpointUri.hostname  # may include port? strip if needed
+  var host = endpointUri.hostname
+  let port = endpointUri.port
+  if port.len > 0 and port != "80" and port != "443":
+    host.add(":" & port)
 
   # Canonical URI: /bucket/key (path-style).  Empty objectKey means a
   # bucket-level operation (e.g. CreateBucket).
@@ -205,6 +209,7 @@ proc signAwsRequestV4*(
   for (k, _) in sortedHeadersCopy:
     signedHeadersList.add(k.toLowerAscii().strip())
   let signedHeaders = signedHeadersList.join(";")
+
 
   let authorization = "AWS4-HMAC-SHA256 " &
     "Credential=" & accessKey & "/" & credentialScope & ", " &

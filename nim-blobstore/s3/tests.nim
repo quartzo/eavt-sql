@@ -76,7 +76,7 @@ proc `==`(a, b: openArray[byte]): bool =
 suite "s3: put + get":
   setup:
     startServer()
-    var tmpS = newS3BlobStore(cfg(), autoCreateBucket = false)
+    var tmpS = newS3BlobStore(cfg(), autoCreateBucket = true)
 
   teardown:
     stopServer()
@@ -115,7 +115,7 @@ suite "s3: put + get":
 suite "s3: overwrite":
   setup:
     startServer()
-    var tmpS = newS3BlobStore(cfg(), autoCreateBucket = false)
+    var tmpS = newS3BlobStore(cfg(), autoCreateBucket = true)
 
   teardown:
     stopServer()
@@ -135,7 +135,7 @@ suite "s3: overwrite":
 suite "s3: delete":
   setup:
     startServer()
-    var tmpS = newS3BlobStore(cfg(), autoCreateBucket = false)
+    var tmpS = newS3BlobStore(cfg(), autoCreateBucket = true)
 
   teardown:
     stopServer()
@@ -154,7 +154,7 @@ suite "s3: delete":
 suite "s3: list":
   setup:
     startServer()
-    var tmpS = newS3BlobStore(cfg(), autoCreateBucket = false)
+    var tmpS = newS3BlobStore(cfg(), autoCreateBucket = true)
 
   teardown:
     stopServer()
@@ -170,7 +170,7 @@ suite "s3: list":
 suite "s3: roots":
   setup:
     startServer()
-    var tmpS = newS3BlobStore(cfg(), autoCreateBucket = false)
+    var tmpS = newS3BlobStore(cfg(), autoCreateBucket = true)
 
   teardown:
     stopServer()

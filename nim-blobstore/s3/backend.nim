@@ -80,13 +80,13 @@ proc buildObjectUrl(b: S3BlobStore; objectKey, queryString: string): string =
     if objectKey.len == 0:
       url.add("/" & b.bucketName)
     else:
-      url.add("/" & b.bucketName & "/" & encodeUrl(objectKey, usePlus = false))
+      url.add("/" & b.bucketName & "/" & encodePathSegment(objectKey))
     if queryString.len > 0: url.add("?" & queryString)
     result = url
   else:
     var url = scheme & "://" & b.bucketName & "." & u.hostname
     if u.port.len > 0: url.add(":" & u.port)
-    url.add("/" & encodeUrl(objectKey, usePlus = false))
+    url.add("/" & encodePathSegment(objectKey))
     if queryString.len > 0: url.add("?" & queryString)
     result = url
 
@@ -130,12 +130,12 @@ proc s3Put(b: S3BlobStore; key: string; data: seq[byte]): Option[string] =
   if code >= 300: return some("s3 put failed: HTTP " & $code)
   result = none(string)
 
-proc s3Get(b: S3BlobStore; key: string): tuple[ok: bool; data: seq[byte]; err: Option[string]] =
+proc s3Get(b: S3BlobStore; key: string): tuple[ok: bool; found: bool; data: seq[byte]; err: Option[string]] =
   let (code, body, err) = doRequest(b, "GET", key, "", @[], expectBody = true)
-  if err.isSome(): return (false, @[], err)
-  if code == 404: return (true, @[], none(string))
-  if code >= 300: return (false, @[], some("s3 get failed: HTTP " & $code))
-  return (true, body, none(string))
+  if err.isSome(): return (false, false, @[], err)
+  if code == 404: return (true, false, @[], none(string))
+  if code >= 300: return (false, false, @[], some("s3 get failed: HTTP " & $code))
+  return (true, true, body, none(string))
 
 proc s3Delete(b: S3BlobStore; key: string): Option[string] =
   let (code, _, err) = doRequest(b, "DELETE", key, "", @[], expectBody = false)
@@ -250,9 +250,9 @@ method get*(s: S3BlobStore; id: ByteArr16): Option[seq[byte]] =
   let key = s.blobKeyForId(id)
   s.lock.acquire()
   try:
-    let (ok, data, err) = s3Get(s, key)
+    let (ok, found, data, err) = s3Get(s, key)
     if not ok: raise newException(IOError, "s3 get: " & err.get(""))
-    if data.len == 0: return none(seq[byte])
+    if not found: return none(seq[byte])
     result = some(data)
   finally: s.lock.release()
 
@@ -290,9 +290,9 @@ method getRoot*(s: S3BlobStore; name: string): Option[seq[byte]] =
   let key = s.rootKeyForName(name)
   s.lock.acquire()
   try:
-    let (ok, data, err) = s3Get(s, key)
+    let (ok, found, data, err) = s3Get(s, key)
     if not ok: raise newException(IOError, "s3 getRoot: " & err.get(""))
-    if data.len == 0: return none(seq[byte])
+    if not found: return none(seq[byte])
     result = some(data)
   finally: s.lock.release()
 
