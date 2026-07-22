@@ -727,3 +727,96 @@ suite "kvstore: journal recovery":
       check kv.get(0, @[byte(2)])  # from journal replay
       kv.close()
     removeDir(path)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PageStoreCursor tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+import ./page_cursor
+
+suite "page_cursor: forward scan":
+  test "empty page store → atEnd":
+    var err: cint
+    let cfg = makeConfig({"backend": "memory"}.toTable)
+    let ps = newPageStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    check ps != nil
+    let c = newPageStoreCursor(ps, 0, @[])
+    check c != nil
+    check c.atEnd
+    closePageStore(ps)
+
+  test "single leaf with keys → peek/next":
+    var err: cint
+    let cfg = makeConfig({"backend": "memory"}.toTable)
+    let ps = newPageStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    let keys = @[@[byte(1), 2, 3], @[byte(4), 5], @[byte(6)]]
+    commitMerge(ps[], @[(0, keys)], false)
+
+    let c = newPageStoreCursor(ps, 0, @[])
+    check not c.atEnd
+
+    let k1 = c.next()
+    check k1.isSome
+    check k1.get == @[byte(1), 2, 3]
+
+    let k2 = c.next()
+    check k2.isSome
+    check k2.get == @[byte(4), 5]
+
+    let k3 = c.next()
+    check k3.isSome
+    check k3.get == @[byte(6)]
+
+    check c.next().isNone
+    check c.atEnd
+    closePageStore(ps)
+
+  test "prefix filter":
+    var err: cint
+    let cfg = makeConfig({"backend": "memory"}.toTable)
+    let ps = newPageStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    let keys = @[@[byte(1), 1], @[byte(1), 2], @[byte(2), 1]]
+    commitMerge(ps[], @[(0, keys)], false)
+
+    let c = newPageStoreCursor(ps, 0, @[byte(1)])
+    let k1 = c.next()
+    check k1.isSome
+    check k1.get == @[byte(1), 1]
+
+    let k2 = c.next()
+    check k2.isSome
+    check k2.get == @[byte(1), 2]
+
+    check c.next().isNone
+    closePageStore(ps)
+
+  test "peek returns same key":
+    var err: cint
+    let cfg = makeConfig({"backend": "memory"}.toTable)
+    let ps = newPageStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    let keys = @[@[byte(5), 0]]
+    commitMerge(ps[], @[(0, keys)], false)
+
+    let c = newPageStoreCursor(ps, 0, @[])
+    let p1 = c.peek()
+    let p2 = c.peek()
+    check p1.isSome and p2.isSome
+    check p1.get == p2.get
+    check p1.get == @[byte(5), 0]
+    closePageStore(ps)
+
+  test "seek advances position":
+    var err: cint
+    let cfg = makeConfig({"backend": "memory"}.toTable)
+    let ps = newPageStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    var keys = newSeq[seq[byte]]()
+    for i in 1..50:
+      keys.add @[byte(i), 0]
+    commitMerge(ps[], @[(0, keys)], false)
+
+    let c = newPageStoreCursor(ps, 0, @[])
+    c.seek(@[byte(30), 0])
+    let k = c.peek()
+    check k.isSome
+    check k.get[0] >= 30
+    closePageStore(ps)

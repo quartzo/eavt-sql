@@ -155,7 +155,7 @@ proc serializeIndexPage(entries: seq[(seq[byte], array[16, byte])]): seq[byte] =
     result.add uuid
     prev = key
 
-proc deserializeIndexPage(data: openArray[byte]): seq[(seq[byte], array[16, byte])] =
+proc deserializeIndexPage*(data: openArray[byte]): seq[(seq[byte], array[16, byte])] =
   if data.len < 2:
     raise newException(ValueError, "index page too short")
   let count = (uint16(data[0]) shl 8 or uint16(data[1])).int
@@ -218,8 +218,8 @@ proc prefixEnd(prefix: seq[byte]): Option[seq[byte]] =
     e.setLen(e.len - 1)
   return none(seq[byte])
 
-proc findPrefixRange(entries: seq[(seq[byte], array[16, byte])];
-                      prefix: seq[byte]): (int, int) =
+proc findPrefixRange*(entries: seq[(seq[byte], array[16, byte])];
+                       prefix: seq[byte]): (int, int) =
   if prefix.len == 0: return (0, entries.len)
   let pe = prefixEnd(prefix)
   let s = partitionPoint(entries, proc(x: auto): bool = cmpSeq(x[0], prefix) < 0)
@@ -285,15 +285,15 @@ proc put(cc: var PageCache; uuid: array[16, byte]; keys: seq[seq[byte]]) =
 
 type
   PageStoreInner* = object
-    blobs: BlobStore           # trait dispatch — no vtable
-    journal: NimJournalVtablePtr
-    trees: seq[CfTree]
-    numCf: int
-    readOnly: bool
-    currentRoot: string
-    cache: PageCache
-    lock: Lock
-    backendType: string
+    blobs*: BlobStore           # trait dispatch — no vtable
+    journal*: NimJournalVtablePtr
+    trees*: seq[CfTree]
+    numCf*: int
+    readOnly*: bool
+    currentRoot*: string
+    cache*: PageCache
+    lock*: Lock
+    backendType*: string
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -303,7 +303,7 @@ type
 proc blobPut(blobs: BlobStore; data: openArray[byte]): array[16, byte] =
   blobs.put(compress(data))
 
-proc blobGet(blobs: BlobStore; id: array[16, byte]): Option[seq[byte]] =
+proc blobGet*(blobs: BlobStore; id: array[16, byte]): Option[seq[byte]] =
   let r = blobs.get(id)
   if r.isNone(): return none(seq[byte])
   result = some(decompress(r.get()))
@@ -335,7 +335,7 @@ proc journalTruncate(s: var PageStoreInner) =
 # B-tree operations
 # ══════════════════════════════════════════════════════════════════════════════
 
-proc loadLeafKeys(s: var PageStoreInner; uuid: array[16, byte]): seq[seq[byte]] =
+proc loadLeafKeys*(s: var PageStoreInner; uuid: array[16, byte]): seq[seq[byte]] =
   let cached = s.cache.get(uuid)
   if cached.isSome: return cached.get
   let data = blobGet(s.blobs, uuid)
