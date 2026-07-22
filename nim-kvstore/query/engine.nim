@@ -20,13 +20,12 @@ import query/hostfns
 type
   QueryStore* = ref object of EngineOps
     eavt*: EavtEngine
-    kv*: NimKVStoreVtablePtr
-    mt*: MtVtablePtr
+    kv*: KVStore             # Nim ref — no C-ABI
 
-proc newQueryStore*(kvHandle: NimKVStoreVtablePtr; mtHandle: MtVtablePtr): QueryStore =
-  let eng = newEavtEngine(kvHandle)
+proc newQueryStore*(kv: KVStore): QueryStore =
+  let eng = newEavtEngine(kv)
   eng.bootstrapResolver()
-  QueryStore(eavt: eng, kv: kvHandle, mt: mtHandle)
+  QueryStore(eavt: eng, kv: kv)
 
 # ── SExpr → storage value ──
 
@@ -57,15 +56,7 @@ proc sexprToValueForType(val: SExpr; vt: uint32): string =
 # ── EngineOps implementation ──
 
 method openCursor(q: QueryStore; cfId: uint32; prefix: seq[byte]): NimCursor =
-  let pf = if prefix.len > 0: addr prefix[0] else: nil
-  var cursorId: uint64 = 0
-  var err: cint
-
-  # Use memtable scan to create cursor
-  let mtPrefix = if cfId == 0'u32: prefix else: prefix
-
-  # For now, create a simple cursor from the KVStore scan
-  var keys: seq[seq[byte]] = @[]
+  let keys = q.kv.scan(cfId.int, prefix)
   var pos = 0
 
   proc isValid(): bool = pos < keys.len
@@ -86,7 +77,7 @@ method openCursor(q: QueryStore; cfId: uint32; prefix: seq[byte]): NimCursor =
       inc pos
   proc invalidate() = pos = keys.len
 
-  let ci = NimCursor(
+  NimCursor(
     isValidCb: isValid,
     currentKeyCb: currentKey,
     stepCb: step,
@@ -94,27 +85,6 @@ method openCursor(q: QueryStore; cfId: uint32; prefix: seq[byte]): NimCursor =
     seekCb: seek,
     invalidateCb: invalidate,
   )
-
-  # Load keys via scan
-  var outBuf: pointer = nil
-  var outLen: csize_t = 0
-  let rc = q.kv.scan(q.kv.handle, cfId, pf, prefix.len.csize_t,
-                      addr outBuf, addr outLen, addr err)
-  if rc != 0: return ci
-
-  var rp = 0
-  while rp + 4 <= outLen.int:
-    let raw = cast[ptr UncheckedArray[byte]](outBuf)
-    let klen = int(uint32(raw[rp]) shl 24 or uint32(raw[rp+1]) shl 16 or
-                     uint32(raw[rp+2]) shl 8 or uint32(raw[rp+3]))
-    rp += 4
-    if rp + klen > outLen.int: break
-    var k = newSeq[byte](klen)
-    copyMem(addr k[0], addr cast[ptr UncheckedArray[byte]](outBuf)[rp], klen)
-    rp += klen
-    keys.add k
-  if outBuf != nil: q.kv.freeBuf(outBuf)
-  ci
 
 method saveWithT(q: QueryStore; eid: uint64; attr: string; val: SExpr;
                   t: uint64; asOf: uint64) =

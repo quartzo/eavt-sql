@@ -36,7 +36,7 @@ import codec    # query/codec.nim: wire value codec
 
 type
   PyEngine = ref object
-    kv: NimKVStoreVtablePtr
+    kv: KVStore              # Nim ref — no C-ABI
     eavt: EavtEngine
     store: QueryStore       # VM engine ops over the SAME EavtEngine
     pathStr: string
@@ -142,19 +142,19 @@ proc createEngine(config: PyObject): PyEngine {.exportpy: "new".} =
     keysA[i] = k.cstring
     valsA[i] = v.cstring
   var err: cint
-  let kvHandle = openKvStore(keysA, valsA, n.cint, addr err)
+  let kv = newKVStore(keysA, valsA, n.cint, addr err)
   deallocShared(keysA)
   deallocShared(valsA)
 
-  if kvHandle == nil:
+  if kv == nil:
     raise newException(ValueError, "failed to open KVStore")
 
-  let eavtEng = newEavtEngine(kvHandle)
+  let eavtEng = newEavtEngine(kv)
   eavtEng.bootstrapResolver()
 
   PyEngine(
-    kv: kvHandle, eavt: eavtEng,
-    store: QueryStore(eavt: eavtEng, kv: kvHandle, mt: nil),
+    kv: kv, eavt: eavtEng,
+    store: newQueryStore(kv),
     pathStr: "db",
     rustEngine: nil,
   )
@@ -164,12 +164,12 @@ proc createEngine(config: PyObject): PyEngine {.exportpy: "new".} =
 # ═══════════════════════════════════════════════════════════════════════════════
 
 proc close*(eng: PyEngine) {.exportpy: "close".} =
-  discard eng.kv.close(eng.kv.handle, nil)
+  eng.kv.close()
 
 proc path*(eng: PyEngine): string {.exportpy: "path".} = eng.pathStr
 
 proc flush*(eng: PyEngine) {.exportpy: "flush".} =
-  discard eng.kv.flush(eng.kv.handle, nil)
+  eng.kv.flush()
 
 # ── DML ──
 
@@ -268,9 +268,7 @@ proc lookupEntity*(eng: PyEngine; attrName: string; value: PyObject): Option[uin
 proc internalStatus*(eng: PyEngine; target: string): string {.exportpy: "internal_status".} = "{}"
 
 proc memtableSize*(eng: PyEngine): uint64 {.exportpy: "memtable_size".} =
-  var sz: uint64 = 0; var err: cint
-  discard eng.kv.memtableSize(eng.kv.handle, addr sz, addr err)
-  sz
+  eng.kv.memtableSize()
 
 proc memtableCount*(eng: PyEngine; cf: uint32): uint64 {.exportpy: "memtable_count".} = 0
 proc journalSize*(eng: PyEngine): uint64 {.exportpy: "journal_size".} = 0
