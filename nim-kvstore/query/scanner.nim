@@ -314,7 +314,7 @@ proc extractCurrent*(sc: V2Scanner): Option[SExpr] =
     return some(SExpr(kind: sInt, ival: int64(beUint32(k, vs))))
   of "e":
     let raw = beUint64(k, vs)
-    return some(SExpr(kind: sInt, ival: keys.decodeInt64(raw)))
+    return some(SExpr(kind: sInt, ival: int64(raw)))
   of "v":
     if isVariableValue(sc.valueAttrType, k.len):
       let hasVt = sc.valueAttrType.isSome
@@ -522,7 +522,7 @@ proc seekToValue*(sc: V2Scanner; value: SExpr) =
 
   case pn:
   of "e":
-    target.add keys.encodeInt(value.ival)
+    target.add keys.encodeRef(uint64(value.ival))
   of "a":
     let v32 = uint32(value.ival)
     target.add byte(v32 shr 24); target.add byte((v32 shr 16) and 0xFF)

@@ -22,3 +22,9 @@ task eavt_test, "Run EAVT unit tests":
        "--path:../nim-blobstore --path:.. " &
        "--passL:-lcrypto --passL:-lzstd " &
        "-r eavt_tests.nim"
+
+task query_test, "Run query engine unit tests":
+  exec "nim c --mm:arc --threads:on -d:release " &
+       "--path:../nim-blobstore --path:.. " &
+       "--passL:-lcrypto --passL:-lzstd " &
+       "-r query/tests.nim"

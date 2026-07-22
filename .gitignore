@@ -45,3 +45,4 @@ nim-kvstore/query/engine
 nim-kvstore/eavt_tests
 nim-kvstore/resolver
 nim-kvstore/scheme
+nim-kvstore/query/tests
