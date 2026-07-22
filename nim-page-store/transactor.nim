@@ -297,7 +297,7 @@ proc kvFlush(s: var KVStoreInner): bool =
   if keysByCf.len > 0:
     commitMerge(s.ps[], keysByCf, true)
     # Truncate journal after successful flush (data now in page store)
-    if s.path.len > 0:
+    if s.path.len > 0 and s.path != ":memory:":
       let journalPath = s.path / "journal" / "journal"
       if fileExists(journalPath):
         try: removeFile(journalPath)
@@ -440,7 +440,7 @@ proc kvJournalAppendC*(h: pointer; key: ptr Byte; klen: csize_t;
     `val`: ptr Byte; vlen: csize_t;
     errOut: ptr cint): cint {.exportc: "kvJournalAppendC", cdecl.} =
   var s = cast[ptr KVStoreInner](h)
-  if s.path.len == 0:
+  if s.path in ["", ":memory:"] or s.config.getOrDefault("backend", "") == "memory":
     setErr(errOut, ErrConfig); return -1
   let journalPath = s.path / "journal" / "journal"
   try:
@@ -464,7 +464,8 @@ proc kvJournalAppendC*(h: pointer; key: ptr Byte; klen: csize_t;
 proc kvJournalReadC*(h: pointer; outBuf: ptr pointer; outLen: ptr csize_t;
     errOut: ptr cint): cint {.exportc: "kvJournalReadC", cdecl.} =
   var s = cast[ptr KVStoreInner](h)
-  if s.path.len == 0: setErr(errOut, ErrConfig); return -1
+  if s.path in ["", ":memory:"] or s.config.getOrDefault("backend", "") == "memory":
+    setErr(errOut, ErrConfig); return -1
   let journalPath = s.path / "journal" / "journal"
   try:
     if not fileExists(journalPath):
@@ -534,7 +535,7 @@ proc openKvStore*(keys, vals: CStringArr; count: cint;
   s.mtSize = 0
   s.flushSnap = 0
   s.config = config
-  s.path = config.getOrDefault("path", "")
+  s.path = config.getOrDefault("path", ":memory:")
   s.readOnly = readOnly
   s.numCf = 4
   s.flushThreshold = parseUInt(config.getOrDefault("flush_threshold", "67108864")).uint64
@@ -543,7 +544,7 @@ proc openKvStore*(keys, vals: CStringArr; count: cint;
   initSpinLock(s.lock)
 
   # Replay journal into memtable (crash recovery)
-  if s.path.len > 0 and not readOnly:
+  if s.path.len > 0 and s.path != ":memory:" and not readOnly:
     let journalPath = s.path / "journal" / "journal"
     if fileExists(journalPath):
       try:
