@@ -114,6 +114,28 @@ impl QueryState {
             }),
         })
     }
+
+    fn with_engine<F, R>(&self, f: F) -> Result<R, String>
+    where
+        F: FnOnce(&QueryEngineInner) -> Result<R, String>,
+    {
+        let inner = self.inner.read().map_err(|e| e.to_string())?;
+        let engine = inner.engine.as_ref().ok_or("engine not open")?;
+        f(engine)
+    }
+
+    pub fn kv_put(&self, cf: u32, key: &[u8]) -> Result<(), String> {
+        self.with_engine(|e| e.tx().put(cf, key))
+    }
+    pub fn kv_get(&self, cf: u32, key: &[u8]) -> Result<bool, String> {
+        self.with_engine(|e| e.tx().get(cf, key))
+    }
+    pub fn kv_scan(&self, cf: u32, prefix: &[u8]) -> Result<Vec<u8>, String> {
+        self.with_engine(|e| e.tx().scan(cf, prefix))
+    }
+    pub fn kv_open_cursor_direct(&self, cf: u32, prefix: &[u8]) -> Result<spier_page_store_nim::storage_traits::CursorHandle, String> {
+        self.with_engine(|e| e.tx().open_cursor_direct(cf, prefix))
+    }
 }
 
 fn open_engine(config: &HashMap<String, String>) -> Result<QueryEngineInner, String> {

@@ -65,6 +65,12 @@ pub struct PySessionHandle {
     inner: spier_eavt_query::SessionHandle,
 }
 
+/// Opaque handle to a raw KV cursor.
+#[pyclass(name = "CursorHandle", unsendable)]
+pub struct PyCursorHandle {
+    inner: spier_page_store_nim::storage_traits::CursorHandle,
+}
+
 /// PyO3 bindings for spier-eavt-query.
 #[pyclass(name = "Engine")]
 pub struct PyEngine {
@@ -336,6 +342,44 @@ impl PyEngine {
             .map_err(to_string_err)
     }
 
+    // ── KV-level operations (for raw storage tests) ──
+
+    fn put(&self, py: Python<'_>, cf: u32, key: Vec<u8>) -> PyResult<()> {
+        py.allow_threads(|| self.inner.kv_put(cf, &key))
+            .map_err(to_string_err)
+    }
+
+    fn get(&self, py: Python<'_>, cf: u32, key: Vec<u8>) -> PyResult<bool> {
+        py.allow_threads(|| self.inner.kv_get(cf, &key))
+            .map_err(to_string_err)
+    }
+
+    fn scan(&self, py: Python<'_>, cf: u32, prefix: Vec<u8>) -> PyResult<Vec<u8>> {
+        py.allow_threads(|| self.inner.kv_scan(cf, &prefix))
+            .map_err(to_string_err)
+    }
+
+    fn open_cursor_direct(&self, py: Python<'_>, cf: u32, prefix: Vec<u8>) -> PyResult<PyCursorHandle> {
+        let handle = py.allow_threads(|| self.inner.kv_open_cursor_direct(cf, &prefix))
+            .map_err(to_string_err)?;
+        Ok(PyCursorHandle { inner: handle })
+    }
+
+    fn cursor_current_key(&self, _py: Python<'_>, cursor: &Bound<'_, PyCursorHandle>) -> PyResult<(bool, Vec<Vec<u8>>)> {
+        let mut buf = Vec::new();
+        let has = cursor.borrow().inner.cursor.borrow().is_valid();
+        if has {
+            if let Some(k) = cursor.borrow().inner.cursor.borrow().current_key() {
+                buf.push(k.to_vec());
+            }
+        }
+        Ok((has, buf))
+    }
+
+    fn cursor_step(&self, _py: Python<'_>, cursor: &Bound<'_, PyCursorHandle>) {
+        cursor.borrow().inner.cursor.borrow_mut().step();
+    }
+
     fn compile_scheme(&self, py: Python<'_>, scheme_text: &str) -> PyResult<PyProgramHandle> {
         let handle = py.allow_threads(|| self.inner.compile_scheme(scheme_text))
             .map_err(to_string_err)?;
@@ -366,5 +410,6 @@ fn spier_eavt_query_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyEngine>()?;
     m.add_class::<PyProgramHandle>()?;
     m.add_class::<PySessionHandle>()?;
+    m.add_class::<PyCursorHandle>()?;
     Ok(())
 }
