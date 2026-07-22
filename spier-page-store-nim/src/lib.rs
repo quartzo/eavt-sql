@@ -250,14 +250,12 @@ impl Drop for NimPageStore {
 }
 
 fn pack_config(config: &HashMap<String, String>) -> (Vec<CString>, Vec<CString>) {
-    let keys: Vec<CString> = config
-        .keys()
-        .map(|k| CString::new(k.as_str()).unwrap())
-        .collect();
-    let vals: Vec<CString> = config
-        .values()
-        .map(|v| CString::new(v.as_str()).unwrap())
-        .collect();
+    let mut keys = Vec::with_capacity(config.len());
+    let mut vals = Vec::with_capacity(config.len());
+    for (k, v) in config {
+        keys.push(CString::new(k.as_str()).unwrap());
+        vals.push(CString::new(v.as_str()).unwrap());
+    }
     (keys, vals)
 }
 
