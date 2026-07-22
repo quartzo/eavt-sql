@@ -43,9 +43,8 @@ truncate em `kvFlush`.
 
 ### 5. Erros de tipo no evaluator Rust (~30 testes)
 **Sintoma:** `type error: expected int, got "SomeString"`
-**Raiz:** O evaluator Rust converte tipos de valor incorretamente em algumas queries
-(provavelmente relacionado a tipos não-REF/LONG passando por code paths que esperam inteiros).
-**Solução:** Integrar evaluator Nim (categoria 1). Enquanto isso, xfail documentado.
+**Raiz:** O evaluator Rust converte tipos de valor incorretamente em algumas queries.
+**Solução:** Integrar evaluator Nim (Fase 1).
 
 ### 6. Erros de importação em testes legados (~9 erros)
 **Sintoma:** `ERROR collecting test_*.py` — `spier_kvstore_py`, `spier_transactor_py`
@@ -57,36 +56,24 @@ e `test_spier_transactor.py` que dependem da solução da categoria 3.
 
 ## Plano de execução (por nível de impacto)
 
-### Fase 1: Integrar Nim evaluator como backend de execução (~80 testes)
-**Impacto:** Resolve categorias 1 e 5 de uma vez (~110 testes).
+### Fase 1: Integrar Nim evaluator como backend de execução (~110 testes)
+**Impacto:** Resolve `unbound` e `type error` — o evaluator Nim (`scheme.nim` + `hostfns.nim`)
+lê valores direto do scanner, eliminando as falhas de binding do evaluator Rust.
 
-1. Adicionar `extern "C"` functions ao Nim `.a` para `nim_query_execute_scheme` e
-   `nim_query_execute_select` — recebem Scheme IR serializado, executam via Nim evaluator,
-   retornam resultado no formato de batch Python.
-
-2. Adicionar wrappers Rust (`NimQueryExecutor`) em `spier-page-store-nim/src/lib.rs`.
-
-3. Modificar `spier-eavt-query/src/lib.rs` para usar `NimQueryExecutor` em vez do
-   evaluator Rust (`SchemeSession`/`SelectSchemeSession`) quando disponível.
-
-4. Adicionar flag `use_nim_evaluator` no config para fallback ao Rust durante transição.
+1. Serializar Scheme IR compilado (Rust) → passar ao Nim evaluator via C-ABI.
+2. Nim evaluator executa e retorna resultado no formato de batch Python.
+3. Modificar `spier-eavt-query/src/lib.rs` para usar Nim em vez de `SchemeSession` Rust.
 
 ### Fase 2: Expor operações KV-level no PyO3 (~14 testes)
-**Impacto:** Resolve categorias 3 e 4.
+**Impacto:** Resolve testes S3 (`test_config_s3_moto.py`) e journal (`test_spier_journal.py`,
+`test_spier_transactor.py`) que dependem de `put`/`get`/`scan` raw KV.
 
-1. Adicionar métodos `put`, `get`, `scan`, `open_cursor_direct`, `cursor_current_key`,
-   `cursor_step` ao `PyEngine` em `spier-eavt-query-py/src/lib.rs`.
+1. Adicionar métodos KV-level ao `PyEngine` em `spier-eavt-query-py/src/lib.rs`.
+2. Delegar ao `NimKVStore` já disponível via `TransactorState`.
 
-2. Wrappers delegam ao `NimKVStore` já disponível via `TransactorState`.
-
-3. Atualizar `tests/test_config_s3_moto.py`, `test_spier_journal.py`, `test_spier_transactor.py`.
-
-### Fase 3: Ajustes finos e xfail documentado (~restante)
-**Impacto:** Limpeza final para chegar a 100%.
-
-1. Identificar falhas remanescentes após fases 1-2.
-2. Para bugs no compilador Rust (não no evaluator), marcar xfail com razão clara.
-3. Corrigir bugs no Nim storage/transactor identificados pelos testes.
+### Fase 3: Corrigir bugs restantes no Nim storage/transactor
+**Impacto:** Falhas que sobrarem após fases 1-2 são bugs reais na camada Nim
+(encoding de chaves, flush, scan, etc). Corrigir diretamente no código Nim.
 
 ---
 
