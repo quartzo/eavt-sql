@@ -3,10 +3,9 @@
 ## File-backed BlobStore backend — 2-level hex-sharded blobs on disk.
 ## Port of spier-blobstore-file/src/lib.rs.
 
-import std/[os, algorithm, options, strutils, tables]
+import std/[os, algorithm, options, strutils]
 import ../common
 import ../blobstore
-import spinlock
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Nim-native type — implements the BlobStore trait.

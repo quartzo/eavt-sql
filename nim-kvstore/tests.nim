@@ -12,7 +12,6 @@ import journal/all
 import nim_memtable/all
 import ./abi
 import ./pages
-import ./spinlock
 import ./backend
 import ./kvstore
 import ./scheme

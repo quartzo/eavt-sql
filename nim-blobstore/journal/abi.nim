@@ -8,8 +8,6 @@
 ## `Err*` codes below. Rust maps the code to a static message -- no string
 ## allocation crosses the FFI boundary.
 
-import spinlock
-
 const
   ErrOk* = 0.cint
   ErrInvalidHandle* = 1.cint   ## nil / unknown backend handle

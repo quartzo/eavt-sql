@@ -5,11 +5,11 @@
 import std/[tables, algorithm, options]
 import ../common
 import ../blobstore
-import spinlock
+import std/locks
 
 type
   MemBlobStore* = ref object of BlobStore
-    lock: SpinLock
+    lock: Lock
     blobs*: Table[ByteArr16, seq[Byte]]
     roots*: Table[string, seq[Byte]]
 
@@ -17,7 +17,7 @@ proc newMemBlobStore*(): MemBlobStore =
   result = MemBlobStore()
   result.blobs = initTable[ByteArr16, seq[Byte]]()
   result.roots = initTable[string, seq[Byte]]()
-  initSpinLock(result.lock)
+  initLock(result.lock)
 
 method put*(s: MemBlobStore; data: openArray[byte]): ByteArr16 =
   var dataCopy = newSeq[Byte](data.len)

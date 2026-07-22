@@ -3,12 +3,11 @@
 ## Port of spier-transactor/src/eavt.rs (~1099 lines Rust → Nim).
 ## Coordinates Resolver + KVStore for entity-attribute-value-time operations.
 
-import std/[tables, strutils, strformat, options, times, sets]
+import std/[tables, strutils, options, times, sets]
 import ./resolver
 import ./keys
 import ./kvstore  # KVStore Nim ref
-import ./spinlock
-import ./abi  # NimKVStoreVtablePtr (for C-ABI bridge overload)
+import std/locks
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Value type mapping
@@ -48,15 +47,11 @@ type
   EavtEngine* = ref object
     kv*: KVStore                  # Nim ref — no C-ABI vtable
     resolver*: Resolver
-    lock: SpinLock
+    lock: Lock
 
 proc newEavtEngine*(kv: KVStore): EavtEngine =
   result = EavtEngine(kv: kv, resolver: newResolver())
-  initSpinLock(result.lock)
-
-proc newEavtEngine*(vt: NimKVStoreVtablePtr): EavtEngine =
-  ## C-ABI bridge — extract the underlying KVStore ref from the vtable handle.
-  newEavtEngine(cast[KVStore](vt.handle))
+  initLock(result.lock)
   # bootstrap called after construction (avoids forward ref)
 
 # ── Batch write helper ──

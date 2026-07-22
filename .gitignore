@@ -43,3 +43,5 @@ nim-blobstore/s3/tests
 nim_memtable/tests
 nim-kvstore/query/engine
 nim-kvstore/eavt_tests
+nim-kvstore/resolver
+nim-kvstore/scheme

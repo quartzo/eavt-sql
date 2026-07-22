@@ -2,10 +2,10 @@
 ##
 ## Port of spier-kvstore/src/generic_page_store.rs (~1800 lines → ~900 lines Nim).
 
-import std/[tables, sets, hashes, strformat, strutils, times, monotimes, sysrand, random, options]
+import std/[tables, sets, hashes, strformat, strutils, times, monotimes, options]
 import ./abi
 import ./pages
-import ./spinlock
+import std/locks
 
 # ══════════════════════════════════════════════════════════════════════════════
 # BlobStore — trait dispatch (no C-ABI vtable).
@@ -84,29 +84,6 @@ const
   RootMagic = [0x45'u8, 0x56'u8, 0x54'u8, 0x31'u8]  # "EVT1"
   RootVersion = 2'u16
   IndexPageMaxSize = 256 * 1024
-
-# ══════════════════════════════════════════════════════════════════════════════
-# UUID helpers
-# ══════════════════════════════════════════════════════════════════════════════
-
-proc newUuidBytes(): array[16, byte] =
-  proc random(dest: var array[16, byte]) =
-    for i in 0..15: dest[i] = byte(rand(255))
-  random(result)
-  result[6] = (result[6] and 0x0F) or 0x40
-  result[8] = (result[8] and 0x3F) or 0x80
-
-proc fmtUuid(uuid: array[16, byte]): string =
-  result = &"{uuid[0]:02x}{uuid[1]:02x}{uuid[2]:02x}{uuid[3]:02x}-"
-  result.add &"{uuid[4]:02x}{uuid[5]:02x}-{uuid[6]:02x}{uuid[7]:02x}-"
-  result.add &"{uuid[8]:02x}{uuid[9]:02x}-"
-  for i in 10..15: result.add &"{uuid[i]:02x}"
-
-proc fmtHex(data: openArray[byte]; maxLen: int): string =
-  let n = min(data.len, maxLen)
-  result = newStringOfCap(n * 2)
-  for i in 0..<n: result.add &"{data[i]:02x}"
-  if data.len > maxLen: result.add ".."
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Root blob serialization
@@ -267,14 +244,14 @@ type
     maxBytes: int
     currentBytes: int
     nextOrder: int64
-    lock: SpinLock
+    lock: Lock
 
 proc keysSize(keys: seq[seq[byte]]): int =
   for k in keys: result += k.len + 8
 
 proc initCache(maxBytes: int): PageCache =
   result = PageCache(maxBytes: maxBytes, currentBytes: 0, nextOrder: 1)
-  initSpinLock(result.lock)
+  initLock(result.lock)
 
 proc get(cc: var PageCache; uuid: array[16, byte]): Option[seq[seq[byte]]] =
   cc.lock.withLock:
@@ -315,7 +292,7 @@ type
     readOnly: bool
     currentRoot: string
     cache: PageCache
-    lock: SpinLock
+    lock: Lock
     backendType: string
 
 
@@ -348,32 +325,6 @@ proc blobListRoots(blobs: BlobStore): seq[string] =
 
 proc blobList(blobs: BlobStore): seq[array[16, byte]] =
   blobs.list()
-
-proc journalAppend(s: var PageStoreInner; key, val: openArray[byte]) =
-  if s.journal == nil: return
-  var err: cint
-  discard s.journal.append(s.journal.handle,
-    cast[ptr Byte](unsafeAddr key[0]), key.len.csize_t,
-    cast[ptr Byte](unsafeAddr val[0]), val.len.csize_t, addr err)
-
-proc journalRead(s: var PageStoreInner): seq[byte] =
-  if s.journal == nil: return @[]
-  var outBuf: pointer = nil
-  var outLen: csize_t = 0
-  var err: cint
-  let rc = s.journal.read(s.journal.handle, addr outBuf, addr outLen, addr err)
-  if rc != 0: return @[]
-  result = newSeq[byte](outLen.int)
-  if outLen.int > 0:
-    copyMem(unsafeAddr result[0], outBuf, outLen.int)
-  s.journal.freeBuf(outBuf)
-
-proc journalSize(s: var PageStoreInner): uint64 =
-  if s.journal == nil: return 0
-  var outSize: uint64 = 0
-  var err: cint
-  discard s.journal.size(s.journal.handle, addr outSize, addr err)
-  return outSize
 
 proc journalTruncate(s: var PageStoreInner) =
   if s.journal == nil: return
@@ -632,18 +583,7 @@ proc collectTreeUuids(s: var PageStoreInner; tree: CfTree;
     live.incl childUuid
     if tree.height > 1:
       collectTreeUuids(s, CfTree(rootUuid: childUuid, height: tree.height - 1,
-                                  numLeaves: 0), live)
-
-proc hasOldRoots(s: var PageStoreInner; maxAgeSecs: uint64; maxRootCount: int): bool =
-  let roots = blobListRoots(s.blobs)
-  if roots.len <= 1: return false
-  if maxRootCount > 0 and roots.len > maxRootCount: return true
-  let latestUs = parseRootUs(roots[0])
-  let maxAgeUs = cast[int64](maxAgeSecs) * 1_000_000
-  for i in 1..<roots.len:
-    let us = parseRootUs(roots[i])
-    if latestUs - us > maxAgeUs: return true
-  return false
+                                   numLeaves: 0), live)
 
 proc gcFull*(s: var PageStoreInner; maxAgeSecs: uint64; maxRootCount: int;
              dryRun: bool): seq[byte] =
@@ -714,307 +654,7 @@ proc collectBlobSizes(s: var PageStoreInner; tree: CfTree;
   let entries = deserializeIndexPage(data.get)
   for (_, childUuid) in entries:
     collectBlobSizes(s, CfTree(rootUuid: childUuid, height: tree.height - 1,
-                                numLeaves: 0), total, count)
-
-proc cfStats(s: var PageStoreInner; cf: int): seq[byte] =
-  let tree = s.trees[cf]
-  var sstSize = 0'u64; var numSst = 0'u64
-  if tree.rootUuid != default(array[16, byte]):
-    collectBlobSizes(s, tree, sstSize, numSst)
-  result = newSeqOfCap[byte](40)
-  for i in 0..7: result.add byte((tree.numLeaves.uint64 shr (i*8)) and 0xFF)
-  for i in 0..7: result.add byte((sstSize shr (i*8)) and 0xFF)
-  for i in 0..7: result.add byte((sstSize shr (i*8)) and 0xFF)
-  for i in 0..7: result.add byte((numSst shr (i*8)) and 0xFF)
-  for i in 0..7: result.add byte(0)
-
-proc dbStats(s: var PageStoreInner): seq[byte] =
-  var totalSst = 0'u64; var totalLive = 0'u64
-  for tree in s.trees:
-    var sz = 0'u64; var cnt = 0'u64
-    collectBlobSizes(s, tree, sz, cnt)
-    totalSst += sz
-    totalLive += sz
-  result = newSeqOfCap[byte](16)
-  for i in 0..7: result.add byte((totalSst shr (i*8)) and 0xFF)
-  for i in 0..7: result.add byte((totalLive shr (i*8)) and 0xFF)
-
-proc pageCountInRange(s: var PageStoreInner; cf: int;
-                       start, endp: seq[byte]): uint64 =
-  if cf >= s.numCf: return 0
-  let tree = s.trees[cf]
-  if tree.rootUuid == default(array[16, byte]) or tree.numLeaves == 0:
-    return 0
-  let entries = loadRootEntries(s, tree)
-  if entries.len == 0: return (if start.len == 0: 1 else: 0)
-  let p = partitionPoint(entries, proc(x: auto): bool = cmpSeq(x[0], start) < 0)
-  let lo = if p > 0: p - 1 else: 0
-  let hi = partitionPoint(entries, proc(x: auto): bool = cmpSeq(x[0], endp) < 0)
-  max(hi - lo, 1).uint64
-
-# ══════════════════════════════════════════════════════════════════════════════
-# VTable dispatch — C-ABI wrappers
-# ══════════════════════════════════════════════════════════════════════════════
-
-proc psGetKeysInPrefix(h: pointer; cf: cuint; prefix: ptr Byte; plen: csize_t;
-                        outBuf: ptr pointer; outLen: ptr csize_t;
-                        errOut: ptr cint): cint {.cdecl.} =
-  if h == nil:
-    setErr(errOut, ErrInvalidHandle)
-    return -1
-  var s = cast[ptr PageStoreInner](h)
-  if cf.int >= s.numCf:
-    setErr(errOut, ErrInvalidArg)
-    return -1
-  s.lock.withLock:
-    try:
-      let pfx = if plen > 0: newSeq[byte](plen.int) else: newSeq[byte](0)
-      if plen > 0: copyMem(unsafeAddr pfx[0], prefix, plen.int)
-      let keys = getKeysInPrefix(s[], cf.int, pfx)
-      var packed = newSeqOfCap[byte](keys.len * 12)
-      for k in keys:
-        let kl = k.len.uint32
-        packed.add byte(kl shr 24)
-        packed.add byte((kl shr 16) and 0xFF)
-        packed.add byte((kl shr 8) and 0xFF)
-        packed.add byte(kl and 0xFF)
-        packed.add k
-      let buf = allocByteBuf(packed.len)
-      if packed.len > 0:
-        copyMem(buf, unsafeAddr packed[0], packed.len)
-      outBuf[] = buf
-      outLen[] = packed.len.csize_t
-      setErr(errOut, ErrOk)
-      return 0
-    except:
-      setErr(errOut, ErrIo)
-      return -1
-
-proc psKeyExists(h: pointer; cf: cuint; key: ptr Byte; klen: csize_t;
-                  outPresent: ptr cint; errOut: ptr cint): cint {.cdecl.} =
-  var s = cast[ptr PageStoreInner](h)
-  s.lock.withLock:
-    try:
-      var k = newSeq[byte](klen.int)
-      if klen.int > 0:
-        copyMem(unsafeAddr k[0], key, klen.int)
-      let present = keyExists(s[], cf.int, k)
-      outPresent[] = if present: 1 else: 0
-      setErr(errOut, ErrOk)
-      return 0
-    except:
-      setErr(errOut, ErrIo)
-      return -1
-
-proc psPageCount(h: pointer; cf: cuint; outCount: ptr uint64;
-                  errOut: ptr cint): cint {.cdecl.} =
-  var s = cast[ptr PageStoreInner](h)
-  s.lock.withLock:
-    try:
-      if cf.int < s[].numCf:
-        outCount[] = s[].trees[cf.int].numLeaves.uint64
-      else:
-        outCount[] = 0
-      setErr(errOut, ErrOk)
-      return 0
-    except:
-      setErr(errOut, ErrIo); return -1
-
-proc psPageCountInRange(h: pointer; cf: cuint; start: ptr Byte; slen: csize_t;
-                         endp: ptr Byte; elen: csize_t;
-                         outCount: ptr uint64; errOut: ptr cint): cint {.cdecl.} =
-  var s = cast[ptr PageStoreInner](h)
-  s.lock.withLock:
-    try:
-      var st = newSeq[byte](slen.int)
-      var en = newSeq[byte](elen.int)
-      if slen.int > 0:
-        copyMem(unsafeAddr st[0], start, slen.int)
-      if elen.int > 0:
-        copyMem(unsafeAddr en[0], endp, elen.int)
-      outCount[] = pageCountInRange(s[], cf.int, st, en)
-      setErr(errOut, ErrOk)
-      return 0
-    except:
-      setErr(errOut, ErrIo); return -1
-
-proc psCommitMerge*(h: pointer; data: ptr Byte; dlen: csize_t;
-           clearJournal: cint; errOut: ptr cint): cint {.cdecl.} =
-  # This should NOT be called during open. Trace backtrace.
-  if dlen > 100_000:
-    setErr(errOut, ErrInvalidArg)
-    return -1
-  var s = cast[ptr PageStoreInner](h)
-  s.lock.withLock:
-    try:
-      var buf = newSeq[byte](dlen.int)
-      if dlen.int > 0:
-        copyMem(unsafeAddr buf[0], data, dlen.int)
-      var keysByCf: seq[(int, seq[seq[byte]])] = @[]
-      var pos = 0
-      while pos + 5 <= buf.len:
-        let cf = buf[pos].int; inc pos
-        let nkeys = (uint32(buf[pos]) shl 24 or uint32(buf[pos+1]) shl 16 or
-                      uint32(buf[pos+2]) shl 8 or uint32(buf[pos+3])).int
-        pos += 4
-        var keys: seq[seq[byte]] = @[]
-        for ki in 0..<nkeys:
-          if pos + 4 > buf.len: break
-          let klen = (uint32(buf[pos]) shl 24 or uint32(buf[pos+1]) shl 16 or
-                       uint32(buf[pos+2]) shl 8 or uint32(buf[pos+3])).int
-          pos += 4
-          if pos + klen > buf.len: break
-          let key = buf[pos..<pos+klen]
-          pos += klen
-          keys.add @key
-        keysByCf.add (cf, keys)
-      commitMerge(s[], keysByCf, clearJournal != 0)
-      setErr(errOut, ErrOk)
-      return 0
-    except:
-      setErr(errOut, ErrIo); return -1
-
-proc psJournalPut(h: pointer; key: ptr Byte; klen: csize_t;
-                   val: ptr Byte; vlen: csize_t;
-                   errOut: ptr cint): cint {.cdecl.} =
-  var s = cast[ptr PageStoreInner](h)
-  s.lock.withLock:
-    try:
-      var k = newSeq[byte](klen.int)
-      var v = newSeq[byte](vlen.int)
-      if klen.int > 0:
-        copyMem(unsafeAddr k[0], key, klen.int)
-      if vlen.int > 0:
-        copyMem(unsafeAddr v[0], val, vlen.int)
-      journalAppend(s[], k, v)
-      setErr(errOut, ErrOk); return 0
-    except:
-      setErr(errOut, ErrIo); return -1
-
-proc psJournalScan(h: pointer; outBuf: ptr pointer; outLen: ptr csize_t;
-                    errOut: ptr cint): cint {.cdecl.} =
-  var s = cast[ptr PageStoreInner](h)
-  s.lock.withLock:
-    try:
-      let data = journalRead(s[])
-      let buf = allocByteBuf(data.len)
-      if data.len > 0:
-        copyMem(buf, unsafeAddr data[0], data.len)
-      outBuf[] = buf; outLen[] = data.len.csize_t
-      setErr(errOut, ErrOk); return 0
-    except:
-      setErr(errOut, ErrIo); return -1
-
-proc psJournalSize(h: pointer; outSize: ptr uint64;
-                    errOut: ptr cint): cint {.cdecl.} =
-  var s = cast[ptr PageStoreInner](h)
-  s.lock.withLock:
-    try:
-      outSize[] = journalSize(s[])
-      setErr(errOut, ErrOk); return 0
-    except:
-      setErr(errOut, ErrIo); return -1
-
-proc psGcFull(h: pointer; maxAgeSecs: uint64; maxRootCount: cuint;
-               dryRun: cint; outBuf: ptr pointer; outLen: ptr csize_t;
-               errOut: ptr cint): cint {.cdecl.} =
-  var s = cast[ptr PageStoreInner](h)
-  s.lock.withLock:
-    try:
-      let result = gcFull(s[], maxAgeSecs, maxRootCount.int, dryRun != 0)
-      let buf = allocByteBuf(result.len)
-      if result.len > 0:
-        copyMem(buf, unsafeAddr result[0], result.len)
-      outBuf[] = buf; outLen[] = result.len.csize_t
-      setErr(errOut, ErrOk); return 0
-    except:
-      setErr(errOut, ErrIo); return -1
-
-proc psCfStats(h: pointer; cf: cuint; outBuf: ptr pointer; outLen: ptr csize_t;
-                errOut: ptr cint): cint {.cdecl.} =
-  var s = cast[ptr PageStoreInner](h)
-  s.lock.withLock:
-    try:
-      let data = cfStats(s[], cf.int)
-      let buf = allocByteBuf(data.len)
-      if data.len > 0:
-        copyMem(buf, unsafeAddr data[0], data.len)
-      outBuf[] = buf; outLen[] = data.len.csize_t
-      setErr(errOut, ErrOk); return 0
-    except:
-      setErr(errOut, ErrIo); return -1
-
-proc psDbStats(h: pointer; outBuf: ptr pointer; outLen: ptr csize_t;
-                errOut: ptr cint): cint {.cdecl.} =
-  var s = cast[ptr PageStoreInner](h)
-  s.lock.withLock:
-    try:
-      let data = dbStats(s[])
-      let buf = allocByteBuf(data.len)
-      if data.len > 0:
-        copyMem(buf, unsafeAddr data[0], data.len)
-      outBuf[] = buf; outLen[] = data.len.csize_t
-      setErr(errOut, ErrOk); return 0
-    except:
-      setErr(errOut, ErrIo); return -1
-
-proc psHasOldRoots(h: pointer; maxAgeSecs: uint64; maxRootCount: cuint;
-                    outResult: ptr cint; errOut: ptr cint): cint {.cdecl.} =
-  var s = cast[ptr PageStoreInner](h)
-  s.lock.withLock:
-    try:
-      outResult[] = if hasOldRoots(s[], maxAgeSecs, maxRootCount.int): 1 else: 0
-      setErr(errOut, ErrOk); return 0
-    except:
-      setErr(errOut, ErrIo); return -1
-
-proc psRootCount(h: pointer; outCount: ptr uint64;
-                  errOut: ptr cint): cint {.cdecl.} =
-  var s = cast[ptr PageStoreInner](h)
-  s.lock.withLock:
-    try:
-      outCount[] = blobListRoots(s.blobs).len.uint64
-      setErr(errOut, ErrOk); return 0
-    except:
-      setErr(errOut, ErrIo); return -1
-
-proc closePageStore*(ps: ptr PageStoreInner) =
-  if ps == nil: return
-  if ps.journal != nil: nim_journal_close(ps.journal)
-  if ps.blobs != nil: ps.blobs.close()
-  ps.trees = @[]
-  ps.cache.map = initTable[array[16, byte], CacheEntry]()
-  ps.cache.currentBytes = 0
-  ps.currentRoot = ""
-  ps.backendType = ""
-  ps.blobs = nil
-  ps.journal = nil
-  deallocShared(ps)
-
-proc psClose*(h: pointer) {.cdecl.} =
-  ## C-ABI bridge — delegates to closePageStore.
-  closePageStore(cast[ptr PageStoreInner](h))
-
-proc initVtable(vt: NimPageStoreVtablePtr; s: ptr PageStoreInner) =
-  vt.handle = s
-  vt.getKeysInPrefix = psGetKeysInPrefix
-  vt.keyExists = psKeyExists
-  vt.pageCount = psPageCount
-  vt.pageCountInRange = psPageCountInRange
-  vt.journalPut = psJournalPut
-  vt.journalScan = psJournalScan
-  vt.journalSize = psJournalSize
-  vt.gcFull = psGcFull
-  vt.cfStats = psCfStats
-  vt.dbStats = psDbStats
-  vt.hasOldRoots = psHasOldRoots
-  vt.rootCount = psRootCount
-  vt.close = psClose
-  vt.freeBuf = freeShared
-
-# ══════════════════════════════════════════════════════════════════════════════
-# openPageStore — create and initialize the page store
-# ══════════════════════════════════════════════════════════════════════════════
+                                 numLeaves: 0), total, count)
 
 proc newPageStore*(keys, vals: CStringArr; count: cint;
                     errOut: ptr cint): ptr PageStoreInner =
@@ -1054,7 +694,7 @@ proc newPageStore*(keys, vals: CStringArr; count: cint;
   result.readOnly = readOnly
   result.cache = initCache(pageCacheSize)
   result.backendType = backend
-  initSpinLock(result.lock)
+  initLock(result.lock)
 
   let roots = blobListRoots(blobs)
   if roots.len > 0:
@@ -1079,11 +719,9 @@ proc newPageStore*(keys, vals: CStringArr; count: cint;
       return nil
     result.currentRoot = name
 
-proc openPageStore*(keys, vals: CStringArr; count: cint;
-                     errOut: ptr cint): NimPageStoreVtablePtr =
-  let ps = newPageStore(keys, vals, count, errOut)
-  if ps == nil: return nil
-  let vt = newVtable()
-  initVtable(vt, ps)
-  setErr(errOut, ErrOk)
-  result = vt
+proc closePageStore*(ps: ptr PageStoreInner) =
+  if ps == nil: return
+  if ps.journal != nil: nim_journal_close(ps.journal)
+  deinitLock(ps.lock)
+  deallocShared(ps)
+

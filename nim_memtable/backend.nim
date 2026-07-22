@@ -5,7 +5,7 @@
 
 import std/[random, algorithm, sets]
 import abi
-import spinlock
+import std/locks
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Persistent treap node
@@ -38,7 +38,7 @@ type
     cursors: seq[CursorState]
     freeCursorSlots: seq[uint64]
     nextCursor: uint64
-    lock: SpinLock
+    lock: Lock
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Treap helpers
@@ -169,9 +169,9 @@ proc newMemTable*(numCf: int): MemTable =
     cfSize: newSeq[int](numCf),
     snaps: @[], freeSnapSlots: @[], nextSnap: 1,
     cursors: @[], freeCursorSlots: @[], nextCursor: 1,
-    lock: SpinLock(),
+    lock: Lock(),
   )
-  initSpinLock(result.hnd.lock)
+  initLock(result.hnd.lock)
   randomize()
 
 proc close*(mt: MemTable) =
@@ -184,7 +184,7 @@ proc close*(mt: MemTable) =
   for i in 0 ..< h.cursors.len:
     h.cursors[i].keys = @[]; h.cursors[i].inUse = false
   h.cursors = @[]; h.freeCursorSlots = @[]
-  deinitSpinLock(h.lock)
+  deinitLock(h.lock)
   deallocShared(h)
   mt.hnd = nil
 

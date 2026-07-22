@@ -7,7 +7,7 @@ import std/[httpclient, strutils, algorithm, uri, tables, options]
 import ../common
 import ../blobstore
 import sigv4
-import spinlock
+import std/locks
 
 proc lastSegment(s: string; sep: char): string =
   let idx = s.rfind(sep)
@@ -15,7 +15,7 @@ proc lastSegment(s: string; sep: char): string =
 
 type
   S3BlobStore* = ref object of BlobStore
-    lock: SpinLock
+    lock: Lock
     initialized*: bool
     endpoint*: string
     bucketName*: string
@@ -324,7 +324,7 @@ method deleteRoot*(s: S3BlobStore; name: string) =
 
 proc newS3BlobStore*(cfg: Table[string, string]; autoCreateBucket = false): S3BlobStore =
   result = S3BlobStore()
-  initSpinLock(result.lock)
+  initLock(result.lock)
   let e = ensureInit(result, cfg)
   if e.isSome():
     raise newException(IOError, "s3 init: " & e.get())

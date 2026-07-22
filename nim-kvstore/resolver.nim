@@ -3,7 +3,7 @@
 ## Port of spier-transactor/src/resolver.rs (~340 lines Rust → Nim).
 ## Manages attribute registry, partition counters, and schema metadata.
 
-import std/[tables, sets, strutils, strformat, options]
+import std/[tables, sets, strutils, options]
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Constants (from resolver_consts.rs)

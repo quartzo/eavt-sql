@@ -11,12 +11,12 @@
 
 import std/os
 import abi
-import spinlock
+import std/locks
 
 type
   JournalHandle* = object
     path*: string          ## full path to the journal file
-    lock*: SpinLock
+    lock*: Lock
 
 # Forward declarations so openJournal can assign them before their bodies.
 proc appendImpl(h: pointer, key: ptr Byte, klen: csize_t,
@@ -39,8 +39,8 @@ proc openJournal*(path: cstring, errOut: ptr cint): NimJournalVtablePtr =
     return nil
   var vt = newVtable()
   var h = cast[ptr JournalHandle](allocShared0(sizeof(JournalHandle)))
-  h[] = JournalHandle(path: $path, lock: SpinLock())
-  initSpinLock(h.lock)
+  h[] = JournalHandle(path: $path, lock: Lock())
+  initLock(h.lock)
   vt.handle = h
   vt.append = appendImpl
   vt.read = readImpl
@@ -58,7 +58,7 @@ proc closeJournal*(vt: NimJournalVtablePtr) =
   if vt == nil: return
   if vt.handle != nil:
     var h = cast[ptr JournalHandle](vt.handle)
-    deinitSpinLock(h.lock)
+    deinitLock(h.lock)
     deallocShared(h)
   freeVtable(vt)
 
