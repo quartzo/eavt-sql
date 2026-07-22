@@ -197,3 +197,75 @@ proc sizeImpl(h: pointer, outSize: ptr uint64, errOut: ptr cint): cint {.cdecl.}
       setErr(errOut, ErrIo)
       return -1
   return 0
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Nim-native API — clean wrapper over the C-ABI vtable for Nim callers.
+# The KVStore, page store, and unit tests use this.
+# ══════════════════════════════════════════════════════════════════════════════
+
+type
+  Journal* = ref object
+    vt*: NimJournalVtablePtr      ## kept alive for close / underlying ops
+    handle*: ptr JournalHandle    ## cached for direct field access (path, lock)
+
+proc newJournal*(path: string): Journal =
+  var err: cint
+  result = Journal()
+  result.vt = openJournal(path.cstring, addr err)
+  if result.vt == nil:
+    raise newException(IOError, "open journal failed: err=" & $err)
+  result.handle = cast[ptr JournalHandle](result.vt.handle)
+
+proc close*(j: Journal) =
+  if j != nil and j.vt != nil:
+    closeJournal(j.vt)
+    j.vt = nil
+    j.handle = nil
+
+proc append*(j: Journal, key, value: openArray[byte]) =
+  var err: cint
+  let kptr = if key.len > 0: cast[ptr Byte](unsafeAddr key[0]) else: nil
+  let vptr = if value.len > 0: cast[ptr Byte](unsafeAddr value[0]) else: nil
+  let rc = j.vt.append(j.vt.handle, kptr, key.len.csize_t,
+                        vptr, value.len.csize_t, addr err)
+  if rc != 0:
+    raise newException(IOError, "journal append failed: err=" & $err)
+
+proc readAll*(j: Journal): seq[(seq[byte], seq[byte])] =
+  ## Read all frames as (key, value) pairs.  Raises on corruption.
+  var buf: pointer = nil
+  var blen: csize_t = 0
+  var err: cint
+  let rc = j.vt.read(j.vt.handle, addr buf, addr blen, addr err)
+  if rc != 0:
+    raise newException(IOError, "journal read failed: err=" & $err)
+  if buf == nil: return
+  var pos = 0
+  let raw = cast[ptr UncheckedArray[byte]](buf)
+  while pos + 4 <= blen.int:
+    let klen = int(uint32(raw[pos]) shl 24 or uint32(raw[pos+1]) shl 16 or
+                   uint32(raw[pos+2]) shl 8 or uint32(raw[pos+3]))
+    pos += 4
+    var k = newSeq[byte](klen)
+    for i in 0..<klen: k[i] = raw[pos + i]
+    pos += klen
+    let vlen = int(uint32(raw[pos]) shl 24 or uint32(raw[pos+1]) shl 16 or
+                   uint32(raw[pos+2]) shl 8 or uint32(raw[pos+3]))
+    pos += 4
+    var v = newSeq[byte](vlen)
+    for i in 0..<vlen: v[i] = raw[pos + i]
+    pos += vlen
+    result.add (k, v)
+  j.vt.freeBuf(buf)
+
+proc truncate*(j: Journal) =
+  var err: cint
+  let rc = j.vt.truncate(j.vt.handle, addr err)
+  if rc != 0:
+    raise newException(IOError, "journal truncate failed: err=" & $err)
+
+proc len*(j: Journal): uint64 =
+  var err: cint
+  let rc = j.vt.size(j.vt.handle, addr result, addr err)
+  if rc != 0:
+    raise newException(IOError, "journal size failed: err=" & $err)
