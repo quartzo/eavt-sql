@@ -578,7 +578,28 @@ proc close*(kv: KVStore) =
 proc put*(kv: KVStore; cf: int; key: openArray[byte]) =
   var k = newSeq[byte](key.len)
   if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
-  kv.mtSize = kv.mt.put(cf, k)
+  kv.lock.withLock:
+    kv.mtSize = kv.mt.put(cf, k)
+    # Journal for crash recovery
+    if kv.path.len > 0 and kv.path != ":memory:" and not kv.readOnly:
+      try:
+        let journalPath = kv.path / "journal" / "journal"
+        createDir(parentDir(journalPath))
+        var f = open(journalPath, fmAppend)
+        var jk = newSeq[byte](1 + key.len)
+        jk[0] = byte(cf)
+        if key.len > 0: copyMem(addr jk[1], unsafeAddr key[0], key.len)
+        # Frame: [u32 klen][key][u32 vlen=1][flag=0]
+        let totKlen = 1 + key.len
+        var hdr = newSeq[byte](4 + totKlen + 4 + 1)
+        hdr[0] = byte((totKlen shr 24) and 0xFF); hdr[1] = byte((totKlen shr 16) and 0xFF)
+        hdr[2] = byte((totKlen shr 8) and 0xFF); hdr[3] = byte(totKlen and 0xFF)
+        copyMem(addr hdr[4], addr jk[0], totKlen)
+        hdr[4 + totKlen] = 0; hdr[5 + totKlen] = 0; hdr[6 + totKlen] = 0; hdr[7 + totKlen] = 1
+        hdr[8 + totKlen] = 0  # flag byte
+        discard f.writeBytes(hdr, 0, hdr.len)
+        f.close()
+      except: discard
 
 proc get*(kv: KVStore; cf: int; key: openArray[byte]): bool =
   var k = newSeq[byte](key.len)
@@ -603,6 +624,12 @@ proc scan*(kv: KVStore; cf: int; prefix: openArray[byte]): seq[seq[byte]] =
   if liveKeys.len > 0: sources.add MergeSource(kind: mskMemTable, keys: liveKeys, idx: 0)
   let endB = prefixEnd(pfx)
   mergeSources(sources, endB)
+
+proc scanReverse*(kv: KVStore; cf: int; prefix: openArray[byte]): seq[seq[byte]] =
+  var r = kv.scan(cf, prefix)
+  var i = 0; var j = r.len - 1
+  while i < j: swap(r[i], r[j]); inc i; dec j
+  r
 
 proc flush*(kv: KVStore) =
   if kv.readOnly: return

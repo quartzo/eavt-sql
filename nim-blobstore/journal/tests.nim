@@ -206,3 +206,19 @@ suite "journal: empty":
     let j = mustOpen(newTempDir())
     check j.readAll().len == 0
     j.close()
+
+suite "journal: binary format":
+  test "raw file contains expected framing bytes":
+    let td = newTempDir()
+    var j = mustOpen(td)
+    j.append(@[byte(1), 2], @[byte(3), 4, 5])
+    j.close()
+    # Read raw file: [u32 klen=2][key 01 02][u32 vlen=3][val 03 04 05]
+    let raw = readFile(td / "journal" / "journal")
+    check raw.len == 15
+    check raw[0] == 0; check raw[1] == 0; check raw[2] == 0; check raw[3] == 2
+    check raw[4] == 1; check raw[5] == 2
+    check raw[6] == 0; check raw[7] == 0; check raw[8] == 0; check raw[9] == 3
+    check raw[10] == 3; check raw[11] == 4; check raw[12] == 5
+    removeDir(td)
+
