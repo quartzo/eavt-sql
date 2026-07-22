@@ -32,7 +32,6 @@ class TestJournalSchemaReflection:
         assert hasattr(cls, "journal_truncate")
 
 
-@pytest.mark.xfail(reason="journal standalone API (journal_append/journal_read/journal_truncate) not yet exposed in spier_eavt_query_py; journal recording+replay works internally via kvBatchWrite")
 class TestJournalAppendRead:
     def test_append_and_read_single(self, journal_instance):
         journal_instance.journal_append(**{"key": b"hello", "value": b"world"})
@@ -57,7 +56,6 @@ class TestJournalAppendRead:
         assert entries == [(data, data)]
 
 
-@pytest.mark.xfail(reason="journal standalone API (journal_append/journal_read/journal_truncate) not yet exposed in spier_eavt_query_py")
 class TestJournalTruncate:
     def test_truncate_clears_entries(self, journal_instance):
         journal_instance.journal_append(**{"key": b"x", "value": b"y"})
@@ -69,7 +67,6 @@ class TestJournalTruncate:
         journal_instance.journal_truncate()
 
 
-@pytest.mark.xfail(reason="journal standalone API not yet exposed")
 class TestJournalFileOnDisk:
     def test_journal_file_exists_after_append(self, journal_instance, tmp_path):
         journal_instance.journal_append(**{"key": b"abc", "value": b"def"})

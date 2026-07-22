@@ -1,4 +1,8 @@
 use std::collections::HashMap;
+use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::Mutex;
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -405,11 +409,104 @@ impl PyEngine {
     }
 }
 
+// ── PyJournal — standalone journal (mirrors original spier-kvstore-py) ──
+
+struct JournalInner {
+    base: PathBuf,
+}
+
+impl JournalInner {
+    fn new(config: &HashMap<String, String>) -> Result<Self, String> {
+        let path = config.get("path").ok_or("path required")?;
+        let base = PathBuf::from(format!("{path}/journal"));
+        fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+        Ok(Self { base })
+    }
+
+    fn append(&self, key: &[u8], value: &[u8]) -> Result<(), String> {
+        let path = self.base.join("journal");
+        let mut buf = Vec::with_capacity(8 + key.len() + value.len());
+        buf.extend_from_slice(&(key.len() as u32).to_be_bytes());
+        buf.extend_from_slice(key);
+        buf.extend_from_slice(&(value.len() as u32).to_be_bytes());
+        buf.extend_from_slice(value);
+        let mut file = fs::OpenOptions::new().create(true).append(true)
+            .open(&path).map_err(|e| e.to_string())?;
+        file.write_all(&buf).map_err(|e| e.to_string())
+    }
+
+    fn read(&self) -> Result<Vec<u8>, String> {
+        let path = self.base.join("journal");
+        if !path.exists() { return Ok(Vec::new()); }
+        fs::read(&path).map_err(|e| e.to_string())
+    }
+
+    fn truncate(&self) -> Result<(), String> {
+        let path = self.base.join("journal");
+        if path.exists() { fs::remove_file(&path).map_err(|e| e.to_string())?; }
+        Ok(())
+    }
+}
+
+#[pyclass(name = "Journal", unsendable)]
+pub struct PyJournal {
+    inner: Mutex<Option<JournalInner>>,
+}
+
+#[pymethods]
+impl PyJournal {
+    #[new]
+    #[pyo3(signature = (config=None))]
+    fn new(py: Python<'_>, config: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let mut cfg: HashMap<String, String> = HashMap::new();
+        if let Some(d) = config {
+            for (k, v) in d.iter() {
+                let key = k.extract::<String>()?;
+                let val = v.str()?.to_string_lossy().into_owned();
+                cfg.insert(key, val);
+            }
+        }
+        let inner = py.allow_threads(|| JournalInner::new(&cfg))
+            .map_err(to_string_err)?;
+        Ok(Self { inner: Mutex::new(Some(inner)) })
+    }
+
+    #[pyo3(signature = (key, value))]
+    fn journal_append(&self, py: Python<'_>, key: Vec<u8>, value: Vec<u8>) -> PyResult<()> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or("journal closed")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        py.allow_threads(|| inner.append(&key, &value))
+            .map_err(to_string_err)
+    }
+
+    fn journal_read(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or("journal closed")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        py.allow_threads(|| inner.read())
+            .map_err(to_string_err)
+    }
+
+    fn journal_truncate(&self, py: Python<'_>) -> PyResult<()> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or("journal closed")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        py.allow_threads(|| inner.truncate())
+            .map_err(to_string_err)
+    }
+
+    fn close(&self) {
+        self.inner.lock().unwrap().take();
+    }
+}
+
 #[pymodule]
 fn spier_eavt_query_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyEngine>()?;
     m.add_class::<PyProgramHandle>()?;
     m.add_class::<PySessionHandle>()?;
     m.add_class::<PyCursorHandle>()?;
+    m.add_class::<PyJournal>()?;
     Ok(())
 }
