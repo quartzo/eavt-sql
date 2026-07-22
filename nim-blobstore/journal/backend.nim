@@ -62,6 +62,9 @@ proc closeJournal*(vt: NimJournalVtablePtr) =
     deallocShared(h)
   freeVtable(vt)
 
+proc closeJournalVtable*(p: pointer) =
+  closeJournal(cast[NimJournalVtablePtr](p))
+
 proc appendImpl(h: pointer, key: ptr Byte, klen: csize_t,
                 `val`: ptr Byte, vlen: csize_t,
                 errOut: ptr cint): cint {.cdecl.} =

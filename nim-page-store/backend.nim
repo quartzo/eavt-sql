@@ -7,6 +7,42 @@ import ./abi
 import ./pages
 import ./spinlock
 
+# ══════════════════════════════════════════════════════════════════════════════
+# BlobStore — memory & journal via direct Nim import; file & s3 keep C-ABI.
+# ══════════════════════════════════════════════════════════════════════════════
+
+import memory/backend as mem_be
+import journal/backend as jou_be
+
+proc nim_blob_memory_open*(keys, vals: abi.CStringArr; count: cint;
+                           errOut: ptr cint): NimBlobVtablePtr =
+  cast[NimBlobVtablePtr](mem_be.nim_blob_memory_open(keys, vals, count.csize_t, errOut))
+
+proc nim_blob_memory_close*(vt: NimBlobVtablePtr) =
+  mem_be.closeVtable(cast[pointer](vt))
+
+proc nim_journal_open*(path: cstring;
+                       errOut: ptr cint): NimJournalVtablePtr =
+  cast[NimJournalVtablePtr](jou_be.openJournal(path, errOut))
+
+proc nim_journal_close*(vt: NimJournalVtablePtr) =
+  jou_be.closeJournalVtable(cast[pointer](vt))
+
+# File + S3 still use importc (their exportc symbols remain).
+proc nim_blob_file_open*(keys, vals: CStringArr; count: cint;
+                         errOut: ptr cint): NimBlobVtablePtr
+    {.importc: "nim_blob_file_open", cdecl.}
+
+proc nim_blob_s3_open*(keys, vals: CStringArr; count: cint;
+                       errOut: ptr cint): NimBlobVtablePtr
+    {.importc: "nim_blob_s3_open", cdecl.}
+
+proc nim_blob_file_close*(vt: NimBlobVtablePtr)
+    {.importc: "nim_blob_file_close", cdecl.}
+
+proc nim_blob_s3_close*(vt: NimBlobVtablePtr)
+    {.importc: "nim_blob_s3_close", cdecl.}
+
 # ── seq[byte] comparison helpers ──
 
 proc cmpSeq*(a, b: seq[byte]): int =
@@ -17,42 +53,6 @@ proc cmpSeq*(a, b: seq[byte]): int =
   if a.len < b.len: return -1
   if a.len > b.len: return 1
   return 0
-
-# Use cmpSeq directly — never overload < for seq[byte] globally.
-# Overloading < interferes with Nim's runtime Table operations.
-
-# ══════════════════════════════════════════════════════════════════════════════
-# BlobStore extern symbols (compiled in libnim_blobstore_*.a)
-# ══════════════════════════════════════════════════════════════════════════════
-
-proc nim_blob_memory_open*(keys, vals: CStringArr; count: cint;
-                           errOut: ptr cint): NimBlobVtablePtr
-    {.importc: "nim_blob_memory_open", cdecl.}
-
-proc nim_blob_file_open*(keys, vals: CStringArr; count: cint;
-                         errOut: ptr cint): NimBlobVtablePtr
-    {.importc: "nim_blob_file_open", cdecl.}
-
-proc nim_blob_s3_open*(keys, vals: CStringArr; count: cint;
-                       errOut: ptr cint): NimBlobVtablePtr
-    {.importc: "nim_blob_s3_open", cdecl.}
-
-proc nim_blob_memory_close*(vt: NimBlobVtablePtr)
-    {.importc: "nim_blob_memory_close", cdecl.}
-
-proc nim_blob_file_close*(vt: NimBlobVtablePtr)
-    {.importc: "nim_blob_file_close", cdecl.}
-
-proc nim_blob_s3_close*(vt: NimBlobVtablePtr)
-    {.importc: "nim_blob_s3_close", cdecl.}
-
-# Journal extern symbols
-proc nim_journal_open*(path: cstring;
-                       errOut: ptr cint): NimJournalVtablePtr
-    {.importc: "nim_journal_open", cdecl.}
-
-proc nim_journal_close*(vt: NimJournalVtablePtr)
-    {.importc: "nim_journal_close", cdecl.}
 
 # ══════════════════════════════════════════════════════════════════════════════
 # zstd FFI (libzstd)

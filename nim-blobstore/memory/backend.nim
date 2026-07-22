@@ -251,8 +251,7 @@ proc memFreeStrs(arr: CStringArr, count: csize_t) {.cdecl.} =
 # ---------------------------------------------------------------------------
 
 proc nim_blob_memory_open*(keys, vals: CStringArr, n: csize_t,
-                           errOut: ptr cint): NimBlobVtablePtr
-                           {.exportc, cdecl.} =
+                           errOut: ptr cint): NimBlobVtablePtr =
   let b = MemBackend()
   b.blobs = initTable[ByteArr16, seq[Byte]]()
   b.roots = initTable[string, seq[Byte]]()
@@ -276,11 +275,13 @@ proc nim_blob_memory_open*(keys, vals: CStringArr, n: csize_t,
   vt.freeStrs = memFreeStrs
   result = vt
 
-proc nim_blob_memory_close*(vt: NimBlobVtablePtr) {.exportc, cdecl.} =
+proc nim_blob_memory_close*(vt: NimBlobVtablePtr) =
   if vt == nil: return
   let h = vt.handle
   let b = unregisterBackend(h)
   if b != nil:
     deinitSpinLock(b.lock)
-    # `b` ref drops here; arc frees the tables/seqs.
   freeVtable(vt)
+
+proc closeVtable*(p: pointer) =
+  nim_blob_memory_close(cast[NimBlobVtablePtr](p))
