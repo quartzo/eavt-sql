@@ -20,14 +20,14 @@ type
     right*: TreapNode
 
   SnapshotEntry = object
-    roots: seq[TreapNode]
-    inUse: bool
+    roots*: seq[TreapNode]
+    inUse*: bool
 
   MemTableHandle* = object
     numCf*: cuint
     live*: seq[TreapNode]
     cfSize*: seq[int]
-    snaps: seq[SnapshotEntry]
+    snaps*: seq[SnapshotEntry]
     freeSnapSlots: seq[uint64]
     nextSnap: uint64
     lock: Lock

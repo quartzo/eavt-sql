@@ -3,12 +3,15 @@
 ## Orchestration layer: coordinates MemTable + PageStore + Journal.
 ## Implements all KVStoreEngine operations via C-ABI vtable.
 
-import std/[tables, strutils, os]
+import std/[tables, strutils, os, options]
 import ./abi
 import ./backend
 import std/locks
 
 import nim_memtable/backend as mt_be
+import nim_memtable/treap_cursor
+import ./page_cursor
+import query/scanner  # NimCursor type
 
 type
   HeapEntry = tuple[key: seq[byte], srcIdx: int]
@@ -272,3 +275,129 @@ proc batchWrite*(kv: KVStore; ops: openArray[byte]) =
 
 proc memtableSize*(kv: KVStore): uint64 = kv.mtSize
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MergedCursor — heap merge of N NimCursor sources (streaming, no materialization)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+type
+  MergedCursor* = ref object
+    sources: seq[NimCursor]
+    heap: MinHeap
+    lastKey: seq[byte]
+    atEnd*: bool
+    curKey: Option[seq[byte]]
+
+proc advance(mc: MergedCursor) =
+  if mc.atEnd: return
+  while mc.heap.len > 0:
+    let (key, srcIdx) = mc.heap.pop()
+    if mc.lastKey.len > 0 and key == mc.lastKey:
+      var src = mc.sources[srcIdx]
+      if src.isValidCb():
+        src.stepCb()
+        if src.isValidCb():
+          let nk = src.currentKeyCb()
+          if nk.isSome: mc.heap.push((nk.get, srcIdx))
+      continue
+    mc.lastKey = key
+    mc.curKey = some(key)
+    var src = mc.sources[srcIdx]
+    src.stepCb()
+    if src.isValidCb():
+      let nk = src.currentKeyCb()
+      if nk.isSome: mc.heap.push((nk.get, srcIdx))
+    return
+  mc.atEnd = true
+  mc.curKey = none(seq[byte])
+
+proc newMergedCursor*(sources: seq[NimCursor]): MergedCursor =
+  result = MergedCursor(sources: sources, atEnd: false)
+  var heap: MinHeap
+  for i, src in sources:
+    if src.isValidCb():
+      let k = src.currentKeyCb()
+      if k.isSome:
+        heap.push((k.get, i))
+  result.heap = heap
+  result.advance()
+
+proc peek*(mc: MergedCursor): Option[seq[byte]] =
+  mc.curKey
+
+proc next*(mc: MergedCursor): Option[seq[byte]] =
+  result = mc.curKey
+  mc.curKey = none(seq[byte])
+  mc.advance()
+
+proc seek*(mc: MergedCursor; target: seq[byte]) =
+  for src in mc.sources:
+    src.seekCb(target)
+  mc.heap.data = @[]
+  for i, src in mc.sources:
+    if src.isValidCb():
+      let k = src.currentKeyCb()
+      if k.isSome: mc.heap.push((k.get, i))
+  mc.lastKey = @[]
+  mc.atEnd = false
+  mc.curKey = none(seq[byte])
+  mc.advance()
+
+# ── Adapters: wrap page store and treap cursors as NimCursor ──
+
+proc pageStoreToNimCursor*(psc: PageStoreCursor): NimCursor =
+  NimCursor(
+    isValidCb: proc(): bool = not psc.atEnd,
+    currentKeyCb: proc(): Option[seq[byte]] = psc.peek(),
+    stepCb: proc() = discard psc.next(),
+    seekCb: proc(target: seq[byte]) = psc.seek(target),
+    skipGroupCb: proc(ge: int) = discard psc.next(),
+    invalidateCb: proc() = psc.atEnd = true,
+  )
+
+proc treapToNimCursor*(tc: TreapCursor): NimCursor =
+  NimCursor(
+    isValidCb: proc(): bool = not tc.atEnd,
+    currentKeyCb: proc(): Option[seq[byte]] = tc.peek(),
+    stepCb: proc() = discard tc.next(),
+    seekCb: proc(target: seq[byte]) = tc.seek(target),
+    skipGroupCb: proc(ge: int) = discard tc.next(),
+    invalidateCb: proc() = tc.atEnd = true,
+  )
+
+# ── New streaming scan entry point ──
+
+proc openScanCursor*(kv: KVStore; cf: int; prefix: seq[byte]): MergedCursor =
+  ## Open a lazy merged cursor over PageStore + flush snapshot + live memtable.
+  ## Returns a streaming cursor — no mass materialization.
+  var sources: seq[NimCursor] = @[]
+
+  # PageStore
+  let psCursor = newPageStoreCursor(kv.ps, cf, prefix)
+  if not psCursor.atEnd:
+    sources.add pageStoreToNimCursor(psCursor)
+
+  # Flush snapshot (if any)
+  if kv.flushSnap != 0:
+    let flushRoot =
+      if kv.flushSnap.int <= kv.mt.hnd.snaps.len and kv.mt.hnd.snaps[kv.flushSnap.int - 1].inUse:
+        kv.mt.hnd.snaps[kv.flushSnap.int - 1].roots[cf]
+      else: nil
+    if flushRoot != nil:
+      let tc = newTreapCursor(flushRoot, prefix)
+      if not tc.atEnd:
+        sources.add treapToNimCursor(tc)
+
+  # Live memtable (snapshot)
+  let liveSnap = kv.mt.snapshot()
+  let liveRoot =
+    if liveSnap == 0: kv.mt.hnd.live[cf]
+    elif liveSnap.int <= kv.mt.hnd.snaps.len and kv.mt.hnd.snaps[liveSnap.int - 1].inUse:
+      kv.mt.hnd.snaps[liveSnap.int - 1].roots[cf]
+    else: nil
+  if liveRoot != nil:
+    let tc = newTreapCursor(liveRoot, prefix)
+    if not tc.atEnd:
+      sources.add treapToNimCursor(tc)
+
+  result = newMergedCursor(sources)
