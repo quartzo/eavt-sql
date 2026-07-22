@@ -1,4 +1,4 @@
-## all.nim (combined blobstore + journal + page-store + memtable)
+## all.nim (combined blobstore + journal + page-store + memtable + query)
 ##
 ## Single compilation entry point for `libnim_page_store.a`.
 ## All backends compiled together — one NimMain, one runtime, no conflicts.
@@ -11,6 +11,10 @@ import nim_memtable/all
 import ./abi
 import ./backend
 import ./transactor
+import ./eavt
+import ./keys
+import ./resolver
+import query/api
 
 proc nim_page_store_open*(keys, vals: CStringArr; count: cint;
                            errOut: ptr cint): NimPageStoreVtablePtr

@@ -16,7 +16,7 @@ const ERR_NOT_FOUND: c_int = 6;
 const ERR_CONFLICT: c_int = 7;
 const ERR_CONFIG: c_int = 8;
 
-fn err_to_string(code: c_int) -> &'static str {
+pub fn err_to_string(code: c_int) -> &'static str {
     match code {
         ERR_OK => "ok",
         ERR_INVALID_HANDLE => "invalid handle",
@@ -31,7 +31,7 @@ fn err_to_string(code: c_int) -> &'static str {
     }
 }
 
-fn check_err(rc: c_int, err: c_int) -> Result<(), String> {
+pub fn check_err(rc: c_int, err: c_int) -> Result<(), String> {
     if rc == 0 {
         Ok(())
     } else {
@@ -810,5 +810,246 @@ impl NimKVStore {
         let rc = unsafe { ((*self.vt).memtable_size)((*self.vt).handle, &mut out_size, &mut err) };
         check_err(rc, err)?;
         Ok(out_size)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Nim Query Engine — C-ABI wrappers for nim-page-store/query/api.nim
+// ═══════════════════════════════════════════════════════════════════════════════
+
+extern "C" {
+    fn nim_query_open(
+        keys: *const *const c_char,
+        vals: *const *const c_char,
+        count: c_int,
+        errOut: *mut c_int,
+    ) -> *mut c_void;
+
+    fn nim_query_close(handle: *mut c_void);
+
+    fn nim_query_save(
+        handle: *mut c_void,
+        eid: u64,
+        attr: *const c_char,
+        val: *const c_char,
+        t: u64,
+        errOut: *mut c_int,
+    ) -> c_int;
+
+    fn nim_query_retract(
+        handle: *mut c_void,
+        eid: u64,
+        attr: *const c_char,
+        val: *const c_char,
+        t: u64,
+        errOut: *mut c_int,
+    ) -> c_int;
+
+    fn nim_query_flush(
+        handle: *mut c_void,
+        errOut: *mut c_int,
+    ) -> c_int;
+
+    fn nim_query_declare_attr(
+        handle: *mut c_void,
+        name: *const c_char,
+        vt_name: *const c_char,
+        many: c_int,
+        errOut: *mut c_int,
+    ) -> u32;
+
+    fn nim_query_lookup_attr(
+        handle: *mut c_void,
+        name: *const c_char,
+        outAid: *mut u32,
+        errOut: *mut c_int,
+    ) -> c_int;
+
+    fn nim_query_attr_name(
+        handle: *mut c_void,
+        aid: u32,
+        outName: *mut *const c_char,
+        errOut: *mut c_int,
+    ) -> c_int;
+
+    fn nim_query_value_type_for(
+        handle: *mut c_void,
+        aid: u32,
+        outVt: *mut u32,
+        errOut: *mut c_int,
+    ) -> c_int;
+
+    fn nim_query_is_declared(
+        handle: *mut c_void,
+        aid: u32,
+        errOut: *mut c_int,
+    ) -> c_int;
+
+    fn nim_query_is_many(
+        handle: *mut c_void,
+        aid: u32,
+        errOut: *mut c_int,
+    ) -> c_int;
+
+    fn nim_query_allocate_entity(
+        handle: *mut c_void,
+        errOut: *mut c_int,
+    ) -> u64;
+
+    fn nim_query_allocate_in_partition(
+        handle: *mut c_void,
+        partition_id: u64,
+        errOut: *mut c_int,
+    ) -> u64;
+
+    fn nim_query_declare_partition(
+        handle: *mut c_void,
+        name: *const c_char,
+        errOut: *mut c_int,
+    ) -> u64;
+
+    fn nim_query_partition_id_for(
+        handle: *mut c_void,
+        name: *const c_char,
+        outPid: *mut u64,
+        errOut: *mut c_int,
+    ) -> c_int;
+
+    fn nim_query_memtable_size(
+        handle: *mut c_void,
+        errOut: *mut c_int,
+    ) -> u64;
+
+    fn nim_query_path(
+        handle: *mut c_void,
+        outPath: *mut *const c_char,
+        errOut: *mut c_int,
+    ) -> c_int;
+}
+
+/// Rust wrapper for the Nim query engine (api.nim).
+/// Only storage operations; SQL compilation still uses spier-eavt-query.
+pub struct NimQueryHandle {
+    handle: *mut c_void,
+}
+
+impl NimQueryHandle {
+    pub fn open(config: &HashMap<String, String>) -> Result<Self, String> {
+        let n = config.len() as c_int;
+        let mut keys: Vec<CString> = Vec::with_capacity(config.len());
+        let mut vals: Vec<CString> = Vec::with_capacity(config.len());
+        for (k, v) in config {
+            keys.push(CString::new(k.as_str()).map_err(|e| format!("CString: {e}"))?);
+            vals.push(CString::new(v.as_str()).map_err(|e| format!("CString: {e}"))?);
+        }
+        let mut key_ptrs: Vec<*const c_char> = keys.iter().map(|s| s.as_ptr()).collect();
+        let mut val_ptrs: Vec<*const c_char> = vals.iter().map(|s| s.as_ptr()).collect();
+
+        let mut err: c_int = 0;
+        let handle = unsafe {
+            nim_query_open(
+                key_ptrs.as_ptr(),
+                val_ptrs.as_ptr(),
+                n,
+                &mut err,
+            )
+        };
+        if handle.is_null() {
+            return Err(format!("nim_query_open failed: {}", err_to_string(err)));
+        }
+        Ok(Self { handle })
+    }
+
+    pub fn save(&self, eid: u64, attr: &str, val: &str, t: u64) -> Result<(), String> {
+        let c_attr = CString::new(attr).map_err(|e| format!("{e}"))?;
+        let c_val = CString::new(val).map_err(|e| format!("{e}"))?;
+        let mut err: c_int = 0;
+        let rc = unsafe {
+            nim_query_save(self.handle, eid, c_attr.as_ptr(), c_val.as_ptr(), t, &mut err)
+        };
+        check_err(rc, err)
+    }
+
+    pub fn retract(&self, eid: u64, attr: &str, val: &str, t: u64) -> Result<(), String> {
+        let c_attr = CString::new(attr).map_err(|e| format!("{e}"))?;
+        let c_val = CString::new(val).map_err(|e| format!("{e}"))?;
+        let mut err: c_int = 0;
+        let rc = unsafe {
+            nim_query_retract(self.handle, eid, c_attr.as_ptr(), c_val.as_ptr(), t, &mut err)
+        };
+        check_err(rc, err)
+    }
+
+    pub fn flush(&self) -> Result<(), String> {
+        let mut err: c_int = 0;
+        let rc = unsafe { nim_query_flush(self.handle, &mut err) };
+        check_err(rc, err)
+    }
+
+    pub fn declare_attr(&self, name: &str, vt_name: &str, many: bool) -> Result<u32, String> {
+        let c_name = CString::new(name).map_err(|e| format!("{e}"))?;
+        let c_vt = CString::new(vt_name).map_err(|e| format!("{e}"))?;
+        let mut err: c_int = 0;
+        let aid = unsafe {
+            nim_query_declare_attr(self.handle, c_name.as_ptr(), c_vt.as_ptr(), many as c_int, &mut err)
+        };
+        check_err(0, err)?;
+        Ok(aid)
+    }
+
+    pub fn lookup_attr(&self, name: &str) -> Result<Option<u32>, String> {
+        let c_name = CString::new(name).map_err(|e| format!("{e}"))?;
+        let mut out_aid: u32 = 0;
+        let mut err: c_int = 0;
+        let rc = unsafe {
+            nim_query_lookup_attr(self.handle, c_name.as_ptr(), &mut out_aid, &mut err)
+        };
+        if rc != 0 {
+            if err == ERR_NOT_FOUND { return Ok(None); }
+            return Err(err_to_string(err).to_string());
+        }
+        Ok(Some(out_aid))
+    }
+
+    pub fn value_type_for(&self, aid: u32) -> Result<Option<u32>, String> {
+        let mut out_vt: u32 = 0;
+        let mut err: c_int = 0;
+        let rc = unsafe {
+            nim_query_value_type_for(self.handle, aid, &mut out_vt, &mut err)
+        };
+        if rc != 0 { return Ok(None); }
+        Ok(Some(out_vt))
+    }
+
+    pub fn allocate_entity_id(&self) -> u64 {
+        let mut err: c_int = 0;
+        unsafe { nim_query_allocate_entity(self.handle, &mut err) }
+    }
+
+    pub fn allocate_in_partition(&self, partition_id: u64) -> u64 {
+        let mut err: c_int = 0;
+        unsafe { nim_query_allocate_in_partition(self.handle, partition_id, &mut err) }
+    }
+
+    pub fn declare_partition(&self, name: &str) -> Result<u64, String> {
+        let c_name = CString::new(name).map_err(|e| format!("{e}"))?;
+        let mut err: c_int = 0;
+        let pid = unsafe { nim_query_declare_partition(self.handle, c_name.as_ptr(), &mut err) };
+        check_err(0, err)?;
+        Ok(pid)
+    }
+
+    pub fn memtable_size(&self) -> u64 {
+        let mut err: c_int = 0;
+        unsafe { nim_query_memtable_size(self.handle, &mut err) }
+    }
+}
+
+impl Drop for NimQueryHandle {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe { nim_query_close(self.handle) };
+            self.handle = std::ptr::null_mut();
+        }
     }
 }
