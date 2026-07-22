@@ -40,7 +40,7 @@ fn main() {
     }
 
     // Track memtable sources
-    let memtable_dir = workspace_root.join("nim-memtable");
+    let memtable_dir = workspace_root.join("nim_memtable");
     for fname in &["abi.nim", "spinlock.nim", "backend.nim", "all.nim"] {
         println!("cargo:rerun-if-changed={}", memtable_dir.join(fname).display());
     }
