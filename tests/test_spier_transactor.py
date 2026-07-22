@@ -10,7 +10,7 @@ from helpers import unpack_keys
 
 @pytest.fixture
 def kv_instance(tmp_path):
-    handle = spier_eavt_query_py.Engine({"backend": "file", "path": str(tmp_path)})
+    handle = spier_eavt_query_py.KVStore({"backend": "file", "path": str(tmp_path)})
     yield handle
     handle.close()
 
@@ -109,13 +109,13 @@ class TestKVClose:
 class TestKVStorage:
     def test_creates_directories(self, tmp_path):
         data_dir = tmp_path / "deep"
-        handle = spier_eavt_query_py.Engine({"backend": "file", "path": str(data_dir)})
+        handle = spier_eavt_query_py.KVStore({"backend": "file", "path": str(data_dir)})
         import os
         assert os.path.isdir(str(data_dir / "blobs"))
         handle.close()
 
     def test_empty_config_defaults_to_memory(self):
-        handle = spier_eavt_query_py.Engine({})
+        handle = spier_eavt_query_py.KVStore({})
         handle.put(**{"cf": 0, "key": b"k"})
         assert handle.get(**{"cf": 0, "key": b"k"}) is True
         handle.close()

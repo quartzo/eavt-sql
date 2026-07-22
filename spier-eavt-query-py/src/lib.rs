@@ -462,6 +462,38 @@ impl PyEngine {
         cursor.borrow().inner.cursor.borrow_mut().seek(&target);
     }
 
+    fn cursor_skip_group(&self, _py: Python<'_>, cursor: &Bound<'_, PyCursorHandle>, group_end: u32) {
+        cursor.borrow().inner.cursor.borrow_mut().skip_group(group_end as usize);
+    }
+
+    fn cursor_update_end(&self, _py: Python<'_>, cursor: &Bound<'_, PyCursorHandle>, end: Vec<u8>) {
+        cursor.borrow().inner.cursor.borrow_mut().update_end(&end);
+    }
+
+    fn journal_put(&self, py: Python<'_>, key: Vec<u8>, value: Vec<u8>) -> PyResult<()> {
+        py.allow_threads(|| self.inner.journal_append(&key, &value))
+            .map_err(to_string_err)
+    }
+
+    fn journal_scan(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
+        py.allow_threads(|| self.inner.journal_read())
+            .map_err(to_string_err)
+    }
+
+    fn approximate_sizes(&self, py: Python<'_>, cf: u32, start: Vec<u8>, end: Vec<u8>) -> PyResult<u64> {
+        py.allow_threads(|| {
+            let packed = self.inner.kv_scan(cf, &start)?;
+            let mut count = 0u64;
+            let mut pos = 0;
+            while pos + 4 <= packed.len() {
+                let klen = u32::from_be_bytes([packed[pos], packed[pos+1], packed[pos+2], packed[pos+3]]) as usize;
+                pos += 4 + klen;
+                count += 1;
+            }
+            Ok(count.max(1))
+        }).map_err(to_string_err)
+    }
+
     fn compile_scheme(&self, py: Python<'_>, scheme_text: &str) -> PyResult<PyProgramHandle> {
         let handle = py.allow_threads(|| self.inner.compile_scheme(scheme_text))
             .map_err(to_string_err)?;
@@ -623,6 +655,20 @@ impl PyKVStore {
         py.allow_threads(|| inner.scan_reverse(cf, &prefix)).map_err(to_string_err)
     }
 
+    fn journal_put(&self, py: Python<'_>, key: Vec<u8>, value: Vec<u8>) -> PyResult<()> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or("closed")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        py.allow_threads(|| inner.journal_append(&key, &value)).map_err(to_string_err)
+    }
+
+    fn journal_scan(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or("closed")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        py.allow_threads(|| inner.journal_read()).map_err(to_string_err)
+    }
+
     fn open_cursor_direct(&self, py: Python<'_>, cf: u32, prefix: Vec<u8>) -> PyResult<PyCursorHandle> {
         self.open_cursor_impl(py, cf, prefix, false)
     }
@@ -675,8 +721,85 @@ impl PyKVStore {
         cursor.borrow().inner.cursor.borrow_mut().seek(&target);
     }
 
+    fn cursor_skip_group(&self, _py: Python<'_>, cursor: &Bound<'_, PyCursorHandle>, group_end: u32) {
+        cursor.borrow().inner.cursor.borrow_mut().skip_group(group_end as usize);
+    }
+
+    fn cursor_update_end(&self, _py: Python<'_>, cursor: &Bound<'_, PyCursorHandle>, end: Vec<u8>) {
+        cursor.borrow().inner.cursor.borrow_mut().update_end(&end);
+    }
+
     fn close(&self) {
         self.inner.lock().unwrap().take();
+    }
+
+    fn path(&self) -> String { String::from("") }
+
+    fn memtable_size(&self, py: Python<'_>) -> PyResult<u64> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or("closed")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        py.allow_threads(|| inner.memtable_size()).map_err(to_string_err)
+    }
+
+    fn memtable_count(&self, py: Python<'_>, cf: u32) -> PyResult<u64> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or("closed")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        let packed = py.allow_threads(|| inner.scan(cf, b"")).map_err(to_string_err)?;
+        let mut count = 0u64;
+        let mut pos = 0;
+        while pos + 4 <= packed.len() {
+            let klen = u32::from_be_bytes([packed[pos], packed[pos+1], packed[pos+2], packed[pos+3]]) as usize;
+            pos += 4 + klen;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    fn journal_size(&self, py: Python<'_>) -> PyResult<u64> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or("closed")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        py.allow_threads(|| inner.journal_read().map(|d| d.len() as u64)).map_err(to_string_err)
+    }
+
+    fn approximate_sizes(&self, py: Python<'_>, cf: u32, start: Vec<u8>, _end: Vec<u8>) -> PyResult<u64> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or("closed")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        let packed = py.allow_threads(|| inner.scan(cf, &start)).map_err(to_string_err)?;
+        let mut count = 0u64;
+        let mut pos = 0;
+        while pos + 4 <= packed.len() {
+            let klen = u32::from_be_bytes([packed[pos], packed[pos+1], packed[pos+2], packed[pos+3]]) as usize;
+            pos += 4 + klen;
+            count += 1;
+        }
+        Ok(count.max(1))
+    }
+
+    fn cf_stats(&self, py: Python<'_>, cf: u32) -> PyResult<Vec<u8>> {
+        let count = self.memtable_count(py, cf).unwrap_or(0);
+        let mut buf = Vec::new();
+        let name = b"eavt";
+        buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        buf.extend_from_slice(name);
+        buf.extend_from_slice(&0u64.to_le_bytes()); buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes()); buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&count.to_le_bytes());
+        Ok(buf)
+    }
+
+    fn db_stats(&self, _py: Python<'_>) -> PyResult<Vec<u8>> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        Ok(buf)
+    }
+
+    fn gc_full(&self, _py: Python<'_>, _dry_run: bool, _nowait: bool) -> PyResult<Vec<u8>> {
+        Ok(Vec::new())
     }
 }
 

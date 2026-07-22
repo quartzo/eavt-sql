@@ -142,6 +142,12 @@ impl QueryState {
     pub fn kv_items(&self, cf: u32) -> Result<Vec<u8>, String> {
         self.with_engine(|e| e.tx().items(cf))
     }
+    pub fn journal_append(&self, key: &[u8], val: &[u8]) -> Result<(), String> {
+        self.with_engine(|e| e.tx().journal_put(key, val))
+    }
+    pub fn journal_read(&self) -> Result<Vec<u8>, String> {
+        self.with_engine(|e| e.tx().journal_scan())
+    }
     pub fn kv_scan_reverse(&self, cf: u32, prefix: &[u8]) -> Result<Vec<u8>, String> {
         self.with_engine(|e| e.tx().scan_reverse(cf, prefix))
     }
