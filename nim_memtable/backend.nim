@@ -11,7 +11,7 @@ import std/locks
 # ══════════════════════════════════════════════════════════════════════════════
 
 type
-  Key = seq[byte]
+  Key* = seq[byte]
 
   TreapNode* = ref object
     key*: Key
@@ -36,7 +36,7 @@ type
 # Treap helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-proc cmpKey(a, b: Key): int =
+proc cmpKey*(a, b: Key): int =
   let n = min(a.len, b.len)
   for i in 0 ..< n:
     if a[i] < b[i]: return -1
