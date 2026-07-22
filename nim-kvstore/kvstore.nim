@@ -10,12 +10,6 @@ import ./spinlock
 
 import nim_memtable/backend as mt_be
 
-proc openMemTableVt(num_cf: cuint; errOut: ptr cint): MtVtablePtr =
-  cast[MtVtablePtr](mt_be.openMemTable(num_cf, errOut))
-
-proc closeMemTableVt(vt: MtVtablePtr) =
-  mt_be.closeVtable(cast[pointer](vt))
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # Simple min-heap for (seq[byte], int) using cmpSeq
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -70,7 +64,7 @@ proc len*(h: MinHeap): int = h.data.len
 type
   KVStoreInner = object
     ps: ptr PageStoreInner        # page store (already opened)
-    mt: MtVtablePtr      # memtable handle
+    mt: mt_be.MemTable         # Nim ref — no vtable
     mtSize: uint64                # approximate memtable byte size
     flushSnap: uint64             # snapshot id during active flush (0 = none)
     lock: SpinLock                # guards all state
@@ -88,12 +82,9 @@ type
 
   MergeSource = object
     case kind: MergeSourceKind
-    of mskPageStore:
+    of mskPageStore, mskMemTable:
       keys: seq[seq[byte]]
       idx: int
-    of mskMemTable:
-      cursorId: uint64
-      cursorVt: MtVtablePtr
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Merge — k-way heap merge of sorted sources
@@ -102,76 +93,26 @@ type
 proc mergeSources(sources: var seq[MergeSource]; endBound: seq[byte];
                    limit: int = -1): seq[seq[byte]] =
   var heap: MinHeap
-  # Prime: push first key from each valid source
   for i, src in sources.mpairs:
-    case src.kind
-    of mskPageStore:
-      if src.idx < src.keys.len:
-        heap.push((src.keys[src.idx], i))
-    of mskMemTable:
-      var keyPtr: pointer = nil
-      var keyLen: csize_t = 0
-      var valid: cint = 0
-      var err: cint
-      discard src.cursorVt.cursorNext(src.cursorVt.handle, src.cursorId,
-                                       addr keyPtr, addr keyLen, addr valid, addr err)
-      if valid != 0 and keyPtr != nil:
-        var k = newSeq[byte](keyLen.int)
-        copyMem(addr k[0], keyPtr, keyLen.int)
-        src.cursorVt.freeBuf(keyPtr)
-        heap.push((k, i))
+    if src.idx < src.keys.len:
+      heap.push((src.keys[src.idx], i))
 
   result = @[]
   var lastKey: seq[byte] = @[]
   while heap.len > 0 and (limit < 0 or result.len < limit):
     let (key, srcIdx) = heap.pop()
-    # Check end bound (keys must be <= endBound)
-    if cmpSeq(key, endBound) > 0:
-      break
-    # Deduplicate
+    if cmpSeq(key, endBound) > 0: break
     if key == lastKey:
       lastKey = key
-      # Advance source and continue
-      var src = addr sources[srcIdx]
-      case src.kind
-      of mskPageStore:
-        inc src.idx
-        if src.idx < src.keys.len:
-          heap.push((src.keys[src.idx], srcIdx))
-      of mskMemTable:
-        var keyPtr: pointer = nil
-        var keyLen: csize_t = 0
-        var valid: cint = 0
-        var err: cint
-        discard src.cursorVt.cursorNext(src.cursorVt.handle, src.cursorId,
-                                         addr keyPtr, addr keyLen, addr valid, addr err)
-        if valid != 0 and keyPtr != nil:
-          var nextK = newSeq[byte](keyLen.int)
-          copyMem(addr nextK[0], keyPtr, keyLen.int)
-          src.cursorVt.freeBuf(keyPtr)
-          heap.push((nextK, srcIdx))
+      inc sources[srcIdx].idx
+      if sources[srcIdx].idx < sources[srcIdx].keys.len:
+        heap.push((sources[srcIdx].keys[sources[srcIdx].idx], srcIdx))
       continue
     lastKey = key
     result.add key
-    # Advance source
-    var src = addr sources[srcIdx]
-    case src.kind
-    of mskPageStore:
-      inc src.idx
-      if src.idx < src.keys.len:
-        heap.push((src.keys[src.idx], srcIdx))
-    of mskMemTable:
-      var keyPtr: pointer = nil
-      var keyLen: csize_t = 0
-      var valid: cint = 0
-      var err: cint
-      discard src.cursorVt.cursorNext(src.cursorVt.handle, src.cursorId,
-                                       addr keyPtr, addr keyLen, addr valid, addr err)
-      if valid != 0 and keyPtr != nil:
-        var nextK = newSeq[byte](keyLen.int)
-        copyMem(addr nextK[0], keyPtr, keyLen.int)
-        src.cursorVt.freeBuf(keyPtr)
-        heap.push((nextK, srcIdx))
+    inc sources[srcIdx].idx
+    if sources[srcIdx].idx < sources[srcIdx].keys.len:
+      heap.push((sources[srcIdx].keys[sources[srcIdx].idx], srcIdx))
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # KVStore operations
@@ -186,63 +127,32 @@ proc prefixEnd(prefix: seq[byte]): seq[byte] =
     result = prefix & result
 
 proc kvPut(s: var KVStoreInner; cf: int; key: seq[byte]) =
-  var outSize: uint64 = 0
-  var err: cint
-  discard s.mt.put(s.mt.handle, cf.cuint, cast[ptr Byte](addr key[0]),
-                    key.len.csize_t, addr outSize, addr err)
-  s.mtSize = outSize
+  s.mtSize = s.mt.put(cf, key)
 
 proc kvGet(s: var KVStoreInner; cf: int; key: seq[byte]): bool =
-  # Check live memtable
-  var snap: uint64 = 0
-  var err: cint
-  discard s.mt.snapshot(s.mt.handle, addr snap, addr err)
-  var present: cint = 0
-  discard s.mt.contains(s.mt.handle, snap, cf.cuint,
-                         cast[ptr Byte](addr key[0]), key.len.csize_t,
-                         addr present, addr err)
-  s.mt.snapshotFree(s.mt.handle, snap)
-  if present != 0: return true
-
-  # Check flush snap
-  if s.flushSnap != 0:
-    discard s.mt.contains(s.mt.handle, s.flushSnap, cf.cuint,
-                           cast[ptr Byte](addr key[0]), key.len.csize_t,
-                           addr present, addr err)
-    if present != 0: return true
-
-  # Check page store
+  if s.mt.contains(0, cf, key): return true
+  if s.flushSnap != 0 and s.mt.contains(s.flushSnap, cf, key): return true
   return keyExists(s.ps[], cf, key)
 
 proc buildScanSources(s: var KVStoreInner; cf: int;
                        prefix: seq[byte]): seq[MergeSource] =
-  var err: cint
   # 1. Page store source
   let psKeys = getKeysInPrefix(s.ps[], cf, prefix)
   if psKeys.len > 0:
     result.add MergeSource(kind: mskPageStore, keys: psKeys, idx: 0)
 
-  # 2. Flush snapshot
+  # 2. Flush snapshot — eager materialize
   if s.flushSnap != 0:
-    var cursorId: uint64 = 0
-    let rc = s.mt.scan(s.mt.handle, s.flushSnap, cf.cuint,
-                        if prefix.len > 0: cast[ptr Byte](addr prefix[0]) else: nil,
-                        prefix.len.csize_t, 0.cint, addr cursorId, addr err)
-    if rc == 0:
-      result.add MergeSource(kind: mskMemTable, cursorId: cursorId,
-                              cursorVt: s.mt)
+    let snapKeys = s.mt.scanAll(s.flushSnap, cf, prefix, false)
+    if snapKeys.len > 0:
+      result.add MergeSource(kind: mskMemTable, keys: snapKeys, idx: 0)
 
-  # 3. Live memtable
-  var liveSnap: uint64 = 0
-  var liveErr: cint = 0
-  discard s.mt.snapshot(s.mt.handle, addr liveSnap, addr liveErr)
-  var cursorId: uint64 = 0
-  let rc = s.mt.scan(s.mt.handle, liveSnap, cf.cuint,
-                      if prefix.len > 0: cast[ptr Byte](addr prefix[0]) else: nil,
-                      prefix.len.csize_t, 0.cint, addr cursorId, addr err)
-  if rc == 0:
-    result.add MergeSource(kind: mskMemTable, cursorId: cursorId,
-                            cursorVt: s.mt)
+  # 3. Live memtable — materialize eagerly
+  let liveSnap = s.mt.snapshot()
+  let liveKeys = s.mt.scanAll(liveSnap, cf, prefix, false)
+  s.mt.snapshotFree(liveSnap)
+  if liveKeys.len > 0:
+    result.add MergeSource(kind: mskMemTable, keys: liveKeys, idx: 0)
 
 proc kvScan(s: var KVStoreInner; cf: int; prefix: seq[byte]): seq[seq[byte]] =
   var sources = buildScanSources(s, cf, prefix)
@@ -259,52 +169,17 @@ proc kvScanReverse(s: var KVStoreInner; cf: int; prefix: seq[byte]): seq[seq[byt
 
 proc kvFlush(s: var KVStoreInner): bool =
   if s.readOnly: return false
-  if s.flushSnap != 0: return false  # flush already in progress
-
+  if s.flushSnap != 0: return false
   let numCf = s.numCf
-
-  # Snapshot + clear memtable ONCE (not per CF)
-  var err: cint
-  discard s.mt.snapshot(s.mt.handle, addr s.flushSnap, addr err)
-  discard s.mt.clear(s.mt.handle, addr err)
+  s.flushSnap = s.mt.snapshot()
+  s.mt.clear()
   s.mtSize = 0
-
-  # Scan snapshot for each CF
   var keysByCf: seq[(int, seq[seq[byte]])] = @[]
   for cf in 0..<numCf:
-
-    # Scan the snapshot to get all keys for this CF
-    var outBuf: pointer = nil
-    var outLen: csize_t = 0
-    let rc = s.mt.scanPrefix(s.mt.handle, s.flushSnap, cf.cuint, nil, 0.csize_t,
-                              0.cint, addr outBuf, addr outLen, addr err)
-    if rc != 0 or outBuf == nil: continue
-
-    var keys: seq[seq[byte]] = @[]
-    var pos = 0
-    while pos + 4 <= outLen.int:
-      let klen = (uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos]) shl 24 or
-                   uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+1]) shl 16 or
-                   uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+2]) shl 8 or
-                   uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+3])).int
-      pos += 4
-      if pos + klen > outLen.int: break
-      keys.add newSeq[byte](klen)
-      copyMem(addr keys[^1][0], addr cast[ptr UncheckedArray[byte]](outBuf)[pos], klen)
-      pos += klen
-    s.mt.freeBuf(outBuf)
-    if keys.len > 0:
-      keysByCf.add (cf, keys)
-
+    let keys = s.mt.scanAll(s.flushSnap, cf, @[], false)
+    if keys.len > 0: keysByCf.add (cf, keys)
   if keysByCf.len > 0:
     commitMerge(s.ps[], keysByCf, true)
-    # FIXME: blobPutRoot in commitMerge doesn't persist to disk for the file
-    # backend, so we cannot truncate the journal yet.
-    # if s.path.len > 0 and s.path != ":memory:":
-    #   let journalPath = s.path / "journal" / "journal"
-    #   if fileExists(journalPath):
-    #     try: removeFile(journalPath)
-    #     except: discard
   s.flushSnap = 0
   s.mtSize = 0
   return true
@@ -374,12 +249,9 @@ proc kvBatchWrite(h: pointer; ops: ptr Byte; olen: csize_t;
           close(f)
         except: discard
       # Write to memtable
-      var outSize: uint64 = 0
-      var merr: cint
-      let rc = s.mt.batch(s.mt.handle, ops, olen, addr outSize, addr merr)
-      if rc != 0:
-        setErr(errOut, merr); return -1
-      s.mtSize = outSize
+      var o: seq[byte] = newSeq[byte](olen)
+      if olen > 0: copyMem(addr o[0], ops, olen)
+      s.mtSize = s.mt.batch(o)
       setErr(errOut, ErrOk); return 0
     except:
       setErr(errOut, ErrIo); return -1
@@ -536,7 +408,7 @@ proc kvCloseC(h: pointer; errOut: ptr cint): cint {.cdecl.} =
     try:
       # Close memtable
       if s.mt != nil:
-        closeMemTableVt(s.mt)
+        s.mt.close()
         s.mt = nil
       # Close page store
       psClose(s.ps)
@@ -564,8 +436,7 @@ proc openKvStore*(keys, vals: CStringArr; count: cint;
     return nil
 
   # Open memtable
-  var mtErr: cint
-  let mt = openMemTableVt(4.cuint, addr mtErr)
+  let mt = mt_be.newMemTable(4)
   if mt == nil:
     psClose(cast[ptr PageStoreInner](ps.handle))
     freeVtable(ps)
@@ -615,9 +486,7 @@ proc openKvStore*(keys, vals: CStringArr; count: cint;
             ops[3] = byte((klen shr 8) and 0xFF)
             ops[4] = byte(klen and 0xFF)
             copyMem(addr ops[5], addr jkey[0], klen)
-            var outSz: uint64 = 0; var merr: cint
-            discard s.mt.batch(s.mt.handle, addr ops[0], ops.len.csize_t, addr outSz, addr merr)
-            s.mtSize = outSz
+            s.mtSize = s.mt.batch(ops)
           elif klen >= 1:
             let cf = byte(jkey[0])
             if cf <= 3:
@@ -628,9 +497,7 @@ proc openKvStore*(keys, vals: CStringArr; count: cint;
               ops[3] = byte(((klen - 1) shr 8) and 0xFF)
               ops[4] = byte((klen - 1) and 0xFF)
               copyMem(addr ops[5], addr jkey[1], klen - 1)
-              var outSz: uint64 = 0; var merr: cint
-              discard s.mt.batch(s.mt.handle, addr ops[0], ops.len.csize_t, addr outSz, addr merr)
-              s.mtSize = outSz
+              s.mtSize = s.mt.batch(ops)
       except: discard
 
   let vt = newKVVtable()
