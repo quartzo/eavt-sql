@@ -47,3 +47,4 @@ pynim_query.so
 # journal test binary
 nim-blobstore/journal/tests
 nim-blobstore/memory/tests
+nim-blobstore/file/tests

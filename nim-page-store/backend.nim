@@ -8,18 +8,26 @@ import ./pages
 import ./spinlock
 
 # ══════════════════════════════════════════════════════════════════════════════
-# BlobStore — memory & journal via direct Nim import; file & s3 keep C-ABI.
+# BlobStore — direct Nim imports; no more C-ABI linkage.
 # ══════════════════════════════════════════════════════════════════════════════
 
 import memory/backend as mem_be
+import file/backend as fil_be
 import journal/backend as jou_be
 
 proc nim_blob_memory_open*(keys, vals: abi.CStringArr; count: cint;
                            errOut: ptr cint): NimBlobVtablePtr =
   cast[NimBlobVtablePtr](mem_be.nim_blob_memory_open(keys, vals, count.csize_t, errOut))
 
+proc nim_blob_file_open*(keys, vals: abi.CStringArr; count: cint;
+                         errOut: ptr cint): NimBlobVtablePtr =
+  cast[NimBlobVtablePtr](fil_be.nim_blob_file_open(keys, vals, count.csize_t, errOut))
+
 proc nim_blob_memory_close*(vt: NimBlobVtablePtr) =
   mem_be.closeVtable(cast[pointer](vt))
+
+proc nim_blob_file_close*(vt: NimBlobVtablePtr) =
+  fil_be.closeVtable(cast[pointer](vt))
 
 proc nim_journal_open*(path: cstring;
                        errOut: ptr cint): NimJournalVtablePtr =
@@ -28,17 +36,10 @@ proc nim_journal_open*(path: cstring;
 proc nim_journal_close*(vt: NimJournalVtablePtr) =
   jou_be.closeJournalVtable(cast[pointer](vt))
 
-# File + S3 still use importc (their exportc symbols remain).
-proc nim_blob_file_open*(keys, vals: CStringArr; count: cint;
-                         errOut: ptr cint): NimBlobVtablePtr
-    {.importc: "nim_blob_file_open", cdecl.}
-
+# S3 still uses C-ABI (not refactored yet).
 proc nim_blob_s3_open*(keys, vals: CStringArr; count: cint;
                        errOut: ptr cint): NimBlobVtablePtr
     {.importc: "nim_blob_s3_open", cdecl.}
-
-proc nim_blob_file_close*(vt: NimBlobVtablePtr)
-    {.importc: "nim_blob_file_close", cdecl.}
 
 proc nim_blob_s3_close*(vt: NimBlobVtablePtr)
     {.importc: "nim_blob_s3_close", cdecl.}
