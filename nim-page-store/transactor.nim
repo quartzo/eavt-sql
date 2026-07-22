@@ -3,7 +3,7 @@
 ## Orchestration layer: coordinates MemTable + PageStore + Journal.
 ## Implements all KVStoreEngine operations via C-ABI vtable.
 
-import std/[tables, strformat, strutils, times, monotimes, options]
+import std/[tables, strformat, strutils, times, monotimes, options, os]
 import ./abi
 import ./backend
 import ./spinlock
@@ -296,6 +296,12 @@ proc kvFlush(s: var KVStoreInner): bool =
 
   if keysByCf.len > 0:
     commitMerge(s.ps[], keysByCf, true)
+    # Truncate journal after successful flush (data now in page store)
+    if s.path.len > 0:
+      let journalPath = s.path / "journal" / "journal"
+      if fileExists(journalPath):
+        try: removeFile(journalPath)
+        except: discard
   s.flushSnap = 0
   s.mtSize = 0
   return true
@@ -325,12 +331,45 @@ proc kvBatchWrite(h: pointer; ops: ptr Byte; olen: csize_t;
   var s = cast[ptr KVStoreInner](h)
   s.lock.withLock:
     try:
+      # Write to memtable
       var outSize: uint64 = 0
       var merr: cint
       let rc = s.mt.batch(s.mt.handle, ops, olen, addr outSize, addr merr)
       if rc != 0:
         setErr(errOut, merr); return -1
       s.mtSize = outSize
+      # Journal each key-value entry for crash recovery
+      if s.path.len > 0 and not s.readOnly:
+        let journalPath = s.path / "journal" / "journal"
+        try:
+          createDir(parentDir(journalPath))
+          var f: File
+          if open(f, journalPath, fmAppend):
+            var pos = 0
+            while pos + 1 <= olen.int:
+              let cf = cast[ptr UncheckedArray[byte]](ops)[pos]
+              inc pos
+              if pos + 4 > olen.int: break
+              let klen = int(uint32(cast[ptr UncheckedArray[byte]](ops)[pos]) shl 24 or
+                             uint32(cast[ptr UncheckedArray[byte]](ops)[pos+1]) shl 16 or
+                             uint32(cast[ptr UncheckedArray[byte]](ops)[pos+2]) shl 8 or
+                             uint32(cast[ptr UncheckedArray[byte]](ops)[pos+3]))
+              pos += 4
+              if pos + klen > olen.int: break
+              let keyStart = pos
+              pos += klen
+              # Write journal entry: [u32 klen][cf+key][u32 1][flag=0]
+              var jentry = newSeq[byte](4 + 1 + klen + 4 + 1)
+              jentry[0] = byte((1 + klen) shr 24); jentry[1] = byte(((1 + klen) shr 16) and 0xFF)
+              jentry[2] = byte(((1 + klen) shr 8) and 0xFF); jentry[3] = byte((1 + klen) and 0xFF)
+              jentry[4] = cf
+              copyMem(addr jentry[5], addr cast[ptr UncheckedArray[byte]](ops)[keyStart], klen)
+              jentry[5 + klen + 0] = 0; jentry[5 + klen + 1] = 0
+              jentry[5 + klen + 2] = 0; jentry[5 + klen + 3] = 1 # vlen = 1
+              jentry[5 + klen + 4] = 0 # flag = 0
+              discard f.writeBytes(jentry, 0, jentry.len)
+            close(f)
+        except: discard
       setErr(errOut, ErrOk); return 0
     except:
       setErr(errOut, ErrIo); return -1
@@ -433,9 +472,6 @@ proc kvCloseC(h: pointer; errOut: ptr cint): cint {.cdecl.} =
   var s = cast[ptr KVStoreInner](h)
   s.lock.withLock:
     try:
-      # Flush memtable to page store before closing
-      if s.mtSize > 0:
-        discard kvFlush(s[])
       # Close memtable
       if s.mt != nil:
         nim_memtable_close(cast[pointer](s.mt))
@@ -487,6 +523,38 @@ proc openKvStore*(keys, vals: CStringArr; count: cint;
   s.gcMaxAgeSecs = parseUInt(config.getOrDefault("gc_max_age_secs", "43200")).uint64
   s.gcMaxRootCount = parseInt(config.getOrDefault("gc_max_root_count", "10"))
   initSpinLock(s.lock)
+
+  # Replay journal into memtable (crash recovery)
+  if s.path.len > 0 and not readOnly:
+    let journalPath = s.path / "journal" / "journal"
+    if fileExists(journalPath):
+      try:
+        let data = readFile(journalPath)
+        var pos = 0
+        while pos + 4 <= data.len:
+          let klen = int(uint32(byte(data[pos])) shl 24 or uint32(byte(data[pos+1])) shl 16 or
+                         uint32(byte(data[pos+2])) shl 8 or uint32(byte(data[pos+3])))
+          pos += 4
+          if pos + klen + 4 > data.len: break
+          let jkey = data[pos..<pos + klen]
+          pos += klen
+          let vlen = int(uint32(byte(data[pos])) shl 24 or uint32(byte(data[pos+1])) shl 16 or
+                         uint32(byte(data[pos+2])) shl 8 or uint32(byte(data[pos+3])))
+          pos += 4
+          if pos + vlen > data.len: break
+          pos += vlen  # skip value (flag byte)
+          # Replay: batch write to memtable. Format: [cf][u32 klen][key]
+          var ops = newSeq[byte](1 + 4 + (klen - 1))
+          ops[0] = byte(jkey[0])  # cf byte
+          ops[1] = byte(((klen - 1) shr 24) and 0xFF)
+          ops[2] = byte(((klen - 1) shr 16) and 0xFF)
+          ops[3] = byte(((klen - 1) shr 8) and 0xFF)
+          ops[4] = byte((klen - 1) and 0xFF)
+          copyMem(addr ops[5], addr jkey[1], klen - 1)
+          var outSz: uint64 = 0; var merr: cint
+          discard s.mt.batch(s.mt.handle, addr ops[0], ops.len.csize_t, addr outSz, addr merr)
+          s.mtSize = outSz
+      except: discard
 
   let vt = newKVVtable()
   vt.handle = s
