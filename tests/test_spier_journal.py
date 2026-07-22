@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-import spier_kvstore_py
+import spier_eavt_query_py
 
 
 def _unpack_kv(buf: bytes) -> list[tuple[bytes, bytes]]:
@@ -19,14 +19,14 @@ def _unpack_kv(buf: bytes) -> list[tuple[bytes, bytes]]:
 
 @pytest.fixture
 def journal_instance(tmp_path):
-    handle = spier_kvstore_py.Journal({"path": str(tmp_path)})
+    handle = spier_eavt_query_py.Journal({"path": str(tmp_path)})
     yield handle
     handle.close()
 
 
 class TestJournalSchemaReflection:
     def test_typed_methods_exist(self):
-        cls = spier_kvstore_py.Journal
+        cls = spier_eavt_query_py.Journal
         assert hasattr(cls, "journal_append")
         assert hasattr(cls, "journal_read")
         assert hasattr(cls, "journal_truncate")
@@ -89,11 +89,11 @@ class TestJournalFileOnDisk:
 
 class TestJournalPersistence:
     def test_entries_survive_instance_recreate(self, tmp_path):
-        h1 = spier_kvstore_py.Journal({"path": str(tmp_path)})
+        h1 = spier_eavt_query_py.Journal({"path": str(tmp_path)})
         h1.journal_append(**{"key": b"persist", "value": b"data"})
         h1.close()
 
-        h2 = spier_kvstore_py.Journal({"path": str(tmp_path)})
+        h2 = spier_eavt_query_py.Journal({"path": str(tmp_path)})
         entries = _unpack_kv(bytes(h2.journal_read()))
         assert entries == [(b"persist", b"data")]
         h2.close()

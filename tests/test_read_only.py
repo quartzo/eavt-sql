@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-import spier_kvstore_py
+import spier_eavt_query_py
 from helpers import unpack_keys
 
 
@@ -17,11 +17,11 @@ def _file_config(tmp_path, read_only=False):
 
 
 def _open_writable(tmp_path):
-    return spier_kvstore_py.Engine(_file_config(tmp_path, read_only=False))
+    return spier_eavt_query_py.Engine(_file_config(tmp_path, read_only=False))
 
 
 def _open_read_only(tmp_path):
-    return spier_kvstore_py.Engine(_file_config(tmp_path, read_only=True))
+    return spier_eavt_query_py.Engine(_file_config(tmp_path, read_only=True))
 
 
 class TestReadOnlyBasic:

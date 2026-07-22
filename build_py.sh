@@ -8,14 +8,14 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
-CRATES=(spier-sql-parse-py spier-kvstore-py spier-transactor-py spier-eavt-query-py)
+CRATES=(spier-sql-parse-py spier-eavt-query-py)
 
 if [ $# -gt 0 ]; then
     FILTER="$1"
     CRATES=("${CRATES[@]/#$FILTER/}")
     CRATES=($(printf '%s\n' "${CRATES[@]}" | rg "$FILTER" || true))
     if [ ${#CRATES[@]} -eq 0 ]; then
-        echo "No crate matching '$FILTER'. Available: spier-sql-parse-py spier-kvstore-py spier-transactor-py spier-eavt-query-py"
+        echo "No crate matching '$FILTER'. Available: spier-sql-parse-py spier-eavt-query-py"
         exit 1
     fi
 fi
