@@ -433,6 +433,9 @@ proc kvCloseC(h: pointer; errOut: ptr cint): cint {.cdecl.} =
   var s = cast[ptr KVStoreInner](h)
   s.lock.withLock:
     try:
+      # Flush memtable to page store before closing
+      if s.mtSize > 0:
+        discard kvFlush(s[])
       # Close memtable
       if s.mt != nil:
         nim_memtable_close(cast[pointer](s.mt))
