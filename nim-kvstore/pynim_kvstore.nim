@@ -5,8 +5,8 @@
 ##
 ## Build:
 ##   nim c --mm:arc --threads:on -d:release --noNimblePath \
-##     --path:nim-page-store --path:<nimpy_dir> \
-##     --app:lib -o:pynim_kvstore.so nim-page-store/pynim_kvstore.nim
+##     --path:nim-kvstore --path:<nimpy_dir> \
+##     --app:lib -o:pynim_kvstore.so nim-kvstore/pynim_kvstore.nim
 
 import nimpy
 import std/[options, strutils, strformat]
@@ -18,7 +18,7 @@ import journal/all
 import nim_memtable/all
 
 import resolver
-import transactor
+import kvstore
 import abi
 import eavt
 import keys
@@ -97,7 +97,7 @@ proc seqOf(eid: uint64): uint64 {.exportpy.} =
   resolver.seqOf(eid)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# KVStore engine — wraps NimKVStore (transactor)
+# KVStore engine — wraps NimKVStore (kvstore)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 type

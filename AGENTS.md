@@ -185,7 +185,7 @@ allocated on Nim's shared heap).
 nim c --app:staticlib --noMain --mm:arc --threads:on -d:release --panics:on \
       --noNimblePath --passC:-fPIC --passL:-fPIC \
       [--passL:-lcrypto for s3] \
-      --out:libnim_page_store.a nim-page-store/all.nim
+      --out:libnim_page_store.a nim-kvstore/all.nim
 ```
 
 **`--threads:on` is MANDATORY.** The entire storage stack (blobstore, journal,

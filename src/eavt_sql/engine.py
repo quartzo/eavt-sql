@@ -4,7 +4,52 @@ import re
 from datetime import datetime, tzinfo
 from typing import Any, Generator
 
-import spier_eavt_query_py
+import pynim_query as _nim
+
+class _EngineWrapper:
+    """Wraps pynim_query module-level functions as class methods."""
+    def __init__(self, config):
+        self._h = _nim.new(config)
+    def compile_sql(self, sql, params): return _nim.compile_sql(self._h, sql, params)
+    def run_vm(self, prog, params, limit, as_of): return _nim.run_vm(self._h, prog, params, limit, as_of)
+    def run_vm_cursor(self, prog, params, limit, as_of): return _nim.run_vm_cursor(self._h, prog, params, limit, as_of)
+    def session_next_batch(self, session, max_rows): return _nim.session_next_batch(self._h, session, max_rows)
+    def explain(self, sql, params): return _nim.explain(self._h, sql, params)
+    def compile_sql_json(self, sql, params): return _nim.compile_sql_json(self._h, sql, params)
+    def scan_datoms(self, as_of): return _nim.scan_datoms(self._h, as_of)
+    def compile_scheme(self, scheme): return _nim.compile_scheme(self._h, scheme)
+    def compile_scheme_dml(self, scheme): return _nim.compile_scheme_dml(self._h, scheme)
+    def compile_scheme_debug(self, scheme): return _nim.compile_scheme_debug(self._h, scheme)
+    def flush(self): return _nim.flush(self._h)
+    def close(self): return _nim.close(self._h)
+    def path(self): return _nim.path(self._h)
+    def save(self, e, attr, v, t): return _nim.save(self._h, e, attr, v, t)
+    def retract(self, e, attr, v, t): return _nim.retract(self._h, e, attr, v, t)
+    def declare_attr(self, name, vt, many): return _nim.declare_attr(self._h, name, vt, many)
+    def declare_attr_from_sql(self, attr, type_name, many, unique): return _nim.declare_attr_from_sql(self._h, attr, type_name, many, unique)
+    def lookup_attr(self, name): return _nim.lookup_attr(self._h, name)
+    def attr_name(self, aid): return _nim.attr_name(self._h, aid)
+    def is_declared(self, aid): return _nim.is_declared(self._h, aid)
+    def value_type_for(self, aid): return _nim.value_type_for(self._h, aid)
+    def is_many(self, aid): return _nim.is_many(self._h, aid)
+    def is_unique_attr(self, name): return _nim.is_unique_attr(self._h, name)
+    def declare_partition(self, name): return _nim.declare_partition(self._h, name)
+    def partition_id_for(self, name): return _nim.partition_id_for(self._h, name)
+    def is_unique(self, aid): return _nim.is_unique(self._h, aid)
+    def allocate_entity_id(self): return _nim.allocate_entity_id(self._h)
+    def allocate_tx(self): return _nim.allocate_tx(self._h)
+    def allocate_in_partition(self, pid): return _nim.allocate_in_partition(self._h, pid)
+    def default_user_partition(self): return _nim.default_user_partition(self._h)
+    def lookup_entity(self, attr_name, value): return _nim.lookup_entity(self._h, attr_name, value)
+    def internal_status(self, target): return _nim.internal_status(self._h, target)
+    def memtable_size(self): return _nim.memtable_size(self._h)
+    def memtable_count(self, cf): return _nim.memtable_count(self._h, cf)
+    def journal_size(self): return _nim.journal_size(self._h)
+    def cf_stats(self, cf): return _nim.cf_stats(self._h, cf)
+    def db_stats(self): return _nim.db_stats(self._h)
+    def gc_full(self, dry_run, nowait): return _nim.gc_full(self._h, dry_run, nowait)
+
+spier_eavt_query_py = type('module', (), {'Engine': _EngineWrapper})()
 from .query_codec import encode_values, decode_values, decode_rows
 
 U64_MAX = 0xFFFFFFFFFFFFFFFF
@@ -89,7 +134,7 @@ class EAVTEngine:
             params_bytes = encode_values(list(params))
             try:
                 result = self._handle.explain(inner, params_bytes)
-            except RuntimeError as e:
+            except Exception as e:
                 raise ValueError(str(e)) from None
             for line in str(result).split("\n"):
                 if line:
@@ -99,7 +144,7 @@ class EAVTEngine:
         params_bytes = encode_values(list(params))
         try:
             prog = self._handle.compile_sql(stripped, params_bytes)
-        except RuntimeError as e:
+        except Exception as e:
             raise ValueError(str(e)) from None
 
         params_bytes = encode_values(list(params))
@@ -108,14 +153,14 @@ class EAVTEngine:
 
         try:
             session = self._handle.run_vm_cursor(prog, params_bytes, limit_val, as_of_val)
-        except RuntimeError as e:
+        except Exception as e:
             raise ValueError(str(e)) from None
 
         try:
             while True:
                 try:
                     batch_bytes = self._handle.session_next_batch(session, 1024)
-                except RuntimeError as e:
+                except Exception as e:
                     raise ValueError(str(e)) from None
 
                 batch_bytes = bytes(batch_bytes) if batch_bytes is not None else b""
@@ -165,12 +210,12 @@ class EAVTEngine:
         """
         try:
             prog = self._handle.compile_scheme_dml(scheme_text)
-        except RuntimeError as e:
+        except Exception as e:
             raise ValueError(str(e)) from None
         params_bytes = encode_values(list(params))
         try:
             out = self._handle.run_vm(prog, params_bytes, U64_MAX, U64_MAX)
-        except RuntimeError as e:
+        except Exception as e:
             raise ValueError(str(e)) from None
         out = bytes(out) if out is not None else b""
         return decode_rows(out)
@@ -184,19 +229,19 @@ class EAVTEngine:
         """
         try:
             prog = self._handle.compile_scheme(scheme_text)
-        except RuntimeError as e:
+        except Exception as e:
             raise ValueError(str(e)) from None
         params_bytes = encode_values(list(params))
         try:
             session = self._handle.run_vm_cursor(prog, params_bytes, U64_MAX, U64_MAX)
-        except RuntimeError as e:
+        except Exception as e:
             raise ValueError(str(e)) from None
         try:
             rows: list[tuple] = []
             while True:
                 try:
                     batch = self._handle.session_next_batch(session, 1024)
-                except RuntimeError as e:
+                except Exception as e:
                     raise ValueError(str(e)) from None
                 batch = bytes(batch) if batch is not None else b""
                 if not batch:
@@ -298,7 +343,7 @@ class PreparedStatement:
         dummy = encode_values([0] * num_params) if num_params else b"\x00\x00\x00\x00\x00"
         try:
             self._prog = engine._handle.compile_sql(sql, dummy)
-        except RuntimeError as e:
+        except Exception as e:
             raise ValueError(str(e)) from None
         self._closed = False
 
@@ -318,14 +363,14 @@ class PreparedStatement:
             session = self._engine._handle.run_vm_cursor(
                 self._prog, params_bytes, limit_val, as_of_val
             )
-        except RuntimeError as e:
+        except Exception as e:
             raise ValueError(str(e)) from None
 
         try:
             while True:
                 try:
                     batch_bytes = self._engine._handle.session_next_batch(session, 1024)
-                except RuntimeError as e:
+                except Exception as e:
                     raise ValueError(str(e)) from None
 
                 batch_bytes = bytes(batch_bytes) if batch_bytes is not None else b""

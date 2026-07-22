@@ -1,4 +1,4 @@
-## transactor.nim — Nim Transactor (put, get, scan, flush, GC, cursor merge).
+## kvstore.nim — Nim KVStore (put, get, scan, flush, GC, cursor merge).
 ##
 ## Orchestration layer: coordinates MemTable + PageStore + Journal.
 ## Implements all KVStoreEngine operations via C-ABI vtable.
@@ -64,7 +64,7 @@ proc pop(h: var MinHeap): HeapEntry =
 proc len*(h: MinHeap): int = h.data.len
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# KVStoreInner — the transactor state
+# KVStoreInner — the kvstore state
 # ═══════════════════════════════════════════════════════════════════════════════
 
 type

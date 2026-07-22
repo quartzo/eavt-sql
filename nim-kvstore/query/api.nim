@@ -8,7 +8,7 @@ import ../eavt
 import ../resolver
 import ../keys
 import ../abi
-import ../transactor
+import ../kvstore
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Handle type

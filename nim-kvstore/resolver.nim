@@ -118,6 +118,11 @@ type
     valueTypes: Table[uint32, uint32]
     uniqueAttrs: HashSet[uint32]
     indexedAttrs: HashSet[uint32]
+    ## Declaration order (attr names by ascending aid; partition names by
+    ## ascending id). Needed to replay the schema into the Rust compiler
+    ## engine so it assigns the SAME ids.
+    attrDeclOrder*: seq[string]
+    partDeclOrder*: seq[string]
 
 proc newResolver*(): Resolver =
   result.nextAid = 1
@@ -178,6 +183,7 @@ proc declarePartition*(r: var Resolver; name: string): uint64 =
   inc r.nextCustomPartition
   r.partitions[p] = PartitionCounter(nextSeq: 1)
   r.partitionNames[name] = p
+  r.partDeclOrder.add name
   return p
 
 proc registerPartition*(r: var Resolver; name: string; partitionId: uint64) =
@@ -225,6 +231,7 @@ proc declareAttr*(r: var Resolver; name: string; valueType: uint32;
   r.declared.incl aid
   r.valueTypes[aid] = valueType
   if many: r.cardinality[aid] = true
+  r.attrDeclOrder.add n
   return (aid, true)
 
 proc valueTypeFor*(r: var Resolver; aid: uint32): Option[uint32] =
@@ -290,6 +297,7 @@ proc loadAttrs*(r: var Resolver; items: seq[(seq[byte], seq[byte])]) =
 proc loadUserAttr*(r: var Resolver; name: string; eid: uint64;
                     valueType: uint32; many, unique, indexed: bool) =
   let aid = eid.uint32
+  let isNew = aid notin r.declared
   r.attrs[name] = aid
   r.attrsRev[aid] = name
   r.declared.incl aid
@@ -297,6 +305,12 @@ proc loadUserAttr*(r: var Resolver; name: string; eid: uint64;
   if many: r.cardinality[aid] = true
   if unique: r.uniqueAttrs.incl aid
   if indexed: r.indexedAttrs.incl aid
+  if isNew:
+    # keep attrDeclOrder sorted by aid (= declaration order in PartDb)
+    var insPos = r.attrDeclOrder.len
+    for i, n in r.attrDeclOrder:
+      if r.attrs.getOrDefault(n, 0'u32) > aid: insPos = i; break
+    r.attrDeclOrder.insert(name, insPos)
   let p = partitionOf(eid)
   if p in r.partitions:
     if seqOf(eid) >= r.partitions[p].nextSeq:

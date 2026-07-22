@@ -882,7 +882,7 @@ impl NimKVStore {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Nim Query Engine — C-ABI wrappers for nim-page-store/query/api.nim
+// Nim Query Engine — C-ABI wrappers for nim-kvstore/query/api.nim
 // ═══════════════════════════════════════════════════════════════════════════════
 
 extern "C" {

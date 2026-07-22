@@ -24,3 +24,7 @@ if str(_so_dir) not in existing:
 _src = _root / "src"
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
+
+# pynim_query.so (nimpy bridge) is built at the repo root.
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))

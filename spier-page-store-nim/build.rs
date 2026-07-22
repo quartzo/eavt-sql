@@ -21,7 +21,7 @@ const NIM_FLAGS: &[&str] = &[
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let workspace_root = manifest_dir.join("..");
-    let page_store_dir = workspace_root.join("nim-page-store");
+    let page_store_dir = workspace_root.join("nim-kvstore");
     let blobstore_dir = workspace_root.join("nim-blobstore");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 

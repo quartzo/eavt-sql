@@ -95,7 +95,9 @@ proc parseStr(input: string; pos: var int): SExpr =
     else:
       s.add input[pos]
     inc pos
-  if pos < input.len: inc pos # skip closing "
+  if pos >= input.len:
+    raise newException(ParseError, "parse error at " & $pos & ": unterminated string")
+  inc pos # skip closing "
   return newStr(s)
 
 proc parseList(input: string; pos: var int): SExpr =
@@ -105,7 +107,9 @@ proc parseList(input: string; pos: var int): SExpr =
   while pos < input.len and input[pos] != ')':
     items.add parse(input, pos)
     skipWhitespace(input, pos)
-  if pos < input.len: inc pos # skip closing )
+  if pos >= input.len:
+    raise newException(ParseError, "parse error at " & $pos & ": unterminated list")
+  inc pos # skip closing )
   return newList(items)
 
 proc parse(input: string; pos: var int): SExpr =
@@ -206,7 +210,18 @@ type
   YieldState* = object
     stack*: seq[Frame]
     dirtyDepthRunIdxs: seq[int]
+    depthRuns*: seq[DepthRunFrame]
     started*: bool
+
+  ## DepthRunFrame — one active `scanner-iterate` loop (port of the Rust
+  ## frame in spier-scheme eval.rs). `stageKey` is the depth index, matching
+  ## Rust's `state.depth_runs.len()` at push time.
+  DepthRunFrame* = object
+    stageKey*: int64
+    scannerVals*: seq[SExpr]
+    body*: seq[SExpr]
+    paramName*: string
+    ranges*: SExpr
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Evaluator
@@ -215,7 +230,8 @@ type
 type EvalError* = object of CatchableError
 
 const SpecialForms = ["let*", "let", "when", "if", "begin", "set!",
-                       "print", "assert", "and", "or", "not"]
+                       "print", "assert", "and", "or", "not",
+                       "scanner-iterate"]
 
 proc isSpecialForm(name: string): bool = name in SpecialForms
 
@@ -285,8 +301,54 @@ proc processValue(value: SExpr; state: var YieldState; env: var Environment;
       state.stack.add Frame(kind: fkOrSeq, osRemaining: restOr)
       state.stack.add Frame(kind: fkEval, fexpr: nextOr)
       return
+    of fkDepthRunBody:
+      # One iteration of a scanner-iterate loop finished: advance the
+      # leapfrog and either re-run the body or unwind.
+      if state.depthRuns.len == 0: continue
+      let dr = state.depthRuns[^1]
+      var leapArgs = @[newInt(dr.stageKey)]
+      for sv in dr.scannerVals: leapArgs.add sv
+      leapArgs.add dr.ranges
+      let okStep = host.call("scheme-leap-next", leapArgs)
+      if okStep.kind == esYield:
+        raise newException(EvalError, "unexpected yield in scheme-leap-next")
+      if isTruthy(okStep.result):
+        if dr.paramName.len > 0 and dr.scannerVals.len > 0:
+          let vStep = host.call("scanner-read", @[dr.scannerVals[0]])
+          if vStep.kind == esYield:
+            raise newException(EvalError, "unexpected yield in scanner-read")
+          env.set(dr.paramName, vStep.result)
+        state.stack.add Frame(kind: fkDepthRunBody)
+        for i in countdown(dr.body.len - 1, 0):
+          state.stack.add Frame(kind: fkEval, fexpr: dr.body[i])
+        return
+      else:
+        # Loop exhausted — the scanner-iterate form evaluates to Void.
+        state.depthRuns.setLen(state.depthRuns.len - 1)
+        state.stack.add Frame(kind: fkEval, fexpr: newVoid())
+        return
     else:
       discard
+
+proc evalFully(expr: SExpr; env: var Environment; host: HostFns;
+               state: var YieldState): EvalStep {.nimcall.} =
+  ## Evaluate `expr` to a final value, draining any continuation frames the
+  ## evaluation pushes (special forms work in non-tail/arg position).
+  ## Yields propagate to the caller.
+  let baseDepth = state.stack.len
+  let step = evalExpr(expr, env, host, state)
+  if step.kind == esYield: return step
+  var lastVal = step.result
+  while state.stack.len > baseDepth:
+    processValue(lastVal, state, env, host)
+    if state.stack.len <= baseDepth: break
+    if state.stack[^1].kind != fkEval: break
+    let top = state.stack[^1]
+    state.stack.setLen(state.stack.len - 1)
+    let s2 = evalExpr(top.fexpr, env, host, state)
+    if s2.kind == esYield: return s2
+    lastVal = s2.result
+  done(lastVal)
 
 # ── Resumable evaluator entry point ──
 
@@ -306,7 +368,10 @@ proc evalWithYield*(program: SchemeProgram; env: var Environment;
       if state.stack.len == 0:
         return done(step.result)
     else:
-      discard
+      # Non-Eval continuation frame reached by the main loop (happens after
+      # a yield resume): route it through processValue with a Void value.
+      state.stack.add frame
+      processValue(newVoid(), state, env, host)
   return done(newVoid())
 
 # ── evalSpecialForm — dispatch special forms ──
@@ -356,12 +421,12 @@ proc evalSpecialForm(name: string; args: SExpr; env: var Environment;
     return evalExpr(valExpr, env, host, state)
   of "print":
     for i in 1..<args.items.len:
-      let v = evalExpr(args.items[i], env, host, state)
+      let v = evalFully(args.items[i], env, host, state)
       if v.kind == esYield: return v
       stderr.writeLine($v.result)
     return done(newVoid())
   of "assert":
-    let v = evalExpr(args.items[1], env, host, state)
+    let v = evalFully(args.items[1], env, host, state)
     if v.kind == esYield: return v
     if not isTruthy(v.result):
       var msg = "assertion failed"
@@ -369,29 +434,86 @@ proc evalSpecialForm(name: string; args: SExpr; env: var Environment;
       raise newException(EvalError, msg)
     return done(newVoid())
   of "and":
-    var remaining: seq[SExpr] = @[]
-    for i in countdown(args.items.len - 1, 2):
-      remaining.add args.items[i]
-    if remaining.len == 0 and args.items.len >= 2:
-      return evalExpr(args.items[1], env, host, state)
-    if remaining.len == 0 and args.items.len < 2:
-      return done(newBool(true))
-    state.stack.add Frame(kind: fkAndSeq, asRemaining: remaining)
-    return evalExpr(args.items[1], env, host, state)
+    var last = newBool(true)
+    for i in 1..<args.items.len:
+      let v = evalFully(args.items[i], env, host, state)
+      if v.kind == esYield: return v
+      if not isTruthy(v.result): return done(newBool(false))
+      last = v.result
+    return done(last)
   of "or":
-    var remaining: seq[SExpr] = @[]
-    for i in countdown(args.items.len - 1, 2):
-      remaining.add args.items[i]
-    if remaining.len == 0 and args.items.len >= 2:
-      return evalExpr(args.items[1], env, host, state)
-    if remaining.len == 0 and args.items.len < 2:
-      return done(newBool(false))
-    state.stack.add Frame(kind: fkOrSeq, osRemaining: remaining)
-    return evalExpr(args.items[1], env, host, state)
+    for i in 1..<args.items.len:
+      let v = evalFully(args.items[i], env, host, state)
+      if v.kind == esYield: return v
+      if isTruthy(v.result): return done(v.result)
+    return done(newBool(false))
   of "not":
-    let v = evalExpr(args.items[1], env, host, state)
+    let v = evalFully(args.items[1], env, host, state)
     if v.kind == esYield: return v
     return done(newBool(not isTruthy(v.result)))
+  of "scanner-iterate":
+    # (scanner-iterate scanner-expr-or-list (param) [:ranges ranges-expr] body...)
+    # Port of spier-scheme eval.rs::eval_scanner_iterate_frame.
+    if args.items.len < 4:
+      raise newException(EvalError,
+        "scanner-iterate: expected (scanner-iterate scanners (param) [:ranges r] body...+)")
+    var scannerExprs: seq[SExpr] = @[]
+    let se = args.items[1]
+    if se.kind == sList and se.items.len > 0:
+      scannerExprs = se.items
+    else:
+      scannerExprs = @[se]
+    let paramsList = args.items[2]
+    if paramsList.kind != sList or paramsList.items.len == 0 or
+       paramsList.items[0].kind != sSymbol:
+      raise newException(EvalError,
+        "scanner-iterate: expected (param) — non-empty list of symbols")
+    let paramName = paramsList.items[0].symval
+    var rangesExpr: SExpr = nil
+    var body: seq[SExpr] = @[]
+    var i = 3
+    while i < args.items.len:
+      let it = args.items[i]
+      if it.kind == sSymbol and it.symval == ":ranges":
+        if rangesExpr != nil:
+          raise newException(EvalError, "scanner-iterate: :ranges specified more than once")
+        if i + 1 >= args.items.len:
+          raise newException(EvalError, "scanner-iterate: :ranges requires a value")
+        rangesExpr = args.items[i + 1]
+        i += 2
+        continue
+      body.add it
+      inc i
+    if body.len == 0:
+      raise newException(EvalError, "scanner-iterate: missing body")
+    var rangesVal = newList(@[])
+    if rangesExpr != nil:
+      let rs = evalExpr(rangesExpr, env, host, state)
+      if rs.kind == esYield: return rs
+      rangesVal = rs.result
+    var scannerVals: seq[SExpr] = @[]
+    for e in scannerExprs:
+      let sv = evalExpr(e, env, host, state)
+      if sv.kind == esYield: return sv
+      scannerVals.add sv.result
+    var leapArgs = @[newInt(0)]
+    for sv in scannerVals: leapArgs.add sv
+    leapArgs.add rangesVal
+    let ok = host.call("scheme-leap-init", leapArgs)
+    if ok.kind == esYield: return ok
+    if not isTruthy(ok.result):
+      return done(newVoid())
+    let val = host.call("scanner-read", @[scannerVals[0]])
+    if val.kind == esYield: return val
+    env.set(paramName, val.result)
+    state.depthRuns.add DepthRunFrame(
+      stageKey: state.depthRuns.len.int64,
+      scannerVals: scannerVals, body: body,
+      paramName: paramName, ranges: rangesVal)
+    state.stack.add Frame(kind: fkDepthRunBody)
+    for j in countdown(body.len - 1, 0):
+      state.stack.add Frame(kind: fkEval, fexpr: body[j])
+    return done(newVoid())
   else:
     raise newException(EvalError, "unknown special form: " & name)
 
@@ -416,11 +538,11 @@ proc evalExpr(expr: SExpr; env: var Environment; host: HostFns;
       if host.isNative(name):
         var args: seq[SExpr] = @[]
         for i in 1..<expr.items.len:
-          let argStep = evalExpr(expr.items[i], env, host, state)
+          let argStep = evalFully(expr.items[i], env, host, state)
           if argStep.kind == esYield: return argStep
           args.add argStep.result
         return host.call(name, args)
-      raise newException(EvalError, "unknown function: " & name)
+      raise newException(EvalError, "unbound: " & name)
     raise newException(EvalError, "cannot apply non-symbol as function")
   return done(newVoid())
 

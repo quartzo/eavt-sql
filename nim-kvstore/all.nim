@@ -10,7 +10,7 @@ import journal/all
 import nim_memtable/all
 import ./abi
 import ./backend
-import ./transactor
+import ./kvstore
 import ./eavt
 import ./keys
 import ./resolver

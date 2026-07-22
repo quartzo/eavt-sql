@@ -4,7 +4,7 @@
 
 import std/[options, tables, strutils, sequtils, math]
 import ../scheme
-import ../transactor
+import ../kvstore
 import ../keys
 import query/types
 import query/scanner
@@ -415,7 +415,7 @@ method call(h: SchemeHostFns; name: string; args: seq[SExpr]): EvalStep =
     let val = args[1]
     let isUnique = h.engine.isUniqueAttr(attr)
     if not isUnique:
-      return done(newVoid())
+      raise newException(EvalError, "lookup-entity: attribute is not UNIQUE")
     let eid = h.engine.lookupEntity(attr, val)
     if eid.isSome:
       return done(SExpr(kind: sInt, ival: int64(eid.get)))

@@ -1,10 +1,10 @@
-## query/engine.nim — QueryEngine: ties transactor + scheme + scanner + hostfns.
+## query/engine.nim — QueryEngine: ties kvstore + scheme + scanner + hostfns.
 ##
 ## Port of spier-eavt-query/src/engine/query_engine_inner.rs + lib.rs (~1293 lines Rust → Nim).
 
 import std/[options, tables, strutils, sequtils]
 import ../scheme
-import ../transactor
+import ../kvstore
 import ../eavt
 import ../keys
 import ../resolver
@@ -14,7 +14,7 @@ import query/scanner
 import query/hostfns
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# QueryStore — concrete EngineOps implementation over the transactor
+# QueryStore — concrete EngineOps implementation over the kvstore
 # ═══════════════════════════════════════════════════════════════════════════════
 
 type
@@ -118,23 +118,38 @@ method openCursor(q: QueryStore; cfId: uint32; prefix: seq[byte]): NimCursor =
 
 method saveWithT(q: QueryStore; eid: uint64; attr: string; val: SExpr;
                   t: uint64; asOf: uint64) =
-  let attrId = q.eavt.lookupAttr(attr).get(0'u32)
-  if attrId == 0:
-    # need to declare attr first
-    discard
+  let attrIdOpt = q.eavt.lookupAttr(attr)
+  if attrIdOpt.isNone:
+    raise newException(EvalError, "save to undeclared attr: " & attr)
+  let attrId = attrIdOpt.get
   let vt = q.eavt.valueTypeFor(attrId).get(scanner.DbTypeString)
+  let many = q.eavt.isMany(attrId)
   let mode = valueTypeToEncodeMode(vt)
   let encoded = encodeValue(sexprToValueForType(val, vt), mode, eid)
-  let entries = buildEavtEntries(eid, attrId, encoded, t, false, mode, false)
+  let indexed = q.eavt.resolver.isIndexed(attrId)
+  if not many:
+    var ePrefix = keys.encodeRef(eid)
+    ePrefix.add byte(attrId shr 24); ePrefix.add byte((attrId shr 16) and 0xFF)
+    ePrefix.add byte((attrId shr 8) and 0xFF); ePrefix.add byte(attrId and 0xFF)
+    for ek in q.eavt.scan(0'u32, ePrefix):
+      if ek.len < 20: continue
+      let esf = beUint64(ek, ek.len - 8)
+      if (esf and 1) != 0: continue
+      var retEntries = buildEavtEntries(eid, attrId, ek[12 ..< ek.len - 8], t, true, mode, indexed)
+      q.eavt.batchWrite(retEntries)
+  var entries = buildEavtEntries(eid, attrId, encoded, t, false, mode, indexed)
   q.eavt.batchWrite(entries)
 
 method retract(q: QueryStore; eid: uint64; attr: string; val: SExpr;
                 t: uint64; asOf: uint64) =
-  let attrId = q.eavt.lookupAttr(attr).get(0'u32)
+  let attrIdOpt = q.eavt.lookupAttr(attr)
+  if attrIdOpt.isNone: return  # retract on undeclared attr is a no-op
+  let attrId = attrIdOpt.get
   let vt = q.eavt.valueTypeFor(attrId).get(scanner.DbTypeString)
   let mode = valueTypeToEncodeMode(vt)
   let encoded = encodeValue(sexprToValueForType(val, vt), mode, eid)
-  let entries = buildEavtEntries(eid, attrId, encoded, t, true, mode, false)
+  let indexed = q.eavt.resolver.isIndexed(attrId)
+  let entries = buildEavtEntries(eid, attrId, encoded, t, true, mode, indexed)
   q.eavt.batchWrite(entries)
 
 method lookupAttr(q: QueryStore; name: string): Option[uint32] =
@@ -146,7 +161,7 @@ method attrName(q: QueryStore; aid: uint32): string =
 method declareAttrFromSql(q: QueryStore; attr, typeName: string;
     many, unique: bool; t: uint64) =
   let vt = valueTypeFromName(typeName)
-  discard q.eavt.eavtDeclareAttr(attr, vt, many)
+  discard q.eavt.eavtDeclareAttr(attr, vt, many, unique)
 
 method declarePartition(q: QueryStore; name: string; t: uint64): uint64 =
   q.eavt.declarePartition(name)
@@ -159,25 +174,55 @@ method allocateTx(q: QueryStore): uint64 = 0  # TODO
 method valueTypeFor(q: QueryStore; aid: uint32): Option[uint32] =
   q.eavt.valueTypeFor(aid)
 
-method isUniqueAttr(q: QueryStore; name: string): bool = false  # TODO
+method isUniqueAttr(q: QueryStore; name: string): bool =
+  let aid = q.eavt.lookupAttr(name)
+  aid.isSome and q.eavt.isUnique(aid.get)
 
 method lookupEntity(q: QueryStore; attrName: string; value: SExpr): Option[uint64] =
-  # TODO: not yet implemented
-  none[uint64]()
+  ## Unique-attr lookup: scan avet [attr 4B][val][eid 8B][sf 8B] by prefix.
+  let aidOpt = q.eavt.lookupAttr(attrName)
+  if aidOpt.isNone: return none[uint64]()
+  let aid = aidOpt.get
+  let vt = q.eavt.valueTypeFor(aid).get(resolver.DbTypeString)
+  let mode = valueTypeToEncodeMode(vt)
+  let encoded = encodeValue(sexprToValueForType(value, vt), mode, 0)
+  var prefix = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
+                byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
+  prefix.add encoded
+  let scanRes = q.eavt.scan(2'u32, prefix)
+  if scanRes.len == 0: return none[uint64]()
+  let k = scanRes[0]
+  if k.len < 20: return none[uint64]()
+  let sf = beUint64(k, k.len - 8)
+  if (sf and 1) == 1: return none[uint64]()  # retracted
+  some(beUint64(k, k.len - 16))
 
 method lookupValue(q: QueryStore; eid: uint64; attrName: string): Option[SExpr] =
-  let aid = q.eavt.lookupAttr(attrName)
-  if aid.isNone: return none[SExpr]()
-  var prefix = keys.encodeInt(int64(eid))
-  let aidVal = aid.get
-  prefix.add byte(aidVal shr 24); prefix.add byte((aidVal shr 16) and 0xFF)
-  prefix.add byte((aidVal shr 8) and 0xFF); prefix.add byte(aidVal and 0xFF)
+  let aidOpt = q.eavt.lookupAttr(attrName)
+  if aidOpt.isNone: return none[SExpr]()
+  let aid = aidOpt.get
+  # eavt key: [eid 8B BE][attr 4B BE][val][sf 8B BE]
+  var prefix = keys.encodeRef(eid)
+  prefix.add byte(aid shr 24); prefix.add byte((aid shr 16) and 0xFF)
+  prefix.add byte((aid shr 8) and 0xFF); prefix.add byte(aid and 0xFF)
   let scanRes = q.eavt.scan(0'u32, prefix)
-  if scanRes.len > 0:
-    let k = scanRes[0]
-    if k.len >= 20:
-      let raw = beUint64(k, 12)
-      return some(SExpr(kind: sInt, ival: keys.decodeInt64(raw)))
+  # Key order: by (prefix, sf). sf = (t<<1)|retracted. Within the same
+  # [eid][attr][val] group, a retraction (sf=odd) sorts right after its
+  # original (sf=even). Walk backwards: if the newest entry in a group is
+  # retracted the whole group is dead.  Otherwise the newest active wins.
+  var retractedGroup: seq[byte] = @[]
+  for j in countdown(scanRes.len - 1, 0):
+    let k = scanRes[j]
+    if k.len < 20: continue
+    let sf = beUint64(k, k.len - 8)
+    let group = k[0 ..< k.len - 8]
+    if (sf and 1) == 1:
+      retractedGroup = group
+      continue
+    if group == retractedGroup:
+      continue   # group was killed by a later retraction
+    let vt = q.eavt.valueTypeFor(aid).get(resolver.DbTypeString)
+    return some(keys.decodeStoredValue(k[12 ..< k.len - 8], vt))
   none[SExpr]()
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -239,8 +284,8 @@ proc nextBatch*(sess: StreamingSession; maxRows: int): (seq[seq[SExpr]], bool) =
     let step = evalWithYield(sess.program, sess.env, sess.host, sess.state)
     case step.kind:
     of esYield:
-      if step.result.kind == sList:
-        rows.add step.result.items
+      if step.row.kind == sList:
+        rows.add step.row.items
       more = rows.len >= maxRows
       if more: return (rows, true)
     of esDone:

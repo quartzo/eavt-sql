@@ -246,6 +246,48 @@ proc beUint32*(data: openArray[byte]; start: int): uint32 =
     result = (result shl 8) or uint32(data[start + i])
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Stored value decoding (query engine)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+proc decodeVariableStr*(data: openArray[byte]; start: int = 0): string =
+  ## Decode an emVariable value ([u32 len][bytes]) at `start`.
+  if start + 4 > data.len: return ""
+  let n = (uint32(data[start]) shl 24 or uint32(data[start+1]) shl 16 or
+           uint32(data[start+2]) shl 8 or uint32(data[start+3])).int
+  if start + 4 + n > data.len: return ""
+  result = newString(n)
+  if n > 0: copyMem(addr result[0], unsafeAddr data[start+4], n)
+
+proc decodeStoredValue*(data: openArray[byte]; vt: uint32): SExpr =
+  ## Decode a stored EAVT value given its db valueType.
+  case vt:
+  of DbTypeRef:
+    if data.len >= 8: SExpr(kind: sInt, ival: cast[int64](beUint64(data, 0)))
+    else: SExpr(kind: sInt, ival: 0)
+  of DbTypeBoolean:
+    if data.len >= 8: SExpr(kind: sBool, bval: decodeInt64(beUint64(data, 0)) != 0)
+    else: SExpr(kind: sBool, bval: false)
+  of DbTypeLong, DbTypeInstant:
+    if data.len >= 8: SExpr(kind: sInt, ival: decodeInt64(beUint64(data, 0)))
+    else: SExpr(kind: sInt, ival: 0)
+  of DbTypeFloat:
+    if data.len >= 8: SExpr(kind: sFloat, fval: decodeFloat64(beUint64(data, 0)))
+    else: SExpr(kind: sFloat, fval: 0.0)
+  of DbTypeBytes, DbTypeBlob:
+    if data.len >= 4:
+      let n = (uint32(data[0]) shl 24 or uint32(data[1]) shl 16 or
+               uint32(data[2]) shl 8 or uint32(data[3])).int
+      let m = min(n, data.len - 4)
+      var b = newSeq[byte](m)
+      if m > 0: copyMem(addr b[0], unsafeAddr data[4], m)
+      SExpr(kind: sBytes, bytesval: b)
+    else:
+      SExpr(kind: sBytes, bytesval: @[])
+  else:
+    SExpr(kind: sStr, sval: decodeVariableStr(data, 0))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Fixed-size encoding (for query engine scanner — sign-flip for int, float, bool, instant)
 # ═══════════════════════════════════════════════════════════════════════════════
 

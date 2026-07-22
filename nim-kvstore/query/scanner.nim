@@ -169,7 +169,7 @@ proc recomputePrefix*(sc: V2Scanner) =
           buf.add byte(v32 shr 24); buf.add byte((v32 shr 16) and 0xFF)
           buf.add byte((v32 shr 8) and 0xFF); buf.add byte(v32 and 0xFF)
         of "e":
-          buf.add keys.encodeInt(v.ival)
+          buf.add keys.encodeRef(uint64(v.ival))
         of "v":
           if sc.valueAttrType == some(DbTypeBlob):
             buf.add keys.encodeVariableUnordered(v.bytesval)

@@ -1,4 +1,4 @@
-## tests.nim — Unit tests for nim-page-store internals.
+## tests.nim — Unit tests for nim-kvstore internals.
 ##
 ## Run with: nim c -r --mm:arc --threads:off --noNimblePath \
 ##   --path:../nim-blobstore tests.nim
@@ -14,7 +14,7 @@ import ./abi
 import ./pages
 import ./spinlock
 import ./backend
-import ./transactor
+import ./kvstore
 import ./scheme
 
 # ═══════════════════════════════════════════════════════════════════════════════
