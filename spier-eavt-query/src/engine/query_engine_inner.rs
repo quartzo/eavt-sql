@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use spier_storage_traits::invalid_cursor_handle;
+use spier_page_store_nim::storage_traits::invalid_cursor_handle;
 use spier_page_store_nim::transactor::keys::{self};
 use spier_page_store_nim::transactor::resolver_consts as resolver;
 use spier_page_store_nim::transactor::TransactorEngine;
@@ -233,7 +233,7 @@ impl EngineOps for QueryEngineInner {
         &self,
         cf_id: u32,
         prefix: &[u8],
-    ) -> Result<std::sync::Arc<std::cell::RefCell<dyn spier_storage_traits::Cursor>>, String> {
+    ) -> Result<std::sync::Arc<std::cell::RefCell<dyn spier_page_store_nim::storage_traits::Cursor>>, String> {
         let h = self.tx.open_cursor_direct(cf_id, prefix)?;
         Ok(h.cursor)
     }

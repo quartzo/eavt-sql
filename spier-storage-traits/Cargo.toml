@@ -1,5 +1,0 @@
-[package]
-name = "spier-storage-traits"
-version = "0.1.0"
-edition = "2021"
-description = "Storage-layer traits (BlobStore, Journal, MemTable, KVStore)"

@@ -2,6 +2,7 @@
 //! (`libnim_page_store.a`). Exposes `NimPageStore` with methods that call
 //! through a C-ABI vtable.
 
+pub mod storage_traits;
 pub mod kvstore;
 pub mod transactor;
 

@@ -29,7 +29,7 @@ pub trait EngineOps: Send + Sync {
         &self,
         cf_id: u32,
         prefix: &[u8],
-    ) -> Result<std::sync::Arc<std::cell::RefCell<dyn spier_storage_traits::Cursor>>, String>;
+    ) -> Result<std::sync::Arc<std::cell::RefCell<dyn spier_page_store_nim::storage_traits::Cursor>>, String>;
     fn collect_active(&self, cf: &str, prefix: &[u8], ctx: &QueryContext) -> Vec<RawDatomView>;
     fn save_with_t(
         &self,

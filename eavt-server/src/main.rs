@@ -327,7 +327,7 @@ impl EavtService for EavtServer {
         _request: Request<eavt::StatusRequest>,
     ) -> Result<Response<eavt::StatusResponse>, Status> {
         let db_stats_bytes = self.client.db_stats().map_err(|e| Status::internal(e))?;
-        let db_stats = spier_storage_traits::DbStats::parse(&db_stats_bytes)
+        let db_stats = spier_page_store_nim::storage_traits::DbStats::parse(&db_stats_bytes)
             .map_err(|e| Status::internal(e))?;
         let mt_size = self
             .client
@@ -371,7 +371,7 @@ impl EavtService for EavtServer {
                 .cf_stats(i as u32)
                 .map_err(|e| Status::internal(e))?;
             let stats =
-                spier_storage_traits::CfStats::parse(&buf).map_err(|e| Status::internal(e))?;
+                spier_page_store_nim::storage_traits::CfStats::parse(&buf).map_err(|e| Status::internal(e))?;
             cfs.push(eavt::CfStatsInfo {
                 name: name.to_string(),
                 num_keys: stats.num_keys,

@@ -4,7 +4,7 @@
 
 pub mod page_store;
 
-pub use spier_storage_traits::KVStoreEngine;
+pub use crate::storage_traits::KVStoreEngine;
 
 use std::collections::HashMap;
 use std::sync::mpsc;
@@ -13,7 +13,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::NimKVStore;
-use spier_storage_traits::CursorHandle;
+use crate::storage_traits::CursorHandle;
 
 const DEFAULT_FLUSH_THRESHOLD: u64 = 64 * 1024 * 1024; // 64MB
 const DEFAULT_GC_MAX_AGE_SECS: u64 = 43200;
@@ -358,7 +358,7 @@ impl KVStoreEngine for KVState {
 
 // ── SimpleCursor — lightweight cursor over pre-fetched keys ──
 
-use spier_storage_traits::Cursor;
+use crate::storage_traits::Cursor;
 
 struct SimpleCursor {
     keys: Vec<Vec<u8>>,

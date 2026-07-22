@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 mod engine;
 
 pub use spier_query_ir::ProgramHandle;
-pub use spier_storage_traits::CursorHandle;
+pub use spier_page_store_nim::storage_traits::CursorHandle;
 
 use spier_compiler::{CompileResultSt, CompilerEngine};
 use spier_datalog::CompileStats;

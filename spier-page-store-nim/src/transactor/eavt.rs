@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use crate::transactor::keys::{self, EncodeMode, RawDatom};
 use crate::transactor::resolver::{self, Resolver};
-use spier_storage_traits::KVStoreEngine;
+use crate::storage_traits::KVStoreEngine;
 use spier_value::{self, Value};
 
 fn unpack_keys(buf: &[u8]) -> Vec<Vec<u8>> {

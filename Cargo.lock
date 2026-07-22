@@ -283,7 +283,7 @@ dependencies = [
  "clap",
  "prost",
  "spier-eavt-query",
- "spier-storage-traits",
+ "spier-page-store-nim",
  "spier-value",
  "tokio",
  "tokio-stream",
@@ -1125,7 +1125,6 @@ dependencies = [
  "spier-scheme",
  "spier-sql-frontend",
  "spier-sql-parse",
- "spier-storage-traits",
  "spier-value",
 ]
 
@@ -1144,7 +1143,6 @@ dependencies = [
 name = "spier-page-store-nim"
 version = "0.1.0"
 dependencies = [
- "spier-storage-traits",
  "spier-value",
 ]
 
@@ -1192,10 +1190,6 @@ dependencies = [
  "pyo3",
  "spier-sql-parse",
 ]
-
-[[package]]
-name = "spier-storage-traits"
-version = "0.1.0"
 
 [[package]]
 name = "spier-value"

@@ -11,7 +11,7 @@ pub use resolver::Resolver;
 use std::collections::HashMap;
 
 use crate::KVState;
-use spier_storage_traits::{CursorHandle, KVStoreEngine};
+use crate::storage_traits::{CursorHandle, KVStoreEngine};
 use spier_value::Value;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

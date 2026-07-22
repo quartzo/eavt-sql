@@ -15,6 +15,5 @@ spier-query-ir = { path = "../spier-query-ir" }
 spier-scheme = { path = "../spier-scheme" }
 spier-sql-frontend = { path = "../spier-sql-frontend" }
 spier-sql-parse = { path = "../spier-sql-parse" }
-spier-storage-traits = { path = "../spier-storage-traits" }
 spier-page-store-nim = { path = "../spier-page-store-nim" }
 spier-value = { path = "../spier-value" }

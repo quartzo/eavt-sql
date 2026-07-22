@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use spier_storage_traits::Cursor;
+use spier_page_store_nim::storage_traits::Cursor;
 use spier_page_store_nim::transactor::keys::{
     decode_fixed, decode_float64, decode_int64, decode_suffix, decode_variable,
     decode_variable_unordered, encode_fixed, encode_int64, encode_suffix, encode_variable,
@@ -15,7 +15,7 @@ use spier_value::{Value, TAG_BYTES, TAG_INT64, TAG_STR};
 
 pub struct InvalidCursor;
 
-impl spier_storage_traits::Cursor for InvalidCursor {
+impl spier_page_store_nim::storage_traits::Cursor for InvalidCursor {
     fn is_valid(&self) -> bool {
         false
     }
