@@ -14,6 +14,7 @@ import ./spinlock
 import blobstore
 import memory/backend as mem_be
 import file/backend as fil_be
+import s3/backend as s3_be
 import journal/backend as jou_be
 
 proc nim_journal_open*(path: cstring;
@@ -22,14 +23,6 @@ proc nim_journal_open*(path: cstring;
 
 proc nim_journal_close*(vt: NimJournalVtablePtr) =
   jou_be.closeJournalVtable(cast[pointer](vt))
-
-# S3 still uses C-ABI.
-proc nim_blob_s3_open*(keys, vals: CStringArr; count: cint;
-                       errOut: ptr cint): NimBlobVtablePtr
-    {.importc: "nim_blob_s3_open", cdecl.}
-
-proc nim_blob_s3_close*(vt: NimBlobVtablePtr)
-    {.importc: "nim_blob_s3_close", cdecl.}
 
 # ── seq[byte] comparison helpers ──
 
@@ -1037,9 +1030,7 @@ proc openPageStore*(keys, vals: CStringArr; count: cint;
         setErr(errOut, ErrConfig)
         return nil
       fil_be.newFileBlobStore(path, readOnly)
-    of "s3":
-      # TODO: refactor S3 backend to implement BlobStore trait.
-      nil
+    of "s3": s3_be.newS3BlobStore(config)
     else: nil
 
   if blobs == nil:
