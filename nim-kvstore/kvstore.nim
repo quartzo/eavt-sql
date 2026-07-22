@@ -320,12 +320,18 @@ proc newMergedCursor*(sources: seq[NimCursor]): MergedCursor =
       if k.isSome:
         heap.push((k.get, i))
   result.heap = heap
-  result.advance()
+  # Lazy — first peek/next/seek will call ensure() → advance()
+
+proc ensure(mc: MergedCursor) =
+  if mc.curKey.isNone and not mc.atEnd:
+    mc.advance()
 
 proc peek*(mc: MergedCursor): Option[seq[byte]] =
-  mc.curKey
+  mc.ensure()
+  if mc.atEnd: none(seq[byte]) else: mc.curKey
 
 proc next*(mc: MergedCursor): Option[seq[byte]] =
+  mc.ensure()
   result = mc.curKey
   mc.curKey = none(seq[byte])
   mc.advance()

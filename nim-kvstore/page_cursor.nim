@@ -18,7 +18,7 @@ type
     prefix*: seq[byte]
     atEnd*: bool
     indexStack: seq[IndexPos]
-    leafKeys: seq[seq[byte]]     ## expanded keys of current leaf
+    leafKeys: seq[seq[byte]]
     leafIdx: int
     curKey: Option[seq[byte]]
 
@@ -80,58 +80,57 @@ proc advanceToNextLeaf(c: PageStoreCursor) =
     c.indexStack.setLen(c.indexStack.len - 1)
   c.atEnd = true
 
+# ── Internal: advance state to next matching key ──
+
+proc advance(c: PageStoreCursor) =
+  if c.atEnd: return
+  c.curKey = none(seq[byte])
+
+  while true:
+    inc c.leafIdx
+    if c.leafIdx < c.leafKeys.len:
+      if keyHasPrefix(c.leafKeys[c.leafIdx], c.prefix):
+        c.curKey = some(c.leafKeys[c.leafIdx])
+        return
+      continue
+    if c.indexStack.len > 0:
+      advanceToNextLeaf(c)
+      if c.atEnd: return
+      continue
+    c.atEnd = true
+    return
+
+proc ensure(c: PageStoreCursor) =
+  if c.curKey.isNone and not c.atEnd:
+    c.advance()
+
 # ── Public API ──
 
 proc newPageStoreCursor*(s: ptr PageStoreInner; cf: int; prefix: seq[byte]): PageStoreCursor =
-  result = PageStoreCursor(
-    s: s, cf: cf, prefix: prefix, atEnd: false, curKey: none(seq[byte]),
-  )
-  if cf < 0 or cf >= s[].numCf:
-    result.atEnd = true; return
+  result = PageStoreCursor(s: s, cf: cf, prefix: prefix, atEnd: false)
+  if cf < 0 or cf >= s[].numCf: result.atEnd = true; return
   let tree = s[].trees[cf]
-  if tree.rootUuid == default(array[16, byte]):
-    result.atEnd = true; return
-  if tree.height == 0:
-    loadLeaf(result, tree.rootUuid)
-  else:
-    descendToFirstLeaf(result, tree.rootUuid, tree.height)
+  if tree.rootUuid == default(array[16, byte]): result.atEnd = true; return
+  if tree.height == 0: loadLeaf(result, tree.rootUuid)
+  else: descendToFirstLeaf(result, tree.rootUuid, tree.height)
 
 proc peek*(c: PageStoreCursor): Option[seq[byte]] =
-  if c.atEnd: return none(seq[byte])
-  if c.curKey.isSome: return c.curKey
-  inc c.leafIdx
-  if c.leafIdx < c.leafKeys.len:
-    let k = c.leafKeys[c.leafIdx]
-    if keyHasPrefix(k, c.prefix):
-      c.curKey = some(k)
-      return c.curKey
-    return c.peek()  # skip non-matching, try next
-  if c.indexStack.len > 0:
-    advanceToNextLeaf(c)
-    if not c.atEnd: return c.peek()
-  c.atEnd = true
-  none(seq[byte])
+  c.ensure()
+  if c.atEnd: none(seq[byte]) else: c.curKey
 
 proc next*(c: PageStoreCursor): Option[seq[byte]] =
-  let k = c.peek()
-  c.curKey = none(seq[byte])
-  k
+  c.ensure()
+  result = c.curKey
+  c.advance()
 
 proc seek*(c: PageStoreCursor; target: seq[byte]) =
-  if c.atEnd: return
   if cmpSeq(target, c.prefix) < 0: return
   let tree = c.s[].trees[c.cf]
-  if tree.rootUuid == default(array[16, byte]):
-    c.atEnd = true; return
-  if tree.height == 0:
-    loadLeaf(c, tree.rootUuid)
-  else:
-    descendToFirstLeaf(c, tree.rootUuid, tree.height)
+  if tree.rootUuid == default(array[16, byte]): c.atEnd = true; return
+  if tree.height == 0: loadLeaf(c, tree.rootUuid)
+  else: descendToFirstLeaf(c, tree.rootUuid, tree.height)
   c.atEnd = false
-  c.curKey = none(seq[byte])
   while not c.atEnd:
-    let nk = c.next()
-    if nk.isSome and cmpSeq(nk.get, target) >= 0:
-      c.curKey = nk
-      return
+    c.advance()
+    if c.curKey.isSome and cmpSeq(c.curKey.get, target) >= 0: return
   c.atEnd = true

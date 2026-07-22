@@ -36,29 +36,29 @@ proc seekStack(c: TreapCursor; target: Key) =
 
 # ── Internal: advance to next key, populate `current` ──
 
-proc advance(c: TreapCursor): bool =
+proc advance(c: TreapCursor) =
   ## Pop next key from the stack and push right child's left chain.
-  ## Returns true if a valid key was found (within prefix range).
-  if c.atEnd: return false
-  if c.current.isSome: return true   # already have a key peeking
+  ## Called by next() and constructor. Never called by peek().
+  if c.atEnd: return
+  c.current = none(Key)
 
   while c.stack.len > 0:
     let cur = c.stack.pop()
     if cmpKey(cur.key, c.upper) >= 0:
-      # Past end of prefix range — stop
       c.stack = @[]
       c.atEnd = true
-      return false
-    # Valid key found
+      return
     c.current = some(cur.key)
-    # Push right child's left chain for subsequent iterations
     var r = cur.right
     while r != nil:
       c.stack.add(r); r = r.left
-    return true
+    return
 
   c.atEnd = true
-  return false
+
+proc ensure(c: TreapCursor) =
+  if c.current.isNone and not c.atEnd:
+    c.advance()
 
 # ── Public API ──
 
@@ -70,21 +70,18 @@ proc newTreapCursor*(root: TreapNode, prefix: seq[byte]): TreapCursor =
   if root == nil:
     result.atEnd = true; return
   result.seekStack(pfx)
-  discard result.advance()
 
 proc peek*(c: TreapCursor): Option[Key] =
-  if c.advance(): c.current else: none(Key)
+  c.ensure()
+  if c.atEnd: none(Key) else: c.current
 
 proc next*(c: TreapCursor): Option[Key] =
+  c.ensure()
   result = c.current
-  c.current = none(Key)
-  discard c.advance()
-  return result
+  c.advance()
 
 proc seek*(c: TreapCursor; target: Key) =
-  ## Reposition cursor to first key >= max(target, prefix).
   let t = if cmpKey(target, c.prefix) < 0: c.prefix else: target
   c.atEnd = false
-  c.current = none(Key)
   c.seekStack(t)
-  discard c.advance()
+  c.advance()
