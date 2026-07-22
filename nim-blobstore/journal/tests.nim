@@ -215,7 +215,7 @@ suite "journal: binary format":
     j.close()
     # Read raw file: [u32 klen=2][key 01 02][u32 vlen=3][val 03 04 05]
     let raw = readFile(td / "journal" / "journal")
-    check raw.len == 15
+    check raw.len == 13
     check ord(raw[0]) == 0; check ord(raw[1]) == 0; check ord(raw[2]) == 0; check ord(raw[3]) == 2
     check ord(raw[4]) == 1; check ord(raw[5]) == 2
     check ord(raw[6]) == 0; check ord(raw[7]) == 0; check ord(raw[8]) == 0; check ord(raw[9]) == 3
