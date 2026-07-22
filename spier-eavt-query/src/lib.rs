@@ -133,6 +133,15 @@ impl QueryState {
     pub fn kv_scan(&self, cf: u32, prefix: &[u8]) -> Result<Vec<u8>, String> {
         self.with_engine(|e| e.tx().scan(cf, prefix))
     }
+    pub fn kv_batch_write(&self, ops: &[u8]) -> Result<(), String> {
+        self.with_engine(|e| e.tx().batch_write(ops))
+    }
+    pub fn kv_batch_put(&self, cf: u32, keys: &[u8]) -> Result<(), String> {
+        self.with_engine(|e| e.tx().batch_put(cf, keys))
+    }
+    pub fn kv_items(&self, cf: u32) -> Result<Vec<u8>, String> {
+        self.with_engine(|e| e.tx().items(cf))
+    }
     pub fn kv_open_cursor_direct(&self, cf: u32, prefix: &[u8]) -> Result<spier_page_store_nim::storage_traits::CursorHandle, String> {
         self.with_engine(|e| e.tx().open_cursor_direct(cf, prefix))
     }

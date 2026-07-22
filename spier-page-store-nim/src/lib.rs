@@ -738,6 +738,19 @@ impl NimKVStore {
         check_err(rc, err)
     }
 
+    pub fn batch_put(&self, cf: u32, keys: &[u8]) -> Result<(), String> {
+        let mut buf = Vec::new();
+        let mut pos = 0;
+        while pos + 4 <= keys.len() {
+            let klen = u32::from_be_bytes([keys[pos], keys[pos+1], keys[pos+2], keys[pos+3]]) as usize;
+            if pos + 4 + klen > keys.len() { break; }
+            buf.push(cf as u8);
+            buf.extend_from_slice(&keys[pos..pos + 4 + klen]);
+            pos += 4 + klen;
+        }
+        self.batch_write(&buf)
+    }
+
     pub fn replay(&self, ops: &[u8]) -> Result<(), String> {
         let mut err: c_int = 0;
         let rc = unsafe {

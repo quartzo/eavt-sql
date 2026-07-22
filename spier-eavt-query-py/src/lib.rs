@@ -360,6 +360,21 @@ impl PyEngine {
             .map_err(to_string_err)
     }
 
+    fn batch_write(&self, py: Python<'_>, ops: Vec<u8>) -> PyResult<()> {
+        py.allow_threads(|| self.inner.kv_batch_write(&ops))
+            .map_err(to_string_err)
+    }
+
+    fn batch_put(&self, py: Python<'_>, cf: u32, keys: Vec<u8>) -> PyResult<()> {
+        py.allow_threads(|| self.inner.kv_batch_put(cf, &keys))
+            .map_err(to_string_err)
+    }
+
+    fn items(&self, py: Python<'_>, cf: u32) -> PyResult<Vec<u8>> {
+        py.allow_threads(|| self.inner.kv_items(cf))
+            .map_err(to_string_err)
+    }
+
     fn open_cursor_direct(&self, py: Python<'_>, cf: u32, prefix: Vec<u8>) -> PyResult<PyCursorHandle> {
         let handle = py.allow_threads(|| self.inner.kv_open_cursor_direct(cf, &prefix))
             .map_err(to_string_err)?;
@@ -461,6 +476,85 @@ impl PyJournal {
     }
 }
 
+// ── PyKVStore — raw KV store without transactor/bootstrap ──
+
+#[pyclass(name = "KVStore", unsendable)]
+pub struct PyKVStore {
+    inner: Mutex<Option<spier_page_store_nim::NimKVStore>>,
+}
+
+#[pymethods]
+impl PyKVStore {
+    #[new]
+    #[pyo3(signature = (config=None))]
+    fn new(py: Python<'_>, config: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let mut cfg: HashMap<String, String> = HashMap::new();
+        if let Some(d) = config {
+            for (k, v) in d.iter() {
+                let key = k.extract::<String>()?;
+                let val = v.str()?.to_string_lossy().into_owned();
+                cfg.insert(key, val);
+            }
+        }
+        let inner = py.allow_threads(|| spier_page_store_nim::NimKVStore::open(&cfg))
+            .map_err(to_string_err)?;
+        Ok(Self { inner: Mutex::new(Some(inner)) })
+    }
+
+    fn put(&self, py: Python<'_>, cf: u32, key: Vec<u8>) -> PyResult<()> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or("closed")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        py.allow_threads(|| inner.put(cf, &key)).map_err(to_string_err)
+    }
+
+    fn get(&self, py: Python<'_>, cf: u32, key: Vec<u8>) -> PyResult<bool> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or("closed")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        py.allow_threads(|| inner.get(cf, &key)).map_err(to_string_err)
+    }
+
+    fn scan(&self, py: Python<'_>, cf: u32, prefix: Vec<u8>) -> PyResult<Vec<u8>> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or("closed")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        py.allow_threads(|| inner.scan(cf, &prefix)).map_err(to_string_err)
+    }
+
+    fn flush(&self, py: Python<'_>) -> PyResult<()> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or("closed")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        py.allow_threads(|| inner.flush()).map_err(to_string_err)
+    }
+
+    fn items(&self, py: Python<'_>, cf: u32) -> PyResult<Vec<u8>> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or("closed")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        py.allow_threads(|| inner.scan(cf, b"")).map_err(to_string_err)
+    }
+
+    fn batch_write(&self, py: Python<'_>, ops: Vec<u8>) -> PyResult<()> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or("closed")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        py.allow_threads(|| inner.batch_write(&ops)).map_err(to_string_err)
+    }
+
+    fn batch_put(&self, py: Python<'_>, cf: u32, keys: Vec<u8>) -> PyResult<()> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or("closed")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        py.allow_threads(|| inner.batch_put(cf, &keys)).map_err(to_string_err)
+    }
+
+    fn close(&self) {
+        self.inner.lock().unwrap().take();
+    }
+}
+
 #[pymodule]
 fn spier_eavt_query_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyEngine>()?;
@@ -468,5 +562,6 @@ fn spier_eavt_query_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySessionHandle>()?;
     m.add_class::<PyCursorHandle>()?;
     m.add_class::<PyJournal>()?;
+    m.add_class::<PyKVStore>()?;
     Ok(())
 }

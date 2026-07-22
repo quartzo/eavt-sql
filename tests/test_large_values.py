@@ -36,7 +36,7 @@ def _pack_eid(eid: int) -> bytes:
 
 def _scan_kv(path, prefix):
     """Open a KV-only engine on the same path for raw key inspection."""
-    kv = spier_eavt_query_py.Engine({"backend": "file", "path": path})
+    kv = spier_eavt_query_py.KVStore({"backend": "file", "path": path})
     try:
         return unpack_keys(bytes(kv.scan(**{"cf": 0, "prefix": prefix})))
     finally:
@@ -130,7 +130,7 @@ class TestLargeValueBatchWrite:
     """Exercise batch_write FFI path directly with large keys."""
 
     def test_batch_write_70kb_key(self, tmp_path):
-        h = spier_eavt_query_py.Engine({"backend": "file", "path": str(tmp_path)})
+        h = spier_eavt_query_py.KVStore({"backend": "file", "path": str(tmp_path)})
         big_key = _make_payload(LARGE_SIZE, "K")
         ops = bytearray()
         ops.append(0)
@@ -141,7 +141,7 @@ class TestLargeValueBatchWrite:
         h.close()
 
     def test_batch_put_70kb_key(self, tmp_path):
-        h = spier_eavt_query_py.Engine({"backend": "file", "path": str(tmp_path)})
+        h = spier_eavt_query_py.KVStore({"backend": "file", "path": str(tmp_path)})
         big_key = _make_payload(LARGE_SIZE, "P")
         buf = bytearray()
         buf.extend(struct.pack(">I", len(big_key)))
@@ -155,7 +155,7 @@ class TestLargeValueCursorScan:
     """Exercise cursor + scan output framing with 70KB+ keys."""
 
     def test_scan_returns_70kb_keys(self, tmp_path):
-        h = spier_eavt_query_py.Engine({"backend": "file", "path": str(tmp_path)})
+        h = spier_eavt_query_py.KVStore({"backend": "file", "path": str(tmp_path)})
         keys_in = []
         for i in range(3):
             k = _pack_eid(100 + i) + _make_payload(LARGE_SIZE, chr(65 + i))
@@ -172,7 +172,7 @@ class TestLargeValueCursorScan:
         h.close()
 
     def test_items_returns_70kb_keys(self, tmp_path):
-        h = spier_eavt_query_py.Engine({"backend": "file", "path": str(tmp_path)})
+        h = spier_eavt_query_py.KVStore({"backend": "file", "path": str(tmp_path)})
         k = _make_payload(LARGE_SIZE, "I")
         h.put(**{"cf": 0, "key": k})
         h.flush()
