@@ -8,11 +8,13 @@ import ./abi
 import ./backend
 import ./spinlock
 
-# MemTable functions — compiled into the same .a, accessed via importc
-proc nim_memtable_open*(num_cf: cuint; errOut: ptr cint): pointer
-    {.importc: "nim_memtable_open", cdecl.}
-proc nim_memtable_close*(vt: pointer)
-    {.importc: "nim_memtable_close", cdecl.}
+import nim_memtable/backend as mt_be
+
+proc openMemTableVt(num_cf: cuint; errOut: ptr cint): MtVtablePtr =
+  cast[MtVtablePtr](mt_be.openMemTable(num_cf, errOut))
+
+proc closeMemTableVt(vt: MtVtablePtr) =
+  mt_be.closeVtable(cast[pointer](vt))
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Simple min-heap for (seq[byte], int) using cmpSeq
@@ -296,12 +298,13 @@ proc kvFlush(s: var KVStoreInner): bool =
 
   if keysByCf.len > 0:
     commitMerge(s.ps[], keysByCf, true)
-    # Truncate journal after successful flush (data now in page store)
-    if s.path.len > 0 and s.path != ":memory:":
-      let journalPath = s.path / "journal" / "journal"
-      if fileExists(journalPath):
-        try: removeFile(journalPath)
-        except: discard
+    # FIXME: blobPutRoot in commitMerge doesn't persist to disk for the file
+    # backend, so we cannot truncate the journal yet.
+    # if s.path.len > 0 and s.path != ":memory:":
+    #   let journalPath = s.path / "journal" / "journal"
+    #   if fileExists(journalPath):
+    #     try: removeFile(journalPath)
+    #     except: discard
   s.flushSnap = 0
   s.mtSize = 0
   return true
@@ -344,6 +347,32 @@ proc kvBatchWrite(h: pointer; ops: ptr Byte; olen: csize_t;
   var s = cast[ptr KVStoreInner](h)
   s.lock.withLock:
     try:
+      # Journal for crash recovery (TODO: also persist AEVT entries correctly)
+      if s.path.len > 0 and s.path != ":memory:" and not s.readOnly:
+        var journalPath = s.path / "journal" / "journal"
+        try:
+          createDir(parentDir(journalPath))
+          var f = open(journalPath, fmAppend)
+          let raw = cast[ptr UncheckedArray[byte]](ops)
+          var pos: int = 0
+          while pos + 5 <= olen.int:
+            let cf = raw[pos]
+            let klenU32 = uint32(raw[pos+1]) shl 24 or uint32(raw[pos+2]) shl 16 or
+                          uint32(raw[pos+3]) shl 8 or uint32(raw[pos+4])
+            let klen = klenU32.int
+            var hdr = newSeq[byte](4 + 1 + klen + 4 + 1)
+            let totKlen = 1 + klen
+            hdr[0] = byte(totKlen shr 24); hdr[1] = byte((totKlen shr 16) and 0xFF)
+            hdr[2] = byte((totKlen shr 8) and 0xFF); hdr[3] = byte(totKlen and 0xFF)
+            hdr[4] = cf
+            if klen > 0:
+              copyMem(addr hdr[5], addr raw[pos+5], klen)
+            hdr[5+klen] = 0; hdr[6+klen] = 0; hdr[7+klen] = 0; hdr[8+klen] = 1
+            hdr[9+klen] = 0  # flag byte
+            discard f.writeBytes(hdr, 0, hdr.len)
+            pos += 5 + klen
+          close(f)
+        except: discard
       # Write to memtable
       var outSize: uint64 = 0
       var merr: cint
@@ -507,7 +536,7 @@ proc kvCloseC(h: pointer; errOut: ptr cint): cint {.cdecl.} =
     try:
       # Close memtable
       if s.mt != nil:
-        nim_memtable_close(cast[pointer](s.mt))
+        closeMemTableVt(s.mt)
         s.mt = nil
       # Close page store
       psClose(s.ps)
@@ -536,7 +565,7 @@ proc openKvStore*(keys, vals: CStringArr; count: cint;
 
   # Open memtable
   var mtErr: cint
-  let mt = cast[MtVtablePtr](nim_memtable_open(4.cuint, addr mtErr))
+  let mt = openMemTableVt(4.cuint, addr mtErr)
   if mt == nil:
     psClose(cast[ptr PageStoreInner](ps.handle))
     freeVtable(ps)

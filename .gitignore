@@ -49,3 +49,4 @@ nim-blobstore/journal/tests
 nim-blobstore/memory/tests
 nim-blobstore/file/tests
 nim-blobstore/s3/tests
+nim_memtable/tests
