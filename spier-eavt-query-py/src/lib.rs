@@ -6,9 +6,60 @@ use pyo3::types::PyDict;
 
 use spier_eavt_query::QueryEngine;
 use spier_eavt_query::QueryState;
+use spier_page_store_nim::storage_traits::Cursor;
 use spier_query_ir::ProgramHandle;
 use spier_page_store_nim::transactor::ValueType;
 use spier_value::Value;
+
+struct SimpleCursor {
+    keys: Vec<Vec<u8>>,
+    idx: usize,
+    valid: bool,
+}
+
+impl Cursor for SimpleCursor {
+    fn is_valid(&self) -> bool { self.valid }
+    fn current_key(&self) -> Option<&[u8]> {
+        if self.valid { Some(&self.keys[self.idx]) } else { None }
+    }
+    fn step(&mut self) {
+        if self.valid { self.idx += 1; self.valid = self.idx < self.keys.len(); }
+    }
+    fn skip_group(&mut self, _group_end: usize) { self.step(); }
+    fn seek(&mut self, target: &[u8]) {
+        self.idx = self.keys.partition_point(|k| k.as_slice() < target);
+        self.valid = self.idx < self.keys.len();
+    }
+    fn update_end(&mut self, _end: &[u8]) {}
+    fn invalidate(&mut self) { self.valid = false; }
+}
+
+/// Cursor for reverse-scan results (keys in descending order).
+struct ReverseCursor {
+    keys: Vec<Vec<u8>>,
+    idx: usize,
+    valid: bool,
+}
+
+impl Cursor for ReverseCursor {
+    fn is_valid(&self) -> bool { self.valid }
+    fn current_key(&self) -> Option<&[u8]> {
+        if self.valid { Some(&self.keys[self.idx]) } else { None }
+    }
+    fn step(&mut self) {
+        if self.valid { self.idx += 1; self.valid = self.idx < self.keys.len(); }
+    }
+    fn skip_group(&mut self, _group_end: usize) { self.step(); }
+    fn seek(&mut self, target: &[u8]) {
+        // Keys descending: find first key <= target
+        self.idx = self.keys.partition_point(|k| k.as_slice() > target);
+        self.valid = self.idx < self.keys.len();
+    }
+    fn update_end(&mut self, _end: &[u8]) {}
+    fn invalidate(&mut self) { self.valid = false; }
+}
+unsafe impl Send for SimpleCursor {}
+unsafe impl Send for ReverseCursor {}
 
 fn to_string_err(e: String) -> PyErr {
     pyo3::exceptions::PyRuntimeError::new_err(e)
@@ -375,8 +426,19 @@ impl PyEngine {
             .map_err(to_string_err)
     }
 
+    fn scan_reverse(&self, py: Python<'_>, cf: u32, prefix: Vec<u8>) -> PyResult<Vec<u8>> {
+        py.allow_threads(|| self.inner.kv_scan_reverse(cf, &prefix))
+            .map_err(to_string_err)
+    }
+
     fn open_cursor_direct(&self, py: Python<'_>, cf: u32, prefix: Vec<u8>) -> PyResult<PyCursorHandle> {
         let handle = py.allow_threads(|| self.inner.kv_open_cursor_direct(cf, &prefix))
+            .map_err(to_string_err)?;
+        Ok(PyCursorHandle { inner: handle })
+    }
+
+    fn open_cursor_reverse_direct(&self, py: Python<'_>, cf: u32, prefix: Vec<u8>) -> PyResult<PyCursorHandle> {
+        let handle = py.allow_threads(|| self.inner.kv_open_cursor_reverse_direct(cf, &prefix))
             .map_err(to_string_err)?;
         Ok(PyCursorHandle { inner: handle })
     }
@@ -394,6 +456,10 @@ impl PyEngine {
 
     fn cursor_step(&self, _py: Python<'_>, cursor: &Bound<'_, PyCursorHandle>) {
         cursor.borrow().inner.cursor.borrow_mut().step();
+    }
+
+    fn cursor_seek(&self, _py: Python<'_>, cursor: &Bound<'_, PyCursorHandle>, target: Vec<u8>) {
+        cursor.borrow().inner.cursor.borrow_mut().seek(&target);
     }
 
     fn compile_scheme(&self, py: Python<'_>, scheme_text: &str) -> PyResult<PyProgramHandle> {
@@ -548,6 +614,65 @@ impl PyKVStore {
         let inner = guard.as_ref().ok_or("closed")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         py.allow_threads(|| inner.batch_put(cf, &keys)).map_err(to_string_err)
+    }
+
+    fn scan_reverse(&self, py: Python<'_>, cf: u32, prefix: Vec<u8>) -> PyResult<Vec<u8>> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or("closed")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        py.allow_threads(|| inner.scan_reverse(cf, &prefix)).map_err(to_string_err)
+    }
+
+    fn open_cursor_direct(&self, py: Python<'_>, cf: u32, prefix: Vec<u8>) -> PyResult<PyCursorHandle> {
+        self.open_cursor_impl(py, cf, prefix, false)
+    }
+
+    fn open_cursor_reverse_direct(&self, py: Python<'_>, cf: u32, prefix: Vec<u8>) -> PyResult<PyCursorHandle> {
+        self.open_cursor_impl(py, cf, prefix, true)
+    }
+
+    fn open_cursor_impl(&self, _py: Python<'_>, cf: u32, prefix: Vec<u8>, reverse: bool) -> PyResult<PyCursorHandle> {
+        let guard = self.inner.lock().unwrap();
+        let inner = guard.as_ref().ok_or("closed")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        let packed = if reverse {
+            inner.scan_reverse(cf, &prefix).map_err(to_string_err)?
+        } else {
+            inner.scan(cf, &prefix).map_err(to_string_err)?
+        };
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        let mut pos = 0;
+        while pos + 4 <= packed.len() {
+            let klen = u32::from_be_bytes([packed[pos], packed[pos+1], packed[pos+2], packed[pos+3]]) as usize;
+            pos += 4;
+            if pos + klen > packed.len() { break; }
+            keys.push(packed[pos..pos + klen].to_vec());
+            pos += klen;
+        }
+        let valid = !keys.is_empty();
+        let cursor = spier_page_store_nim::storage_traits::CursorHandle {
+            cursor: std::sync::Arc::new(std::cell::RefCell::new(ReverseCursor { keys, idx: 0, valid })),
+        };
+        Ok(PyCursorHandle { inner: cursor })
+    }
+
+    fn cursor_current_key(&self, _py: Python<'_>, cursor: &Bound<'_, PyCursorHandle>) -> PyResult<(bool, Vec<Vec<u8>>)> {
+        let mut buf = Vec::new();
+        let has = cursor.borrow().inner.cursor.borrow().is_valid();
+        if has {
+            if let Some(k) = cursor.borrow().inner.cursor.borrow().current_key() {
+                buf.push(k.to_vec());
+            }
+        }
+        Ok((has, buf))
+    }
+
+    fn cursor_step(&self, _py: Python<'_>, cursor: &Bound<'_, PyCursorHandle>) {
+        cursor.borrow().inner.cursor.borrow_mut().step();
+    }
+
+    fn cursor_seek(&self, _py: Python<'_>, cursor: &Bound<'_, PyCursorHandle>, target: Vec<u8>) {
+        cursor.borrow().inner.cursor.borrow_mut().seek(&target);
     }
 
     fn close(&self) {

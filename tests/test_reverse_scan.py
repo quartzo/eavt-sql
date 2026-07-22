@@ -11,7 +11,7 @@ CF = 0
 
 @pytest.fixture
 def kv(tmp_path):
-    handle = spier_eavt_query_py.Engine({"backend": "file", "path": str(tmp_path)})
+    handle = spier_eavt_query_py.KVStore({"backend": "file", "path": str(tmp_path)})
     yield handle
     handle.close()
 

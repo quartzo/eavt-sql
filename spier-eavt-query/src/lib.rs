@@ -142,6 +142,12 @@ impl QueryState {
     pub fn kv_items(&self, cf: u32) -> Result<Vec<u8>, String> {
         self.with_engine(|e| e.tx().items(cf))
     }
+    pub fn kv_scan_reverse(&self, cf: u32, prefix: &[u8]) -> Result<Vec<u8>, String> {
+        self.with_engine(|e| e.tx().scan_reverse(cf, prefix))
+    }
+    pub fn kv_open_cursor_reverse_direct(&self, cf: u32, prefix: &[u8]) -> Result<spier_page_store_nim::storage_traits::CursorHandle, String> {
+        self.with_engine(|e| e.tx().open_cursor_reverse_direct(cf, prefix))
+    }
     pub fn kv_open_cursor_direct(&self, cf: u32, prefix: &[u8]) -> Result<spier_page_store_nim::storage_traits::CursorHandle, String> {
         self.with_engine(|e| e.tx().open_cursor_direct(cf, prefix))
     }
