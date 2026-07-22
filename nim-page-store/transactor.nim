@@ -338,27 +338,6 @@ proc kvBatchWrite(h: pointer; ops: ptr Byte; olen: csize_t;
       if rc != 0:
         setErr(errOut, merr); return -1
       s.mtSize = outSize
-      # Journal each key-value entry for crash recovery
-      if s.path.len > 0 and not s.readOnly:
-        var pos = 0
-        while pos + 1 <= olen.int:
-          let cf = cast[ptr UncheckedArray[byte]](ops)[pos]
-          inc pos
-          if pos + 4 > olen.int: break
-          let klen = int(uint32(cast[ptr UncheckedArray[byte]](ops)[pos]) shl 24 or
-                         uint32(cast[ptr UncheckedArray[byte]](ops)[pos+1]) shl 16 or
-                         uint32(cast[ptr UncheckedArray[byte]](ops)[pos+2]) shl 8 or
-                         uint32(cast[ptr UncheckedArray[byte]](ops)[pos+3]))
-          pos += 4
-          if pos + klen > olen.int: break
-          let keyStart = pos
-          pos += klen
-          # Build journal key: cf_byte + key_bytes, value: flag byte
-          var jk = newSeq[byte](1 + klen)
-          jk[0] = cf
-          copyMem(addr jk[1], addr cast[ptr UncheckedArray[byte]](ops)[keyStart], klen)
-          var flag: byte = 0
-          discard kvJournalAppendC(h, addr jk[0], jk.len.csize_t, addr flag, 1, errOut)
       setErr(errOut, ErrOk); return 0
     except:
       setErr(errOut, ErrIo); return -1
@@ -476,7 +455,8 @@ proc kvJournalAppendC*(h: pointer; key: ptr Byte; klen: csize_t;
       let vu = vlen.uint32; let voff = 4 + klen.int
       hdr[voff] = byte(vu shr 24); hdr[voff+1] = byte((vu shr 16) and 0xFF)
       hdr[voff+2] = byte((vu shr 8) and 0xFF); hdr[voff+3] = byte(vu and 0xFF)
-      copyMem(addr hdr[voff+4], `val`, vlen.int)
+      if vlen.int > 0:
+        copyMem(cast[pointer](cast[int](addr hdr[0]) + voff + 4), `val`, vlen.int)
       discard f.writeBytes(hdr, 0, hdr.len); close(f)
     setErr(errOut, ErrOk); return 0
   except: setErr(errOut, ErrIo); return -1
@@ -484,8 +464,7 @@ proc kvJournalAppendC*(h: pointer; key: ptr Byte; klen: csize_t;
 proc kvJournalReadC*(h: pointer; outBuf: ptr pointer; outLen: ptr csize_t;
     errOut: ptr cint): cint {.exportc: "kvJournalReadC", cdecl.} =
   var s = cast[ptr KVStoreInner](h)
-  if s.path.len == 0:
-    setErr(errOut, ErrConfig); return -1
+  if s.path.len == 0: setErr(errOut, ErrConfig); return -1
   let journalPath = s.path / "journal" / "journal"
   try:
     if not fileExists(journalPath):
@@ -500,8 +479,7 @@ proc kvJournalReadC*(h: pointer; outBuf: ptr pointer; outLen: ptr csize_t;
 proc kvJournalTruncateC*(h: pointer; errOut: ptr cint): cint
     {.exportc: "kvJournalTruncateC", cdecl.} =
   var s = cast[ptr KVStoreInner](h)
-  if s.path.len == 0:
-    setErr(errOut, ErrConfig); return -1
+  if s.path.len == 0: setErr(errOut, ErrConfig); return -1
   let journalPath = s.path / "journal" / "journal"
   try:
     if fileExists(journalPath): removeFile(journalPath)
@@ -582,15 +560,17 @@ proc openKvStore*(keys, vals: CStringArr; count: cint;
                          uint32(byte(data[pos+2])) shl 8 or uint32(byte(data[pos+3])))
           pos += 4
           if pos + vlen > data.len: break
-          pos += vlen  # skip value (flag byte)
-          # Replay: batch write to memtable. Format: [cf][u32 klen][key]
-          var ops = newSeq[byte](1 + 4 + (klen - 1))
-          ops[0] = byte(jkey[0])  # cf byte
-          ops[1] = byte(((klen - 1) shr 24) and 0xFF)
-          ops[2] = byte(((klen - 1) shr 16) and 0xFF)
-          ops[3] = byte(((klen - 1) shr 8) and 0xFF)
-          ops[4] = byte((klen - 1) and 0xFF)
-          copyMem(addr ops[5], addr jkey[1], klen - 1)
+          pos += vlen  # skip flag byte
+          # Replay only full EAVT keys (20+ bytes: 8B eid + 4B attr + v + 8B suffix)
+          if klen < 20: continue
+          # Replay as CF 0 entry (original EAVT key)
+          var ops = newSeq[byte](1 + 4 + klen)
+          ops[0] = 0  # CF 0
+          ops[1] = byte((klen shr 24) and 0xFF)
+          ops[2] = byte((klen shr 16) and 0xFF)
+          ops[3] = byte((klen shr 8) and 0xFF)
+          ops[4] = byte(klen and 0xFF)
+          copyMem(addr ops[5], addr jkey[0], klen)
           var outSz: uint64 = 0; var merr: cint
           discard s.mt.batch(s.mt.handle, addr ops[0], ops.len.csize_t, addr outSz, addr merr)
           s.mtSize = outSz

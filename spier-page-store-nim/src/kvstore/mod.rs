@@ -270,16 +270,16 @@ impl KVStoreEngine for KVState {
         Ok(())
     }
 
-    fn journal_put(&self, _key: &[u8], _value: &[u8]) -> Result<(), String> {
-        Ok(()) // handled internally by NimKVStore
+    fn journal_put(&self, key: &[u8], value: &[u8]) -> Result<(), String> {
+        self.with_kv(|kv| kv.journal_append(key, value))
     }
 
     fn journal_scan(&self) -> Result<Vec<u8>, String> {
-        Ok(Vec::new()) // handled internally by NimKVStore
+        self.with_kv(|kv| kv.journal_read())
     }
 
     fn journal_size(&self) -> Result<u64, String> {
-        Ok(0) // handled internally by NimKVStore
+        self.with_kv(|kv| kv.journal_read().map(|d| d.len() as u64))
     }
 
     fn memtable_size(&self) -> Result<u64, String> {
