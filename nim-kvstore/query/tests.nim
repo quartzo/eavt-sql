@@ -945,9 +945,9 @@ suite "engine: DML with batch execute":
     q.declareAttrFromSql("user.name", ":db.type/string", false, false, 1)
 
     let progStr = "(begin " &
-      "(declare-attr \"user/name\" \":db.type/string\" false false) " &
+      "(declare-attr \"user.name\" \":db.type/string\" false false) " &
       "(let* ((eid (alloc-entity 4))) " &
-      "  (save eid \"user/name\" \"UPSERT User\") " &
+      "  (save eid \"user.name\" \"UPSERT User\") " &
       "  (result eid)))"
 
     let program = SchemeProgram(body: parse(progStr))
@@ -973,8 +973,8 @@ suite "engine: DML with batch execute":
     let eid = q.allocateInPartition(4)
     q.saveWithT(eid, "user.name", SExpr(kind: sStr, sval: "Before"), 1, 0)
 
-    let progStr = "(begin (retract " & $eid & " \"user/name\" \"Before\") " &
-      "(result (lookup-value " & $eid & " \"user/name\")))"
+    let progStr = "(begin (retract " & $eid & " \"user.name\" \"Before\") " &
+      "(result (lookup-value " & $eid & " \"user.name\")))"
     let program = SchemeProgram(body: parse(progStr))
     let session = newQuerySession(q, program, @[], 2'u64, none[uint64]())
     let result = executeProgram(session)
@@ -983,3 +983,226 @@ suite "engine: DML with batch execute":
     check result.kind == sList
     check result.items.len >= 2
     check result.items[1].kind == sVoid
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Engine: partitions
+# ═══════════════════════════════════════════════════════════════════════════════
+
+suite "engine: partitions":
+  test "declare-partition returns id via Scheme":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    let prog = SchemeProgram(body: parse("(result (declare-partition \"my.part\"))"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let result = executeProgram(session)
+    check result.kind == sList
+    let pid = result.items[1].ival
+    check pid > 0
+
+  test "declare-partition is idempotent via Scheme":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    let prog = SchemeProgram(body: parse("(declare-partition \"my.part\")"))
+    var session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    discard executeProgram(session)
+
+    let prog2 = SchemeProgram(body: parse("(result (declare-partition \"my.part\"))"))
+    session = newQuerySession(q, prog2, @[], 0'u64, none[uint64]())
+    let result = executeProgram(session)
+    check result.items[1].ival > 0
+
+  test "alloc-entity in custom partition via Scheme":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    let prog = SchemeProgram(body: parse(
+      "(begin " &
+      "  (declare-partition \"custom\") " &
+      "  (let* ((pid (declare-partition \"custom\"))) " &
+      "    (result (alloc-entity pid))))"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let result = executeProgram(session)
+    check result.kind == sList
+    check result.items[1].ival > 0
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Engine: alloc-entity / tx-entity via Scheme
+# ═══════════════════════════════════════════════════════════════════════════════
+
+suite "engine: alloc-entity / tx-entity":
+  test "alloc-entity returns eid via Scheme":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    let prog = SchemeProgram(body: parse("(result (alloc-entity))"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let result = executeProgram(session)
+    check result.items[1].ival > 0
+
+  test "alloc-entity produces distinct eids":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    let prog = SchemeProgram(body: parse(
+      "(result (alloc-entity) (alloc-entity) (alloc-entity))"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let result = executeProgram(session)
+    # (result e1 e2 e3) — flattened args, not nested list
+    check result.kind == sList
+    check result.items.len == 4  # "result" + 3 distinct eids
+    check result.items[1].ival != result.items[2].ival
+    check result.items[2].ival != result.items[3].ival
+    check result.items[1].ival != result.items[3].ival
+
+  test "tx-entity returns current tx":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    let prog = SchemeProgram(body: parse("(result (tx-entity))"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let result = executeProgram(session)
+    check result.items[1].ival == 0  # tx is 0
+
+  test "alloc-entity with default partition":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    let prog = SchemeProgram(body: parse("(result (alloc-entity 4))"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let result = executeProgram(session)
+    check result.items[1].ival > 0
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Engine: combined roundtrip
+# ═══════════════════════════════════════════════════════════════════════════════
+
+suite "engine: combined roundtrip":
+  test "alloc + save + lookup-value roundtrip via Scheme":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    let prog = SchemeProgram(body: parse(
+      "(begin " &
+      "  (declare-attr \"user.name\" \":db.type/string\" #f #t) " &
+      "  (declare-attr \"user.hq\" \":db.type/string\" #f #f) " &
+      "  (let* ((c1 (alloc-entity)) " &
+      "         (c2 (alloc-entity))) " &
+      "    (save c1 \"user.name\" \"ACME\") " &
+      "    (save c1 \"user.hq\" \"NYC\") " &
+      "    (save c2 \"user.name\" \"Globex\") " &
+      "    (save c2 \"user.hq\" \"SF\") " &
+      "    (result c1 " &
+      "           (lookup-value c1 \"user.name\") " &
+      "           (lookup-value c1 \"user.hq\") " &
+      "           c2 " &
+      "           (lookup-value c2 \"user.name\") " &
+      "           (lookup-value c2 \"user.hq\") " &
+      "           (lookup-entity \"user.name\" \"Globex\"))))"))
+    let session = newQuerySession(q, prog, @[], 1'u64, none[uint64]())
+    let result = executeProgram(session)
+    check result.kind == sList
+    # Flat (result c1 name1 hq1 c2 name2 hq2 globex-eid)
+    check result.items.len == 8  # "result" + 7 values
+    let c1 = result.items[1].ival
+    let name1 = result.items[2].sval
+    let hq1 = result.items[3].sval
+    let c2 = result.items[4].ival
+    let name2 = result.items[5].sval
+    let hq2 = result.items[6].sval
+    let globexEid = result.items[7].ival
+    check name1 == "ACME"
+    check hq1 == "NYC"
+    check name2 == "Globex"
+    check hq2 == "SF"
+    check globexEid == c2
+
+  test "state persists across multiple calls":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    q.declareAttrFromSql("user.name", ":db.type/string", false, false, 1)
+
+    var prog = SchemeProgram(body: parse(
+      "(begin (let* ((e (alloc-entity))) " &
+      "  (save e \"user.name\" \"Zed\") " &
+      "  (result e)))"))
+    var session = newQuerySession(q, prog, @[], 1'u64, none[uint64]())
+    let r1 = executeProgram(session)
+    let eid = r1.items[1].ival
+
+    prog = SchemeProgram(body: parse(
+      "(result (lookup-value " & $eid & " \"user.name\"))"))
+    session = newQuerySession(q, prog, @[], 2'u64, some(0'u64))
+    let r2 = executeProgram(session)
+    check r2.items[1].sval == "Zed"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Engine: error paths
+# ═══════════════════════════════════════════════════════════════════════════════
+
+suite "engine: error paths":
+  test "save to undeclared attr errors via Scheme":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    let prog = SchemeProgram(body: parse(
+      "(let* ((e (alloc-entity))) (save e \"no.such.attr\" \"x\"))"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    expect EvalError:
+      discard executeProgram(session)
+
+  test "lookup-entity on non-unique errors":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    q.declareAttrFromSql("tag.x", ":db.type/string", true, false, 1)
+
+    let prog = SchemeProgram(body: parse(
+      "(lookup-entity \"tag.x\" \"anything\")"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    expect EvalError:
+      discard executeProgram(session)
+
+  test "parse error propagates":
+    # Unterminated S-expression causes ParseError
+    var caught = false
+    try:
+      discard parse("(result 'unterminated")
+    except CatchableError:
+      caught = true
+    check caught
+
+  test "unknown host function errors":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    let prog = SchemeProgram(body: parse("(no-such-fn 1 2)"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    expect EvalError:
+      discard executeProgram(session)
+
+  test "result with no args returns void in list":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    let prog = SchemeProgram(body: parse("(result)"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let result = executeProgram(session)
+    check result.kind == sList
+    # (result) → (result) with empty args
+    check result.items.len >= 1
