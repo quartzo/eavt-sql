@@ -102,29 +102,34 @@ impl QueryEngineInner {
     }
 
     pub fn open_s3(config: &HashMap<String, String>) -> Result<Self, String> {
-        let s3_url = config
-            .get("path")
-            .or_else(|| config.get("url"))
-            .ok_or("path/url required for s3 backend")?;
-        let parsed: Vec<&str> = s3_url.trim_start_matches("s3://").splitn(2, '/').collect();
-        let bucket = parsed.first().ok_or("S3 URL missing bucket")?.to_string();
-        let prefix = parsed.get(1).unwrap_or(&"").to_string();
-        let prefix = if prefix.is_empty() {
-            "eavt".to_string()
+        let (bucket, prefix) = if config.contains_key("bucket_name") {
+            (config["bucket_name"].clone(),
+             config.get("prefix").cloned().unwrap_or_else(|| "eavt".to_string()))
         } else {
-            prefix
+            let s3_url = config
+                .get("path")
+                .or_else(|| config.get("url"))
+                .ok_or("path/url required for s3 backend")?;
+            let parsed: Vec<&str> = s3_url.trim_start_matches("s3://").splitn(2, '/').collect();
+            let b = parsed.first().ok_or("S3 URL missing bucket")?.to_string();
+            let p = parsed.get(1).unwrap_or(&"").to_string();
+            (b, if p.is_empty() { "eavt".to_string() } else { p })
         };
 
-        let access_key =
-            std::env::var("AWS_ACCESS_KEY_ID").map_err(|_| "AWS_ACCESS_KEY_ID not set")?;
-        let secret_key =
-            std::env::var("AWS_SECRET_ACCESS_KEY").map_err(|_| "AWS_SECRET_ACCESS_KEY not set")?;
-        let endpoint = std::env::var("AWS_ENDPOINT_URL_S3")
-            .or_else(|_| std::env::var("AWS_ENDPOINT_URL"))
-            .map_err(|_| "AWS_ENDPOINT_URL_S3 or AWS_ENDPOINT_URL not set")?;
-        let region = std::env::var("AWS_REGION")
-            .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
-            .unwrap_or_else(|_| "us-east-1".into());
+        let access_key = config.get("access_key").cloned()
+            .or_else(|| std::env::var("AWS_ACCESS_KEY_ID").ok())
+            .ok_or("access_key required for s3 backend")?;
+        let secret_key = config.get("secret_key").cloned()
+            .or_else(|| std::env::var("AWS_SECRET_ACCESS_KEY").ok())
+            .ok_or("secret_key required for s3 backend")?;
+        let endpoint = config.get("endpoint").cloned()
+            .or_else(|| std::env::var("AWS_ENDPOINT_URL_S3").ok())
+            .or_else(|| std::env::var("AWS_ENDPOINT_URL").ok())
+            .ok_or("endpoint required for s3 backend")?;
+        let region = config.get("region").cloned()
+            .or_else(|| std::env::var("AWS_REGION").ok())
+            .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
+            .unwrap_or_else(|| "us-east-1".into());
 
         let journal_dir = format!("/tmp/eavt-journal/{}/{}", bucket, prefix);
         std::fs::create_dir_all(&journal_dir).map_err(|e| format!("journal dir: {e}"))?;
@@ -140,7 +145,7 @@ impl QueryEngineInner {
         config.insert("prefix".into(), prefix);
 
         let mut engine = Self::load("spier_page_store_nim", &config)?;
-        engine.path = s3_url.to_string();
+        engine.path = format!("s3://{}/{}", config["bucket_name"], config["prefix"]);
         Ok(engine)
     }
 

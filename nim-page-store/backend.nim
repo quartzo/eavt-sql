@@ -367,14 +367,13 @@ proc blobGet(blobs: NimBlobVtablePtr; id: array[16, byte]): Option[seq[byte]] =
   blobs.freeBuf(outBuf)
   return some(decompress(raw))
 
-proc blobPutRoot(blobs: NimBlobVtablePtr; name: string; data: openArray[byte]) =
+proc blobPutRoot(blobs: NimBlobVtablePtr; name: string; data: openArray[byte]): bool =
   let compressed = compress(data)
   var err: cint
   let rc = blobs.putRoot(blobs.handle, name.cstring,
                           cast[ptr Byte](unsafeAddr compressed[0]),
                           compressed.len.csize_t, addr err)
-  if rc != 0:
-    raise newException(IOError, &"blob put_root failed: err={err}")
+  return rc == 0
 
 proc blobGetRoot(blobs: NimBlobVtablePtr; name: string): Option[seq[byte]] =
   var outBuf: pointer = nil
@@ -679,7 +678,7 @@ proc commitMerge*(s: var PageStoreInner; keysByCf: seq[(int, seq[seq[byte]])];
           let numLeaves = countSubtreeLeaves(s, root, height)
           CfTree(rootUuid: root, height: height, numLeaves: numLeaves)
   let newRoot = makeRootName()
-  blobPutRoot(s.blobs, newRoot, serializeRoot(s.trees))
+  discard blobPutRoot(s.blobs, newRoot, serializeRoot(s.trees))
   s.currentRoot = newRoot
   if clearJournal:
     journalTruncate(s)
@@ -1139,7 +1138,8 @@ proc openPageStore*(keys, vals: CStringArr; count: cint;
     s.trees = @[]
     for _ in 0..<numCf: s.trees.add emptyTree()
     let name = makeRootName()
-    blobPutRoot(blobs, name, serializeRoot(s.trees))
+    if not blobPutRoot(blobs, name, serializeRoot(s.trees)):
+      deallocShared(s); return nil
     s.currentRoot = name
   let vt = newVtable()
   initVtable(vt, s)
