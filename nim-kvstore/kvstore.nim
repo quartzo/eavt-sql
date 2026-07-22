@@ -411,7 +411,7 @@ proc kvCloseC(h: pointer; errOut: ptr cint): cint {.cdecl.} =
         s.mt.close()
         s.mt = nil
       # Close page store
-      psClose(s.ps)
+      closePageStore(s.ps)
       # ARC cleanup before raw free
       s.config = initTable[string, string]()
       s.path = ""
@@ -431,20 +431,19 @@ proc openKvStore*(keys, vals: CStringArr; count: cint;
   let readOnly = config.getOrDefault("read_only", "false") == "true"
 
   # Open page store
-  let ps = openPageStore(keys, vals, count, errOut)
+  let ps = newPageStore(keys, vals, count, errOut)
   if ps == nil:
     return nil
 
   # Open memtable
   let mt = mt_be.newMemTable(4)
   if mt == nil:
-    psClose(cast[ptr PageStoreInner](ps.handle))
-    freeVtable(ps)
+    closePageStore(ps)
     setErr(errOut, ErrIo)
     return nil
 
   let s = cast[ptr KVStoreInner](allocShared0(sizeof(KVStoreInner)))
-  s.ps = cast[ptr PageStoreInner](ps.handle)
+  s.ps = ps
   s.mt = mt
   s.mtSize = 0
   s.flushSnap = 0

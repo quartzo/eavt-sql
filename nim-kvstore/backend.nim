@@ -978,19 +978,22 @@ proc psRootCount(h: pointer; outCount: ptr uint64;
     except:
       setErr(errOut, ErrIo); return -1
 
+proc closePageStore*(ps: ptr PageStoreInner) =
+  if ps == nil: return
+  if ps.journal != nil: nim_journal_close(ps.journal)
+  if ps.blobs != nil: ps.blobs.close()
+  ps.trees = @[]
+  ps.cache.map = initTable[array[16, byte], CacheEntry]()
+  ps.cache.currentBytes = 0
+  ps.currentRoot = ""
+  ps.backendType = ""
+  ps.blobs = nil
+  ps.journal = nil
+  deallocShared(ps)
+
 proc psClose*(h: pointer) {.cdecl.} =
-  var s = cast[ptr PageStoreInner](h)
-  if s.journal != nil: nim_journal_close(s.journal)
-  if s.blobs != nil:
-    s.blobs.close()
-  s.trees = @[]
-  s.cache.map = initTable[array[16, byte], CacheEntry]()
-  s.cache.currentBytes = 0
-  s.currentRoot = ""
-  s.backendType = ""
-  s.blobs = nil
-  s.journal = nil
-  deallocShared(h)
+  ## C-ABI bridge — delegates to closePageStore.
+  closePageStore(cast[ptr PageStoreInner](h))
 
 proc initVtable(vt: NimPageStoreVtablePtr; s: ptr PageStoreInner) =
   vt.handle = s
@@ -1013,8 +1016,8 @@ proc initVtable(vt: NimPageStoreVtablePtr; s: ptr PageStoreInner) =
 # openPageStore — create and initialize the page store
 # ══════════════════════════════════════════════════════════════════════════════
 
-proc openPageStore*(keys, vals: CStringArr; count: cint;
-                     errOut: ptr cint): NimPageStoreVtablePtr =
+proc newPageStore*(keys, vals: CStringArr; count: cint;
+                    errOut: ptr cint): ptr PageStoreInner =
   let config = parseConfig(keys, vals, count.csize_t)
   let backend = config.getOrDefault("backend", "memory")
   let readOnly = config.getOrDefault("read_only", "false") == "true"
@@ -1044,35 +1047,43 @@ proc openPageStore*(keys, vals: CStringArr; count: cint;
       if journalPath == "": nil
       else: nim_journal_open(journalPath, errOut)
 
-  let s = cast[ptr PageStoreInner](allocShared0(sizeof(PageStoreInner)))
-  s.blobs = blobs
-  s.journal = journal
-  s.numCf = numCf
-  s.readOnly = readOnly
-  s.cache = initCache(pageCacheSize)
-  s.backendType = backend
-  initSpinLock(s.lock)
+  result = cast[ptr PageStoreInner](allocShared0(sizeof(PageStoreInner)))
+  result.blobs = blobs
+  result.journal = journal
+  result.numCf = numCf
+  result.readOnly = readOnly
+  result.cache = initCache(pageCacheSize)
+  result.backendType = backend
+  initSpinLock(result.lock)
 
   let roots = blobListRoots(blobs)
   if roots.len > 0:
     let latest = roots[0]
     let rootData = blobGetRoot(blobs, latest)
     if rootData.isSome():
-      s.trees = deserializeRoot(rootData.get())
-      var i = s.trees.len
+      result.trees = deserializeRoot(rootData.get())
+      var i = result.trees.len
       while i < numCf:
-        s.trees.add emptyTree(); inc i
-      s.currentRoot = latest
+        result.trees.add emptyTree(); inc i
+      result.currentRoot = latest
     else:
-      setErr(errOut, ErrIo); deallocShared(s); return nil
+      setErr(errOut, ErrIo)
+      deallocShared(result)
+      return nil
   else:
-    s.trees = @[]
-    for _ in 0..<numCf: s.trees.add emptyTree()
+    result.trees = @[]
+    for _ in 0..<numCf: result.trees.add emptyTree()
     let name = makeRootName()
-    if not blobPutRoot(blobs, name, serializeRoot(s.trees)):
-      deallocShared(s); return nil
-    s.currentRoot = name
+    if not blobPutRoot(blobs, name, serializeRoot(result.trees)):
+      deallocShared(result)
+      return nil
+    result.currentRoot = name
+
+proc openPageStore*(keys, vals: CStringArr; count: cint;
+                     errOut: ptr cint): NimPageStoreVtablePtr =
+  let ps = newPageStore(keys, vals, count, errOut)
+  if ps == nil: return nil
   let vt = newVtable()
-  initVtable(vt, s)
+  initVtable(vt, ps)
   setErr(errOut, ErrOk)
-  return vt
+  result = vt

@@ -201,30 +201,28 @@ suite "lifecycle: page-store open/close":
   test "single open/close memory":
     var err: cint
     let cfg = makeConfig({"backend": "memory"}.toTable)
-    var vt = openPageStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    var vt = newPageStore(cfg.keys, cfg.vals, cfg.count, addr err)
     check vt != nil
     check err == ErrOk
     if vt != nil:
-      psClose(vt.handle)
-      freeVtable(vt)
+      closePageStore(vt)
     freeConfig(cfg)
 
   test "5 open/close cycles memory":
     for i in 0..<5:
       var err: cint
       let cfg = makeConfig({"backend": "memory"}.toTable)
-      var vt = openPageStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      var vt = newPageStore(cfg.keys, cfg.vals, cfg.count, addr err)
       check vt != nil
       if vt != nil:
-        psClose(vt.handle)
-        freeVtable(vt)
+        closePageStore(vt)
       freeConfig(cfg)
 
   test "3 open/write/scan/close cycles memory":
     for i in 0..<3:
       var err: cint
       let cfg = makeConfig({"backend": "memory"}.toTable)
-      var vt = openPageStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      var vt = newPageStore(cfg.keys, cfg.vals, cfg.count, addr err)
       check vt != nil
       if vt != nil:
         if vt.getKeysInPrefix != nil:
@@ -232,8 +230,7 @@ suite "lifecycle: page-store open/close":
           var outLen: csize_t = 0
           discard vt.getKeysInPrefix(vt.handle, 0'u32, nil, 0.csize_t, addr outBuf, addr outLen, addr err)
           if outBuf != nil: vt.freeBuf(outBuf)
-        psClose(vt.handle)
-        freeVtable(vt)
+        closePageStore(vt)
       freeConfig(cfg)
 
 suite "lifecycle: blobstore memory alone":
