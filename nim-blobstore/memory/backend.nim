@@ -16,9 +16,9 @@ import spinlock
 
 type
   MemBackend* = ref object
-    lock: SpinLock
-    blobs: Table[ByteArr16, seq[Byte]]
-    roots: Table[string, seq[Byte]]
+    lock*: SpinLock
+    blobs*: Table[ByteArr16, seq[Byte]]
+    roots*: Table[string, seq[Byte]]
 
 # ---------------------------------------------------------------------------
 # Global registry — keeps Nim refs alive across the FFI boundary.
