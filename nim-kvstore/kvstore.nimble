@@ -16,3 +16,9 @@ task test, "Run unit tests":
        "--path:../nim-blobstore --path:.. " &
        "--passL:-lcrypto --passL:-lzstd " &
        "-r tests.nim"
+
+task eavt_test, "Run EAVT unit tests":
+  exec "nim c --mm:arc --threads:on -d:release " &
+       "--path:../nim-blobstore --path:.. " &
+       "--passL:-lcrypto --passL:-lzstd " &
+       "-r eavt_tests.nim"

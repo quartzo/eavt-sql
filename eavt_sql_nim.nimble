@@ -14,3 +14,4 @@ task test, "Run all Nim unit tests":
   exec "(cd nim-blobstore/journal && nimble test)"
   exec "(cd nim_memtable          && nimble test)"
   exec "(cd nim-kvstore           && nimble test)"
+  exec "(cd nim-kvstore           && nimble eavt_test)"

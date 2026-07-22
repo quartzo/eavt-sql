@@ -6,8 +6,9 @@
 import std/[tables, strutils, strformat, options, times, sets]
 import ./resolver
 import ./keys
-import ./abi  # for NimKVStoreVtablePtr, MtVtablePtr, error codes
+import ./kvstore  # KVStore Nim ref
 import ./spinlock
+import ./abi  # NimKVStoreVtablePtr (for C-ABI bridge overload)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Value type mapping
@@ -45,14 +46,17 @@ proc valueTypeFromName*(name: string): uint32 =
 
 type
   EavtEngine* = ref object
-    kv*: NimKVStoreVtablePtr
-    kvHandle*: pointer
+    kv*: KVStore                  # Nim ref — no C-ABI vtable
     resolver*: Resolver
     lock: SpinLock
 
-proc newEavtEngine*(kv: NimKVStoreVtablePtr): EavtEngine =
-  result = EavtEngine(kv: kv, kvHandle: kv.handle, resolver: newResolver())
+proc newEavtEngine*(kv: KVStore): EavtEngine =
+  result = EavtEngine(kv: kv, resolver: newResolver())
   initSpinLock(result.lock)
+
+proc newEavtEngine*(vt: NimKVStoreVtablePtr): EavtEngine =
+  ## C-ABI bridge — extract the underlying KVStore ref from the vtable handle.
+  newEavtEngine(cast[KVStore](vt.handle))
   # bootstrap called after construction (avoids forward ref)
 
 # ── Batch write helper ──
@@ -66,32 +70,12 @@ proc batchWrite*(eng: EavtEngine; entries: seq[EavtEntry]) =
     ops.add byte(kl shr 24); ops.add byte((kl shr 16) and 0xFF)
     ops.add byte((kl shr 8) and 0xFF); ops.add byte(kl and 0xFF)
     ops.add e.key
-  var err: cint
-  discard eng.kv.batchWrite(eng.kvHandle, addr ops[0], ops.len.csize_t, addr err)
+  eng.kv.batchWrite(ops)
 
 # ── Scan helper ──
 
 proc scan*(eng: EavtEngine; cf: uint32; prefix: seq[byte]): seq[seq[byte]] =
-  var outBuf: pointer = nil
-  var outLen: csize_t = 0
-  var err: cint
-  let pf = if prefix.len > 0: addr prefix[0] else: nil
-  let rc = eng.kv.scan(eng.kvHandle, cf, pf, prefix.len.csize_t,
-                         addr outBuf, addr outLen, addr err)
-  if rc != 0: return @[]
-  var pos = 0
-  while pos + 4 <= outLen.int:
-    let klen = (uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos]) shl 24 or
-                 uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+1]) shl 16 or
-                 uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+2]) shl 8 or
-                 uint32(cast[ptr UncheckedArray[byte]](outBuf)[pos+3])).int
-    pos += 4
-    if pos + klen > outLen.int: break
-    var k = newSeq[byte](klen)
-    copyMem(addr k[0], addr cast[ptr UncheckedArray[byte]](outBuf)[pos], klen)
-    pos += klen
-    result.add k
-  if outBuf != nil: eng.kv.freeBuf(outBuf)
+  eng.kv.scan(cf.int, prefix)
 
 # ── Bootstrap: scan KV for existing schema ──
 
