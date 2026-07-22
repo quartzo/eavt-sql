@@ -302,8 +302,17 @@ impl KVStoreEngine for KVState {
         Ok(":memory:".to_string())
     }
 
-    fn approximate_sizes(&self, _cf: u32, _start: &[u8], _end: &[u8]) -> Result<u64, String> {
-        Ok(0)
+    fn approximate_sizes(&self, cf: u32, start: &[u8], _end: &[u8]) -> Result<u64, String> {
+        // Scan to count keys in the prefix range for cardinality estimates
+        let packed = self.scan(cf, start)?;
+        let mut count = 0u64;
+        let mut pos = 0;
+        while pos + 4 <= packed.len() {
+            let klen = u32::from_be_bytes([packed[pos], packed[pos+1], packed[pos+2], packed[pos+3]]) as usize;
+            pos += 4 + klen;
+            count += 1;
+        }
+        Ok(count.max(1)) // minimum 1 so planner doesn't think it's empty
     }
 
     fn cf_stats(&self, cf: u32) -> Result<Vec<u8>, String> {
