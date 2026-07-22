@@ -472,13 +472,13 @@ proc openKvStore*(keys, vals: CStringArr; count: cint;
           let klen = int(uint32(byte(data[pos])) shl 24 or uint32(byte(data[pos+1])) shl 16 or
                          uint32(byte(data[pos+2])) shl 8 or uint32(byte(data[pos+3])))
           pos += 4
-          if pos + klen + 4 > data.len: break
+          if pos + klen + 4 > data.len: discard
           let jkey = data[pos..<pos + klen]
           pos += klen
           let vlen = int(uint32(byte(data[pos])) shl 24 or uint32(byte(data[pos+1])) shl 16 or
                          uint32(byte(data[pos+2])) shl 8 or uint32(byte(data[pos+3])))
           pos += 4
-          if pos + vlen > data.len: break
+          if pos + vlen > data.len: discard
           pos += vlen  # skip flag byte
           # Replay: if EAVT key (20+ bytes), replay as CF 0
           # If short key (cf-prefixed), extract cf from first byte
@@ -555,18 +555,24 @@ proc newKVStore*(keys, vals: CStringArr; count: cint;
                          uint32(byte(data[pos+2])) shl 8 or uint32(byte(data[pos+3])))
           pos += 4
           if pos + klen + 4 > data.len: break
-          let jkey = data[pos..<pos + klen]; pos += klen
+          # Read jkey as raw bytes
+          let cf = byte(data[pos])
+          pos += klen
           let vlen = int(uint32(byte(data[pos])) shl 24 or uint32(byte(data[pos+1])) shl 16 or
                          uint32(byte(data[pos+2])) shl 8 or uint32(byte(data[pos+3])))
-          pos += 4; if pos + vlen > data.len: break; pos += vlen
+          pos += 4
+          if pos + vlen > data.len: break
+          pos += vlen  # skip flag byte
           if klen >= 20:
             ops.add(0'u8); ops.add(byte((klen shr 24) and 0xFF))
             ops.add(byte((klen shr 16) and 0xFF)); ops.add(byte((klen shr 8) and 0xFF))
-            ops.add(byte(klen and 0xFF)); for b in jkey: ops.add(byte(b))
-          elif klen >= 1 and byte(jkey[0]) <= 3:
-            ops.add(byte(jkey[0])); ops.add(byte(((klen-1) shr 24) and 0xFF))
+            ops.add(byte(klen and 0xFF))
+            for i in 0..<klen: ops.add(byte(data[pos - 4 - vlen - klen + i]))
+          elif klen >= 1 and cf <= 3:
+            ops.add(cf); ops.add(byte(((klen-1) shr 24) and 0xFF))
             ops.add(byte(((klen-1) shr 16) and 0xFF)); ops.add(byte(((klen-1) shr 8) and 0xFF))
-            ops.add(byte((klen-1) and 0xFF)); for b in jkey[1..^1]: ops.add(byte(b))
+            ops.add(byte((klen-1) and 0xFF))
+            for i in 1..<klen: ops.add(byte(data[pos - 4 - vlen - klen + i]))
         if ops.len > 0: result.mtSize = result.mt.batch(ops)
       except: discard
 
