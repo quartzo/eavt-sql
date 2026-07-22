@@ -239,13 +239,8 @@ suite "lifecycle: page-store open/close":
 suite "lifecycle: blobstore memory alone":
   test "10 open/close cycles":
     for i in 0..<10:
-      var err: cint
-      let cfg = makeConfig({"backend": "memory"}.toTable)
-      let bs = nim_blob_memory_open(cfg.keys, cfg.vals, cfg.count, addr err)
+      let bs = newMemBlobStore()
       check bs != nil
-      if bs != nil:
-        var outBuf: pointer = nil
-        var outLen: csize_t = 0
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # KVStore integration tests — put, get, scan, flush end-to-end

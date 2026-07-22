@@ -1,8 +1,9 @@
 ## all.nim (file backend)
 ##
-## Single compilation entry point for libnim_blobstore_file.a.
-## Produces: nim_blob_file_open / nim_blob_file_close / nim_blob_file_free_str
+## Convenience re-export — imports the full backend module.
 
-import abi
+import ../common
 import spinlock
+import ../blobstore
 import backend
+export backend

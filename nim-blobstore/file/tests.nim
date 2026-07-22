@@ -7,9 +7,9 @@
 ##   cd nim-blobstore/file && nimble test
 
 import std/[unittest, os, times, options]
-import backend   # FileBlobStore, newFileBlobStore, put, get, delete, list,
-                 # putRoot, getRoot, listRoots, deleteRoot
-import abi       # ByteArr16
+import backend      # FileBlobStore, newFileBlobStore, put, get, delete, list,
+                    # putRoot, getRoot, listRoots, deleteRoot
+import ../common    # ByteArr16
 
 proc newTempDir(): string =
   result = "/tmp/fbtest_" & $getTime().toUnix() & "_" & $getTime().nanosecond

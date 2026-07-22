@@ -8,26 +8,13 @@ import ./pages
 import ./spinlock
 
 # ══════════════════════════════════════════════════════════════════════════════
-# BlobStore — direct Nim imports; no more C-ABI linkage.
+# BlobStore — trait dispatch (no C-ABI vtable).
 # ══════════════════════════════════════════════════════════════════════════════
 
+import blobstore
 import memory/backend as mem_be
 import file/backend as fil_be
 import journal/backend as jou_be
-
-proc nim_blob_memory_open*(keys, vals: abi.CStringArr; count: cint;
-                           errOut: ptr cint): NimBlobVtablePtr =
-  cast[NimBlobVtablePtr](mem_be.nim_blob_memory_open(keys, vals, count.csize_t, errOut))
-
-proc nim_blob_file_open*(keys, vals: abi.CStringArr; count: cint;
-                         errOut: ptr cint): NimBlobVtablePtr =
-  cast[NimBlobVtablePtr](fil_be.nim_blob_file_open(keys, vals, count.csize_t, errOut))
-
-proc nim_blob_memory_close*(vt: NimBlobVtablePtr) =
-  mem_be.closeVtable(cast[pointer](vt))
-
-proc nim_blob_file_close*(vt: NimBlobVtablePtr) =
-  fil_be.closeVtable(cast[pointer](vt))
 
 proc nim_journal_open*(path: cstring;
                        errOut: ptr cint): NimJournalVtablePtr =
@@ -36,7 +23,7 @@ proc nim_journal_open*(path: cstring;
 proc nim_journal_close*(vt: NimJournalVtablePtr) =
   jou_be.closeJournalVtable(cast[pointer](vt))
 
-# S3 still uses C-ABI (not refactored yet).
+# S3 still uses C-ABI.
 proc nim_blob_s3_open*(keys, vals: CStringArr; count: cint;
                        errOut: ptr cint): NimBlobVtablePtr
     {.importc: "nim_blob_s3_open", cdecl.}
@@ -328,7 +315,7 @@ proc put(cc: var PageCache; uuid: array[16, byte]; keys: seq[seq[byte]]) =
 
 type
   PageStoreInner* = object
-    blobs: NimBlobVtablePtr
+    blobs: BlobStore           # trait dispatch — no vtable
     journal: NimJournalVtablePtr
     trees: seq[CfTree]
     numCf: int
@@ -343,79 +330,31 @@ type
 # BlobStore / Journal wrappers
 # ══════════════════════════════════════════════════════════════════════════════
 
-proc blobPut(blobs: NimBlobVtablePtr; data: openArray[byte]): array[16, byte] =
-  let compressed = compress(data)
-  var idOut: array[16, byte]
-  var err: cint
-  let rc = blobs.put(blobs.handle, cast[ptr Byte](unsafeAddr compressed[0]),
-                      compressed.len.csize_t, cast[ptr Byte](addr idOut), addr err)
-  if rc != 0:
-    raise newException(IOError, &"blob put failed: err={err}")
-  return idOut
+proc blobPut(blobs: BlobStore; data: openArray[byte]): array[16, byte] =
+  blobs.put(compress(data))
 
-proc blobGet(blobs: NimBlobVtablePtr; id: array[16, byte]): Option[seq[byte]] =
-  var outBuf: pointer = nil
-  var outLen: csize_t = 0
-  var present: cint = 0
-  var err: cint
-  let rc = blobs.get(blobs.handle, cast[ptr Byte](unsafeAddr id),
-                      addr outBuf, addr outLen, addr present, addr err)
-  if rc != 0:
-    raise newException(IOError, &"blob get failed: err={err}")
-  if present == 0: return none(seq[byte])
-  let raw = newSeq[byte](outLen.int)
-  copyMem(unsafeAddr raw[0], outBuf, outLen.int)
-  blobs.freeBuf(outBuf)
-  return some(decompress(raw))
+proc blobGet(blobs: BlobStore; id: array[16, byte]): Option[seq[byte]] =
+  let r = blobs.get(id)
+  if r.isNone(): return none(seq[byte])
+  result = some(decompress(r.get()))
 
-proc blobPutRoot(blobs: NimBlobVtablePtr; name: string; data: openArray[byte]): bool =
-  let compressed = compress(data)
-  var err: cint
-  let rc = blobs.putRoot(blobs.handle, name.cstring,
-                          cast[ptr Byte](unsafeAddr compressed[0]),
-                          compressed.len.csize_t, addr err)
-  return rc == 0
+proc blobPutRoot(blobs: BlobStore; name: string; data: openArray[byte]): bool =
+  try:
+    blobs.putRoot(name, compress(data))
+    return true
+  except:
+    return false
 
-proc blobGetRoot(blobs: NimBlobVtablePtr; name: string): Option[seq[byte]] =
-  var outBuf: pointer = nil
-  var outLen: csize_t = 0
-  var present: cint = 0
-  var err: cint
-  let rc = blobs.getRoot(blobs.handle, name.cstring,
-                          addr outBuf, addr outLen, addr present, addr err)
-  if rc != 0:
-    raise newException(IOError, &"blob get_root failed: err={err}")
-  if present == 0: return none(seq[byte])
-  let raw = newSeq[byte](outLen.int)
-  copyMem(unsafeAddr raw[0], outBuf, outLen.int)
-  blobs.freeBuf(outBuf)
-  return some(decompress(raw))
+proc blobGetRoot(blobs: BlobStore; name: string): Option[seq[byte]] =
+  let r = blobs.getRoot(name)
+  if r.isNone(): return none(seq[byte])
+  result = some(decompress(r.get()))
 
-proc blobListRoots(blobs: NimBlobVtablePtr): seq[string] =
-  var outArr: pointer = nil
-  var outCount: csize_t = 0
-  var err: cint
-  let rc = blobs.listRoots(blobs.handle, addr outArr, addr outCount, addr err)
-  if rc != 0: return @[]
-  let carr = cast[CStringArr](outArr)
-  for i in 0..<outCount.int:
-    result.add $carr[i]
-  blobs.freeStrs(carr, outCount)
+proc blobListRoots(blobs: BlobStore): seq[string] =
+  blobs.listRoots()
 
-proc blobList(blobs: NimBlobVtablePtr): seq[array[16, byte]] =
-  var outBuf: pointer = nil
-  var outLen: csize_t = 0
-  var err: cint
-  let rc = blobs.list(blobs.handle, addr outBuf, addr outLen, addr err)
-  if rc != 0: return @[]
-  let data = cast[ptr UncheckedArray[byte]](outBuf)
-  var pos = 0
-  while pos + 16 <= outLen.int:
-    var id: array[16, byte]
-    for j in 0..15: id[j] = data[pos + j]
-    pos += 16
-    result.add id
-  blobs.freeBuf(outBuf)
+proc blobList(blobs: BlobStore): seq[array[16, byte]] =
+  blobs.list()
 
 proc journalAppend(s: var PageStoreInner; key, val: openArray[byte]) =
   if s.journal == nil: return
@@ -742,16 +681,16 @@ proc gcFull*(s: var PageStoreInner; maxAgeSecs: uint64; maxRootCount: int;
   let rootsRemoved = rootsToRemove.len
   if not dryRun:
     for name in rootsToRemove:
-      var err: cint
-      discard s.blobs.deleteRoot(s.blobs.handle, name.cstring, addr err)
+      try: s.blobs.deleteRoot(name)
+      except: discard
   let allBlobs = blobList(s.blobs)
   let blobsScanned = allBlobs.len
   var blobsRemoved = 0
   for id in allBlobs:
     if id notin liveUuids:
       if not dryRun:
-        var err: cint
-        discard s.blobs.delete(s.blobs.handle, cast[ptr Byte](unsafeAddr id), addr err)
+        try: s.blobs.delete(id)
+        except: discard
       inc blobsRemoved
   let liveCount = liveUuids.len
   result = newSeqOfCap[byte](41)
@@ -1048,16 +987,9 @@ proc psRootCount(h: pointer; outCount: ptr uint64;
 
 proc psClose*(h: pointer) {.cdecl.} =
   var s = cast[ptr PageStoreInner](h)
-  # Close blobstore and journal FIRST
   if s.journal != nil: nim_journal_close(s.journal)
   if s.blobs != nil:
-    case s.backendType:
-    of "memory": nim_blob_memory_close(s.blobs)
-    of "file": nim_blob_file_close(s.blobs)
-    of "s3": nim_blob_s3_close(s.blobs)
-    else: discard
-  # ARC cleanup: empty all seq/string/table fields so destructors run
-  # BEFORE deallocShared (which is a raw free that skips ARC).
+    s.blobs.close()
   s.trees = @[]
   s.cache.map = initTable[array[16, byte], CacheEntry]()
   s.cache.currentBytes = 0
@@ -1093,14 +1025,21 @@ proc openPageStore*(keys, vals: CStringArr; count: cint;
   let config = parseConfig(keys, vals, count.csize_t)
   let backend = config.getOrDefault("backend", "memory")
   let readOnly = config.getOrDefault("read_only", "false") == "true"
+  let path = config.getOrDefault("path", "")
   let pageCacheSize = parseInt(config.getOrDefault("page_cache_size", "67108864"))
   let numCf = 4
 
-  let blobs =
+  let blobs: BlobStore =
     case backend:
-    of "memory": nim_blob_memory_open(keys, vals, count, errOut)
-    of "file": nim_blob_file_open(keys, vals, count, errOut)
-    of "s3": nim_blob_s3_open(keys, vals, count, errOut)
+    of "memory": mem_be.newMemBlobStore()
+    of "file":
+      if path.len == 0:
+        setErr(errOut, ErrConfig)
+        return nil
+      fil_be.newFileBlobStore(path, readOnly)
+    of "s3":
+      # TODO: refactor S3 backend to implement BlobStore trait.
+      nil
     else: nil
 
   if blobs == nil:
@@ -1127,8 +1066,8 @@ proc openPageStore*(keys, vals: CStringArr; count: cint;
   if roots.len > 0:
     let latest = roots[0]
     let rootData = blobGetRoot(blobs, latest)
-    if rootData.isSome:
-      s.trees = deserializeRoot(rootData.get)
+    if rootData.isSome():
+      s.trees = deserializeRoot(rootData.get())
       var i = s.trees.len
       while i < numCf:
         s.trees.add emptyTree(); inc i
