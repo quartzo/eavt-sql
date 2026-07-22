@@ -802,13 +802,13 @@ suite "engine: save + lookup":
     check q.lookupEntity("user.email", SExpr(kind: sStr, sval: "nope")).isNone
 
 suite "engine: cursor":
-  test "openCursor on empty KVStore":
+  test "openCursor returns valid cursor":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-
+    # CF 0 has bootstrap data — cursor should be valid
     let cursor = q.openCursor(0'u32, @[])
-    check not cursor.isValidCb()
+    check cursor.isValidCb()
 
   test "openCursor on populated EAVT → step through keys":
     let kv = newMemoryKVStore()

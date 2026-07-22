@@ -56,34 +56,14 @@ proc sexprToValueForType(val: SExpr; vt: uint32): string =
 # ── EngineOps implementation ──
 
 method openCursor(q: QueryStore; cfId: uint32; prefix: seq[byte]): NimCursor =
-  let keys = q.kv.scan(cfId.int, prefix)
-  var pos = 0
-
-  proc isValid(): bool = pos < keys.len
-  proc currentKey(): Option[seq[byte]] =
-    if pos < keys.len: some(keys[pos]) else: none[seq[byte]]()
-  proc step() = inc pos
-  proc skipGroup(ge: int) = inc pos
-  proc seek(target: seq[byte]) =
-    while pos < keys.len:
-      var gt = true
-      let k = keys[pos]
-      if k.len < target.len: gt = false
-      else:
-        for i in 0..<target.len:
-          if k[i] < target[i]: gt = false; break
-          if k[i] > target[i]: break
-      if gt: return
-      inc pos
-  proc invalidate() = pos = keys.len
-
+  let mc = q.kv.openScanCursor(cfId.int)
   NimCursor(
-    isValidCb: isValid,
-    currentKeyCb: currentKey,
-    stepCb: step,
-    skipGroupCb: skipGroup,
-    seekCb: seek,
-    invalidateCb: invalidate,
+    isValidCb: proc(): bool = not mc.atEnd,
+    currentKeyCb: proc(): Option[seq[byte]] = mc.peek(),
+    stepCb: proc() = discard mc.next(),
+    seekCb: proc(target: seq[byte]) = mc.seek(target),
+    skipGroupCb: proc(ge: int) = discard mc.next(),
+    invalidateCb: proc() = mc.atEnd = true,
   )
 
 method saveWithT(q: QueryStore; eid: uint64; attr: string; val: SExpr;

@@ -234,13 +234,13 @@ import treap_cursor
 
 suite "treap_cursor: forward scan":
   test "empty treap → atEnd":
-    let c = newTreapCursor(nil, @[])
+    let c = newTreapCursor(nil)
     check c.atEnd
 
   test "single key → peek/next":
     let mt = newMemTable(1)
     discard mt.put(0, @[byte(1), 2, 3])
-    let c = newTreapCursor(mt.hnd.live[0], @[])
+    let c = newTreapCursor(mt.hnd.live[0])
     check not c.atEnd
 
     let k1 = c.peek()
@@ -262,21 +262,22 @@ suite "treap_cursor: forward scan":
     discard mt.put(0, @[byte(3)])
     discard mt.put(0, @[byte(1)])
     discard mt.put(0, @[byte(2)])
-    let c = newTreapCursor(mt.hnd.live[0], @[])
+    let c = newTreapCursor(mt.hnd.live[0])
     check c.next().get == @[byte(1)]
     check c.next().get == @[byte(2)]
     check c.next().get == @[byte(3)]
     check c.next().isNone
     mt.close()
 
-  test "prefix filter":
+  test "iterate all keys in order":
     let mt = newMemTable(1)
     discard mt.put(0, @[byte(1), 0])
     discard mt.put(0, @[byte(1), 5])
     discard mt.put(0, @[byte(2), 0])
-    let c = newTreapCursor(mt.hnd.live[0], @[byte(1)])
+    let c = newTreapCursor(mt.hnd.live[0])
     check c.next().get == @[byte(1), 0]
     check c.next().get == @[byte(1), 5]
+    check c.next().get == @[byte(2), 0]
     check c.next().isNone
     mt.close()
 
@@ -284,19 +285,19 @@ suite "treap_cursor: forward scan":
     let mt = newMemTable(1)
     for i in 1..50:
       discard mt.put(0, @[byte(i)])
-    let c = newTreapCursor(mt.hnd.live[0], @[])
+    let c = newTreapCursor(mt.hnd.live[0])
     c.seek(@[byte(30)])
     let k = c.peek()
     check k.isSome
     check k.get[0] >= 30
     mt.close()
 
-  test "seek past prefix stays atEnd":
+  test "seek past last key returns none":
     let mt = newMemTable(1)
     discard mt.put(0, @[byte(1), 0])
     discard mt.put(0, @[byte(1), 5])
-    let c = newTreapCursor(mt.hnd.live[0], @[byte(1)])
-    c.seek(@[byte(2), 0])
-    check c.next().isNone  # past prefix range
+    let c = newTreapCursor(mt.hnd.live[0])
+    c.seek(@[byte(9), 9])
+    check c.peek().isNone
     check c.atEnd
     mt.close()

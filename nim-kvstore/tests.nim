@@ -739,7 +739,7 @@ suite "page_cursor: forward scan":
     let cfg = makeConfig({"backend": "memory"}.toTable)
     let ps = newPageStore(cfg.keys, cfg.vals, cfg.count, addr err)
     check ps != nil
-    let c = newPageStoreCursor(ps, 0, @[])
+    let c = newPageStoreCursor(ps, 0)
     check c != nil
     check c.atEnd
     closePageStore(ps)
@@ -751,7 +751,7 @@ suite "page_cursor: forward scan":
     let keys = @[@[byte(1), 2, 3], @[byte(4), 5], @[byte(6)]]
     commitMerge(ps[], @[(0, keys)], false)
 
-    let c = newPageStoreCursor(ps, 0, @[])
+    let c = newPageStoreCursor(ps, 0)
     check not c.atEnd
 
     let k1 = c.next()
@@ -770,22 +770,18 @@ suite "page_cursor: forward scan":
     check c.atEnd
     closePageStore(ps)
 
-  test "prefix filter":
+  test "iterate all keys":
     var err: cint
     let cfg = makeConfig({"backend": "memory"}.toTable)
     let ps = newPageStore(cfg.keys, cfg.vals, cfg.count, addr err)
     let keys = @[@[byte(1), 1], @[byte(1), 2], @[byte(2), 1]]
     commitMerge(ps[], @[(0, keys)], false)
 
-    let c = newPageStoreCursor(ps, 0, @[byte(1)])
-    let k1 = c.next()
-    check k1.isSome
-    check k1.get == @[byte(1), 1]
-
-    let k2 = c.next()
-    check k2.isSome
-    check k2.get == @[byte(1), 2]
-
+    let c = newPageStoreCursor(ps, 0)
+    check c.peek().get == @[byte(1), 1]
+    check c.next().get == @[byte(1), 1]
+    check c.next().get == @[byte(1), 2]
+    check c.next().get == @[byte(2), 1]
     check c.next().isNone
     closePageStore(ps)
 
@@ -796,7 +792,7 @@ suite "page_cursor: forward scan":
     let keys = @[@[byte(5), 0]]
     commitMerge(ps[], @[(0, keys)], false)
 
-    let c = newPageStoreCursor(ps, 0, @[])
+    let c = newPageStoreCursor(ps, 0)
     let p1 = c.peek()
     let p2 = c.peek()
     check p1.isSome and p2.isSome
@@ -813,7 +809,7 @@ suite "page_cursor: forward scan":
       keys.add @[byte(i), 0]
     commitMerge(ps[], @[(0, keys)], false)
 
-    let c = newPageStoreCursor(ps, 0, @[])
+    let c = newPageStoreCursor(ps, 0)
     c.seek(@[byte(30), 0])
     let k = c.peek()
     check k.isSome

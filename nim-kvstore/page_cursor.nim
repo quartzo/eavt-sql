@@ -1,8 +1,7 @@
 ## page_cursor.nim — Lazy forward cursor over PageStore B-tree leaf pages.
 ##
-## Loads one leaf page at a time (expanded keys), iterates via array index.
-## The LRU cache stores zstd-compressed bytes; the cursor holds the current
-## page expanded for cache locality and fast iteration.
+## Iterates all keys in a CF in order. No prefix filtering — the scanner
+## handles that via seek() and classifyKey. Loads one leaf at a time.
 
 import std/[options]
 import ./backend
@@ -15,7 +14,6 @@ type
   PageStoreCursor* = ref object
     s*: ptr PageStoreInner
     cf*: int
-    prefix*: seq[byte]
     atEnd*: bool
     indexStack: seq[IndexPos]
     leafKeys: seq[seq[byte]]
@@ -23,9 +21,6 @@ type
     curKey: Option[seq[byte]]
 
 # ── Helpers ──
-
-proc keyHasPrefix(key, prefix: openArray[byte]): bool =
-  key.len >= prefix.len and key[0..<prefix.len] == prefix
 
 proc loadIndexPage(s: var PageStoreInner; uuid: array[16, byte]): seq[(seq[byte], array[16, byte])] =
   let data = blobGet(s.blobs, uuid)
@@ -37,7 +32,7 @@ proc loadLeaf(c: PageStoreCursor; uuid: array[16, byte]) =
   c.leafKeys = loadLeafKeys(c.s[], uuid)
   c.leafIdx = -1
 
-# ── Forward descent ──
+# ── Navigation ──
 
 proc descendToFirstLeaf(c: PageStoreCursor; uuid: array[16, byte]; height: uint8) =
   var curUuid = uuid
@@ -45,18 +40,10 @@ proc descendToFirstLeaf(c: PageStoreCursor; uuid: array[16, byte]; height: uint8
   c.indexStack = @[]
   while h > 0:
     let entries = loadIndexPage(c.s[], curUuid)
-    var idx = 0
-    while idx < entries.len:
-      let (k, _) = entries[idx]
-      if cmpSeq(k, c.prefix) < 0: inc idx
-      else: break
-    if idx >= entries.len: idx = entries.len - 1
-    c.indexStack.add IndexPos(entries: entries, pos: idx)
-    curUuid = entries[idx][1]
+    c.indexStack.add IndexPos(entries: entries, pos: 0)
+    curUuid = entries[0][1]
     dec h
   loadLeaf(c, curUuid)
-
-# ── Advance to next leaf ──
 
 proc advanceToNextLeaf(c: PageStoreCursor) =
   while c.indexStack.len > 0:
@@ -66,33 +53,25 @@ proc advanceToNextLeaf(c: PageStoreCursor) =
       var curUuid = top.entries[top.pos][1]
       while true:
         let entries = loadIndexPage(c.s[], curUuid)
-        var idx = 0
-        while idx < entries.len:
-          let (k, _) = entries[idx]
-          if cmpSeq(k, c.prefix) < 0: inc idx
-          else: break
-        if idx < entries.len:
-          c.indexStack.add IndexPos(entries: entries, pos: idx)
-          curUuid = entries[idx][1]
+        if entries.len > 0:
+          c.indexStack.add IndexPos(entries: entries, pos: 0)
+          curUuid = entries[0][1]
         else: break
       loadLeaf(c, curUuid)
       return
     c.indexStack.setLen(c.indexStack.len - 1)
   c.atEnd = true
 
-# ── Internal: advance state to next matching key ──
+# ── Internal ──
 
 proc advance(c: PageStoreCursor) =
   if c.atEnd: return
   c.curKey = none(seq[byte])
-
   while true:
     inc c.leafIdx
     if c.leafIdx < c.leafKeys.len:
-      if keyHasPrefix(c.leafKeys[c.leafIdx], c.prefix):
-        c.curKey = some(c.leafKeys[c.leafIdx])
-        return
-      continue
+      c.curKey = some(c.leafKeys[c.leafIdx])
+      return
     if c.indexStack.len > 0:
       advanceToNextLeaf(c)
       if c.atEnd: return
@@ -106,8 +85,8 @@ proc ensure(c: PageStoreCursor) =
 
 # ── Public API ──
 
-proc newPageStoreCursor*(s: ptr PageStoreInner; cf: int; prefix: seq[byte]): PageStoreCursor =
-  result = PageStoreCursor(s: s, cf: cf, prefix: prefix, atEnd: false)
+proc newPageStoreCursor*(s: ptr PageStoreInner; cf: int): PageStoreCursor =
+  result = PageStoreCursor(s: s, cf: cf, atEnd: false)
   if cf < 0 or cf >= s[].numCf: result.atEnd = true; return
   let tree = s[].trees[cf]
   if tree.rootUuid == default(array[16, byte]): result.atEnd = true; return
@@ -124,7 +103,6 @@ proc next*(c: PageStoreCursor): Option[seq[byte]] =
   c.advance()
 
 proc seek*(c: PageStoreCursor; target: seq[byte]) =
-  if cmpSeq(target, c.prefix) < 0: return
   let tree = c.s[].trees[c.cf]
   if tree.rootUuid == default(array[16, byte]): c.atEnd = true; return
   if tree.height == 0: loadLeaf(c, tree.rootUuid)

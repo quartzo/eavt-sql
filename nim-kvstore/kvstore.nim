@@ -373,28 +373,25 @@ proc treapToNimCursor*(tc: TreapCursor): NimCursor =
 
 # ── New streaming scan entry point ──
 
-proc openScanCursor*(kv: KVStore; cf: int; prefix: seq[byte]): MergedCursor =
+proc openScanCursor*(kv: KVStore; cf: int): MergedCursor =
   ## Open a lazy merged cursor over PageStore + flush snapshot + live memtable.
-  ## Returns a streaming cursor — no mass materialization.
+  ## No prefix — iterates all keys in the CF.
   var sources: seq[NimCursor] = @[]
 
-  # PageStore
-  let psCursor = newPageStoreCursor(kv.ps, cf, prefix)
+  let psCursor = newPageStoreCursor(kv.ps, cf)
   if not psCursor.atEnd:
     sources.add pageStoreToNimCursor(psCursor)
 
-  # Flush snapshot (if any)
   if kv.flushSnap != 0:
     let flushRoot =
       if kv.flushSnap.int <= kv.mt.hnd.snaps.len and kv.mt.hnd.snaps[kv.flushSnap.int - 1].inUse:
         kv.mt.hnd.snaps[kv.flushSnap.int - 1].roots[cf]
       else: nil
     if flushRoot != nil:
-      let tc = newTreapCursor(flushRoot, prefix)
+      let tc = newTreapCursor(flushRoot)
       if not tc.atEnd:
         sources.add treapToNimCursor(tc)
 
-  # Live memtable (snapshot)
   let liveSnap = kv.mt.snapshot()
   let liveRoot =
     if liveSnap == 0: kv.mt.hnd.live[cf]
@@ -402,7 +399,7 @@ proc openScanCursor*(kv: KVStore; cf: int; prefix: seq[byte]): MergedCursor =
       kv.mt.hnd.snaps[liveSnap.int - 1].roots[cf]
     else: nil
   if liveRoot != nil:
-    let tc = newTreapCursor(liveRoot, prefix)
+    let tc = newTreapCursor(liveRoot)
     if not tc.atEnd:
       sources.add treapToNimCursor(tc)
 
