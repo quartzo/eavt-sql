@@ -764,7 +764,7 @@ impl PyKVStore {
         py.allow_threads(|| inner.journal_read().map(|d| d.len() as u64)).map_err(to_string_err)
     }
 
-    fn approximate_sizes(&self, py: Python<'_>, cf: u32, start: Vec<u8>, _end: Vec<u8>) -> PyResult<u64> {
+    fn approximate_sizes(&self, py: Python<'_>, cf: u32, start: Vec<u8>, end: Vec<u8>) -> PyResult<u64> {
         let guard = self.inner.lock().unwrap();
         let inner = guard.as_ref().ok_or("not open")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
