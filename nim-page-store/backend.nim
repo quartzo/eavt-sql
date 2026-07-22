@@ -47,7 +47,7 @@ proc nim_blob_s3_close*(vt: NimBlobVtablePtr)
     {.importc: "nim_blob_s3_close", cdecl.}
 
 # Journal extern symbols
-proc nim_journal_open*(keys, vals: CStringArr; count: cint;
+proc nim_journal_open*(path: cstring;
                        errOut: ptr cint): NimJournalVtablePtr
     {.importc: "nim_journal_open", cdecl.}
 
@@ -1109,7 +1109,10 @@ proc openPageStore*(keys, vals: CStringArr; count: cint;
 
   let journal =
     if backend == "memory": nil
-    else: nim_journal_open(keys, vals, count, errOut)
+    else:
+      let journalPath = config.getOrDefault("path", "").cstring
+      if journalPath == "": nil
+      else: nim_journal_open(journalPath, errOut)
 
   let s = cast[ptr PageStoreInner](allocShared0(sizeof(PageStoreInner)))
   s.blobs = blobs
