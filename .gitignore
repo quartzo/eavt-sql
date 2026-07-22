@@ -31,7 +31,6 @@ nim-blobstore/*/sha256
 **/journal/journal
 /nim-kvstore/tests
 /nim-page-store/resolver
-/pynim_kvstore.so
 nim-page-store/scheme
 nim-kvstore/tests
 nim-page-store/query/engine
