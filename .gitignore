@@ -43,3 +43,4 @@ nim-page-store/scheme
 nim-page-store/tests
 nim-page-store/query/engine
 nim-page-store/tests
+pynim_query.so
