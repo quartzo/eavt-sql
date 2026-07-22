@@ -342,7 +342,6 @@ proc kvPutC(h: pointer; cf: cuint; key: ptr Byte; klen: csize_t;
 proc kvBatchWrite(h: pointer; ops: ptr Byte; olen: csize_t;
                    errOut: ptr cint): cint {.cdecl.} =
   var s = cast[ptr KVStoreInner](h)
-  if s.readOnly: setErr(errOut, ErrReadOnly); return -1
   s.lock.withLock:
     try:
       # Write to memtable
@@ -559,7 +558,7 @@ proc openKvStore*(keys, vals: CStringArr; count: cint;
   initSpinLock(s.lock)
 
   # Replay journal into memtable (crash recovery)
-  if s.path.len > 0 and s.path != ":memory:":
+  if s.path.len > 0 and s.path != ":memory:" and s.path != "":
     let journalPath = s.path / "journal" / "journal"
     if fileExists(journalPath):
       try:
