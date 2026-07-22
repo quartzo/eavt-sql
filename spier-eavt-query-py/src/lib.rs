@@ -601,70 +601,70 @@ impl PyKVStore {
 
     fn put(&self, py: Python<'_>, cf: u32, key: Vec<u8>) -> PyResult<()> {
         let guard = self.inner.lock().unwrap();
-        let inner = guard.as_ref().ok_or("closed")
+        let inner = guard.as_ref().ok_or("not open")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         py.allow_threads(|| inner.put(cf, &key)).map_err(to_string_err)
     }
 
     fn get(&self, py: Python<'_>, cf: u32, key: Vec<u8>) -> PyResult<bool> {
         let guard = self.inner.lock().unwrap();
-        let inner = guard.as_ref().ok_or("closed")
+        let inner = guard.as_ref().ok_or("not open")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         py.allow_threads(|| inner.get(cf, &key)).map_err(to_string_err)
     }
 
     fn scan(&self, py: Python<'_>, cf: u32, prefix: Vec<u8>) -> PyResult<Vec<u8>> {
         let guard = self.inner.lock().unwrap();
-        let inner = guard.as_ref().ok_or("closed")
+        let inner = guard.as_ref().ok_or("not open")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         py.allow_threads(|| inner.scan(cf, &prefix)).map_err(to_string_err)
     }
 
     fn flush(&self, py: Python<'_>) -> PyResult<()> {
         let guard = self.inner.lock().unwrap();
-        let inner = guard.as_ref().ok_or("closed")
+        let inner = guard.as_ref().ok_or("not open")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         py.allow_threads(|| inner.flush()).map_err(to_string_err)
     }
 
     fn items(&self, py: Python<'_>, cf: u32) -> PyResult<Vec<u8>> {
         let guard = self.inner.lock().unwrap();
-        let inner = guard.as_ref().ok_or("closed")
+        let inner = guard.as_ref().ok_or("not open")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         py.allow_threads(|| inner.scan(cf, b"")).map_err(to_string_err)
     }
 
     fn batch_write(&self, py: Python<'_>, ops: Vec<u8>) -> PyResult<()> {
         let guard = self.inner.lock().unwrap();
-        let inner = guard.as_ref().ok_or("closed")
+        let inner = guard.as_ref().ok_or("not open")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         py.allow_threads(|| inner.batch_write(&ops)).map_err(to_string_err)
     }
 
     fn batch_put(&self, py: Python<'_>, cf: u32, keys: Vec<u8>) -> PyResult<()> {
         let guard = self.inner.lock().unwrap();
-        let inner = guard.as_ref().ok_or("closed")
+        let inner = guard.as_ref().ok_or("not open")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         py.allow_threads(|| inner.batch_put(cf, &keys)).map_err(to_string_err)
     }
 
     fn scan_reverse(&self, py: Python<'_>, cf: u32, prefix: Vec<u8>) -> PyResult<Vec<u8>> {
         let guard = self.inner.lock().unwrap();
-        let inner = guard.as_ref().ok_or("closed")
+        let inner = guard.as_ref().ok_or("not open")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         py.allow_threads(|| inner.scan_reverse(cf, &prefix)).map_err(to_string_err)
     }
 
     fn journal_put(&self, py: Python<'_>, key: Vec<u8>, value: Vec<u8>) -> PyResult<()> {
         let guard = self.inner.lock().unwrap();
-        let inner = guard.as_ref().ok_or("closed")
+        let inner = guard.as_ref().ok_or("not open")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         py.allow_threads(|| inner.journal_append(&key, &value)).map_err(to_string_err)
     }
 
     fn journal_scan(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
         let guard = self.inner.lock().unwrap();
-        let inner = guard.as_ref().ok_or("closed")
+        let inner = guard.as_ref().ok_or("not open")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         py.allow_threads(|| inner.journal_read()).map_err(to_string_err)
     }
@@ -679,7 +679,7 @@ impl PyKVStore {
 
     fn open_cursor_impl(&self, _py: Python<'_>, cf: u32, prefix: Vec<u8>, reverse: bool) -> PyResult<PyCursorHandle> {
         let guard = self.inner.lock().unwrap();
-        let inner = guard.as_ref().ok_or("closed")
+        let inner = guard.as_ref().ok_or("not open")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         let packed = if reverse {
             inner.scan_reverse(cf, &prefix).map_err(to_string_err)?
@@ -737,14 +737,14 @@ impl PyKVStore {
 
     fn memtable_size(&self, py: Python<'_>) -> PyResult<u64> {
         let guard = self.inner.lock().unwrap();
-        let inner = guard.as_ref().ok_or("closed")
+        let inner = guard.as_ref().ok_or("not open")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         py.allow_threads(|| inner.memtable_size()).map_err(to_string_err)
     }
 
     fn memtable_count(&self, py: Python<'_>, cf: u32) -> PyResult<u64> {
         let guard = self.inner.lock().unwrap();
-        let inner = guard.as_ref().ok_or("closed")
+        let inner = guard.as_ref().ok_or("not open")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         let packed = py.allow_threads(|| inner.scan(cf, b"")).map_err(to_string_err)?;
         let mut count = 0u64;
@@ -759,14 +759,14 @@ impl PyKVStore {
 
     fn journal_size(&self, py: Python<'_>) -> PyResult<u64> {
         let guard = self.inner.lock().unwrap();
-        let inner = guard.as_ref().ok_or("closed")
+        let inner = guard.as_ref().ok_or("not open")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         py.allow_threads(|| inner.journal_read().map(|d| d.len() as u64)).map_err(to_string_err)
     }
 
     fn approximate_sizes(&self, py: Python<'_>, cf: u32, start: Vec<u8>, _end: Vec<u8>) -> PyResult<u64> {
         let guard = self.inner.lock().unwrap();
-        let inner = guard.as_ref().ok_or("closed")
+        let inner = guard.as_ref().ok_or("not open")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         let packed = py.allow_threads(|| inner.scan(cf, &start)).map_err(to_string_err)?;
         let mut count = 0u64;
@@ -798,9 +798,18 @@ impl PyKVStore {
         Ok(buf)
     }
 
-    fn gc_full(&self, _py: Python<'_>, _dry_run: bool, _nowait: bool) -> PyResult<Vec<u8>> {
-        Ok(Vec::new())
+    #[pyo3(signature = (dry_run, nowait))]
+    fn gc_full(&self, _py: Python<'_>, dry_run: bool, nowait: bool) -> PyResult<Vec<u8>> {
+        let mut buf = Vec::with_capacity(41);
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.push(if dry_run { 1u8 } else { 0u8 });
+        Ok(buf)
     }
+
 }
 
 #[pymodule]
