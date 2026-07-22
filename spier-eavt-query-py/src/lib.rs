@@ -6,7 +6,7 @@ use pyo3::types::PyDict;
 use spier_eavt_query::QueryEngine;
 use spier_eavt_query::QueryState;
 use spier_query_ir::ProgramHandle;
-use spier_kvstore::transactor::ValueType;
+use spier_page_store_nim::transactor::ValueType;
 use spier_value::Value;
 
 fn to_string_err(e: String) -> PyErr {

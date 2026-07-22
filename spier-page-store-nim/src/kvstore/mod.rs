@@ -2,8 +2,7 @@
 // NimKVStore handles everything: blobstore, journal, memtable, page-store,
 // transactor (flush/GC/scan), and cursor merge.
 
-pub mod page_store;  // cf_name_for helper
-pub mod transactor;  // EAVT engine + resolver (merged from spier-transactor)
+pub mod page_store;
 
 pub use spier_storage_traits::KVStoreEngine;
 
@@ -13,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use spier_page_store_nim::NimKVStore;
+use crate::NimKVStore;
 use spier_storage_traits::CursorHandle;
 
 const DEFAULT_FLUSH_THRESHOLD: u64 = 64 * 1024 * 1024; // 64MB

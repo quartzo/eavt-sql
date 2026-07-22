@@ -1120,7 +1120,7 @@ dependencies = [
  "chrono",
  "spier-compiler",
  "spier-datalog",
- "spier-kvstore",
+ "spier-page-store-nim",
  "spier-query-ir",
  "spier-scheme",
  "spier-sql-frontend",
@@ -1135,18 +1135,8 @@ version = "0.1.0"
 dependencies = [
  "pyo3",
  "spier-eavt-query",
- "spier-kvstore",
  "spier-page-store-nim",
  "spier-query-ir",
- "spier-value",
-]
-
-[[package]]
-name = "spier-kvstore"
-version = "0.1.0"
-dependencies = [
- "spier-page-store-nim",
- "spier-storage-traits",
  "spier-value",
 ]
 
@@ -1155,6 +1145,7 @@ name = "spier-page-store-nim"
 version = "0.1.0"
 dependencies = [
  "spier-storage-traits",
+ "spier-value",
 ]
 
 [[package]]

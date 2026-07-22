@@ -3,16 +3,16 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use spier_storage_traits::invalid_cursor_handle;
-use spier_kvstore::transactor::keys::{self};
-use spier_kvstore::transactor::resolver_consts as resolver;
-use spier_kvstore::transactor::TransactorEngine;
-use spier_kvstore::transactor::TransactorState;
+use spier_page_store_nim::transactor::keys::{self};
+use spier_page_store_nim::transactor::resolver_consts as resolver;
+use spier_page_store_nim::transactor::TransactorEngine;
+use spier_page_store_nim::transactor::TransactorState;
 use spier_value::Value;
 
 use crate::engine::types::{EngineError, EngineOps, QueryContext, RawDatomView};
 
 fn cf_name_to_id() -> HashMap<String, usize> {
-    spier_kvstore::transactor::constants::cf_name_map()
+    spier_page_store_nim::transactor::constants::cf_name_map()
 }
 
 /// TTL cache for cardinality estimates. Keyed by (cf_id, prefix_bytes).
@@ -83,20 +83,20 @@ impl QueryEngineInner {
     }
 
     pub fn open(config: &HashMap<String, String>) -> Result<Self, String> {
-        Self::load("spier_kvstore", config)
+        Self::load("spier_page_store_nim", config)
     }
 
     pub fn open_read_only(config: &HashMap<String, String>) -> Result<Self, String> {
         let mut config = config.clone();
         config.insert("read_only".into(), "true".into());
-        Self::load("spier_kvstore", &config)
+        Self::load("spier_page_store_nim", &config)
     }
 
     pub fn open_in_memory(config: &HashMap<String, String>) -> Result<Self, String> {
         let mut config = config.clone();
         config.insert("backend".into(), "memory".into());
         config.remove("path");
-        let mut engine = Self::load("spier_kvstore", &config)?;
+        let mut engine = Self::load("spier_page_store_nim", &config)?;
         engine.path = ":memory:".to_string();
         Ok(engine)
     }
@@ -139,7 +139,7 @@ impl QueryEngineInner {
         config.insert("secret_key".into(), secret_key);
         config.insert("prefix".into(), prefix);
 
-        let mut engine = Self::load("spier_kvstore", &config)?;
+        let mut engine = Self::load("spier_page_store_nim", &config)?;
         engine.path = s3_url.to_string();
         Ok(engine)
     }
@@ -191,7 +191,7 @@ impl QueryEngineInner {
             .value_type_for(aid)
             .ok()
             .flatten()
-            .map(spier_kvstore::transactor::value_type_to_eid);
+            .map(spier_page_store_nim::transactor::value_type_to_eid);
         if let Ok(mut cache) = self.vt_cache.write() {
             cache.insert(aid, vt);
         }
@@ -371,7 +371,7 @@ impl EngineOps for QueryEngineInner {
 
     fn lookup_value(&self, eid: u64, attr_name: &str, ctx: &QueryContext) -> Option<Value> {
         let aid = self.lookup_attr_cached(attr_name)?;
-        let prefix: Vec<u8> = spier_kvstore::transactor::keys::encode_int64(eid as i64)
+        let prefix: Vec<u8> = spier_page_store_nim::transactor::keys::encode_int64(eid as i64)
             .to_be_bytes()
             .iter()
             .chain(aid.to_be_bytes().iter())

@@ -2,6 +2,11 @@
 //! (`libnim_page_store.a`). Exposes `NimPageStore` with methods that call
 //! through a C-ABI vtable.
 
+pub mod kvstore;
+pub mod transactor;
+
+pub use kvstore::KVState;
+
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::sync::Once;

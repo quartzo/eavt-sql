@@ -1,4 +1,4 @@
 [workspace]
-members = ["eavt-cli", "eavt-server", "spier-kvstore", "spier-storage-traits", "spier-value", "spier-datalog", "spier-eavt-query", "spier-eavt-query-py", "spier-sql-parse", "spier-sql-parse-py", "spier-sql-frontend", "spier-planner", "spier-compiler", "spier-query-ir", "spier-scheme", "spier-page-store-nim"]
-default-members = ["eavt-cli", "eavt-server", "spier-kvstore", "spier-storage-traits", "spier-value", "spier-datalog", "spier-eavt-query", "spier-eavt-query-py", "spier-sql-parse", "spier-sql-parse-py", "spier-sql-frontend", "spier-planner", "spier-compiler", "spier-query-ir", "spier-scheme", "spier-page-store-nim"]
+members = ["eavt-cli", "eavt-server", "spier-storage-traits", "spier-value", "spier-datalog", "spier-eavt-query", "spier-eavt-query-py", "spier-sql-parse", "spier-sql-parse-py", "spier-sql-frontend", "spier-planner", "spier-compiler", "spier-query-ir", "spier-scheme", "spier-page-store-nim"]
+default-members = ["eavt-cli", "eavt-server", "spier-storage-traits", "spier-value", "spier-datalog", "spier-eavt-query", "spier-eavt-query-py", "spier-sql-parse", "spier-sql-parse-py", "spier-sql-frontend", "spier-planner", "spier-compiler", "spier-query-ir", "spier-scheme", "spier-page-store-nim"]
 resolver = "2"

@@ -6,3 +6,4 @@ description = "Nim-backed B-tree page store (COW, zstd-compressed pages on blobs
 
 [dependencies]
 spier-storage-traits = { path = "../spier-storage-traits" }
+spier-value = { path = "../spier-value" }
