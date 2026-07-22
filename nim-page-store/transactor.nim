@@ -534,7 +534,7 @@ proc openKvStore*(keys, vals: CStringArr; count: cint;
   s.mtSize = 0
   s.flushSnap = 0
   s.config = config
-  s.path = config.getOrDefault("path", ":memory:")
+  s.path = config.getOrDefault("path", "")
   s.readOnly = readOnly
   s.numCf = 4
   s.flushThreshold = parseUInt(config.getOrDefault("flush_threshold", "67108864")).uint64
