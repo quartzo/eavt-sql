@@ -48,3 +48,4 @@ pynim_query.so
 nim-blobstore/journal/tests
 nim-blobstore/memory/tests
 nim-blobstore/file/tests
+nim-blobstore/s3/tests

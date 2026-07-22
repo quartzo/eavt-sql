@@ -152,8 +152,13 @@ proc signAwsRequestV4*(
   let endpointUri = parseUri(endpoint)
   let host = endpointUri.hostname  # may include port? strip if needed
 
-  # Canonical URI: /bucket/key (path-style) — Rust impl uses path-style by default
-  let canonicalUri = encodePathSegment("/" & bucketName & "/" & objectKey)
+  # Canonical URI: /bucket/key (path-style).  Empty objectKey means a
+  # bucket-level operation (e.g. CreateBucket).
+  let canonicalUri =
+    if objectKey.len == 0:
+      encodePathSegment("/" & bucketName)
+    else:
+      encodePathSegment("/" & bucketName & "/" & objectKey)
 
   # Canonical query string: keys + values sorted by key
   var qs: seq[(string, string)] = @[]

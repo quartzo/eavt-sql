@@ -41,13 +41,6 @@ proc ensureInit(b: S3BlobStore; cfg: Table[string, string]): Option[string] =
   b.initialized = true
   result = none(string)
 
-proc newS3BlobStore*(cfg: Table[string, string]): S3BlobStore =
-  result = S3BlobStore()
-  initSpinLock(result.lock)
-  let e = ensureInit(result, cfg)
-  if e.isSome():
-    raise newException(IOError, "s3 init: " & e.get())
-
 # ── key helpers ──────────────────────────────────────────────────────────────
 
 proc uuidToHexStr(id: ByteArr16): string =
@@ -70,7 +63,7 @@ proc blobKeyForId(b: S3BlobStore; id: ByteArr16): string =
 proc rootKeyForName(b: S3BlobStore; name: string): string =
   b.prefixedKey("roots/" & name)
 
-# ── URL + HTTP ───────────────────────────────────────────────────────────────
+# ── URL building + HTTP ─────────────────────────────────────────────────────
 
 proc buildHost(b: S3BlobStore): string =
   let u = parseUri(b.endpoint)
@@ -84,7 +77,10 @@ proc buildObjectUrl(b: S3BlobStore; objectKey, queryString: string): string =
   if b.pathStyle:
     var url = scheme & "://" & u.hostname
     if u.port.len > 0: url.add(":" & u.port)
-    url.add("/" & b.bucketName & "/" & encodeUrl(objectKey, usePlus = false))
+    if objectKey.len == 0:
+      url.add("/" & b.bucketName)
+    else:
+      url.add("/" & b.bucketName & "/" & encodeUrl(objectKey, usePlus = false))
     if queryString.len > 0: url.add("?" & queryString)
     result = url
   else:
@@ -185,9 +181,7 @@ proc s3ListAll(b: S3BlobStore; prefix: string): tuple[ok: bool; items: seq[strin
     continuationToken = if isTruncated and nextTokens.len > 0: nextTokens[0] else: ""
   result = (true, allItems, none(string))
 
-# ══════════════════════════════════════════════════════════════════════════════
-# BlobStore trait methods
-# ══════════════════════════════════════════════════════════════════════════════
+# ── hex decode helper ────────────────────────────────────────────────────────
 
 proc uuidFromHexStr(s: string): Option[ByteArr16] =
   if s.len != 32: return none(ByteArr16)
@@ -204,6 +198,36 @@ proc uuidFromHexStr(s: string): Option[ByteArr16] =
     if hi.isNone() or lo.isNone(): return none(ByteArr16)
     bytes[i] = (hi.get() shl 4) or lo.get()
   result = some(bytes)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BlobStore trait methods
+# ══════════════════════════════════════════════════════════════════════════════
+
+method createBucket*(s: S3BlobStore) =
+  ## Create the configured bucket via S3 CreateBucket API.
+  let signed = signAwsRequestV4(
+    accessKey = s.accessKey, secretKey = s.secretKey,
+    region = s.region, service = "s3", endpoint = s.endpoint,
+    bucketName = s.bucketName, httpMethod = "PUT", objectKey = "",
+    queryString = "", extraHeaders = @[], payload = @[],
+  )
+  let url = s.buildObjectUrl("", "")
+  let host = s.buildHost()
+  var client: HttpClient
+  try:
+    client = newHttpClient(timeout = 30000)
+  except OSError, IOError:
+    raise newException(IOError, "createBucket http: " & getCurrentExceptionMsg())
+  defer: client.close()
+  client.headers = newHttpHeaders({
+    "Authorization": signed.authorization,
+    "x-amz-date": signed.xAmzDate,
+    "x-amz-content-sha256": signed.xAmzContentSha256,
+    "Host": host,
+  })
+  let resp = client.request(url, HttpPut, "")
+  if resp.code != Http200:
+    raise newException(IOError, "createBucket failed: HTTP " & $resp.code)
 
 method put*(s: S3BlobStore; data: openArray[byte]): ByteArr16 =
   var payload: seq[byte] = newSeq[byte](data.len)
@@ -297,3 +321,16 @@ method deleteRoot*(s: S3BlobStore; name: string) =
     let e = s3Delete(s, key)
     if e.isSome(): raise newException(IOError, "s3 deleteRoot: " & e.get())
   finally: s.lock.release()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Constructor (must come after all method definitions for forward ref)
+# ══════════════════════════════════════════════════════════════════════════════
+
+proc newS3BlobStore*(cfg: Table[string, string]; autoCreateBucket = false): S3BlobStore =
+  result = S3BlobStore()
+  initSpinLock(result.lock)
+  let e = ensureInit(result, cfg)
+  if e.isSome():
+    raise newException(IOError, "s3 init: " & e.get())
+  if autoCreateBucket:
+    result.createBucket()
