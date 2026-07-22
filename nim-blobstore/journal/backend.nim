@@ -116,10 +116,12 @@ proc readImpl(h: pointer, outBuf: ptr pointer, outLen: ptr csize_t,
   except CatchableError:
     setErr(errOut, ErrIo)
     return -1
-  # Replay and re-pack only the well-formed leading frames.
+  # Replay: validate every frame.  Error on truncated frames or trailing
+  # garbage after the last valid frame (no silent discard).
   var packed = newSeq[byte](0)
   var off = 0
-  while off + 8 <= data.len:
+  while off + 4 <= data.len:
+    # --- klen ---
     let klen = cast[uint32](cast[byte](data[off]).uint32 shl 24 or
                             cast[byte](data[off+1]).uint32 shl 16 or
                             cast[byte](data[off+2]).uint32 shl 8 or
@@ -129,21 +131,34 @@ proc readImpl(h: pointer, outBuf: ptr pointer, outLen: ptr csize_t,
     packed.add(cast[byte]((klen shr 16) and 0xFF))
     packed.add(cast[byte]((klen shr 8) and 0xFF))
     packed.add(cast[byte](klen and 0xFF))
+    if off + klen.int > data.len:
+      setErr(errOut, ErrIo)
+      return -1   # truncated key
     for c in data[off ..< off + klen.int]: packed.add(c.byte)
     off += klen.int
+
+    # --- vlen ---
+    if off + 4 > data.len:
+      setErr(errOut, ErrIo)
+      return -1   # truncated vlen (missing after key)
     let vlen = cast[uint32](cast[byte](data[off]).uint32 shl 24 or
                             cast[byte](data[off+1]).uint32 shl 16 or
                             cast[byte](data[off+2]).uint32 shl 8 or
                             cast[byte](data[off+3]).uint32)
     off += 4
-    if off + vlen.int > data.len:
-      break
     packed.add(cast[byte]((vlen shr 24) and 0xFF))
     packed.add(cast[byte]((vlen shr 16) and 0xFF))
     packed.add(cast[byte]((vlen shr 8) and 0xFF))
     packed.add(cast[byte](vlen and 0xFF))
+    if off + vlen.int > data.len:
+      setErr(errOut, ErrIo)
+      return -1   # truncated value
     for c in data[off ..< off + vlen.int]: packed.add(c.byte)
     off += vlen.int
+
+  if off < data.len:
+    setErr(errOut, ErrIo)
+    return -1       # trailing garbage after last complete frame
   if packed.len == 0:
     outBuf[] = nil
     outLen[] = 0

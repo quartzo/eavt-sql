@@ -44,3 +44,5 @@ nim-page-store/tests
 nim-page-store/query/engine
 nim-page-store/tests
 pynim_query.so
+# journal test binary
+nim-blobstore/journal/tests
