@@ -34,7 +34,7 @@ type
   SnapshotFn* = proc(h: pointer, outId: ptr uint64, errOut: ptr cint): cint {.cdecl.}
   SnapshotFreeFn* = proc(h: pointer, id: uint64) {.cdecl.}
   ScanFn* = proc(h: pointer, id: uint64, cf: cuint, prefix: ptr Byte, plen: csize_t,
-                reverse: cint, outCursor: ptr uint64, errOut: ptr cint): cint {.cdecl.}
+                outCursor: ptr uint64, errOut: ptr cint): cint {.cdecl.}
   CursorNextFn* = proc(h: pointer, cursor: uint64,
                        outKey: ptr pointer, outLen: ptr csize_t,
                        outValid: ptr cint, errOut: ptr cint): cint {.cdecl.}
@@ -52,7 +52,7 @@ type
   CountPrefixFn* = proc(h: pointer, id: uint64, cf: cuint, prefix: ptr Byte, plen: csize_t,
                         outCount: ptr uint64, errOut: ptr cint): cint {.cdecl.}
   ScanPrefixFn* = proc(h: pointer, id: uint64, cf: cuint, prefix: ptr Byte, plen: csize_t,
-                       reverse: cint, outBuf: ptr pointer, outLen: ptr csize_t,
+                       outBuf: ptr pointer, outLen: ptr csize_t,
                        errOut: ptr cint): cint {.cdecl.}
   DebugCountNodesFn* = proc(h: pointer, outCount: ptr uint64): cint {.cdecl.}
   FreeBufFn* = proc(p: pointer) {.cdecl.}

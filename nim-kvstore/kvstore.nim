@@ -221,10 +221,10 @@ proc scan*(kv: KVStore; cf: int; prefix: openArray[byte]): seq[seq[byte]] =
   let psKeys = getKeysInPrefix(kv.ps[], cf, pfx)
   if psKeys.len > 0: sources.add MergeSource(kind: mskPageStore, keys: psKeys, idx: 0)
   if kv.flushSnap != 0:
-    let snapKeys = kv.mt.scanAll(kv.flushSnap, cf, pfx, false)
+    let snapKeys = kv.mt.scanAll(kv.flushSnap, cf, pfx)
     if snapKeys.len > 0: sources.add MergeSource(kind: mskMemTable, keys: snapKeys, idx: 0)
   let liveSnap = kv.mt.snapshot()
-  let liveKeys = kv.mt.scanAll(liveSnap, cf, pfx, false)
+  let liveKeys = kv.mt.scanAll(liveSnap, cf, pfx)
   kv.mt.snapshotFree(liveSnap)
   if liveKeys.len > 0: sources.add MergeSource(kind: mskMemTable, keys: liveKeys, idx: 0)
   let endB = prefixEnd(pfx)
@@ -243,7 +243,7 @@ proc flush*(kv: KVStore) =
   kv.mt.clear(); kv.mtSize = 0
   var keysByCf: seq[(int, seq[seq[byte]])] = @[]
   for cf in 0..<kv.numCf:
-    let keys = kv.mt.scanAll(kv.flushSnap, cf, @[], false)
+    let keys = kv.mt.scanAll(kv.flushSnap, cf, @[])
     if keys.len > 0: keysByCf.add (cf, keys)
   if keysByCf.len > 0: commitMerge(kv.ps[], keysByCf, true)
   kv.flushSnap = 0; kv.mtSize = 0

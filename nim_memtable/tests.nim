@@ -81,7 +81,7 @@ suite "memtable: snapshot + scan":
     discard mt.put(0, @[byte(1)])
     discard mt.put(0, @[byte(2)])
     let snap = mt.snapshot()
-    let keys = mt.scanAll(snap, 0, @[], false)
+    let keys = mt.scanAll(snap, 0, @[])
     check keys.len == 3
     check keys[0] == @[byte(1)]
     check keys[1] == @[byte(2)]
@@ -95,7 +95,7 @@ suite "memtable: snapshot + scan":
     discard mt.put(0, @[byte(0), 20])
     discard mt.put(0, @[byte(1), 30])
     let snap = mt.snapshot()
-    let keys = mt.scanAll(snap, 0, @[byte(0)], false)
+    let keys = mt.scanAll(snap, 0, @[byte(0)])
     check keys.len == 2
     check keys[0] == @[byte(0), 10]
     check keys[1] == @[byte(0), 20]
@@ -107,7 +107,7 @@ suite "memtable: snapshot + scan":
     discard mt.put(0, @[byte(9)])
     discard mt.put(0, @[byte(1)])
     let snap = mt.snapshot()
-    let keys = mt.scanAll(snap, 0, @[], false)
+    let keys = mt.scanAll(snap, 0, @[])
     check keys.len == 2
     mt.snapshotFree(snap)
     mt.close()
@@ -117,8 +117,8 @@ suite "memtable: snapshot + scan":
     discard mt.put(0, @[byte(1)])
     let snap = mt.snapshot()
     mt.clear()
-    check mt.scanAll(snap, 0, @[], false).len == 1  # snapshot still sees old data
-    check mt.scanAll(0, 0, @[], false).len == 0      # live scan (id=0) sees nothing
+    check mt.scanAll(snap, 0, @[]).len == 1  # snapshot still sees old data
+    check mt.scanAll(0, 0, @[]).len == 0      # live scan (id=0) sees nothing
     mt.snapshotFree(snap)
     mt.close()
 
@@ -176,7 +176,7 @@ suite "memtable: COW isolation":
     discard mt.put(0, @[byte(1)])
     let snap = mt.snapshot()
     discard mt.put(0, @[byte(2)])
-    let keys = mt.scanAll(snap, 0, @[], false)
+    let keys = mt.scanAll(snap, 0, @[])
     check keys.len == 1
     check keys[0] == @[byte(1)]
     mt.snapshotFree(snap)
@@ -188,7 +188,7 @@ suite "memtable: COW isolation":
     discard mt.put(0, @[byte(2)])
     let snap = mt.snapshot()
     mt.clear()
-    check mt.scanAll(snap, 0, @[], false).len == 2
+    check mt.scanAll(snap, 0, @[]).len == 2
     mt.snapshotFree(snap)
     mt.close()
 

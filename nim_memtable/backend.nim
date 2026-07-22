@@ -128,22 +128,6 @@ proc collectForward(node: TreapNode, prefix, upper: Key, acc: var seq[Key]) =
     while r != nil:
       stack.add(r); r = r.left
 
-proc collectReverse(node: TreapNode, prefix, upper: Key, acc: var seq[Key]) =
-  var stack: seq[TreapNode] = @[]
-  var n = node
-  while n != nil:
-    if cmpKey(n.key, prefix) >= 0:
-      stack.add(n); n = n.left
-    else:
-      n = n.right
-  while stack.len > 0:
-    let cur = stack.pop()
-    if cmpKey(cur.key, upper) < 0: acc.add(cur.key)
-    var r = cur.right
-    while r != nil:
-      stack.add(r); r = r.left
-  acc.reverse()
-
 proc collectAddrs(node: TreapNode; seen: var HashSet[int]) =
   if node == nil or seen.contains(cast[int](node)): return
   seen.incl(cast[int](node))
@@ -244,8 +228,7 @@ proc snapshotFree*(mt: MemTable; id: uint64) =
       mt.hnd.snaps[id.int - 1].inUse = false
       mt.hnd.freeSnapSlots.add(id)
 
-proc scanAll*(mt: MemTable; snapId: uint64; cf: int; prefix: openArray[byte];
-              reverse = false): seq[seq[byte]] =
+proc scanAll*(mt: MemTable; snapId: uint64; cf: int; prefix: openArray[byte]): seq[seq[byte]] =
   if cf < 0 or cf >= mt.hnd.live.len: return @[]
   let root =
     if snapId == 0: mt.hnd.live[cf]
@@ -259,8 +242,7 @@ proc scanAll*(mt: MemTable; snapId: uint64; cf: int; prefix: openArray[byte];
               else: prefixUpperBound(pfx)
   var collected: seq[Key] = @[]
   mt.hnd.lock.withLock:
-    if reverse: collectReverse(root, pfx, upper, collected)
-    else: collectForward(root, pfx, upper, collected)
+    collectForward(root, pfx, upper, collected)
   for k in collected: result.add(k)
 
 proc contains*(mt: MemTable; snapId: uint64; cf: int; key: openArray[byte]): bool =
@@ -337,10 +319,9 @@ proc snapshotFreeImpl(h: pointer, id: uint64) {.cdecl.} =
   if mt != nil and mt[] != nil: mt[].snapshotFree(id)
 
 proc scanImpl(h: pointer, id: uint64, cf: cuint, prefix: ptr Byte, plen: csize_t,
-              reverse: cint, outCursor: ptr uint64, errOut: ptr cint): cint {.cdecl.} =
+              outCursor: ptr uint64, errOut: ptr cint): cint {.cdecl.} =
   var hnd = cast[ptr MemTableHandle](h)
   if hnd == nil: setErr(errOut, ErrInvalidHandle); return -1
-  # use internal MemTableHandle directly for cursor compat
   if cf >= hnd.numCf: setErr(errOut, ErrInvalidHandle); return -1
   var pfx = newSeq[byte](plen)
   if plen > 0: copyMem(addr pfx[0], prefix, plen)
@@ -348,14 +329,11 @@ proc scanImpl(h: pointer, id: uint64, cf: cuint, prefix: ptr Byte, plen: csize_t
               else: prefixUpperBound(pfx)
   var collected: seq[Key] = @[]
   hnd.lock.withLock:
-    # scanImpl goes through the raw handle, accessing snaps directly
     let snapRoot = if id == 0 or id.int > hnd.snaps.len: nil
                    else: (if hnd.snaps[id.int-1].inUse: hnd.snaps[id.int-1].roots[cf.int] else: nil)
-    # For live scan (id=0), use live roots
     let root = if id == 0: hnd.live[cf.int] else: snapRoot
     if root == nil: setErr(errOut, ErrNotFound); return -1
-    if reverse != 0: collectReverse(root, pfx, upper, collected)
-    else: collectForward(root, pfx, upper, collected)
+    collectForward(root, pfx, upper, collected)
   var st: CursorState
   st.keys = collected
   st.inUse = true
@@ -415,14 +393,14 @@ proc countPrefixImpl(h: pointer, id: uint64, cf: cuint, prefix: ptr Byte, plen: 
   except: setErr(errOut, ErrIo); return -1
 
 proc scanPrefixImpl(h: pointer, id: uint64, cf: cuint, prefix: ptr Byte, plen: csize_t,
-                    reverse: cint, outBuf: ptr pointer, outLen: ptr csize_t,
+                    outBuf: ptr pointer, outLen: ptr csize_t,
                     errOut: ptr cint): cint {.cdecl.} =
   let mt = cast[ptr MemTable](h)
   if mt == nil or mt[] == nil: setErr(errOut, ErrInvalidHandle); return -1
   var pfx = newSeq[byte](plen)
   if plen > 0: copyMem(addr pfx[0], prefix, plen)
   try:
-    let keys = mt[].scanAll(id, cf.int, pfx, reverse != 0)
+    let keys = mt[].scanAll(id, cf.int, pfx)
     var packed = newSeq[byte](0)
     for k in keys:
       packed.add(cast[byte]((k.len shr 24) and 0xFF)); packed.add(cast[byte]((k.len shr 16) and 0xFF))
