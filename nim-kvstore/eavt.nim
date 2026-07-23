@@ -27,7 +27,8 @@ proc valueTypeToEncodeMode*(vt: uint32): EncodeMode =
   else:               return emVariable
 
 proc valueTypeFromName*(name: string): uint32 =
-  case name.toLowerAscii():
+  let n = if name.startsWith(":db.type/"): name[9..^1].toLowerAscii() else: name.toLowerAscii()
+  case n:
   of "ref":     return DbTypeRef
   of "string":  return DbTypeString
   of "keyword": return DbTypeKeyword
