@@ -2103,3 +2103,40 @@ suite "engine: scanner-iterate more":
     for row in rows:
       if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
     check vals == @[1'i64, 2, 3]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Engine: select-path (yield-mode) — ported from test_scheme_arith.py
+# ═══════════════════════════════════════════════════════════════════════════════
+
+suite "engine: select-path (yield-mode)":
+  test "arith in select path":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let rows = runSelect(q, "(begin (+ 1 2) (result-row 3))")
+    check rows.len == 1
+    check rows[0][0].ival == 3
+
+  test "and in select path":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let rows = runSelect(q, "(begin (and #t 42) (result-row 1))")
+    check rows.len == 1
+    check rows[0][0].ival == 1
+
+  test "or in select path":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let rows = runSelect(q, "(begin (or #f 7) (result-row 2))")
+    check rows.len == 1
+    check rows[0][0].ival == 2
+
+  test "not in select path":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let rows = runSelect(q, "(begin (not #t) (result-row 3))")
+    check rows.len == 1
+    check rows[0][0].ival == 3
