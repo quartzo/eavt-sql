@@ -4,7 +4,7 @@
 ## handles that via seek() and classifyKey. Loads one leaf at a time.
 
 import std/[options]
-import ./backend
+import page_store
 
 type
   IndexPos = object

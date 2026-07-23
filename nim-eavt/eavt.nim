@@ -4,9 +4,9 @@
 ## Coordinates Resolver + KVStore for entity-attribute-value-time operations.
 
 import std/[tables, strutils, options, times, sets]
-import ./resolver
-import ./keys
-import ./kvstore  # KVStore Nim ref
+import resolver
+import keys
+import kvstore  # KVStore Nim ref
 import std/locks
 
 # ═══════════════════════════════════════════════════════════════════════════════

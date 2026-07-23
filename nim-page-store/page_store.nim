@@ -3,8 +3,8 @@
 ## Port of spier-kvstore/src/generic_page_store.rs (~1800 lines → ~900 lines Nim).
 
 import std/[tables, sets, hashes, strformat, strutils, times, monotimes, options]
-import ./abi
-import ./pages
+import abi
+import pages
 import std/locks
 
 # ══════════════════════════════════════════════════════════════════════════════

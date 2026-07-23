@@ -3,8 +3,8 @@
 ## Port of spier-transactor/src/keys.rs (~839 lines Rust → Nim).
 
 import std/[strutils]
-import ./resolver
-import ./scheme  # for PartDb, PartUser, PartTx, partitionOf, makeEntityId
+import resolver
+import scheme  # for PartDb, PartUser, PartTx, partitionOf, makeEntityId
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Encode mode

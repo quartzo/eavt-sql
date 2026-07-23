@@ -10,12 +10,12 @@ import file/all
 import s3/all
 import journal/all
 import nim_memtable/all
-import ./abi
-import ./pages
-import ./backend
-import ./kvstore
-import ./scheme
-import ./page_cursor
+import abi
+import pages
+import page_store
+import kvstore
+import scheme
+import page_cursor
 
 # Helper: collect keys from streaming merged cursor
 proc scanKeys(kv: KVStore; cf: int; prefix: seq[byte] = @[]): seq[seq[byte]] =

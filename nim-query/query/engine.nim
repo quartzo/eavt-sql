@@ -3,15 +3,15 @@
 ## Port of spier-eavt-query/src/engine/query_engine_inner.rs + lib.rs (~1293 lines Rust → Nim).
 
 import std/[options, tables, strutils, sequtils]
-import ../scheme
-import ../kvstore
-import ../eavt
-import ../keys
-import ../resolver
-import ../abi
-import query/types
-import query/scanner
-import query/hostfns
+import scheme
+import kvstore
+import eavt
+import keys
+import resolver
+import abi
+import types
+import scanner
+import hostfns
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # QueryStore — concrete EngineOps implementation over the kvstore

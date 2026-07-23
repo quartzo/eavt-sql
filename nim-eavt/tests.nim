@@ -3,11 +3,11 @@
 ## Unit tests for the EAVT engine (Nim API, no C-ABI).
 
 import std/[unittest, tables, os, times, options]
-import ./abi
-import ./eavt
-import ./kvstore
-import ./keys
-import ./resolver
+import abi
+import eavt
+import kvstore
+import keys
+import resolver
 
 proc makeConfig(t: Table[string, string]): tuple[keys: CStringArr, vals: CStringArr, count: cint] =
   let n = t.len

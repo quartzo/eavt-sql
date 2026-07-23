@@ -3,11 +3,11 @@
 ## Port of spier-eavt-query/src/engine/scheme.rs (~983 lines Rust → Nim).
 
 import std/[options, tables, strutils, sequtils, math]
-import ../scheme
-import ../kvstore
-import ../keys
-import query/types
-import query/scanner
+import scheme
+import kvstore
+import keys
+import types
+import scanner
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Helpers

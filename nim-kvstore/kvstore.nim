@@ -3,13 +3,14 @@
 ## Orchestration layer: coordinates MemTable + PageStore + Journal.
 
 import std/[tables, strutils, os, options]
-import ./abi
-import ./backend
+import abi
+import page_store
+
 import std/locks
 
 import nim_memtable/backend as mt_be
-import nim_memtable/treap_cursor
-import ./page_cursor
+import treap_cursor
+import page_cursor
 import query/scanner  # NimCursor type
 
 # ═══════════════════════════════════════════════════════════════════════════════

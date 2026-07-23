@@ -14,5 +14,7 @@ task test, "Run all Nim unit tests":
   exec "(cd nim-blobstore/journal && nimble test)"
   exec "(cd nim_memtable          && nimble test)"
   exec "(cd nim-kvstore           && nimble test)"
-  exec "(cd nim-kvstore           && nimble eavt_test)"
-  exec "(cd nim-kvstore           && nimble query_test)"
+  exec "(cd nim-eavt              && nimble test)"
+  exec "(cd nim-query             && nimble test)"
+  # nim-page-store tests are part of nim-kvstore/tests.nim (to be split)
+  # nim-scheme tests are part of nim-kvstore/tests.nim (to be split)

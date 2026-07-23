@@ -13,7 +13,7 @@
 ##   99 = Unknown [u8 tag][u64 payload]  (decode → error, like Rust)
 
 import std/[options, math]
-import ../scheme
+import scheme
 
 const
   TagText* = 1'u8

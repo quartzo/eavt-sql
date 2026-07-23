@@ -3,7 +3,7 @@
 ## Port of spier-eavt-query/src/engine/types.rs (~269 lines Rust → Nim).
 
 import std/[options, sequtils, algorithm]
-import ../scheme
+import scheme
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Value comparison for SExpr (used as the universal Value type)

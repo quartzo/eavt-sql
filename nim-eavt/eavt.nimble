@@ -1,19 +1,16 @@
 version       = "0.1.0"
 author        = "eavt-sql-nim"
-description   = "Key-Value Store"
+description   = "EAVT engine"
 license       = "MIT"
 srcDir        = "."
 backend       = "c"
 
-task test, "Run unit tests":
+task test, "Run EAVT unit tests":
   exec "nim c --mm:arc --threads:on -d:release " &
        "--path:../nim-blobstore " &
+       "--path:../nim-page-store " &
        "--path:../nim-kvstore " &
        "--path:../nim-scheme " &
-       "--path:../nim-eavt " &
-       "--path:../nim-query " &
-       "--path:../nim-page-store " &
-       "--path:../nim_memtable " &
        "--path:.. " &
        "--passL:-lcrypto --passL:-lzstd " &
        "-r tests.nim"

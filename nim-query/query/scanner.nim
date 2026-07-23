@@ -3,8 +3,8 @@
 ## Port of spier-eavt-query/src/engine/scanner.rs (~855 lines Rust → Nim).
 
 import std/[options, tables, strutils]
-import ../scheme
-import ../keys
+import scheme
+import keys
 export keys.beUint32, keys.beUint64
 
 # ═══════════════════════════════════════════════════════════════════════════════
