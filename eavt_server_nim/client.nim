@@ -112,10 +112,31 @@ proc admin*(c: EavtClient; command: string): string =
   sendMsg(c.fd, msgpack2json.fromJsonNode(node))
   let resp = recvMsg(c.fd)
   if resp.len == 0: return ""
-  var output: string
-  unpack(resp, output)
   try:
     let node = toJsonNode(resp)
     if node.hasKey("output"): return node["output"].getStr
   except: discard
-  return output
+  return ""
+
+proc dump*(c: EavtClient; index: string = "EAVT"): seq[SqlResult] =
+  var node = newJObject()
+  node["type"] = %"admin"
+  node["command"] = %("dump " & index)
+  sendMsg(c.fd, msgpack2json.fromJsonNode(node))
+  while true:
+    let resp = recvMsg(c.fd)
+    if resp.len == 0: break
+    let node = toJsonNode(resp)
+    if node.hasKey("error") and node["error"].getStr.len > 0:
+      result.add(SqlResult(error: node["error"].getStr))
+      break
+    var sr = SqlResult()
+    if node.hasKey("columns"):
+      for col in node["columns"]: sr.columns.add(col.getStr)
+    if node.hasKey("rows"):
+      for row in node["rows"]:
+        var r: seq[string]
+        for v in row: r.add($v)
+        sr.rows.add(r)
+    result.add(sr)
+    if not node["more"].getBool: break

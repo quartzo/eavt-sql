@@ -15,16 +15,16 @@ proc execQuery(eng: SharedEngine; req: Request; fd: SocketHandle) =
   of rkSql:
     let stmt = sql_parser.parse(req.sql)
     let cstats = CompileStats(
-      lookupAttr: proc(name: string): uint32 = lookupAttrId(eng.eavt, name),
+      lookupAttr: proc(name: string): uint32 = lookupAttrId(eng.store.eavt, name),
       estimateIndexSize: proc(index: string, bound: openArray[uint64]): float64 = 10_000_000.0,
-      partitionIdFor: proc(name: string): uint64 = eng.eavt.partitionIdFor(name).get(otherwise = 0),
+      partitionIdFor: proc(name: string): uint64 = eng.store.eavt.partitionIdFor(name).get(otherwise = 0),
       isRefAttr: proc(name: string): bool =
-        let aid = lookupAttrId(eng.eavt, name)
-        if aid == 0: false else: eng.eavt.valueTypeFor(aid).get(otherwise = 0) == 21'u32,
+        let aid = lookupAttrId(eng.store.eavt, name)
+        if aid == 0: false else: eng.store.eavt.valueTypeFor(aid).get(otherwise = 0) == 21'u32,
       isIndexedAttr: proc(name: string): bool = true,
     )
     let compiled = compileSql(stmt, cstats)
-    let tx = eng.eavt.allocateTAndWriteTx()
+    let tx = eng.store.eavt.allocateTAndWriteTx()
     if compiled.isSelect:
       let proto = newQuerySession(eng.store, compiled.program, @[], tx, none[int64]())
       let sess = newStreamingSession(proto)
@@ -62,7 +62,8 @@ proc execQuery(eng: SharedEngine; req: Request; fd: SocketHandle) =
 
 proc dumpDatoms(eng: SharedEngine; fd: SocketHandle; command: string) =
   let parts = command.splitWhitespace()
-  let index = if parts.len >= 2: parts[1].toUpperAscii() else: "EAVT"
+  let index = if parts.len >= 2: parts[1].toUpperAscii()
+             else: "EAVT"
   let cf = case index
     of "AEVT": 1
     of "AVET": 2
@@ -71,87 +72,17 @@ proc dumpDatoms(eng: SharedEngine; fd: SocketHandle; command: string) =
 
   var cursor = eng.kv.openScanCursor(cf)
   var rows: seq[seq[SExpr]]
-  var totalIter = 0
-
-  while totalIter < 1_000_000:
-    inc totalIter
+  var count = 0
+  while count < 100_000:
     let keyOpt = cursor.next()
     if not isSome(keyOpt): break
     let key = keyOpt.get
-    if key.len < 20: continue
-
-    let suffixRaw = beUint64(key, key.len - 8)
-    let (t, retracted) = decodeSuffix(suffixRaw)
-    if retracted: continue
-
-    var eid: int64
-    var aid: uint32
-    case cf
-    of 0:
-      eid = cast[int64](beUint64(key, 0))
-      aid = beUint32(key, 8)
-    of 1:
-      aid = beUint32(key, 0)
-      eid = cast[int64](beUint64(key, 4))
-    of 2:
-      aid = beUint32(key, 0)
-      eid = cast[int64](beUint64(key, key.len - 16))
-    of 3:
-      aid = beUint32(key, key.len - 16)
-      eid = cast[int64](beUint64(key, key.len - 16 + 4))
-    else: continue
-
-    let vtOpt = eng.eavt.valueTypeFor(aid)
-    let vt = vtOpt.get(otherwise = DbTypeLong)
-    let vStart = case cf
-      of 0: 12
-      of 1: 12
-      of 2: 4
-      of 3: 0
-      else: 12
-    let vEnd = case cf
-      of 0: key.len - 8
-      of 1: key.len - 8
-      of 2: key.len - 16
-      of 3: key.len - 20
-      else: key.len - 8
-    if vEnd <= vStart: continue
-
-    let rawValue = key[vStart..<vEnd]
-    var valSexpr: SExpr
-
-    case vt
-    of DbTypeRef:
-      if rawValue.len >= 8: valSexpr = SExpr(kind: sInt, ival: cast[int64](beUint64(rawValue, 0)))
-      else: valSexpr = SExpr(kind: sInt, ival: 0)
-    of DbTypeLong, DbTypeInstant:
-      if rawValue.len >= 8: valSexpr = SExpr(kind: sInt, ival: decodeInt64(beUint64(rawValue, 0)))
-      else: valSexpr = SExpr(kind: sInt, ival: 0)
-    of DbTypeBoolean:
-      if rawValue.len >= 8: valSexpr = SExpr(kind: sBool, bval: decodeInt64(beUint64(rawValue, 0)) != 0)
-      else: valSexpr = SExpr(kind: sBool, bval: false)
-    of DbTypeFloat:
-      if rawValue.len >= 8: valSexpr = SExpr(kind: sFloat, fval: decodeFloat64(beUint64(rawValue, 0)))
-      else: valSexpr = SExpr(kind: sFloat, fval: 0.0)
-    of DbTypeString, DbTypeKeyword:
-      valSexpr = SExpr(kind: sBytes, bytesval: rawValue)
-    of DbTypeBytes, DbTypeBlob:
-      valSexpr = SExpr(kind: sBytes, bytesval: rawValue)
-    else:
-      valSexpr = SExpr(kind: sBytes, bytesval: rawValue)
-
-    let attrName = eng.eavt.attrName(aid)
-    rows.add(@[
-      SExpr(kind: sInt, ival: eid),
-      SExpr(kind: sStr, sval: attrName),
-      valSexpr,
-      SExpr(kind: sInt, ival: cast[int64](t)),
-    ])
+    rows.add(@[SExpr(kind: sBytes, bytesval: key)])
+    inc count
     if rows.len >= 100:
-      writeResponse(fd, @["e", "attr", "value", "t"], rows, true)
+      writeResponse(fd, @["key"], rows, true)
       rows.setLen(0)
-
-  writeResponse(fd, @["e", "attr", "value", "t"], rows, false)
+  writeResponse(fd, @["key"], rows, false)
 
 proc handleConnection*(eng: SharedEngine; fd: SocketHandle) =
   while true:

@@ -79,8 +79,12 @@ proc cmdMemtable() =
 
 proc cmdDump(index: string) =
   try:
-    let r = gClient.admin("dump " & index)
-    echo r
+    for chunk in gClient.dump(index):
+      if chunk.error.len > 0:
+        stderr.writeLine "Error: ", chunk.error
+        return
+      for row in chunk.rows:
+        echo row.join("\t")
   except CatchableError as e:
     stderr.writeLine "Error: ", e.msg
 

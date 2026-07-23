@@ -5,17 +5,14 @@ type
   SharedEngine* = ref object
     lock*: Lock
     kv*: KVStore
-    eavt*: EavtEngine
     store*: QueryStore
 
 proc initSharedEngine*(): SharedEngine =
   var cfg = initTable[string, string]()
   cfg["backend"] = "memory"
   let kv = newKVStore(cfg)
-  let eavt = newEavtEngine(kv)
-  eavt.bootstrapResolver()
   let store = newQueryStore(kv)
-  result = SharedEngine(kv: kv, eavt: eavt, store: store)
+  result = SharedEngine(kv: kv, store: store)
   initLock(result.lock)
 
 proc close*(eng: SharedEngine) =
