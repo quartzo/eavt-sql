@@ -388,3 +388,93 @@ suite "kvstore: journal recovery":
 
 
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MergedCursor unit tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import query/scanner  # NimCursor type
+
+proc mockNimCursor(keys: seq[seq[byte]]): NimCursor =
+  var pos = 0
+  let validCb = proc(): bool = pos < keys.len
+  let curCb = proc(): Option[seq[byte]] =
+    if pos < keys.len: some(keys[pos]) else: none[seq[byte]]()
+  let stepCb = proc() = inc pos
+  let skipCb = proc(ge: int) = inc pos
+  let seekCb = proc(target: seq[byte]) =
+    while pos < keys.len:
+      let k = keys[pos]
+      if k.len >= target.len:
+        var gt = true
+        for i in 0..<target.len:
+          if k[i] < target[i]: gt = false; break
+          if k[i] > target[i]: break
+        if gt: return
+      inc pos
+  let invCb = proc() = pos = keys.len
+  NimCursor(
+    isValidCb: validCb, currentKeyCb: curCb, stepCb: stepCb,
+    skipGroupCb: skipCb, seekCb: seekCb, invalidateCb: invCb)
+
+proc collectAll(mc: MergedCursor): seq[seq[byte]] =
+  while true:
+    let k = mc.next()
+    if k.isNone: break
+    result.add k.get
+
+suite "merged_cursor":
+  test "two sources merge sorted":
+    let s1 = mockNimCursor(@[@[byte(1)], @[byte(3)], @[byte(5)]])
+    let s2 = mockNimCursor(@[@[byte(2)], @[byte(4)]])
+    let mc = newMergedCursor(@[s1, s2])
+    check collectAll(mc) == @[@[byte(1)], @[byte(2)], @[byte(3)], @[byte(4)], @[byte(5)]]
+
+  test "empty sources → atEnd":
+    let s1 = mockNimCursor(@[])
+    let s2 = mockNimCursor(@[])
+    let mc = newMergedCursor(@[s1, s2])
+    check mc.peek().isNone
+    check mc.atEnd
+
+  test "single source passthrough":
+    let s1 = mockNimCursor(@[@[byte(7)], @[byte(8)]])
+    let mc = newMergedCursor(@[s1])
+    check mc.peek().get == @[byte(7)]
+    check mc.next().get == @[byte(7)]
+    check mc.next().get == @[byte(8)]
+    check mc.next().isNone
+
+  test "dedup identical keys":
+    let s1 = mockNimCursor(@[@[byte(1)], @[byte(2)]])
+    let s2 = mockNimCursor(@[@[byte(2)], @[byte(3)]])
+    let mc = newMergedCursor(@[s1, s2])
+    check collectAll(mc) == @[@[byte(1)], @[byte(2)], @[byte(3)]]
+
+  test "peek idempotent":
+    let s1 = mockNimCursor(@[@[byte(5)]])
+    let mc = newMergedCursor(@[s1])
+    check mc.peek() == mc.peek()
+    check mc.peek().get == @[byte(5)]
+    check mc.next().get == @[byte(5)]
+    check mc.next().isNone
+
+  test "seek advances all sources":
+    let s1 = mockNimCursor(@[@[byte(1)], @[byte(3)], @[byte(5)]])
+    let s2 = mockNimCursor(@[@[byte(2)], @[byte(4)]])
+    let mc = newMergedCursor(@[s1, s2])
+    mc.seek(@[byte(4)])
+    check collectAll(mc) == @[@[byte(4)], @[byte(5)]]
+
+  test "three sources merge":
+    let s1 = mockNimCursor(@[@[byte(1)], @[byte(4)]])
+    let s2 = mockNimCursor(@[@[byte(2)], @[byte(5)]])
+    let s3 = mockNimCursor(@[@[byte(3)], @[byte(6)]])
+    let mc = newMergedCursor(@[s1, s2, s3])
+    check collectAll(mc) == @[@[byte(1)], @[byte(2)], @[byte(3)], @[byte(4)], @[byte(5)], @[byte(6)]]
+
+  test "seek to exact value":
+    let s1 = mockNimCursor(@[@[byte(10)], @[byte(20)]])
+    let mc = newMergedCursor(@[s1])
+    mc.seek(@[byte(20)])
+    check mc.peek().get == @[byte(20)]
