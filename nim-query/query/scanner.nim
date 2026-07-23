@@ -336,6 +336,8 @@ proc extractCurrent*(sc: V2Scanner): Option[SExpr] =
           return some(SExpr(kind: sBool, bval: raw != 0))
         elif sc.valueAttrType == some(DbTypeInstant) or sc.valueAttrType == some(DbTypeRef):
           return some(SExpr(kind: sInt, ival: keys.decodeInt64(raw)))
+        elif sc.valueAttrType == some(DbTypeLong):
+          return some(SExpr(kind: sInt, ival: keys.decodeInt64(raw)))
         else:
           return some(SExpr(kind: sInt, ival: int64(raw)))
       else: discard

@@ -1666,3 +1666,4 @@ suite "engine: scanner host fns":
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].bytesval.len == 8
+
