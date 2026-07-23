@@ -3,6 +3,7 @@
 import std/[unittest, options]
 import scheme
 
+# ═══════════════════════════════════════════════════════════════════════════════
 # Scheme evaluator tests
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -107,3 +108,13 @@ suite "scheme.errors":
   test "unbound variable":
     expect EvalError:
       var env = newEnvironment()
+      discard eval(SchemeProgram(body: parse"x"), env, NilHost())
+  test "unknown function":
+    expect EvalError:
+      var env = newEnvironment()
+      discard eval(SchemeProgram(body: parse"(nope 1 2)"), env, NilHost())
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PageStore Nim API tests (newPageStore → ptr PageStoreInner directly)
+# ══════════════════════════════════════════════════════════════════════════════
+
