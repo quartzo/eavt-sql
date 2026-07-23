@@ -14,5 +14,4 @@ srcDir        = "."
 backend       = "c"
 
 task test, "Run unit tests (requires rustfs)":
-  exec "nim c --mm:arc --threads:on -d:release " &
-       "--passL:-lcrypto -r tests.nim"
+  exec "nim c --mm:arc --threads:on -d:release -r tests.nim"

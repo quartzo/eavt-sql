@@ -6,9 +6,4 @@ srcDir        = "."
 backend       = "c"
 
 task test, "Run page store unit tests":
-  exec "nim c --mm:arc --threads:on -d:release " &
-       "--path:../nim-blobstore " &
-       "--path:../nim-kvstore " &
-       "--path:.. " &
-       "--passL:-lcrypto --passL:-lzstd " &
-       "-r tests.nim"
+  exec "nim c --mm:arc --threads:on -d:release -r tests.nim"

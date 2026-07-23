@@ -6,11 +6,4 @@ srcDir        = "."
 backend       = "c"
 
 task test, "Run EAVT unit tests":
-  exec "nim c --mm:arc --threads:on -d:release " &
-       "--path:../nim-blobstore " &
-       "--path:../nim-page-store " &
-       "--path:../nim-kvstore " &
-       "--path:../nim-scheme " &
-       "--path:.. " &
-       "--passL:-lcrypto --passL:-lzstd " &
-       "-r tests.nim"
+  exec "nim c --mm:arc --threads:on -d:release -r tests.nim"

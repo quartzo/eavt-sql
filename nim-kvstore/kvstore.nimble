@@ -6,14 +6,4 @@ srcDir        = "."
 backend       = "c"
 
 task test, "Run unit tests":
-  exec "nim c --mm:arc --threads:on -d:release " &
-       "--path:../nim-blobstore " &
-       "--path:../nim-kvstore " &
-       "--path:../nim-scheme " &
-       "--path:../nim-eavt " &
-       "--path:../nim-query " &
-       "--path:../nim-page-store " &
-       "--path:../nim_memtable " &
-       "--path:.. " &
-       "--passL:-lcrypto --passL:-lzstd " &
-       "-r tests.nim"
+  exec "nim c --mm:arc --threads:on -d:release -r tests.nim"
