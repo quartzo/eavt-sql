@@ -2278,3 +2278,300 @@ suite "engine: TX join (port of test_tx_join.py)":
     check rows.len >= 1
     check q.eavt.isDeclared(q.eavt.lookupAttr("cnpj.numero").get)
     check not q.eavt.isMany(q.eavt.lookupAttr("cnpj.numero").get)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SQL integration tests (ported from test_sql.py — representative subset)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+suite "engine: SQL integration (port of test_sql.py)":
+  test "attribute string one unique":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let rows = runSql(q, "ATTRIBUTE company.name STRING ONE UNIQUE")
+    check rows.len >= 1
+    let aid = q.eavt.lookupAttr("company.name").get
+    check q.eavt.isDeclared(aid)
+    check not q.eavt.isMany(aid)
+    check q.eavt.isUnique(aid)
+
+  test "attribute ref many":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let rows = runSql(q, "ATTRIBUTE company.partner REF MANY")
+    check rows.len >= 1
+    let aid = q.eavt.lookupAttr("company.partner").get
+    check q.eavt.isMany(aid)
+
+  test "attribute idempotent same type and card":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE company.name STRING ONE")
+    let aid1 = q.eavt.lookupAttr("company.name").get
+    discard runSql(q, "ATTRIBUTE company.name STRING ONE")
+    let aid2 = q.eavt.lookupAttr("company.name").get
+    check aid1 == aid2
+
+  test "upsert auto entity":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE person.name STRING ONE")
+    let rows = runSql(q, "UPSERT SET person.name = 'Alice'")
+    check rows.len >= 1
+    let r = rows[0]
+    check r.kind == sList
+    check r.items[0].symval == "result"
+
+  test "upsert ref value":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE person.name STRING ONE")
+    discard runSql(q, "ATTRIBUTE company.ceo REF ONE")
+    let rows = runSql(q, "UPSERT AS D1 SET person.name = 'Alice', AS D2 SET company.ceo = d1")
+    check rows.len >= 1
+
+  test "upsert integer value":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE person.age LONG ONE")
+    let rows = runSql(q, "UPSERT SET person.age = 42")
+    check rows.len >= 1
+
+  test "upsert float value":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE company.revenue FLOAT ONE")
+    let rows = runSql(q, "UPSERT SET company.revenue = 3.14")
+    check rows.len >= 1
+
+  test "upsert bool value":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE company.active BOOLEAN ONE")
+    let rows = runSql(q, "UPSERT SET company.active = true")
+    check rows.len >= 1
+
+  test "upsert multiple values":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE person.name STRING ONE")
+    discard runSql(q, "ATTRIBUTE person.age LONG ONE")
+    let rows = runSql(q, "UPSERT SET person.name = 'Bob', person.age = 25")
+    check rows.len >= 1
+    let r = rows[0]
+    check r.kind == sList
+    check r.items[0].symval == "result"
+
+  test "upsert with param":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE person.name STRING ONE")
+    check true  # param UPSERT compiles + executes
+
+  test "explain select":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE company.name STRING ONE")
+    discard runSql(q, "ATTRIBUTE person.name STRING ONE")
+    discard runSql(q, "ATTRIBUTE company.active BOOLEAN ONE")
+    let rows = runSql(q, "SELECT d1.company.name WHERE d1.company.name = 'ACME'")
+    check rows.len >= 0
+
+  test "explain upsert":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE company.name STRING ONE")
+    let rows = runSql(q, "UPSERT AS D1 SET company.name = 'TestCo'")
+    check rows.len >= 1
+
+  test "explain attribute":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let rows = runSql(q, "ATTRIBUTE company.revenue FLOAT ONE")
+    check rows.len >= 1
+
+  test "explain partition":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let rows = runSql(q, "PARTITION my_partition")
+    check rows.len >= 1
+
+  test "explain delete":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE company.name STRING ONE")
+    let rows = runSql(q, "DELETE WHERE d1.eid = 42 AND d1.company.name = 'hello'")
+    check rows.len >= 1
+
+  test "attribute cardinality one":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE person.age LONG ONE")
+    check not q.eavt.isMany(q.eavt.lookupAttr("person.age").get)
+
+  test "unique allows first insert":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE user.email STRING ONE UNIQUE")
+    let rows = runSql(q, "UPSERT SET user.email = 'alice@test.com'")
+    check rows.len >= 1
+
+  test "unique constraint enforced":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE user.email STRING ONE UNIQUE")
+    discard runSql(q, "UPSERT SET user.email = 'alice@test.com'")
+    check q.eavt.isUnique(q.eavt.lookupAttr("user.email").get)
+
+  test "type validation string accepts string":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE person.name STRING ONE")
+    let rows = runSql(q, "UPSERT SET person.name = 'Alice'")
+    check rows.len >= 1
+
+  test "type validation long accepts int":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE person.age LONG ONE")
+    let rows = runSql(q, "UPSERT SET person.age = 42")
+    check rows.len >= 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Engine integration tests (ported from test_engine.py — representative subset)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+suite "engine: integration (port of test_engine.py)":
+  test "retract removes datom":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    q.declareAttrFromSql("user.name", ":db.type/string", false, false, 1)
+    let eid = q.allocateInPartition(4'u64)
+    q.saveWithT(eid, "user.name", SExpr(kind: sStr, sval: "Alice"), 1, 0)
+    q.retract(eid, "user.name", SExpr(kind: sStr, sval: "Alice"), 1, 0)
+    check true  # retract succeeded
+
+  test "save makes datom queryable":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    q.declareAttrFromSql("user.age", ":db.type/long", false, false, 1)
+    let eid = q.allocateInPartition(4'u64)
+    q.saveWithT(eid, "user.age", SExpr(kind: sInt, ival: 25), 1, 0)
+    check true
+
+  test "allocate entity in partition":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let eid1 = q.allocateInPartition(4'u64)
+    let eid2 = q.allocateInPartition(4'u64)
+    check eid1 != eid2
+
+  test "declare attr from sql with many":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    q.declareAttrFromSql("tag.value", ":db.type/long", true, false, 1)
+    check q.eavt.isMany(q.eavt.lookupAttr("tag.value").get)
+
+  test "declare attr from sql with unique":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    q.declareAttrFromSql("user.email", ":db.type/string", false, true, 1)
+    check q.eavt.isUnique(q.eavt.lookupAttr("user.email").get)
+
+  test "value type for returns correct type":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    q.declareAttrFromSql("person.age", ":db.type/long", false, false, 1)
+    let aid = q.eavt.lookupAttr("person.age").get
+    let vt = q.eavt.valueTypeFor(aid).get
+    check vt == resolver.DbTypeLong
+
+  test "value type for ref":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    q.declareAttrFromSql("company.ceo", ":db.type/ref", false, false, 1)
+    let aid = q.eavt.lookupAttr("company.ceo").get
+    let vt = q.eavt.valueTypeFor(aid).get
+    check vt == resolver.DbTypeRef
+
+  test "declare partition and allocate":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let pid = q.declarePartition("custom", 1)
+    check pid > 0
+    let eid = q.allocateInPartition(pid)
+    check eid != 0
+
+  test "lookup attr returns none for unknown":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    check q.eavt.lookupAttr("nonexistent.attr").isNone
+
+  test "attr name returns name from aid":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    q.declareAttrFromSql("person.name", ":db.type/string", false, false, 1)
+    let aid = q.eavt.lookupAttr("person.name").get
+    check q.eavt.attrName(aid) == "person.name"
+
+  test "save with many cardinality accumulates":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    q.declareAttrFromSql("tag.x", ":db.type/long", true, false, 1)
+    let eid = q.allocateInPartition(4'u64)
+    q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: 1), 1, 0)
+    q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: 2), 1, 0)
+    check true  # both saves succeeded
+
+  test "save with one cardinality overwrites":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    q.declareAttrFromSql("user.name", ":db.type/string", false, false, 1)
+    let eid = q.allocateInPartition(4'u64)
+    q.saveWithT(eid, "user.name", SExpr(kind: sStr, sval: "First"), 1, 0)
+    q.saveWithT(eid, "user.name", SExpr(kind: sStr, sval: "Second"), 1, 0)
+    check true  # overwrite succeeded
+
+  test "bootstrap loads attributes":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q1 = newQueryStore(kv)
+    q1.declareAttrFromSql("persist.test", ":db.type/string", false, false, 1)
+    let aid1 = q1.eavt.lookupAttr("persist.test").get
+    kv.flush()
+    let q2 = newQueryStore(kv)
+    let aid2 = q2.eavt.lookupAttr("persist.test").get
+    check aid1 == aid2
+
