@@ -70,19 +70,19 @@ proc dumpDatoms(eng: SharedEngine; fd: SocketHandle; command: string) =
     of "VAET": 3
     else: 0
 
-  var cursor = eng.kv.openScanCursor(cf)
   var rows: seq[seq[SExpr]]
-  var count = 0
-  while count < 100_000:
-    let keyOpt = cursor.next()
-    if not isSome(keyOpt): break
-    let key = keyOpt.get
-    rows.add(@[SExpr(kind: sBytes, bytesval: key)])
-    inc count
+  for datom in eng.store.eavt.scanDatoms(cf):
+    if datom.retracted: continue
+    rows.add(@[
+      SExpr(kind: sInt, ival: datom.e),
+      SExpr(kind: sStr, sval: datom.attrName),
+      datom.value,
+      SExpr(kind: sInt, ival: datom.t),
+    ])
     if rows.len >= 100:
-      writeResponse(fd, @["key"], rows, true)
+      writeResponse(fd, @["e", "attr", "value", "t"], rows, true)
       rows.setLen(0)
-  writeResponse(fd, @["key"], rows, false)
+  writeResponse(fd, @["e", "attr", "value", "t"], rows, false)
 
 proc handleConnection*(eng: SharedEngine; fd: SocketHandle) =
   while true:

@@ -6,7 +6,8 @@
 import std/[tables, strutils, options, times, sets]
 import resolver
 import keys
-import kvstore  # KVStore Nim ref
+import kvstore
+import scheme
 import std/locks
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -77,6 +78,15 @@ proc scanPrefix*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byte]] =
     let key = k.get
     if key.len < prefix.len or key[0..<prefix.len] != prefix: continue
     result.add key
+
+type
+  Datom* = object
+    e*: int64
+    a*: uint32
+    attrName*: string
+    value*: SExpr
+    t*: int64
+    retracted*: bool
 
 # ── Seed partition counters from existing EAVT data ──
 
@@ -283,3 +293,48 @@ proc partitionIdFor*(eng: EavtEngine; name: string): Option[uint64] =
 
 proc defaultUserPartition*(eng: EavtEngine): uint64 =
   PartUser
+
+iterator scanDatoms*(eng: EavtEngine; cf: int): Datom =
+  let mc = eng.kv.openScanCursor(cf)
+  while true:
+    let k = mc.next()
+    if k.isNone: break
+    let key = k.get
+    if key.len < 20: continue
+
+    let suffixRaw = beUint64(key, key.len - 8)
+    let (t, retracted) = decodeSuffix(suffixRaw)
+
+    var eid: int64
+    var aid: uint32
+    var vStart: int
+    var vEnd: int
+
+    case cf
+    of 0:
+      eid = cast[int64](beUint64(key, 0))
+      aid = beUint32(key, 8)
+      vStart = 12; vEnd = key.len - 8
+    of 1:
+      aid = beUint32(key, 0)
+      eid = cast[int64](beUint64(key, 4))
+      vStart = 12; vEnd = key.len - 8
+    of 2:
+      aid = beUint32(key, 0)
+      vStart = 4; vEnd = key.len - 16
+      eid = cast[int64](beUint64(key, key.len - 16))
+    of 3:
+      vStart = 0; vEnd = key.len - 20
+      eid = cast[int64](beUint64(key, key.len - 12))
+      aid = beUint32(key, key.len - 16)
+    else: continue
+
+    if vEnd <= vStart: continue
+
+    let rawValue = key[vStart..<vEnd]
+    let vt = eng.valueTypeFor(aid).get(otherwise = DbTypeString)
+    let valSexpr = decodeStoredValue(rawValue, vt)
+    let attrName = eng.attrName(aid)
+
+    yield Datom(e: eid, a: aid, attrName: attrName,
+                value: valSexpr, t: cast[int64](t), retracted: retracted)
