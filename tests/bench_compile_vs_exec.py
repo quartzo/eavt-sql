@@ -1,10 +1,10 @@
 """Benchmark: compile cost vs execution cost isolation.
 
 Demonstrates the value of PreparedStatement (compile once, execute many)
-vs raw engine.sql() (recompile every call).
+vs raw client.execute() (recompile every call).
 
-Run: LD_LIBRARY_PATH=target/release uv run python tests/bench_compile_vs_exec.py
-     LD_LIBRARY_PATH=target/release uv run python tests/bench_compile_vs_exec.py --scale 50000
+Run: uv run python tests/bench_compile_vs_exec.py
+     uv run python tests/bench_compile_vs_exec.py --scale 50000
 """
 import argparse
 import os
@@ -13,13 +13,9 @@ import time
 from pathlib import Path
 
 _root = Path(__file__).resolve().parent.parent
-_release = _root / "target" / "release"
-_lp = os.environ.get("LD_LIBRARY_PATH", "")
-if str(_release) not in _lp:
-    os.environ["LD_LIBRARY_PATH"] = f"{_release}:{_lp}" if _lp else str(_release)
-sys.path.insert(0, str(_root / "src"))
+sys.path.insert(0, str(_root / "py_eavt_client" / "src"))
 
-from eavt_sql.engine import EAVTEngine
+from eavt_client.client import EavtClient
 
 
 def fmt_ms(seconds):
@@ -37,20 +33,20 @@ def section(title):
 
 
 def setup(engine, n):
-    list(engine.sql("ATTRIBUTE company.name STRING ONE UNIQUE"))
-    list(engine.sql("ATTRIBUTE company.revenue FLOAT ONE"))
-    list(engine.sql("ATTRIBUTE company.active BOOLEAN ONE"))
-    list(engine.sql("ATTRIBUTE person.name STRING ONE UNIQUE"))
-    list(engine.sql("ATTRIBUTE person.age LONG ONE"))
+    list(client.execute("ATTRIBUTE company.name STRING ONE UNIQUE"))
+    list(client.execute("ATTRIBUTE company.revenue FLOAT ONE"))
+    list(client.execute("ATTRIBUTE company.active BOOLEAN ONE"))
+    list(client.execute("ATTRIBUTE person.name STRING ONE UNIQUE"))
+    list(client.execute("ATTRIBUTE person.age LONG ONE"))
 
     t0 = time.perf_counter()
     for i in range(n):
-        list(engine.sql(
+        list(client.execute(
             "UPSERT AS D1 SET company.name = %1, company.revenue = %2",
             f"company_{i:06d}", float(i * 100),
         ))
     for i in range(n // 2):
-        list(engine.sql(
+        list(client.execute(
             "UPSERT AS D1 SET person.name = %1, person.age = %2",
             f"person_{i:06d}", 20 + (i % 50),
         ))
@@ -58,7 +54,7 @@ def setup(engine, n):
     print(f"  Seeded {n + n // 2:,} entities in {fmt_ms(elapsed)}")
     for _ in range(10):
         try:
-            engine.flush()
+            client.admin('flush')
             break
         except RuntimeError:
             time.sleep(0.1)
@@ -95,7 +91,7 @@ def bench_point_lookup(engine, n):
     # Raw sql() — recompiles every time
     t0 = time.perf_counter()
     for name in lookups:
-        list(engine.sql("SELECT d1.eid WHERE d1.company.name = %1", name))
+        list(client.execute("SELECT d1.eid WHERE d1.company.name = %1", name))
     elapsed_raw = time.perf_counter() - t0
 
     # PreparedStatement — compile once
@@ -109,7 +105,7 @@ def bench_point_lookup(engine, n):
     per_raw = elapsed_raw / len(lookups)
     per_prep = elapsed_prep / len(lookups)
     speedup = elapsed_raw / elapsed_prep
-    print(f"  {'engine.sql() (compile+exec)':40s} {fmt_us(per_raw):>10s}/op  ({len(lookups):,} ops)")
+    print(f"  {'client.execute() (compile+exec)':40s} {fmt_us(per_raw):>10s}/op  ({len(lookups):,} ops)")
     print(f"  {'PreparedStatement (exec only)':40s} {fmt_us(per_prep):>10s}/op  ({len(lookups):,} ops)")
     print(f"  {'Speedup':40s} {speedup:>9.1f}x")
     print(f"  {'Compile overhead per call':40s} {fmt_us(per_raw - per_prep):>10s}")
@@ -123,7 +119,7 @@ def bench_full_scan(engine, n):
     # Raw sql()
     t0 = time.perf_counter()
     for _ in range(iters):
-        rows = list(engine.sql("SELECT d1.company.name"))
+        rows = list(client.execute("SELECT d1.company.name"))
     elapsed_raw = (time.perf_counter() - t0) / iters
 
     # PreparedStatement
@@ -134,7 +130,7 @@ def bench_full_scan(engine, n):
     elapsed_prep = (time.perf_counter() - t0) / iters
     stmt.close()
 
-    print(f"  {'engine.sql() (compile+exec)':40s} {fmt_ms(elapsed_raw):>10s}  ({len(rows):,} rows)")
+    print(f"  {'client.execute() (compile+exec)':40s} {fmt_ms(elapsed_raw):>10s}  ({len(rows):,} rows)")
     print(f"  {'PreparedStatement (exec only)':40s} {fmt_ms(elapsed_prep):>10s}  ({len(rows):,} rows)")
     print(f"  {'Compile overhead':40s} {fmt_ms(elapsed_raw - elapsed_prep):>10s}")
     print(f"  {'Compile fraction':40s} {(elapsed_raw - elapsed_prep) / elapsed_raw * 100:>9.1f}%")
@@ -148,7 +144,7 @@ def bench_upsert(engine, n):
     # Raw sql()
     t0 = time.perf_counter()
     for name, rev in lookups:
-        list(engine.sql("UPSERT AS D1 = eid(company.name, %1) SET company.revenue = %2", name, rev))
+        list(client.execute("UPSERT AS D1 = eid(company.name, %1) SET company.revenue = %2", name, rev))
     elapsed_raw = time.perf_counter() - t0
 
     # PreparedStatement
@@ -162,7 +158,7 @@ def bench_upsert(engine, n):
     per_raw = elapsed_raw / len(lookups)
     per_prep = elapsed_prep / len(lookups)
     speedup = elapsed_raw / elapsed_prep
-    print(f"  {'engine.sql() (compile+exec)':40s} {fmt_us(per_raw):>10s}/op  ({len(lookups):,} ops)")
+    print(f"  {'client.execute() (compile+exec)':40s} {fmt_us(per_raw):>10s}/op  ({len(lookups):,} ops)")
     print(f"  {'PreparedStatement (exec only)':40s} {fmt_us(per_prep):>10s}/op  ({len(lookups):,} ops)")
     print(f"  {'Speedup':40s} {speedup:>9.1f}x")
     print(f"  {'Compile overhead per call':40s} {fmt_us(per_raw - per_prep):>10s}")
@@ -188,9 +184,9 @@ def bench_mixed_workload(engine, n):
     for i, name in enumerate(lookups):
         q = queries_raw[i % len(queries_raw)]
         if "UPSERT" in q:
-            list(engine.sql(q, name, float(i) * 2.5))
+            list(client.execute(q, name, float(i) * 2.5))
         else:
-            list(engine.sql(q, name))
+            list(client.execute(q, name))
         ops += 1
     elapsed_raw = time.perf_counter() - t0
 
@@ -210,7 +206,7 @@ def bench_mixed_workload(engine, n):
     per_raw = elapsed_raw / ops
     per_prep = elapsed_prep / ops
     speedup = elapsed_raw / elapsed_prep
-    print(f"  {'engine.sql() (compile+exec)':40s} {fmt_us(per_raw):>10s}/op  ({ops:,} ops)")
+    print(f"  {'client.execute() (compile+exec)':40s} {fmt_us(per_raw):>10s}/op  ({ops:,} ops)")
     print(f"  {'PreparedStatement (exec only)':40s} {fmt_us(per_prep):>10s}/op  ({ops:,} ops)")
     print(f"  {'Speedup':40s} {speedup:>9.1f}x")
     print(f"  {'Compile fraction':40s} {(elapsed_raw - elapsed_prep) / elapsed_raw * 100:>9.1f}%")
@@ -227,7 +223,7 @@ def main():
     print(f"  Scale: {n:,} entities")
     print(f"{'#' * 70}")
 
-    engine = EAVTEngine(":memory:")
+    engine = EavtClient()
     setup(engine, n)
 
     bench_compile_cost(engine, n)
@@ -236,7 +232,7 @@ def main():
     bench_upsert(engine, n)
     bench_mixed_workload(engine, n)
 
-    engine.close()
+    client.close()
     section("BENCHMARK COMPLETE")
 
 

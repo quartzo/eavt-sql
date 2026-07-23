@@ -1,8 +1,8 @@
 """Heavy performance benchmark — comprehensive workload analysis.
 
-Run: LD_LIBRARY_PATH=target/release uv run python tests/bench_heavy.py
-     LD_LIBRARY_PATH=target/release uv run python tests/bench_heavy.py --scale 50000
-     LD_LIBRARY_PATH=target/release uv run python tests/bench_heavy.py --backend file --path /tmp/bench_db
+Run: uv run python tests/bench_heavy.py
+     uv run python tests/bench_heavy.py --scale 50000
+     uv run python tests/bench_heavy.py --backend file --path /tmp/bench_db
 """
 import argparse
 import os
@@ -12,13 +12,9 @@ import time
 from pathlib import Path
 
 _root = Path(__file__).resolve().parent.parent
-_release = _root / "target" / "release"
-_lp = os.environ.get("LD_LIBRARY_PATH", "")
-if str(_release) not in _lp:
-    os.environ["LD_LIBRARY_PATH"] = f"{_release}:{_lp}" if _lp else str(_release)
-sys.path.insert(0, str(_root / "src"))
+sys.path.insert(0, str(_root / "py_eavt_client" / "src"))
 
-from eavt_sql.engine import EAVTEngine
+from eavt_client.client import EavtClient
 
 DEFAULT_SCALE = 20000
 
@@ -79,7 +75,7 @@ def setup_schema(engine):
         "ATTRIBUTE order.total FLOAT ONE",
         "ATTRIBUTE order.item REF ONE",
     ]:
-        list(engine.sql(stmt))
+        list(client.execute(stmt))
 
 
 def bench_writes(engine, n):
@@ -87,7 +83,7 @@ def bench_writes(engine, n):
 
     t0 = time.perf_counter()
     for i in range(n):
-        list(engine.sql(
+        list(client.execute(
             "UPSERT AS D1 SET company.name = %1, company.revenue = %2, company.active = true",
             f"company_{i:06d}", float(i * 100),
         ))
@@ -96,7 +92,7 @@ def bench_writes(engine, n):
 
     t0 = time.perf_counter()
     for i in range(n // 2):
-        list(engine.sql(
+        list(client.execute(
             "UPSERT AS D1 SET person.name = %1, person.age = %2,"
             "    AS D2 SET city.name = %3, city.population = %4",
             f"person_{i:06d}", 20 + (i % 50),
@@ -108,7 +104,7 @@ def bench_writes(engine, n):
 
     t0 = time.perf_counter()
     for i in range(n // 4):
-        list(engine.sql(
+        list(client.execute(
             "UPSERT AS D1 SET item.codigo = %1, item.preco = %2, order.total = %3",
             f"ITEM_{i:06d}", float(i) * 1.5, float(i) * 1.5,
         ))
@@ -119,7 +115,7 @@ def bench_writes(engine, n):
     MANY_TAGS = 3
     t0 = time.perf_counter()
     for i in range(n // 10):
-        list(engine.sql(
+        list(client.execute(
             "UPSERT AS D1 = %1 SET company.tags = %2",
             1000 + i,
             f"tag_{i % 20}",
@@ -136,7 +132,7 @@ def bench_eid_vs_where(engine, n):
 
     t0 = time.perf_counter()
     for name in lookups:
-        list(engine.sql(
+        list(client.execute(
             "UPSERT AS D1 = eid('company.name', %1) SET company.active = false", name
         ))
     elapsed_where = time.perf_counter() - t0
@@ -144,7 +140,7 @@ def bench_eid_vs_where(engine, n):
 
     t0 = time.perf_counter()
     for name in lookups:
-        list(engine.sql(
+        list(client.execute(
             "UPSERT AS D1 = eid('company.name', %1) SET company.active = true", name
         ))
     elapsed_eid = time.perf_counter() - t0
@@ -152,7 +148,7 @@ def bench_eid_vs_where(engine, n):
 
     t0 = time.perf_counter()
     for name in lookups:
-        list(engine.sql(
+        list(client.execute(
             "UPSERT AS D1 = eid(company.name, %1) SET company.active = true", name
         ))
     elapsed_eid_unq = time.perf_counter() - t0
@@ -160,7 +156,7 @@ def bench_eid_vs_where(engine, n):
 
     t0 = time.perf_counter()
     for name in lookups:
-        list(engine.sql(
+        list(client.execute(
             "UPSERT AS D1 = eid(%1, %2) SET company.active = false",
             "company.name", name,
         ))
@@ -178,7 +174,7 @@ def bench_val(engine, n):
 
     t0 = time.perf_counter()
     for codigo in item_lookups:
-        list(engine.sql(
+        list(client.execute(
             "UPSERT AS D1 SET order.total = val(eid('item.codigo', %1), 'item.preco')",
             codigo,
         ))
@@ -187,13 +183,13 @@ def bench_val(engine, n):
 
     item_eids = []
     for codigo in item_lookups[:100]:
-        rows = list(engine.sql("SELECT d1.eid WHERE d1.item.codigo = %1", codigo))
+        rows = list(client.execute("SELECT d1.eid WHERE d1.item.codigo = %1", codigo))
         if rows:
             item_eids.append(rows[0][0])
 
     t0 = time.perf_counter()
     for eid in item_eids:
-        list(engine.sql(
+        list(client.execute(
             "UPSERT AS D1 SET order.total = val(%1, 'item.preco')",
             eid,
         ))
@@ -202,7 +198,7 @@ def bench_val(engine, n):
 
     t0 = time.perf_counter()
     for codigo in item_lookups:
-        list(engine.sql(
+        list(client.execute(
             "UPSERT AS D1 SET order.total = val(eid(item.codigo, %1), item.preco)",
             codigo,
         ))
@@ -213,32 +209,32 @@ def bench_val(engine, n):
 def bench_selects(engine, n):
     section("SELECT — query patterns at scale")
 
-    sample_eid = list(engine.sql("SELECT d1.eid WHERE d1.company.name = %1", "company_000000"))[0][0]
+    sample_eid = list(client.execute("SELECT d1.eid WHERE d1.company.name = %1", "company_000000"))[0][0]
 
-    timed("SELECT eid point lookup", lambda: list(engine.sql(
+    timed("SELECT eid point lookup", lambda: list(client.execute(
         "SELECT d1.company.name WHERE d1.eid = %1", sample_eid
     )), repeat=20)
 
-    timed("SELECT by unique attr (AVET)", lambda: list(engine.sql(
+    timed("SELECT by unique attr (AVET)", lambda: list(client.execute(
         "SELECT d1.eid WHERE d1.company.name = %1", "company_000050"
     )), repeat=20)
 
-    timed("SELECT full scan", lambda: list(engine.sql(
+    timed("SELECT full scan", lambda: list(client.execute(
         "SELECT d1.company.name"
     )), repeat=3)
 
-    mid_eid = list(engine.sql("SELECT d1.eid WHERE d1.company.name = %1", f"company_{n // 4:06d}"))[0][0]
-    end_eid = list(engine.sql("SELECT d1.eid WHERE d1.company.name = %1", f"company_{n // 2:06d}"))[0][0]
-    timed(f"SELECT range ~25% (by eid)", lambda: list(engine.sql(
+    mid_eid = list(client.execute("SELECT d1.eid WHERE d1.company.name = %1", f"company_{n // 4:06d}"))[0][0]
+    end_eid = list(client.execute("SELECT d1.eid WHERE d1.company.name = %1", f"company_{n // 2:06d}"))[0][0]
+    timed(f"SELECT range ~25% (by eid)", lambda: list(client.execute(
         "SELECT d1.company.name WHERE d1.eid >= %1 AND d1.eid < %2",
         mid_eid, end_eid,
     )), repeat=3)
 
-    timed("SELECT many-cardinality (tags)", lambda: list(engine.sql(
+    timed("SELECT many-cardinality (tags)", lambda: list(client.execute(
         "SELECT d1.company.tags WHERE d1.eid = %1", 1000
     )), repeat=20)
 
-    timed("SELECT wildcard (attr + val)", lambda: list(engine.sql(
+    timed("SELECT wildcard (attr + val)", lambda: list(client.execute(
         "SELECT d1.attr, d1.val WHERE d1.eid = %1", sample_eid
     )), repeat=20)
 
@@ -247,31 +243,31 @@ def bench_joins(engine, n):
     section("JOIN — multi-pattern queries")
 
     half = n // 2
-    ceo_eid = list(engine.sql("SELECT d1.eid WHERE d1.person.name = %1", "person_000000"))[0][0]
+    ceo_eid = list(client.execute("SELECT d1.eid WHERE d1.person.name = %1", "person_000000"))[0][0]
     if ceo_eid:
-        list(engine.sql("UPSERT AS D1 = eid('company.name', 'company_000000') SET company.ceo = %1", ceo_eid))
+        list(client.execute("UPSERT AS D1 = eid('company.name', 'company_000000') SET company.ceo = %1", ceo_eid))
 
-    city_eid = list(engine.sql("SELECT d1.eid WHERE d1.city.name = %1", "city_000000"))[0][0]
+    city_eid = list(client.execute("SELECT d1.eid WHERE d1.city.name = %1", "city_000000"))[0][0]
     if city_eid:
-        list(engine.sql("UPSERT AS D1 = eid('company.name', 'company_000000') SET company.hq = %1", city_eid))
+        list(client.execute("UPSERT AS D1 = eid('company.name', 'company_000000') SET company.hq = %1", city_eid))
 
-    timed("2-pattern join (company → ceo)", lambda: list(engine.sql(
+    timed("2-pattern join (company → ceo)", lambda: list(client.execute(
         "SELECT d1.company.name, d2.person.name"
         " WHERE d1.company.ceo = d2.eid AND d1.company.name = 'company_000000'"
     )), repeat=20)
 
-    timed("2-pattern join (company → hq)", lambda: list(engine.sql(
+    timed("2-pattern join (company → hq)", lambda: list(client.execute(
         "SELECT d1.company.name, d2.city.name"
         " WHERE d1.company.hq = d2.eid AND d1.company.name = 'company_000000'"
     )), repeat=20)
 
-    timed("3-pattern chain (company → ceo → company)", lambda: list(engine.sql(
+    timed("3-pattern chain (company → ceo → company)", lambda: list(client.execute(
         "SELECT d1.company.name, d2.person.name, d3.company.name"
         " WHERE d1.company.ceo = d2.eid AND d2.person.name = 'person_000000'"
         " AND d1.company.hq = d3.eid"
     )), repeat=10)
 
-    timed("Reverse lookup (VAET)", lambda: list(engine.sql(
+    timed("Reverse lookup (VAET)", lambda: list(client.execute(
         "SELECT d1.eid WHERE d1.company.ceo = %1", ceo_eid
     )), repeat=20)
 
@@ -279,26 +275,26 @@ def bench_joins(engine, n):
 def bench_delete(engine, n):
     section("DELETE — retraction performance")
 
-    delete_eids = list(engine.sql("SELECT d1.eid WHERE d1.company.name = %1", "company_000000"))
+    delete_eids = list(client.execute("SELECT d1.eid WHERE d1.company.name = %1", "company_000000"))
     if delete_eids:
         sample_eid = delete_eids[0][0]
-        list(engine.sql("UPSERT AS D1 = %1 SET company.tags = 'dtag1', company.tags = 'dtag2'", sample_eid))
+        list(client.execute("UPSERT AS D1 = %1 SET company.tags = 'dtag1', company.tags = 'dtag2'", sample_eid))
 
         t0 = time.perf_counter()
-        list(engine.sql("DELETE WHERE d1.eid = %1 AND d1.company.tags = 'dtag1'", sample_eid))
+        list(client.execute("DELETE WHERE d1.eid = %1 AND d1.company.tags = 'dtag1'", sample_eid))
         elapsed = time.perf_counter() - t0
         print(f"  {'DELETE single datom':50s} {fmt_ms(elapsed):>10s}")
 
     delete_batch = []
     for i in range(n // 10, n // 10 + min(100, n // 10)):
-        rows = list(engine.sql("SELECT d1.eid WHERE d1.company.name = %1", f"company_{i:06d}"))
+        rows = list(client.execute("SELECT d1.eid WHERE d1.company.name = %1", f"company_{i:06d}"))
         if rows:
             delete_batch.append(rows[0][0])
 
     if delete_batch:
         t0 = time.perf_counter()
         for eid in delete_batch:
-            list(engine.sql("DELETE WHERE d1.eid = %1 AND d1.company.active = true", eid))
+            list(client.execute("DELETE WHERE d1.eid = %1 AND d1.company.active = true", eid))
         elapsed = time.perf_counter() - t0
         print(f"  {'DELETE × 100 (conditional)':50s} {fmt_ms(elapsed):>10s}  {fmt_ops(elapsed, len(delete_batch))}")
 
@@ -312,19 +308,19 @@ def bench_mixed_workload(engine, n):
     ops = 0
     for i, name in enumerate(lookups):
         if i % 5 == 0:
-            list(engine.sql("UPSERT AS D1 = eid(company.name, %1) SET company.revenue = %2", name, float(i) * 2.5))
+            list(client.execute("UPSERT AS D1 = eid(company.name, %1) SET company.revenue = %2", name, float(i) * 2.5))
             ops += 1
         elif i % 5 == 1:
-            list(engine.sql("SELECT d1.company.revenue WHERE d1.company.name = %1", name))
+            list(client.execute("SELECT d1.company.revenue WHERE d1.company.name = %1", name))
             ops += 1
         elif i % 5 == 2:
-            list(engine.sql("SELECT d1.eid, d1.company.active WHERE d1.company.name = %1", name))
+            list(client.execute("SELECT d1.eid, d1.company.active WHERE d1.company.name = %1", name))
             ops += 1
         elif i % 5 == 3:
-            list(engine.sql("DELETE WHERE d1.company.name = %1 AND d1.company.tags = 'nonexist'", name))
+            list(client.execute("DELETE WHERE d1.company.name = %1 AND d1.company.tags = 'nonexist'", name))
             ops += 1
         else:
-            list(engine.sql("SELECT d1.company.tags WHERE d1.company.name = %1", name))
+            list(client.execute("SELECT d1.company.tags WHERE d1.company.name = %1", name))
             ops += 1
     elapsed = time.perf_counter() - t0
     print(f"  {'Mixed (20% write, 80% read)':50s} {fmt_ms(elapsed):>10s}  {fmt_ops(elapsed, ops)}")
@@ -333,24 +329,24 @@ def bench_mixed_workload(engine, n):
 def bench_flush_impact(engine, n):
     section("FLUSH — MemTable → PageStore")
 
-    timed("SELECT before flush (MemTable)", lambda: list(engine.sql(
+    timed("SELECT before flush (MemTable)", lambda: list(client.execute(
         "SELECT d1.company.name"
     )), repeat=3)
 
     t0 = time.perf_counter()
-    engine.flush()
+    client.admin('flush')
     elapsed = time.perf_counter() - t0
     print(f"  {'flush()':50s} {fmt_ms(elapsed):>10s}")
 
-    timed("SELECT after flush (PageStore)", lambda: list(engine.sql(
+    timed("SELECT after flush (PageStore)", lambda: list(client.execute(
         "SELECT d1.company.name"
     )), repeat=3)
 
-    timed("Point lookup after flush", lambda: list(engine.sql(
+    timed("Point lookup after flush", lambda: list(client.execute(
         "SELECT d1.eid WHERE d1.company.name = %1", "company_000050"
     )), repeat=20)
 
-    timed("eid() after flush", lambda: list(engine.sql(
+    timed("eid() after flush", lambda: list(client.execute(
         "UPSERT AS D1 = eid(company.name, %1) SET company.active = true", "company_000050"
     )), repeat=20)
 
@@ -376,9 +372,9 @@ def main():
     if args.backend == "file":
         import shutil
         shutil.rmtree(args.path, ignore_errors=True)
-        engine = EAVTEngine(args.path, page_cache_size=args.cache_size)
+        engine = EavtClient()
     else:
-        engine = EAVTEngine(":memory:", page_cache_size=args.cache_size)
+        engine = EavtClient()
 
     setup_schema(engine)
     print(f"\n  Schema declared. Loading {n:,} entities...")
@@ -398,7 +394,7 @@ def main():
     run("mixed", bench_mixed_workload)
     run("flush", bench_flush_impact)
 
-    engine.close()
+    client.close()
 
     if args.backend == "file":
         import shutil
