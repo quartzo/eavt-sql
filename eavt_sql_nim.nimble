@@ -9,7 +9,13 @@ srcDir        = "."
 backend       = "c"
 
 task test, "Run all Nim unit tests (single binary)":
-  exec "nim c --mm:arc --threads:on -d:release -r all_tests.nim"
+  exec "nim c --mm:arc --threads:on -d:release " &
+       "--out:build/all_tests all_tests.nim && build/all_tests"
+
+task dist, "Build server and REPL to build/":
+  exec "nim c --mm:orc --threads:on -d:release " &
+       "--out:build/eavt-server eavt_server_nim/server.nim"
+  exec "(cd eavt-repl-nim && nimble release)"
 
 task test_local, "Run each module's tests separately (for debugging)":
   exec "(cd nim_blobstore/memory  && nimble test)"

@@ -54,3 +54,4 @@ nim_sql_frontend/test_sql_frontend
 pynim_query.so
 # Rust build artifacts
 target/
+build/
