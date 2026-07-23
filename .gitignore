@@ -53,3 +53,6 @@ nim-eavt/tests
 nim-scheme/tests
 nim-sql-parse/parser
 nim-sql-parse/tests
+nim-datalog/datalog_ast
+nim-datalog/translate
+nim-datalog/tests

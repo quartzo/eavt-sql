@@ -19,3 +19,4 @@ task test, "Run all Nim unit tests":
   exec "nim c --mm:arc --threads:on -d:release -r nim-eavt/tests.nim"
   exec "nim c --mm:arc --threads:on -d:release -r nim-query/query/tests.nim"
   exec "(cd nim-sql-parse && nimble test)"
+  exec "(cd nim-datalog && nimble test)"
