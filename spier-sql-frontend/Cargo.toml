@@ -1,9 +1,0 @@
-[package]
-name = "spier-sql-frontend"
-version = "0.1.0"
-edition = "2021"
-description = "SQL frontend (parse + datalog IR, stage 1 of compilation)"
-
-[dependencies]
-spier-datalog = { path = "../spier-datalog" }
-spier-sql-parse = { path = "../spier-sql-parse" }

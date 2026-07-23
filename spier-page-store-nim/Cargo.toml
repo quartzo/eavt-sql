@@ -1,8 +1,0 @@
-[package]
-name = "spier-page-store-nim"
-version = "0.1.0"
-edition = "2021"
-description = "Nim-backed B-tree page store (COW, zstd-compressed pages on blobstore)"
-
-[dependencies]
-spier-value = { path = "../spier-value" }

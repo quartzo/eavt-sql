@@ -6,9 +6,6 @@ dist/
 wheels/
 *.egg-info
 
-# Rust / Cargo
-target/
-# DynSpire codegen-emitted Python clients (per-spier generated/)
 generated/
 # Maturin native extensions
 *.so
@@ -25,7 +22,6 @@ tests/bench_cnpj_eavt_vs_mmap_results.md
 .nimcache/
 libnim_blobstore_*.a
 libnim_memtable*.a
-nim-blobstore/*/sha256
 # Test artifacts
 /journal/
 **/journal/journal

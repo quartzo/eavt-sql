@@ -5,9 +5,9 @@
 ##
 ## Build:
 ##   nim c --mm:arc --threads:on -d:release --noNimblePath \
-##     --path:nim_blobstore --path:nim_kvstore --path:. --path:<nimpy_dir> \
+##     --path:nim_blobstore --path:nim_query --path:. --path:<nimpy_dir> \
 ##     --passL:-lcrypto --passL:-lzstd --app:lib \
-##     -o:pynim_query.so nim_kvstore/query/pynim_query.nim
+##     -o:pynim_query.so nim_query/query/pynim_query.nim
 
 import nimpy
 import nimpy/nim_py_marshalling  # newPyNone
