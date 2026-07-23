@@ -12,4 +12,4 @@ requires "linenoise"
 
 task release, "Build the REPL":
   exec "nim c --mm:arc --threads:on -d:release " &
-       "--out:../build/eavt-repl-nim src/eavt_repl.nim"
+       "--out:../build/eavt-sql-cli src/eavt_repl.nim"

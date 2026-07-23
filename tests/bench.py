@@ -1,6 +1,6 @@
 """Performance benchmarks — measures insert/query/flush latency via UDS.
 
-Run:  ./build/eavt-server &
+Run:  ./build/eavt-sql-server &
       uv run python tests/bench.py
 """
 import time
