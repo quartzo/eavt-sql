@@ -259,6 +259,25 @@ proc eavtDeclareAttr*(eng: EavtEngine; name: string; valueType: uint32;
           encodeValue($DbUniqueIdentityAid, emFixed, 0), t, false, emFixed, true))
     return (aid, isNew)
 
+proc bootstrapSystemAttrs*(eng: EavtEngine) =
+  ## Write EAVT datoms for built-in system attributes if they don't exist yet.
+  if eng.kv.memtableSize() > 0: return
+  let tx = eng.resolver.allocateInPartition(PartTx)
+  for (name, vt, _) in [("db.ident", DbTypeString, false),
+                         ("db.cardinality", DbTypeRef, false),
+                         ("db.valueType", DbTypeRef, false),
+                         ("db.unique", DbTypeRef, false)]:
+    let aid = eng.resolver.lookupAttr(name).get(otherwise = 0)
+    if aid == 0: continue
+    let e = aid.int64
+    eng.batchWrite(buildEavtEntries(e, DbIdentAid,
+      encodeValue(name, emVariable, 0), e, false, emVariable, true))
+    eng.batchWrite(buildEavtEntries(e, DbValueTypeAid,
+      encodeValue($vt, emFixed, 0), tx, false, emFixed, true))
+    let cardId = DbCardinalityOneAid
+    eng.batchWrite(buildEavtEntries(e, DbCardinalityAid,
+      encodeValue($cardId, emFixed, 0), tx, false, emFixed, true))
+
 # ── Resolver accessors ──
 
 proc lookupAttr*(eng: EavtEngine; name: string): Option[uint32] =

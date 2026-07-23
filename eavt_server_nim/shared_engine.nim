@@ -12,6 +12,7 @@ proc initSharedEngine*(): SharedEngine =
   cfg["backend"] = "memory"
   let kv = newKVStore(cfg)
   let store = newQueryStore(kv)
+  store.eavt.bootstrapSystemAttrs()
   result = SharedEngine(kv: kv, store: store)
   initLock(result.lock)
 
