@@ -1,175 +1,80 @@
 # eavt-sql
 
-**An immutable, time-traveling fact database — with a SQL dialect instead of Datalog.**
+**An immutable, time-traveling fact database — with a SQL dialect.**
 
-eavt-sql borrows [Datomic](https://www.datomic.com/)'s immutable, indexed, entity-attribute-value model and brings it to a familiar SQL interface. No `?`-variables, no Datalog — just `SELECT`, `UPSERT`, `UPDATE`, and `DELETE` over dot-notation attributes with implicit joins.
+eavt-sql borrows [Datomic](https://www.datomic.com/)'s immutable, indexed, entity-attribute-value model and brings it to a familiar SQL interface. No Datalog — just `SELECT`, `UPSERT`, `UPDATE`, and `DELETE` over dot-notation attributes with implicit joins.
 
-Every piece of data is an immutable **fact** — a *datom* `(entity, attribute, value, transaction)`. Nothing is ever overwritten or physically deleted: updates retract the old value, history is preserved forever, and you can query the database **as of any point in time**.
-
-```python
-from eavt_sql.engine import EAVTEngine
-
-engine = EAVTEngine(":memory:")
-
-# Declare a schema (entities are attribute bags — no fixed tables/columns)
-list(engine.sql("ATTRIBUTE company.name STRING ONE UNIQUE"))
-list(engine.sql("ATTRIBUTE company.hq REF ONE"))
-list(engine.sql("ATTRIBUTE city.name STRING ONE UNIQUE"))
-
-# Create entities — each UPSERT returns [(entity_id, values_inserted)]
-acme = list(engine.sql("UPSERT AS D1 SET company.name = 'ACME'"))[0][0]
-nyc  = list(engine.sql("UPSERT AS D1 SET city.name = 'New York'"))[0][0]
-
-# Link them by unique attribute via an AVET point lookup
-list(engine.sql("UPSERT AS D1 = eid('company.name', 'ACME') SET company.hq = %1", nyc))
-
-# Implicit join: d1.company.hq = d2 — the planner picks the index & join order
-list(engine.sql("SELECT d1.company.name, d2.city.name WHERE d1.company.hq = d2 AND d2.city.name = 'New York'"))
-# → [('ACME', 'New York')]
-
-# Update is also a join; the old value is retracted, not destroyed
-list(engine.sql("UPDATE AS D1 SET company.name = 'ACME Corp' WHERE d1.company.hq = d2 AND d2.city.name = 'New York'"))
-
-# Query the full revision history — retracted values are still there
-list(engine.sql("SELECT HISTORY d1.company.name WHERE d1.eid = %1", acme))
-# → [('ACME',), ('ACME Corp',)]
-```
-
-## Why?
-
-Datomic showed that an **append-only, immutable** database is a better fit for systems that must audit, reason about, and rewind state — but it requires learning Datalog. eavt-sql keeps the model and gives you SQL:
-
-- **Immutable by default** — writes never destroy data. Retract a fact and the old value stays queryable forever.
-- **Time travel** — re-run any query as of a past transaction or timestamp (`as_of=...`), or `SELECT HISTORY` to see every revision.
-- **A real SQL dialect** — `SELECT`/`UPSERT`/`UPDATE`/`DELETE`/`ATTRIBUTE` with `WHERE`, joins, ranges, and `IN`. Attributes use dot notation (`d1.company.name`); joins are implicit (`d1.company.hq = d2`), so you never write `JOIN ... ON`.
-- **Schemaless entities** — an entity is a bag of attribute facts. Add attributes at any time; no migrations to reshape a table.
-- **Automatic query planning** — a cost-based planner with branch-and-bound search picks the join order and selects among four indexes (EAVT / AEVT / AVET / VAET). You describe *what* to join; the engine decides *how*.
-- **Native Rust core, thin Python API** — all storage and query execution are Rust; Python is a small typed client.
-
-## A SQL dialect for facts
-
-Attributes are namespaced and read with dots. Each `dN` in a query is a **virtual datom**; the same alias joining multiple conditions means "the same entity".
-
-```python
-# Join two patterns — d1 and d2 share an entity through d1.company.hq = d2
-engine.sql("SELECT d1.company.name, d2.city.name WHERE d1.company.hq = d2 AND d2.city.name = 'NYC'")
-
-# Range + not-equal + IN
-engine.sql("SELECT d1.item.score WHERE d1.item.score >= %1 AND d1.item.score <= %2 AND d1.item.score != %3", 30, 70, 50)
-engine.sql("SELECT d1.item.score WHERE d1.item.score IN (10, 30, 50)")
-
-# Wildcards: dump every attribute/value of an entity
-engine.sql("SELECT d1.attr, d1.val WHERE d1.eid = %1", eid)
-# → [('company.name', 'ACME Corp'), ('company.hq', 1002), ...]
-
-# Transaction metadata, Datomic-style
-engine.sql("SELECT d1.company.name, d2.db.txInstant WHERE d1.company.name = 'ACME' AND d1.tx = d2")
-```
-
-Full syntax: **[SQL Reference](./docs/sql-reference.md)**.
-
-## Immutable by default, queryable at any time
-
-| Operation | What happens on disk |
-|-----------|----------------------|
-| `UPSERT` | Asserts a new fact. `ONE` cardinality also retracts the prior value (both kept in history). |
-| `UPDATE` | A join scan that asserts new facts / retracts old ones per matched entity. |
-| `DELETE` | Retracts matching facts — **no physical deletion**. |
-| `SELECT` | Reads only the current (non-retracted) state. |
-| `SELECT HISTORY` | Reads every revision, including retracted values. |
-| `as_of=t` | Reads the state as of a transaction number or timestamp. |
-
-```python
-engine.export_jsonl("data.jsonl.gz", history=True)   # full history, portable
-```
-
-## Layered Rust core
-
-The entire engine is a **Rust workspace of layered crates**. Each crate depends on the next through `Cargo.toml` paths — no runtime `dlopen`, no C ABI slot buffer, no code generation step. Storage backends implement the `BlobStoreEngine` / `JournalEngine` / `MemTableEngine` traits from `spier-storage-traits`; the layers above import the definitions of the layers below.
-
-```
-SQL text
-  │
-  ▼
-spier-sql-frontend ──► spier-sql-parse   (lexer + parser → AST)
-  │                  └► spier-datalog     (AST → Datalog IR)
-  ▼
-resolve_ir  ──► spier-transactor          (schema resolution)
-  ▼
-spier-compiler ──► spier-planner          (cost-based join ordering + index pick)
-  ▼
-VM program ──► spier-eavt-query           (leapfrog triejoin VM, streaming)
-                  │
-                  ▼
-              spier-kvstore ──► spier-memtable            (crossbeam write buffer)
-                             └► spier-blobstore-{memory|file|s3}   (page storage)
-                             └► spier-journal-file        (write-ahead log)
-```
-
-| Crate | Responsibility |
-|-------|----------------|
-| `spier-storage-traits` | `BlobStoreEngine`, `JournalEngine`, `MemTableEngine`, `KVStoreEngine`, `Cursor` |
-| `spier-value` | Core `Value` / `ValueType` + `query_codec` |
-| `spier-query-ir` | VM opcodes, `Instruction`, `VMProgram`, `SpecKind` |
-| `spier-sql-parse` | Pure-Rust SQL lexer + parser |
-| `spier-datalog` | SQL AST → Datalog IR + `resolve_ir` + `CompileStats` |
-| `spier-sql-frontend` | Stage-1 compile: parse + datalog IR |
-| `spier-planner` | Stage-2a: cost-based join ordering + index selection (stats only, no transactor) |
-| `spier-compiler` | Stage-2b: plan → VM bytecode |
-| `spier-eavt-query` | Orchestrates the pipeline; runs the triejoin VM |
-| `spier-transactor` | EAVT semantics: save / retract / declare_attr + resolver + UNIQUE constraints |
-| `spier-kvstore` | Key-only multi-CF store: MemTable + PageStore + flush + GC |
-| `spier-memtable` | Per-CF `SkipMap` write buffer, O(1) snapshots |
-| `spier-blobstore-memory` / `-file` / `-s3` | Pluggable page storage backends |
-| `spier-journal-file` | Local write-ahead journal (not needed for `:memory:`) |
-
-> **[Spier & Crate Map](./docs/spier-map.md)** — which crate consumes which, and the trait behind each boundary.
-
-## Storage backends
-
-```python
-engine = EAVTEngine(":memory:")            # volatile — file backend in an ephemeral temp dir
-engine = EAVTEngine("./my_db")             # persistent (spier-blobstore-file, zstd-compressed pages)
-engine = EAVTEngine("s3://bucket/prefix")  # S3-compatible object store (spier-blobstore-s3)
-```
-
-| Backend | Storage | Use case |
-|---------|---------|----------|
-| Memory | In-memory `HashMap` | Server `:memory:` mode (gRPC); selectable via `backend` config in Rust |
-| File | Directory + zstd-compressed blobs + WAL | Persistent local; also backs Python's `:memory:` (temp dir) |
-| S3 | S3-compatible object store + local WAL | Cloud / distributed |
-
-Attribute declarations persist to disk and reload on reopen.
+Every piece of data is an immutable **fact** — a *datom* `(entity, attribute, value, transaction)`. Nothing is ever overwritten: updates retract the old value, history is preserved forever, and you can query the database **as of any point in time**.
 
 ## Quick Start
 
-Requires Python 3.13+, [uv](https://docs.astral.sh/uv/), and a Rust toolchain.
+Requires Nim ≥ 2.0.14 and Python ≥ 3.13 for benchmarks. Zero Rust toolchain.
 
 ```bash
-cargo build --release     # compile the Rust crates (PyO3 bindings are .so)
-uv sync --group dev       # install Python deps
-uv run pytest tests/ -v   # run the suite (Rust tests: cargo test --release)
+# Build server + CLI
+nimble dist                    # → build/eavt-sql-server, build/eavt-sql-cli
+
+# Run all tests (492 Nim tests)
+nimble test                    # → build/all_tests
+
+# Start the server
+./build/eavt-sql-server        # listens on /run/user/$UID/eavt/eavt.sock
 ```
 
-## gRPC server & REPL
+## Server + CLI (Unix Domain Socket + MessagePack)
 
 ```bash
-eavt-server path/to/db            # file storage
-eavt-server :memory:              # in-memory
-eavt-server s3://bucket/prefix    # S3
+# Server
+./build/eavt-sql-server
 
-eavt-repl localhost:50051         # connect the REPL client
-# Dot commands: .status .tree .memtable .dump .flush .help .quit
-# SQL: SELECT, UPSERT, UPDATE, DELETE, ATTRIBUTE ...
+# REPL (Tab-separated output, linenoise history, dot-commands)
+./build/eavt-sql-cli
 ```
+
+**Dot commands:** `.help` `.flush` `.status` `.tree` `.memtable` `.dump [EAVT|AEVT|AVET|VAET]` `.quit`
+
+**Protocol:** MessagePack over UDS (big-endian length-prefix framing). Types preserved across the wire:
+int64, float64, bool, string, bytes. Python client in `py_eavt_client/`.
+
+## SQL Dialect
+
+Attributes are namespaced and read with dots. Each `dN` in a query is a **virtual datom**; the same alias joining multiple conditions means "the same entity".
+
+```sql
+-- Join two patterns — d1 and d2 share an entity through d1.company.hq = d2
+SELECT d1.company.name, d2.city.name WHERE d1.company.hq = d2 AND d2.city.name = 'NYC'
+
+-- Range + not-equal + IN
+SELECT d1.item.score WHERE d1.item.score >= %1 AND d1.item.score <= %2 AND d1.item.score != %3
+SELECT d1.item.score WHERE d1.item.score IN (10, 30, 50)
+
+-- Wildcards: dump every attribute/value of an entity
+SELECT d1.attr, d1.val WHERE d1.eid = %1
+
+-- Transaction metadata, Datomic-style
+SELECT d1.company.name, d2.db.txInstant WHERE d1.company.name = 'ACME' AND d1.tx = d2
+
+-- History: every revision, including retracted values
+SELECT HISTORY d1.company.name WHERE d1.eid = %1
+```
+
+## Immutability
+
+| Operation | What happens |
+|-----------|-------------|
+| `UPSERT` | Asserts a fact. `ONE` cardinality retracts the prior value (both kept). |
+| `UPDATE` | Join scan: asserts new facts / retracts old ones per matched entity. |
+| `DELETE` | Retracts matching facts — **no physical deletion**. |
+| `SELECT` | Reads only the current (non-retracted) state. |
+| `SELECT HISTORY` | Reads every revision, including retracted values. |
 
 ## Schema
 
-```python
-engine.sql("ATTRIBUTE company.partner REF MANY")
-engine.sql("ATTRIBUTE company.name STRING ONE UNIQUE")
-engine.sql("ATTRIBUTE company.revenue FLOAT ONE")
-engine.sql("ATTRIBUTE company.active BOOLEAN ONE")
+```sql
+ATTRIBUTE company.partner REF MANY
+ATTRIBUTE company.name STRING ONE UNIQUE
+ATTRIBUTE company.revenue FLOAT ONE
+ATTRIBUTE company.active BOOLEAN ONE
 ```
 
 | Param | Effect |
@@ -178,8 +83,6 @@ engine.sql("ATTRIBUTE company.active BOOLEAN ONE")
 | `ONE` (default) | one value per `(E, A)` — replacement semantics |
 | `MANY` | values accumulate for the same `(E, A)` |
 | `UNIQUE` | no two entities share a value for this attribute |
-
-Values are auto-coerced by declared type. Schema attributes (`db.ident`, `db.valueType`, …) are themselves queryable via SQL.
 
 ## Indexes
 
@@ -190,53 +93,113 @@ Values are auto-coerced by declared type. Schema attributes (`db.ident`, `db.val
 | AVET | `a, v, e` | value → entity lookups |
 | VAET | `v, a, e` | reverse ref lookups (refs only) |
 
-All four are key-only and prefix-compressed (varint sizes, 256 KB page splits). The planner selects among them automatically.
+Auto-selected by a cost-based planner with branch-and-bound search.
 
-## Architecture & design notes
-
-- **Two-stage compilation**: stage 1 (frontend: parse + datalog IR) and stage 2 (compiler: plan + codegen) are decoupled — the compiler never touches the transactor, it consumes cost stats embedded in the resolved IR.
-- **Leapfrog triejoin VM**: resumable, pull-based cursors stream results in bounded batches; `EXPLAIN` dumps every candidate join ordering with costs plus the compiled bytecode.
-- **MemTable swap-flush**: on threshold, the live write buffer is frozen and a fresh one takes over; flush reads frozen data non-destructively, so reads stay consistent during flush.
-- **Single-writer, per-datom locking**: one `Mutex<Resolver>` serializes writes, held only for one datom — not a whole statement. UNIQUE checks run inside the same lock (no TOCTOU). Non-blocking `flush()`/`gc_full()` return `Busy` rather than blocking; a background poller auto-flushes by size and GCs by age.
-- **In-process, not RPC**: the Python layer calls the Rust crates through PyO3 bindings in the same address space. Live objects (cursors, snapshots, VM programs) cross the boundary as a single `Arc` boxed pointer — zero per-call serialization.
-
-### Project layout
+## Architecture
 
 ```
-spier-storage-traits/  # Storage-layer traits (BlobStore/Journal/MemTable/KVStore)
-spier-value/           # Core Value type + query_codec
-spier-query-ir/        # VM opcodes, instructions, SpecKind
-spier-sql-parse/       # SQL parser (lexer + parser)
-spier-sql-frontend/    # Stage-1: parse + datalog IR
-spier-datalog/         # AST → Datalog IR + resolve_ir + CompileStats
-spier-planner/         # Cost-based join ordering
-spier-compiler/        # Stage-2: plan + codegen
-spier-eavt-query/      # Query engine: VM, triejoin (orchestrates the pipeline)
-spier-transactor/      # EAVT engine: save/retract + resolver + constraints
-spier-kvstore/         # KV store (MemTable + PageStore + flush)
-spier-memtable/        # MemTable (crossbeam SkipMap per CF)
-spier-blobstore-memory/ # In-memory BlobStore backend
-spier-blobstore-file/   # File-backed BlobStore backend
-spier-blobstore-s3/     # S3-backed BlobStore backend
-spier-journal-file/     # File-backed Journal backend
-spier-sql-parse-py/    # PyO3 bindings for spier-sql-parse
-spier-transactor-py/   # PyO3 bindings for spier-transactor
-spier-eavt-query-py/   # PyO3 bindings for spier-eavt-query
-eavt-cli/              # eavt-repl: REPL client (gRPC)
-eavt-server/           # gRPC server (tonic)
-src/eavt_sql/          # Python package
-  __init__.py          # Re-exports Rust classes + constants
-  engine.py            # EAVTEngine
-  sql_parse_client.py  # SqlParseClient (spier-sql-parse via PyO3)
-  query_codec.py       # Value serialization for query params/results
-  types.py             # Datom, Timestamp, ref, etc.
-tests/                 # All tests
+SQL text
+  │
+  ▼
+nim-sql-parse        (D.1) lexer + parser → AST
+  │
+  ▼
+nim-datalog          (D.2) AST → Datalog IR (EAVT patterns)
+  │
+  ▼
+nim-planner          (D.3) join ordering + index selection (cost-based DFS)
+  │
+  ▼
+nim-compiler         (D.4) Datalog IR → Scheme S-expressions
+  │
+  ▼
+nim-scheme           Stack-based VM with yield/resume (streaming queries)
+  │
+  ▼
+nim-query            Host functions: scanner-open, scanner-iterate, save, retract
+  │
+  ▼
+nim-eavt             EAVT engine: resolver, allocation, uniqueness constraints
+  │
+  ▼
+nim-kvstore          KVStore: put/get/scan/flush/GC + MergedCursor
+  │
+  ├── nim-memtable   COW treap (ARC-managed), one per CF
+  └── nim-page-store COW B-tree, zstd-compressed pages, LRU cache
+  │
+  ▼
+nim-blobstore        memory / file / S3 backends
 ```
 
-### Dependencies
+All layers are **pure Nim** — no C ABI, no vtable indirection, no Rust.
 
-- `orjson >= 3.10` — JSON serialization
-- No external database — the storage engine is native Rust
+| Module | Lines | Role |
+|--------|-------|------|
+| `nim_sql_parse` | 780 | SQL lexer + recursive-descent parser |
+| `nim_datalog` | 603 | SQL AST → Datalog patterns + resolve |
+| `nim_planner` | 774 | Cost-based join ordering (EAVT/AEVT/AVET/VAET) |
+| `nim_compiler` | 580 | Datalog IR → Scheme codegen |
+| `nim_sql_frontend` | 143 | Orchestration: parse → compile → Scheme program |
+| `nim_scheme` | 579 | S-expr parser + stack VM with yield/resume |
+| `nim_query` | ~2,000 | Scanner, hostfns (22 ops), leapfrog triejoin |
+| `nim_eavt` | 285 | EAVT engine: save/retract + resolver + constraints |
+| `nim_kvstore` | 319 | KVStore + PageStore + MergedCursor |
+| `nim_memtable` | ~400 | Per-CF COW treap |
+| `nim_page_store` | 721 | COW B-tree, LRU cache (zstd-compressed) |
+| `nim_blobstore` | ~800 | memory / file / S3 backends |
+
+## Storage Backends
+
+| Backend | Storage | Use case |
+|---------|---------|----------|
+| Memory | In-memory `HashMap` | `:memory:` mode |
+| File | Directory + zstd-compressed blobs | Persistent local |
+| S3 | S3-compatible object store + local journal | Cloud / distributed |
+
+## Python Client
+
+```python
+from eavt_client.client import EavtClient
+
+client = EavtClient()  # connects to local UDS server
+rows = client.execute("ATTRIBUTE company.name STRING ONE")
+rows = client.execute("UPSERT SET company.name = 'ACME'")
+rows = client.execute("SELECT d1.company.name WHERE d1.company.name = 'ACME'")
+client.admin("flush")
+client.close()
+```
+
+## Benchmarks
+
+```bash
+./build/eavt-sql-server &
+uv run python tests/bench.py
+```
+
+See `tests/bench*.py` — insert/query/flush latency, join performance, compile vs execution cost.
+
+## Project Layout
+
+```
+eavt_server_nim/       # UDS server (msgpack, thread-per-connection)
+eavt-repl-nim/          # REPL client (linenoise, tab-separated output)
+py_eavt_client/         # Python client (msgpack over UDS)
+nim_sql_parse/          # D.1 — SQL lexer + parser
+nim_datalog/            # D.2 — AST → Datalog IR
+nim_planner/            # D.3 — join ordering + index selection
+nim_compiler/           # D.4 — Scheme codegen
+nim_sql_frontend/       # Orchestration: parse → compile
+nim_scheme/             # S-expr parser + VM
+nim_query/              # Scanner, hostfns, leapfrog triejoin
+nim_eavt/               # EAVT engine
+nim_kvstore/            # KVStore + PageStore
+nim_memtable/           # COW treap per CF
+nim_page_store/         # COW B-tree + LRU cache
+nim_blobstore/          # memory / file / S3 backends
+build/                  # compiled binaries (gitignored)
+tests/                  # Python benchmarks
+docs/                   # SQL reference, architecture notes
+```
 
 ## License
 
