@@ -1,4 +1,0 @@
-[workspace]
-members = ["eavt-cli"]
-default-members = ["eavt-cli"]
-resolver = "2"

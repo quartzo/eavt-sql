@@ -1,17 +1,26 @@
-import grpc
-from collections.abc import Generator
-
-from eavt_client import eavt_pb2 as pb
-from eavt_client import eavt_pb2_grpc as grpc_pb
+import json, os, socket, struct
+from pathlib import Path
 
 
 class EavtClient:
-    def __init__(self, addr: str):
-        self.channel = grpc.insecure_channel(addr)
-        self.stub = grpc_pb.EavtServiceStub(self.channel)
+    """EAVT database client over Unix Domain Socket with JSON streaming protocol."""
+
+    def __init__(self, sock_path: str | None = None):
+        if sock_path is None:
+            sock_path = self._default_path()
+        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._sock.connect(sock_path)
+        self._rbuf = b""
+
+    @staticmethod
+    def _default_path() -> str:
+        xdg = Path("/run/user") / str(os.getuid()) / "eavt" / "eavt.sock"
+        if xdg.exists() or "XDG_RUNTIME_DIR" in os.environ:
+            return str(xdg)
+        return str(Path.home() / ".local" / "state" / "eavt" / "eavt.sock")
 
     def close(self):
-        self.channel.close()
+        self._sock.close()
 
     def __enter__(self):
         return self
@@ -19,96 +28,68 @@ class EavtClient:
     def __exit__(self, *_):
         self.close()
 
-    def execute(self, query: str, *params, **kw) -> list[tuple]:
-        request = pb.SqlRequest(
-            query=query,
-            params=[_to_proto_value(p) for p in params],
-            as_of_us=kw.get("as_of_us"),
-            limit=kw.get("limit"),
-        )
-        resp = self.stub.Execute(request)
-        return [tuple(_from_proto_value(v) for v in row.values) for row in resp.rows]
+    def _send_msg(self, data: str):
+        payload = data.encode()
+        self._sock.sendall(struct.pack(">I", len(payload)) + payload)
 
-    def sql(
-        self,
-        query: str,
-        *params,
-        as_of_us: int | None = None,
-        limit: int | None = None,
-    ) -> Generator[tuple, None, None]:
-        request = pb.SqlRequest(
-            query=query,
-            params=[_to_proto_value(p) for p in params],
-            as_of_us=as_of_us,
-            limit=limit,
-        )
-        for row in self.stub.Sql(request):
-            yield tuple(_from_proto_value(v) for v in row.values)
+    def _recv_msg(self) -> dict:
+        raw = self._sock.recv(4)
+        if len(raw) < 4:
+            raise ConnectionError("server closed connection")
+        size = struct.unpack(">I", raw)[0]
+        data = b""
+        while len(data) < size:
+            chunk = self._sock.recv(size - len(data))
+            if not chunk:
+                raise ConnectionError("server closed connection mid-message")
+            data += chunk
+        return json.loads(data)
 
-    def sql1(self, query: str, *params, **kw) -> tuple | None:
-        return next(self.sql(query, *params, limit=1, **kw), None)
+    def sql(self, query: str, *params) -> list[dict]:
+        """Execute SQL and return all result chunks as a list of dicts."""
+        req = {"type": "sql", "sql": query}
+        if params:
+            req["params"] = list(params)
+        self._send_msg(json.dumps(req))
+        results = []
+        while True:
+            resp = self._recv_msg()
+            if "error" in resp and resp["error"]:
+                raise RuntimeError(resp["error"])
+            results.append(resp)
+            if not resp.get("more", False):
+                break
+        return results
+
+    def execute(self, query: str, *params) -> list[tuple]:
+        """Execute SQL and return rows as flat tuples."""
+        chunks = self.sql(query, *params)
+        rows = []
+        for chunk in chunks:
+            for row in chunk.get("rows", []):
+                rows.append(tuple(self._parse_value(v) for v in row))
+        return rows
+
+    def sql1(self, query: str, *params) -> tuple | None:
+        """Execute SQL and return first row as tuple, or None."""
+        rows = self.execute(query, *params)
+        return rows[0] if rows else None
+
+    def admin(self, command: str) -> str:
+        """Send admin command and return output."""
+        self._send_msg(json.dumps({"type": "admin", "command": command}))
+        resp = self._recv_msg()
+        return resp.get("output", "")
 
     def flush(self):
-        self.execute("FLUSH")
+        return self.admin("flush")
 
-    def status(self) -> dict:
-        rows = self.execute("STATUS")
-        row = rows[0] if rows else ("", "")
-        return {"db_path": row[0], "storage_mode": row[1]}
+    def status(self) -> str:
+        return self.admin("status")
 
-    def prepare(self, query: str) -> int:
-        """Compile SQL once, return stmt_id for ExecutePrepared."""
-        resp = self.stub.Prepare(pb.PrepareRequest(query=query))
-        return resp.stmt_id
-
-    def execute_prepared(
-        self,
-        stmt_id: int,
-        *params,
-        as_of_us: int | None = None,
-        limit: int | None = None,
-    ) -> list[tuple]:
-        """Execute a previously prepared statement with new params."""
-        request = pb.ExecutePreparedRequest(
-            stmt_id=stmt_id,
-            params=[_to_proto_value(p) for p in params],
-            as_of_us=as_of_us,
-            limit=limit,
-        )
-        resp = self.stub.ExecutePrepared(request)
-        return [tuple(_from_proto_value(v) for v in row.values) for row in resp.rows]
-
-    def unprepare(self, stmt_id: int) -> None:
-        """Drop a prepared statement from server-side cache."""
-        self.stub.Unprepare(pb.UnprepareRequest(stmt_id=stmt_id))
-
-
-def _to_proto_value(v) -> pb.Value:
-    if isinstance(v, bool):
-        return pb.Value(bool_val=v)
-    if isinstance(v, int):
-        return pb.Value(int_val=v)
-    if isinstance(v, float):
-        return pb.Value(float_val=v)
-    if isinstance(v, str):
-        return pb.Value(text_val=v)
-    if isinstance(v, bytes):
-        return pb.Value(bytes_val=v)
-    raise TypeError(f"unsupported type: {type(v)}")
-
-
-def _from_proto_value(v: pb.Value) -> int | float | str | bool | bytes | None:
-    kind = v.WhichOneof("kind")
-    if kind == "int_val":
-        return v.int_val
-    if kind == "float_val":
-        return v.float_val
-    if kind == "text_val":
-        return v.text_val
-    if kind == "bool_val":
-        return v.bool_val
-    if kind == "bytes_val":
-        return v.bytes_val
-    if kind == "ref_val":
-        return v.ref_val
-    return None
+    @staticmethod
+    def _parse_value(v: str):
+        try:
+            return json.loads(v)
+        except (json.JSONDecodeError, TypeError):
+            return v
