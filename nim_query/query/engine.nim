@@ -8,7 +8,6 @@ import kvstore
 import eavt
 import keys
 import resolver
-import abi
 import types
 import scanner
 import hostfns

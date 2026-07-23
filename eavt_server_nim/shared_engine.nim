@@ -1,5 +1,5 @@
 import std/[locks, tables]
-import kvstore, eavt, engine, abi
+import kvstore, eavt, engine
 
 type
   SharedEngine* = ref object
@@ -9,20 +9,9 @@ type
     store*: QueryStore
 
 proc initSharedEngine*(): SharedEngine =
-  var tbl = initTable[string, string]()
-  tbl["backend"] = "memory"
-  let n = tbl.len
-  var keys = cast[CStringArr](allocShared0(n * sizeof(cstring)))
-  var vals = cast[CStringArr](allocShared0(n * sizeof(cstring)))
-  var i = 0
-  for k, v in tbl.pairs:
-    keys[i] = k.cstring
-    vals[i] = v.cstring
-    inc i
-  var err: cint
-  let kv = newKVStore(keys, vals, n.cint, addr err)
-  deallocShared(keys)
-  deallocShared(vals)
+  var cfg = initTable[string, string]()
+  cfg["backend"] = "memory"
+  let kv = newKVStore(cfg)
   let eavt = newEavtEngine(kv)
   eavt.bootstrapResolver()
   let store = newQueryStore(kv)

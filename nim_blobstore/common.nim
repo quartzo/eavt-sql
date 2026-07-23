@@ -20,7 +20,6 @@ type
   Byte* = uint8
   ByteArr16* = array[16, Byte]
   BytePtr* = ptr UncheckedArray[Byte]
-  CStringArr* = ptr UncheckedArray[cstring]
 
 template setErr*(errOut: ptr cint; code: cint) =
   if errOut != nil: errOut[] = code
@@ -39,9 +38,3 @@ proc allocByteBuf*(n: Natural): ptr Byte =
 
 proc freeShared*(p: pointer) {.cdecl.} =
   if p != nil: deallocShared(p)
-
-proc parseConfig*(keys, vals: CStringArr; n: csize_t): Table[string, string] =
-  result = initTable[string, string](if n.int > 0: n.int else: 1)
-  for i in 0 ..< n.int:
-    if keys[i] != nil and vals[i] != nil:
-      result[$keys[i]] = $vals[i]

@@ -15,7 +15,6 @@ import eavt
 import codec
 import types
 import scanner
-import abi
 import hostfns
 import engine
 import parser as sql_parser
@@ -59,29 +58,11 @@ proc newMockCursor(keys: seq[seq[byte]]): NimCursor =
     invalidateCb: invalidate,
   )
 
-proc makeConfig(t: Table[string, string]): tuple[keys: CStringArr, vals: CStringArr, count: cint] =
-  let n = t.len
-  result.keys = cast[CStringArr](allocShared0(n * sizeof(cstring)))
-  result.vals = cast[CStringArr](allocShared0(n * sizeof(cstring)))
-  var i = 0
-  for k, v in t.pairs:
-    result.keys[i] = k.cstring
-    result.vals[i] = v.cstring
-    inc i
-  result.count = n.cint
-
-proc freeConfig(cfg: tuple[keys: CStringArr, vals: CStringArr, count: cint]) =
-  deallocShared(cfg.keys)
-  deallocShared(cfg.vals)
-
 proc newMemoryKVStore(): KVStore =
   var tbl = initTable[string, string]()
   tbl["backend"] = "memory"
-  let cfg = makeConfig(tbl)
-  var err: cint
-  result = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
-  freeConfig(cfg)
-
+  let cfg = tbl
+  result = newKVStore(cfg)
 # ═══════════════════════════════════════════════════════════════════════════════
 # 1. Codec — encode/decode round-trips
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -3,27 +3,14 @@
 ## Unit tests for the EAVT engine (Nim API, no C-ABI).
 
 import std/[unittest, tables, os, times, options]
-import abi
 import eavt
 import kvstore
 import keys
 import resolver
 
-proc makeConfig(t: Table[string, string]): tuple[keys: CStringArr, vals: CStringArr, count: cint] =
-  let n = t.len
-  result.keys = cast[CStringArr](allocShared0(n * sizeof(cstring)))
-  result.vals = cast[CStringArr](allocShared0(n * sizeof(cstring)))
-  result.count = n.cint
-  var i = 0
-  for k, v in t:
-    result.keys[i] = k.cstring
-    result.vals[i] = v.cstring
-    inc i
-
 proc newTestEngine(): EavtEngine =
-  var err: cint
-  let cfg = makeConfig({"backend": "memory"}.toTable)
-  let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+  let cfg = {"backend": "memory"}.toTable
+  let kv = newKVStore(cfg)
   result = newEavtEngine(kv)
   result.bootstrapResolver()
 
@@ -90,18 +77,16 @@ suite "eavt: attribute declaration":
     let path = "/tmp/eavttest_attr_" & $getTime().toUnix() & "_" & $getTime().nanosecond
     createDir(path)
     block:
-      var err: cint
-      let cfg = makeConfig({"backend": "file", "path": path}.toTable)
-      let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      let cfg = {"backend": "file", "path": path}.toTable
+      let kv = newKVStore(cfg)
       let eng = newEavtEngine(kv)
       eng.bootstrapResolver()
       discard eng.eavtDeclareAttr("persist.x", DbTypeString, false)
       eng.kv.flush()
       eng.kv.close()
     block:
-      var err: cint
-      let cfg = makeConfig({"backend": "file", "path": path}.toTable)
-      let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      let cfg = {"backend": "file", "path": path}.toTable
+      let kv = newKVStore(cfg)
       let eng = newEavtEngine(kv)
       eng.bootstrapResolver()
       let aid = eng.lookupAttr("persist.x")
@@ -199,9 +184,8 @@ suite "eavt: bootstrap":
     let path = "/tmp/eavttest_boot_" & $getTime().toUnix() & "_" & $getTime().nanosecond
     createDir(path)
     block:  # write attrs to file-backed store
-      var err: cint
-      let cfg = makeConfig({"backend": "file", "path": path}.toTable)
-      let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      let cfg = {"backend": "file", "path": path}.toTable
+      let kv = newKVStore(cfg)
       let eng = newEavtEngine(kv)
       eng.bootstrapResolver()
       discard eng.eavtDeclareAttr("boot.a", DbTypeString, false)
@@ -209,9 +193,8 @@ suite "eavt: bootstrap":
       eng.kv.flush()
       eng.kv.close()
     block:  # reopen and bootstrap
-      var err: cint
-      let cfg = makeConfig({"backend": "file", "path": path}.toTable)
-      let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      let cfg = {"backend": "file", "path": path}.toTable
+      let kv = newKVStore(cfg)
       let eng = newEavtEngine(kv)
       eng.bootstrapResolver()
       check eng.lookupAttr("boot.a").isSome()

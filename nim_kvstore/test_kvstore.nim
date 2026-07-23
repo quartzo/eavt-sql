@@ -5,7 +5,6 @@ import memory/all
 import file/all
 import journal/all
 import nim_memtable/all
-import abi
 import pages
 import page_store
 import kvstore
@@ -22,34 +21,16 @@ proc scanKeys(kv: KVStore; cf: int; prefix: seq[byte] = @[]): seq[seq[byte]] =
     result.add key
 
 
-proc makeConfig(t: Table[string, string]): tuple[keys: CStringArr, vals: CStringArr, count: cint] =
-  let n = t.len
-  result.keys = cast[CStringArr](allocShared0(n * sizeof(cstring)))
-  result.vals = cast[CStringArr](allocShared0(n * sizeof(cstring)))
-  var i = 0
-  for k, v in t.pairs:
-    result.keys[i] = k.cstring
-    result.vals[i] = v.cstring
-    inc i
-  result.count = n.cint
-
-proc freeConfig(cfg: tuple[keys: CStringArr, vals: CStringArr, count: cint]) =
-  deallocShared(cfg.keys)
-  deallocShared(cfg.vals)
-
-
 suite "kvstore: Nim API (KVStore ref)":
   test "new + close memory":
-    let cfg = makeConfig({"backend": "memory"}.toTable)
-    var err: cint
-    let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
     check kv != nil
     kv.close()
 
   test "put + get round-trip":
-    let cfg = makeConfig({"backend": "memory"}.toTable)
-    var err: cint
-    let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
     check kv != nil
     kv.put(0, @[byte(1), 2, 3])
     check kv.get(0, @[byte(1), 2, 3])
@@ -58,9 +39,8 @@ suite "kvstore: Nim API (KVStore ref)":
     kv.close()
 
   test "scan returns keys in order":
-    let cfg = makeConfig({"backend": "memory"}.toTable)
-    var err: cint
-    let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
     kv.put(0, @[byte(3)])
     kv.put(0, @[byte(1)])
     kv.put(0, @[byte(2)])
@@ -72,9 +52,8 @@ suite "kvstore: Nim API (KVStore ref)":
     kv.close()
 
   test "scan with prefix":
-    let cfg = makeConfig({"backend": "memory"}.toTable)
-    var err: cint
-    let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
     kv.put(0, @[byte(0), 10])
     kv.put(0, @[byte(0), 20])
     kv.put(0, @[byte(1), 30])
@@ -85,9 +64,8 @@ suite "kvstore: Nim API (KVStore ref)":
     kv.close()
 
   test "flush makes data visible after scan":
-    let cfg = makeConfig({"backend": "memory"}.toTable)
-    var err: cint
-    let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
     kv.put(0, @[byte(5)])
     kv.put(0, @[byte(2)])
     kv.flush()
@@ -96,9 +74,8 @@ suite "kvstore: Nim API (KVStore ref)":
     kv.close()
 
   test "memtableSize reflects puts":
-    let cfg = makeConfig({"backend": "memory"}.toTable)
-    var err: cint
-    let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
     check kv.memtableSize() == 0
     kv.put(0, @[byte(1), 2, 3])
     check kv.memtableSize() == 3
@@ -107,9 +84,8 @@ suite "kvstore: Nim API (KVStore ref)":
     kv.close()
 
   test "separate CFs are independent":
-    let cfg = makeConfig({"backend": "memory"}.toTable)
-    var err: cint
-    let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
     kv.put(0, @[byte(1)])
     kv.put(1, @[byte(2)])
     check kv.get(0, @[byte(1)])
@@ -128,9 +104,8 @@ suite "kvstore: file backend":
   test "put + get with file backend":
     let path = "/tmp/kvtest_fb_" & $getTime().toUnix() & "_" & $getTime().nanosecond
     createDir(path)
-    let cfg = makeConfig({"backend": "file", "path": path}.toTable)
-    var err: cint
-    let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    let cfg = {"backend": "file", "path": path}.toTable
+    let kv = newKVStore(cfg)
     check kv != nil
     kv.put(0, @[byte(10), 20, 30])
     check kv.get(0, @[byte(10), 20, 30])
@@ -141,9 +116,8 @@ suite "kvstore: file backend":
   test "flush + scan on file backend":
     let path = "/tmp/kvtest_fb2_" & $getTime().toUnix() & "_" & $getTime().nanosecond
     createDir(path)
-    let cfg = makeConfig({"backend": "file", "path": path}.toTable)
-    var err: cint
-    let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    let cfg = {"backend": "file", "path": path}.toTable
+    let kv = newKVStore(cfg)
     kv.put(0, @[byte(5)])
     kv.put(0, @[byte(1)])
     kv.put(0, @[byte(9)])
@@ -157,16 +131,14 @@ suite "kvstore: file backend":
     let path = "/tmp/kvtest_fb3_" & $getTime().toUnix() & "_" & $getTime().nanosecond
     createDir(path)
     block:
-      let cfg = makeConfig({"backend": "file", "path": path}.toTable)
-      var err: cint
-      let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      let cfg = {"backend": "file", "path": path}.toTable
+      let kv = newKVStore(cfg)
       kv.put(0, @[byte(0xAB), 0xCD])
       kv.flush()
       kv.close()
     block:
-      let cfg = makeConfig({"backend": "file", "path": path}.toTable)
-      var err: cint
-      let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      let cfg = {"backend": "file", "path": path}.toTable
+      let kv = newKVStore(cfg)
       check kv.get(0, @[byte(0xAB), 0xCD])
       check not kv.get(0, @[byte(0)])
       kv.close()
@@ -175,9 +147,8 @@ suite "kvstore: file backend":
   test "multi-CF with file backend":
     let path = "/tmp/kvtest_fb4_" & $getTime().toUnix() & "_" & $getTime().nanosecond
     createDir(path)
-    let cfg = makeConfig({"backend": "file", "path": path}.toTable)
-    var err: cint
-    let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    let cfg = {"backend": "file", "path": path}.toTable
+    let kv = newKVStore(cfg)
     kv.put(0, @[byte(1)])
     kv.put(1, @[byte(2)])
     kv.put(2, @[byte(3)])
@@ -199,16 +170,14 @@ suite "kvstore: read-only":
     let path = "/tmp/kvtest_ro_" & $getTime().toUnix() & "_" & $getTime().nanosecond
     createDir(path)
     block:  # write
-      let cfg = makeConfig({"backend": "file", "path": path}.toTable)
-      var err: cint
-      let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      let cfg = {"backend": "file", "path": path}.toTable
+      let kv = newKVStore(cfg)
       kv.put(0, @[byte(7)])
       kv.flush()
       kv.close()
     block:  # read-only
-      let cfg = makeConfig({"backend": "file", "path": path, "read_only": "true"}.toTable)
-      var err: cint
-      let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      let cfg = {"backend": "file", "path": path, "read_only": "true"}.toTable
+      let kv = newKVStore(cfg)
       check kv.get(0, @[byte(7)])
       check not kv.get(0, @[byte(9)])
       kv.close()
@@ -218,17 +187,15 @@ suite "kvstore: read-only":
     let path = "/tmp/kvtest_ro2_" & $getTime().toUnix() & "_" & $getTime().nanosecond
     createDir(path)
     block:
-      let cfg = makeConfig({"backend": "file", "path": path}.toTable)
-      var err: cint
-      let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      let cfg = {"backend": "file", "path": path}.toTable
+      let kv = newKVStore(cfg)
       kv.put(0, @[byte(3)])
       kv.put(0, @[byte(1)])
       kv.flush()
       kv.close()
     block:
-      let cfg = makeConfig({"backend": "file", "path": path, "read_only": "true"}.toTable)
-      var err: cint
-      let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      let cfg = {"backend": "file", "path": path, "read_only": "true"}.toTable
+      let kv = newKVStore(cfg)
       check scanKeys(kv, 0) == @[@[byte(1)], @[byte(3)]]
       kv.close()
     removeDir(path)
@@ -241,9 +208,8 @@ suite "kvstore: read-only":
 
 suite "kvstore: large values":
   test "70 KB key survives put + get":
-    let cfg = makeConfig({"backend": "memory"}.toTable)
-    var err: cint
-    let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
     var big = newSeq[byte](70000)
     for i in 0..<big.len: big[i] = byte(i and 0xFF)
     kv.put(0, big)
@@ -254,18 +220,16 @@ suite "kvstore: large values":
     let path = "/tmp/kvtest_lv_" & $getTime().toUnix() & "_" & $getTime().nanosecond
     createDir(path)
     block:
-      let cfg = makeConfig({"backend": "file", "path": path}.toTable)
-      var err: cint
-      let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      let cfg = {"backend": "file", "path": path}.toTable
+      let kv = newKVStore(cfg)
       var big = newSeq[byte](70000)
       for i in 0..<big.len: big[i] = byte((i * 7) and 0xFF)
       kv.put(0, big)
       kv.flush()
       kv.close()
     block:
-      let cfg = makeConfig({"backend": "file", "path": path}.toTable)
-      var err: cint
-      let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      let cfg = {"backend": "file", "path": path}.toTable
+      let kv = newKVStore(cfg)
       var big = newSeq[byte](70000)
       for i in 0..<big.len: big[i] = byte((i * 7) and 0xFF)
       check kv.get(0, big)
@@ -280,9 +244,8 @@ suite "kvstore: large values":
 
 suite "kvstore: reverse scan":
   test "reverse scan returns keys descending":
-    let cfg = makeConfig({"backend": "memory"}.toTable)
-    var err: cint
-    let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
     kv.put(0, @[byte(3)])
     kv.put(0, @[byte(1)])
     kv.put(0, @[byte(2)])
@@ -297,9 +260,8 @@ suite "kvstore: reverse scan":
     kv.close()
 
   test "reverse scan after flush still correct":
-    let cfg = makeConfig({"backend": "memory"}.toTable)
-    var err: cint
-    let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
     kv.put(0, @[byte(5)])
     kv.put(0, @[byte(1)])
     kv.flush()
@@ -325,18 +287,16 @@ suite "kvstore: journal recovery":
     let path = "/tmp/kvtest_jr_" & $getTime().toUnix() & "_" & $getTime().nanosecond
     createDir(path)
     block:  # write without flush
-      let cfg = makeConfig({"backend": "file", "path": path}.toTable)
-      var err: cint
-      let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      let cfg = {"backend": "file", "path": path}.toTable
+      let kv = newKVStore(cfg)
       kv.put(0, @[byte(1)])
       kv.put(0, @[byte(2)])
       kv.put(1, @[byte(3)])
       # NO flush — close directly
       kv.close()
     block:  # reopen — data should survive via journal
-      let cfg = makeConfig({"backend": "file", "path": path}.toTable)
-      var err: cint
-      let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      let cfg = {"backend": "file", "path": path}.toTable
+      let kv = newKVStore(cfg)
       check kv.get(0, @[byte(1)])
       check kv.get(0, @[byte(2)])
       check kv.get(1, @[byte(3)])
@@ -347,16 +307,14 @@ suite "kvstore: journal recovery":
     let path = "/tmp/kvtest_jr2_" & $getTime().toUnix() & "_" & $getTime().nanosecond
     createDir(path)
     block:
-      let cfg = makeConfig({"backend": "file", "path": path}.toTable)
-      var err: cint
-      let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      let cfg = {"backend": "file", "path": path}.toTable
+      let kv = newKVStore(cfg)
       for i in 1..20:
         kv.put(0, @[byte(i)])
       kv.close()
     block:
-      let cfg = makeConfig({"backend": "file", "path": path}.toTable)
-      var err: cint
-      let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      let cfg = {"backend": "file", "path": path}.toTable
+      let kv = newKVStore(cfg)
       for i in 1..20:
         check kv.get(0, @[byte(i)])
       kv.close()
@@ -366,17 +324,15 @@ suite "kvstore: journal recovery":
     let path = "/tmp/kvtest_jr3_" & $getTime().toUnix() & "_" & $getTime().nanosecond
     createDir(path)
     block:
-      let cfg = makeConfig({"backend": "file", "path": path}.toTable)
-      var err: cint
-      let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      let cfg = {"backend": "file", "path": path}.toTable
+      let kv = newKVStore(cfg)
       kv.put(0, @[byte(1)])   # flushed
       kv.flush()
       kv.put(0, @[byte(2)])   # journal only
       kv.close()
     block:
-      let cfg = makeConfig({"backend": "file", "path": path}.toTable)
-      var err: cint
-      let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
+      let cfg = {"backend": "file", "path": path}.toTable
+      let kv = newKVStore(cfg)
       check kv.get(0, @[byte(1)])  # from page store
       check kv.get(0, @[byte(2)])  # from journal replay
       kv.close()

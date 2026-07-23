@@ -3,26 +3,14 @@
 ## Port of spier-kvstore/src/generic_page_store.rs (~1800 lines → ~900 lines Nim).
 
 import std/[tables, sets, hashes, strformat, strutils, times, monotimes, options]
-import abi
 import pages
 import std/locks
-
-# ══════════════════════════════════════════════════════════════════════════════
-# BlobStore — trait dispatch (no C-ABI vtable).
-# ══════════════════════════════════════════════════════════════════════════════
 
 import blobstore
 import memory/mem_backend as mem_be
 import file/file_backend as fil_be
 import s3/s3_backend as s3_be
 import journal/journal_backend as jou_be
-
-proc nim_journal_open*(path: cstring;
-                       errOut: ptr cint): NimJournalVtablePtr =
-  cast[NimJournalVtablePtr](jou_be.openJournal(path, errOut))
-
-proc nim_journal_close*(vt: NimJournalVtablePtr) =
-  jou_be.closeJournalVtable(cast[pointer](vt))
 
 # ── seq[byte] comparison helpers ──
 
@@ -283,7 +271,7 @@ proc put(cc: var PageCache; uuid: array[16, byte]; compressed: seq[byte]) =
 type
   PageStoreInner* = object
     blobs*: BlobStore           # trait dispatch — no vtable
-    journal*: NimJournalVtablePtr
+    journal*: jou_be.Journal
     trees*: seq[CfTree]
     numCf*: int
     readOnly*: bool
@@ -325,8 +313,7 @@ proc blobList(blobs: BlobStore): seq[array[16, byte]] =
 
 proc journalTruncate(s: var PageStoreInner) =
   if s.journal == nil: return
-  var err: cint
-  discard s.journal.truncate(s.journal.handle, addr err)
+  s.journal.truncate()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # B-tree operations
@@ -653,9 +640,7 @@ proc collectBlobSizes(s: var PageStoreInner; tree: CfTree;
     collectBlobSizes(s, CfTree(rootUuid: childUuid, height: tree.height - 1,
                                  numLeaves: 0), total, count)
 
-proc newPageStore*(keys, vals: CStringArr; count: cint;
-                    errOut: ptr cint): ptr PageStoreInner =
-  let config = parseConfig(keys, vals, count.csize_t)
+proc newPageStore*(config: Table[string, string]): ptr PageStoreInner =
   let backend = config.getOrDefault("backend", "memory")
   let readOnly = config.getOrDefault("read_only", "false") == "true"
   let path = config.getOrDefault("path", "")
@@ -667,22 +652,24 @@ proc newPageStore*(keys, vals: CStringArr; count: cint;
     of "memory": mem_be.newMemBlobStore()
     of "file":
       if path.len == 0:
-        setErr(errOut, ErrConfig)
         return nil
       fil_be.newFileBlobStore(path, readOnly)
     of "s3": s3_be.newS3BlobStore(config)
     else: nil
 
   if blobs == nil:
-    setErr(errOut, ErrConfig)
     return nil
 
   let journal =
     if backend == "memory": nil
     else:
-      let journalPath = config.getOrDefault("path", "").cstring
+      let journalPath = config.getOrDefault("path", "")
       if journalPath == "": nil
-      else: nim_journal_open(journalPath, errOut)
+      else:
+        try:
+          jou_be.newJournal(journalPath)
+        except:
+          nil
 
   result = cast[ptr PageStoreInner](allocShared0(sizeof(PageStoreInner)))
   result.blobs = blobs
@@ -704,7 +691,6 @@ proc newPageStore*(keys, vals: CStringArr; count: cint;
         result.trees.add emptyTree(); inc i
       result.currentRoot = latest
     else:
-      setErr(errOut, ErrIo)
       deallocShared(result)
       return nil
   else:
@@ -718,7 +704,7 @@ proc newPageStore*(keys, vals: CStringArr; count: cint;
 
 proc closePageStore*(ps: ptr PageStoreInner) =
   if ps == nil: return
-  if ps.journal != nil: nim_journal_close(ps.journal)
+  if ps.journal != nil: ps.journal.close()
   deinitLock(ps.lock)
   deallocShared(ps)
 

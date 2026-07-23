@@ -3,7 +3,6 @@
 ## Orchestration layer: coordinates MemTable + PageStore + Journal.
 
 import std/[tables, strutils, os, options]
-import abi
 import page_store
 
 import std/locks
@@ -79,11 +78,9 @@ type
 # KVStore operations
 # ═══════════════════════════════════════════════════════════════════════════════
 
-proc newKVStore*(keys, vals: CStringArr; count: cint;
-                  errOut: ptr cint): KVStore =
-  let config = parseConfig(keys, vals, count.csize_t)
+proc newKVStore*(config: Table[string, string]): KVStore =
   let readOnly = config.getOrDefault("read_only", "false") == "true"
-  let ps = newPageStore(keys, vals, count, errOut)
+  let ps = newPageStore(config)
   if ps == nil: return nil
   let mt = mt_be.newMemTable(4)
   if mt == nil: closePageStore(ps); return nil
