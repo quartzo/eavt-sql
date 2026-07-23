@@ -2251,3 +2251,30 @@ suite "engine: TX entity (port of test_tx.py)":
     check r.kind == sList
     check r.items[0].symval == "result"
     check r.items.len >= 2
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TX join tests (ported from test_tx_join.py)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+suite "engine: TX join (port of test_tx_join.py)":
+  test "upsert into cnpj in tx partition":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE cnpj.numero STRING ONE")
+    discard runSql(q, "ATTRIBUTE cnpj.razao_social STRING ONE")
+    let rows = runSql(q,
+      "UPSERT SET cnpj.numero = '12345678000199', cnpj.razao_social = 'Raisehands Data Architecture'")
+    check rows.len >= 1
+    let r = rows[0]
+    check r.kind == sList
+    check r.items[0].symval == "result"
+
+  test "declare attr with many":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let rows = runSql(q, "ATTRIBUTE cnpj.numero STRING ONE")
+    check rows.len >= 1
+    check q.eavt.isDeclared(q.eavt.lookupAttr("cnpj.numero").get)
+    check not q.eavt.isMany(q.eavt.lookupAttr("cnpj.numero").get)
