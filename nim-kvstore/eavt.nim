@@ -67,22 +67,48 @@ proc batchWrite*(eng: EavtEngine; entries: seq[EavtEntry]) =
     ops.add e.key
   eng.kv.batchWrite(ops)
 
-# ── Scan helper ──
+proc scanPrefix*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byte]] =
+  ## Scan all keys in CF with given prefix using streaming cursor.
+  let mc = eng.kv.openScanCursor(cf)
+  while true:
+    let k = mc.next()
+    if k.isNone: break
+    let key = k.get
+    if key.len < prefix.len or key[0..<prefix.len] != prefix: continue
+    result.add key
 
-proc scan*(eng: EavtEngine; cf: uint32; prefix: seq[byte]): seq[seq[byte]] =
-  eng.kv.scan(cf.int, prefix)
+# ── Seed partition counters from existing EAVT data ──
+
+proc seedPartitionCounters*(eng: EavtEngine) =
+  ## Walk EAVT (CF 0) to find the highest eid per partition.
+  let mc = eng.kv.openScanCursor(0)
+  let targets = eng.resolver.knownPartitions()
+  var covered: HashSet[uint64] = initHashSet[uint64]()
+  eng.lock.withLock:
+    while true:
+      let k = mc.next()
+      if k.isNone: break
+      let key = k.get
+      if key.len < 8: continue
+      let sf = beUint64(key, key.len - 8)
+      if (sf and 1) == 1: continue
+      let e = decodeInt64(beUint64(key, 0))
+      let p = partitionOf(cast[uint64](e))
+      if p in targets:
+        eng.resolver.advancePast(cast[uint64](e))
+        covered.incl p
+      if covered.len >= targets.len: break
 
 # ── Bootstrap: scan KV for existing schema ──
 
 proc bootstrapResolver*(eng: EavtEngine) =
-  ## Load user attribute schema from db.* datoms (Rust bootstrap_resolver).
-  ## aevt key: [attr 4B BE][eid 8B BE][val][sf 8B BE]
+  ## Load user attribute schema from db.* datoms.
   var identMap = initTable[uint64, string]()
   var vtMap = initTable[uint64, uint32]()
   var cardMap = initTable[uint64, bool]()
   var uniqueSet = initHashSet[uint64]()
 
-  for k in eng.scan(1'u32, @[0'u8, 0'u8, 0'u8, byte(DbIdentAid)]):
+  for k in eng.scanPrefix(1, @[0'u8, 0'u8, 0'u8, byte(DbIdentAid)]):
     if k.len < 24: continue
     if beUint32(k, 0) != DbIdentAid: continue
     let sf = beUint64(k, k.len - 8)
@@ -92,7 +118,7 @@ proc bootstrapResolver*(eng: EavtEngine) =
     let name = decodeVariableStr(k, 12)
     if name.len > 0: identMap[e] = name
 
-  for k in eng.scan(1'u32, @[0'u8, 0'u8, 0'u8, byte(DbValueTypeAid)]):
+  for k in eng.scanPrefix(1, @[0'u8, 0'u8, 0'u8, byte(DbValueTypeAid)]):
     if k.len < 28: continue
     if beUint32(k, 0) != DbValueTypeAid: continue
     let sf = beUint64(k, k.len - 8)
@@ -100,7 +126,7 @@ proc bootstrapResolver*(eng: EavtEngine) =
     let e = beUint64(k, 4)
     vtMap[e] = cast[uint32](decodeInt64(beUint64(k, 12)))
 
-  for k in eng.scan(1'u32, @[0'u8, 0'u8, 0'u8, byte(DbCardinalityAid)]):
+  for k in eng.scanPrefix(1, @[0'u8, 0'u8, 0'u8, byte(DbCardinalityAid)]):
     if k.len < 28: continue
     if beUint32(k, 0) != DbCardinalityAid: continue
     let sf = beUint64(k, k.len - 8)
@@ -108,7 +134,7 @@ proc bootstrapResolver*(eng: EavtEngine) =
     let e = beUint64(k, 4)
     cardMap[e] = cast[uint32](decodeInt64(beUint64(k, 12))) == DbCardinalityManyAid
 
-  for k in eng.scan(1'u32, @[0'u8, 0'u8, 0'u8, byte(DbUniqueAid)]):
+  for k in eng.scanPrefix(1, @[0'u8, 0'u8, 0'u8, byte(DbUniqueAid)]):
     if k.len < 20: continue
     if beUint32(k, 0) != DbUniqueAid: continue
     let sf = beUint64(k, k.len - 8)
@@ -120,6 +146,8 @@ proc bootstrapResolver*(eng: EavtEngine) =
     let many = cardMap.getOrDefault(e, false)
     let unique = e in uniqueSet
     eng.resolver.loadUserAttr(name, e, vt, many, unique, false)
+
+  seedPartitionCounters(eng)
 
 # ── Save a datom ──
 
@@ -137,7 +165,7 @@ proc eavtSave*(eng: EavtEngine; eid: uint64; attrName: string;
       var ePrefix = encodeRef(eid)
       ePrefix.add byte(attrId shr 24); ePrefix.add byte((attrId shr 16) and 0xFF)
       ePrefix.add byte((attrId shr 8) and 0xFF); ePrefix.add byte(attrId and 0xFF)
-      for ek in eng.scan(0'u32, ePrefix):
+      for ek in eng.scanPrefix(0, ePrefix):
         if ek.len < 20: continue
         let esf = beUint64(ek, ek.len - 8)
         if (esf and 1) != 0: continue
@@ -185,7 +213,7 @@ proc resolveAsOfTx*(eng: EavtEngine; asOfUs: uint64): Option[uint64] =
   var bestTx = 0'u64
   var bestInst = 0'u64
   var found = false
-  for k in eng.scan(1'u32, prefix):
+  for k in eng.scanPrefix(1, prefix):
     if k.len < 28: continue  # 4 + 8 + 8 + 8
     if beUint32(k, 0) != DbTxInstantAid: continue
     let sf = beUint64(k, k.len - 8)

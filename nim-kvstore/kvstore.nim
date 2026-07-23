@@ -74,51 +74,9 @@ type
     gcMaxAgeSecs*: uint64
     gcMaxRootCount*: int
 
-# ── Internal alias ──
-
-type
-  MergeSourceKind = enum
-    mskPageStore, mskMemTable
-  MergeSource = object
-    case kind: MergeSourceKind
-    of mskPageStore, mskMemTable:
-      keys: seq[seq[byte]]
-      idx: int
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Merge — k-way heap merge of sorted sources (used by legacy scan)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-proc mergeSources(sources: var seq[MergeSource]; endBound: seq[byte];
-                   limit: int = -1): seq[seq[byte]] =
-  var heap: MinHeap
-  for i, src in sources.mpairs:
-    if src.idx < src.keys.len: heap.push((src.keys[src.idx], i))
-  result = @[]
-  var lastKey: seq[byte] = @[]
-  while heap.len > 0 and (limit < 0 or result.len < limit):
-    let (key, srcIdx) = heap.pop()
-    if cmpSeq(key, endBound) > 0: break
-    if key == lastKey:
-      lastKey = key; inc sources[srcIdx].idx
-      if sources[srcIdx].idx < sources[srcIdx].keys.len:
-        heap.push((sources[srcIdx].keys[sources[srcIdx].idx], srcIdx))
-      continue
-    lastKey = key; result.add key; inc sources[srcIdx].idx
-    if sources[srcIdx].idx < sources[srcIdx].keys.len:
-      heap.push((sources[srcIdx].keys[sources[srcIdx].idx], srcIdx))
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # KVStore operations
 # ═══════════════════════════════════════════════════════════════════════════════
-
-proc prefixEnd(prefix: seq[byte]): seq[byte] =
-  if prefix.len == 0:
-    result = newSeq[byte](64)
-    for i in 0..<64: result[i] = 0xFF
-  else:
-    for i in 0..<32: result.add 0xFF
-    result = prefix & result
 
 proc newKVStore*(keys, vals: CStringArr; count: cint;
                   errOut: ptr cint): KVStore =
@@ -205,26 +163,6 @@ proc get*(kv: KVStore; cf: int; key: openArray[byte]): bool =
   if kv.flushRoots.len > 0 and kv.flushRoots[cf] != nil and mt_be.containsKey(kv.flushRoots[cf], k): return true
   keyExists(kv.ps[], cf, k)
 
-proc scan*(kv: KVStore; cf: int; prefix: openArray[byte]): seq[seq[byte]] =
-  var pfx: seq[byte] = @[]
-  for b in prefix: pfx.add(b)
-  var sources: seq[MergeSource] = @[]
-  let psKeys = getKeysInPrefix(kv.ps[], cf, pfx)
-  if psKeys.len > 0: sources.add MergeSource(kind: mskPageStore, keys: psKeys, idx: 0)
-  if kv.flushRoots.len > 0 and kv.flushRoots[cf] != nil:
-    let snapKeys = kv.mt.scanAll(cf, pfx)
-    if snapKeys.len > 0: sources.add MergeSource(kind: mskMemTable, keys: snapKeys, idx: 0)
-  let liveKeys = kv.mt.scanAll(cf, pfx)
-  if liveKeys.len > 0: sources.add MergeSource(kind: mskMemTable, keys: liveKeys, idx: 0)
-  let endB = prefixEnd(pfx)
-  mergeSources(sources, endB)
-
-proc scanReverse*(kv: KVStore; cf: int; prefix: openArray[byte]): seq[seq[byte]] =
-  var r = kv.scan(cf, prefix)
-  var i = 0; var j = r.len - 1
-  while i < j: swap(r[i], r[j]); inc i; dec j
-  r
-
 proc flush*(kv: KVStore) =
   if kv.readOnly: return
   if kv.flushRoots.len > 0: return
@@ -233,7 +171,11 @@ proc flush*(kv: KVStore) =
   var keysByCf: seq[(int, seq[seq[byte]])] = @[]
   for cf in 0..<kv.numCf:
     if kv.flushRoots[cf] != nil:
-      let keys = mt_be.collectKeys(kv.flushRoots[cf], @[])
+      var keys: seq[seq[byte]] = @[]
+      let tc = newTreapCursor(kv.flushRoots[cf])
+      while not tc.atEnd:
+        let k = tc.next()
+        if k.isSome: keys.add(k.get)
       if keys.len > 0: keysByCf.add (cf, keys)
   if keysByCf.len > 0: commitMerge(kv.ps[], keysByCf, true)
   kv.flushRoots = @[]; kv.mtSize = 0

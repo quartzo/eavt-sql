@@ -121,7 +121,7 @@ suite "eavt: save + retract":
     discard eng.eavtDeclareAttr("test.val", DbTypeString, false)
     let eid = eng.allocateEntityId()
     discard eng.eavtSave(eid, "test.val", "hello", 1)
-    let keys = eng.scan(0'u32, newSeq[byte]())
+    let keys = eng.scanPrefix(0, @[])
     check keys.len > 0
 
   test "save with multiple values (many cardinality)":
@@ -131,7 +131,7 @@ suite "eavt: save + retract":
     discard eng.eavtSave(eid, "tag.list", "a", 1)
     discard eng.eavtSave(eid, "tag.list", "b", 1)
     # Both should exist in scan
-    let keys = eng.scan(0'u32, keys.encodeRef(eid))
+    let keys = eng.scanPrefix(0, keys.encodeRef(eid))
     check keys.len >= 2
 
   test "save overwrites with one cardinality":
@@ -144,7 +144,7 @@ suite "eavt: save + retract":
     var prefix = keys.encodeRef(eid)
     prefix.add byte(aid shr 24); prefix.add byte((aid shr 16) and 0xFF)
     prefix.add byte((aid shr 8) and 0xFF); prefix.add byte(aid and 0xFF)
-    let scanKeys = eng.scan(0'u32, prefix)
+    let scanKeys = eng.scanPrefix(0, prefix)
     # Overwrite writes old+retraction+new; scan returns all keys raw.
     check scanKeys.len >= 2
 
@@ -157,7 +157,7 @@ suite "eavt: save + retract":
     var prefix = keys.encodeRef(eid)
     prefix.add byte(101 shr 24); prefix.add byte((101 shr 16) and 0xFF)
     prefix.add byte((101 shr 8) and 0xFF); prefix.add byte(101 and 0xFF)
-    let keys = eng.scan(0'u32, prefix)
+    let keys = eng.scanPrefix(0, prefix)
     var hasActive = false
     for k in keys:
       let sf = beUint64(k, k.len - 8)

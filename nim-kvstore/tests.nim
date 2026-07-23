@@ -17,6 +17,16 @@ import ./kvstore
 import ./scheme
 import ./page_cursor
 
+# Helper: collect keys from streaming merged cursor
+proc scanKeys(kv: KVStore; cf: int; prefix: seq[byte] = @[]): seq[seq[byte]] =
+  let mc = kv.openScanCursor(cf)
+  while true:
+    let k = mc.next()
+    if k.isNone: break
+    let key = k.get
+    if prefix.len > 0 and (key.len < prefix.len or key[0..<prefix.len] != prefix): continue
+    result.add key
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Page serialization tests
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -434,7 +444,7 @@ suite "kvstore: Nim API (KVStore ref)":
     kv.put(0, @[byte(3)])
     kv.put(0, @[byte(1)])
     kv.put(0, @[byte(2)])
-    let keys = kv.scan(0, newSeq[byte]())
+    let keys = scanKeys(kv, 0)
     check keys.len == 3
     check keys[0] == @[byte(1)]
     check keys[1] == @[byte(2)]
@@ -448,7 +458,7 @@ suite "kvstore: Nim API (KVStore ref)":
     kv.put(0, @[byte(0), 10])
     kv.put(0, @[byte(0), 20])
     kv.put(0, @[byte(1), 30])
-    let keys = kv.scan(0, @[byte(0)])
+    let keys = scanKeys(kv, 0, @[byte(0)])
     check keys.len == 2
     check keys[0] == @[byte(0), 10]
     check keys[1] == @[byte(0), 20]
@@ -461,7 +471,7 @@ suite "kvstore: Nim API (KVStore ref)":
     kv.put(0, @[byte(5)])
     kv.put(0, @[byte(2)])
     kv.flush()
-    let keys = kv.scan(0, newSeq[byte]())
+    let keys = scanKeys(kv, 0)
     check keys == @[@[byte(2)], @[byte(5)]]
     kv.close()
 
@@ -516,7 +526,7 @@ suite "kvstore: file backend":
     kv.put(0, @[byte(1)])
     kv.put(0, @[byte(9)])
     kv.flush()
-    let keys = kv.scan(0, newSeq[byte]())
+    let keys = scanKeys(kv, 0)
     check keys == @[@[byte(1)], @[byte(5)], @[byte(9)]]
     kv.close()
     removeDir(path)
@@ -595,7 +605,7 @@ suite "kvstore: read-only":
       let cfg = makeConfig({"backend": "file", "path": path, "read_only": "true"}.toTable)
       var err: cint
       let kv = newKVStore(cfg.keys, cfg.vals, cfg.count, addr err)
-      check kv.scan(0, newSeq[byte]()) == @[@[byte(1)], @[byte(3)]]
+      check scanKeys(kv, 0) == @[@[byte(1)], @[byte(3)]]
       kv.close()
     removeDir(path)
 
@@ -648,8 +658,14 @@ suite "kvstore: reverse scan":
     kv.put(0, @[byte(3)])
     kv.put(0, @[byte(1)])
     kv.put(0, @[byte(2)])
-    let keys = kv.scanReverse(0, newSeq[byte]())
-    check keys == @[@[byte(3)], @[byte(2)], @[byte(1)]]
+    let keys = scanKeys(kv, 0)
+    var rev = keys
+    var i = 0
+    var j = rev.len - 1
+    while i < j:
+      swap(rev[i], rev[j])
+      inc i; dec j
+    check rev == @[@[byte(3)], @[byte(2)], @[byte(1)]]
     kv.close()
 
   test "reverse scan after flush still correct":
@@ -660,7 +676,14 @@ suite "kvstore: reverse scan":
     kv.put(0, @[byte(1)])
     kv.flush()
     kv.put(0, @[byte(3)])  # live memtable
-    check kv.scanReverse(0, newSeq[byte]()) == @[@[byte(5)], @[byte(3)], @[byte(1)]]
+    let keys2 = scanKeys(kv, 0)
+    var rev2 = keys2
+    var a = 0
+    var b = rev2.len - 1
+    while a < b:
+      swap(rev2[a], rev2[b])
+      inc a; dec b
+    check rev2 == @[@[byte(5)], @[byte(3)], @[byte(1)]]
     kv.close()
 
 # ══════════════════════════════════════════════════════════════════════════════

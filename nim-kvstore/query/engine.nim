@@ -81,7 +81,7 @@ method saveWithT(q: QueryStore; eid: uint64; attr: string; val: SExpr;
     var ePrefix = keys.encodeRef(eid)
     ePrefix.add byte(attrId shr 24); ePrefix.add byte((attrId shr 16) and 0xFF)
     ePrefix.add byte((attrId shr 8) and 0xFF); ePrefix.add byte(attrId and 0xFF)
-    for ek in q.eavt.scan(0'u32, ePrefix):
+    for ek in q.eavt.scanPrefix(0, ePrefix):
       if ek.len < 20: continue
       let esf = beUint64(ek, ek.len - 8)
       if (esf and 1) != 0: continue
@@ -139,7 +139,7 @@ method lookupEntity(q: QueryStore; attrName: string; value: SExpr): Option[uint6
   var prefix = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
                 byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
   prefix.add encoded
-  let scanRes = q.eavt.scan(2'u32, prefix)
+  let scanRes = q.eavt.scanPrefix(2, prefix)
   if scanRes.len == 0: return none[uint64]()
   let k = scanRes[0]
   if k.len < 20: return none[uint64]()
@@ -155,7 +155,7 @@ method lookupValue(q: QueryStore; eid: uint64; attrName: string): Option[SExpr] 
   var prefix = keys.encodeRef(eid)
   prefix.add byte(aid shr 24); prefix.add byte((aid shr 16) and 0xFF)
   prefix.add byte((aid shr 8) and 0xFF); prefix.add byte(aid and 0xFF)
-  let scanRes = q.eavt.scan(0'u32, prefix)
+  let scanRes = q.eavt.scanPrefix(0, prefix)
   # Key order: by (prefix, sf). sf = (t<<1)|retracted. Within the same
   # [eid][attr][val] group, a retraction (sf=odd) sorts right after its
   # original (sf=even). Walk backwards: if the newest entry in a group is

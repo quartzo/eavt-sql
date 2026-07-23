@@ -96,21 +96,6 @@ proc insert(node: TreapNode, key: Key): TreapNode =
 # In-order walk helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-proc collectForward(node: TreapNode, prefix, upper: Key, acc: var seq[Key]) =
-  var stack: seq[TreapNode] = @[]
-  var n = node
-  while n != nil:
-    if cmpKey(n.key, prefix) >= 0:
-      stack.add(n); n = n.left
-    else:
-      n = n.right
-  while stack.len > 0:
-    let cur = stack.pop()
-    if cmpKey(cur.key, upper) < 0: acc.add(cur.key)
-    var r = cur.right
-    while r != nil:
-      stack.add(r); r = r.left
-
 proc collectAddrs(node: TreapNode; seen: var HashSet[int]) =
   if node == nil or seen.contains(cast[int](node)): return
   seen.incl(cast[int](node))
@@ -167,20 +152,6 @@ proc clear*(mt: MemTable) =
   for i in 0 ..< mt.hnd.live.len:
     mt.hnd.live[i] = nil
     mt.hnd.cfSize[i] = 0
-
-proc collectKeys*(root: TreapNode; prefix: openArray[byte]): seq[Key] =
-  var pfx = newSeq[byte](prefix.len)
-  if prefix.len > 0: copyMem(addr pfx[0], unsafeAddr prefix[0], prefix.len)
-  let upper = if pfx.len == 0: @[byte(0xFF), 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
-              else: prefixUpperBound(pfx)
-  collectForward(root, pfx, upper, result)
-
-proc scanAll*(mt: MemTable; cf: int; prefix: openArray[byte]): seq[seq[byte]] =
-  if cf < 0 or cf >= mt.hnd.live.len: return @[]
-  let root = mt.hnd.live[cf]
-  if root == nil: return @[]
-  let collected = collectKeys(root, prefix)
-  for k in collected: result.add(k)
 
 proc contains*(mt: MemTable; cf: int; key: openArray[byte]): bool =
   if cf < 0 or cf >= mt.hnd.live.len: return false
