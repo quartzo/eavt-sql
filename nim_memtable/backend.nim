@@ -93,14 +93,8 @@ proc insert(node: TreapNode, key: Key): TreapNode =
     return node
 
 # ══════════════════════════════════════════════════════════════════════════════
-# In-order walk helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-proc collectAddrs(node: TreapNode; seen: var HashSet[int]) =
-  if node == nil or seen.contains(cast[int](node)): return
-  seen.incl(cast[int](node))
-  collectAddrs(node.left, seen)
-  collectAddrs(node.right, seen)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Nim-native MemTable
@@ -170,7 +164,3 @@ proc countPrefix*(mt: MemTable; cf: int; prefix: openArray[byte]): uint64 =
   result = if pfx.len == 0: cast[uint64](countAll(root))
            else: cast[uint64](countInRange(root, pfx, prefixUpperBound(pfx)))
 
-proc debugCountNodes*(mt: MemTable): uint64 =
-  var seen: HashSet[int] = initHashSet[int]()
-  for r in mt.hnd.live: collectAddrs(r, seen)
-  cast[uint64](seen.len)

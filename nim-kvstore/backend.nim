@@ -356,13 +356,6 @@ proc loadLeafKeysNoput(s: var PageStoreInner; uuid: array[16, byte]): seq[seq[by
     raise newException(IOError, "leaf blob not found")
   deserializePage(decompress(compressed.get))
 
-proc loadRootEntries(s: var PageStoreInner; tree: CfTree): seq[(seq[byte], array[16, byte])] =
-  if tree.rootUuid == default(array[16, byte]) or tree.height == 0:
-    return @[]
-  let data = blobGet(s.blobs, tree.rootUuid)
-  if data.isNone: return @[]
-  return deserializeIndexPage(data.get)
-
 proc collectKeysFromIndex(s: var PageStoreInner; pageUuid: array[16, byte];
                            height: uint8; prefix: seq[byte]): seq[seq[byte]] =
   let data = blobGet(s.blobs, pageUuid)
