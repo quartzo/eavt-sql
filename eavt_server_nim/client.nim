@@ -1,4 +1,5 @@
-import std/[nativesockets, posix, json, os, strutils]
+import std/[nativesockets, posix, json, os, strutils, streams]
+import msgpack4nim, msgpack4nim/msgpack2json
 
 type
   SqlResult* = object
@@ -33,10 +34,8 @@ proc close*(c: EavtClient) =
 
 proc writeU32(fd: SocketHandle; v: uint32) =
   var buf: array[4, byte]
-  buf[0] = byte(v shr 24)
-  buf[1] = byte(v shr 16)
-  buf[2] = byte(v shr 8)
-  buf[3] = byte(v)
+  buf[0] = byte(v shr 24); buf[1] = byte(v shr 16)
+  buf[2] = byte(v shr 8); buf[3] = byte(v)
   discard posix.write(cint(fd), addr buf, 4)
 
 proc readU32(fd: SocketHandle): int =
@@ -80,18 +79,18 @@ proc recvMsg(fd: SocketHandle): string =
     if not recvAll(fd, addr result[0], l): return ""
 
 proc exec*(c: EavtClient; sql: string; params: seq[string] = @[]): seq[SqlResult] =
-  var req = newJObject()
-  req["type"] = %"sql"
-  req["sql"] = %sql
+  var node = newJObject()
+  node["type"] = %"sql"
+  node["sql"] = %sql
   if params.len > 0:
     var pa = newJArray()
     for p in params: pa.add(%p)
-    req["params"] = pa
-  sendMsg(c.fd, $req)
+    node["params"] = pa
+  sendMsg(c.fd, msgpack2json.fromJsonNode(node))
   while true:
     let resp = recvMsg(c.fd)
     if resp.len == 0: break
-    let node = parseJson(resp)
+    let node = toJsonNode(resp)
     if node.hasKey("error") and node["error"].getStr.len > 0:
       result.add(SqlResult(error: node["error"].getStr))
       break
@@ -101,18 +100,22 @@ proc exec*(c: EavtClient; sql: string; params: seq[string] = @[]): seq[SqlResult
     if node.hasKey("rows"):
       for row in node["rows"]:
         var r: seq[string]
-        for v in row: r.add(v.getStr)
+        for v in row: r.add($v)
         sr.rows.add(r)
     result.add(sr)
     if not node["more"].getBool: break
 
 proc admin*(c: EavtClient; command: string): string =
-  var req = newJObject()
-  req["type"] = %"admin"
-  req["command"] = %command
-  sendMsg(c.fd, $req)
+  var node = newJObject()
+  node["type"] = %"admin"
+  node["command"] = %command
+  sendMsg(c.fd, msgpack2json.fromJsonNode(node))
   let resp = recvMsg(c.fd)
   if resp.len == 0: return ""
-  let node = parseJson(resp)
-  if node.hasKey("output"): return node["output"].getStr
-  return ""
+  var output: string
+  unpack(resp, output)
+  try:
+    let node = toJsonNode(resp)
+    if node.hasKey("output"): return node["output"].getStr
+  except: discard
+  return output

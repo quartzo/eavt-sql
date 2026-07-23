@@ -1,16 +1,17 @@
 import json, os, socket, struct
 from pathlib import Path
 
+import msgpack
+
 
 class EavtClient:
-    """EAVT database client over Unix Domain Socket with JSON streaming protocol."""
+    """EAVT database client over Unix Domain Socket with msgpack streaming protocol."""
 
     def __init__(self, sock_path: str | None = None):
         if sock_path is None:
             sock_path = self._default_path()
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.connect(sock_path)
-        self._rbuf = b""
 
     @staticmethod
     def _default_path() -> str:
@@ -28,11 +29,10 @@ class EavtClient:
     def __exit__(self, *_):
         self.close()
 
-    def _send_msg(self, data: str):
-        payload = data.encode()
-        self._sock.sendall(struct.pack(">I", len(payload)) + payload)
+    def _send_msg(self, data: bytes):
+        self._sock.sendall(struct.pack(">I", len(data)) + data)
 
-    def _recv_msg(self) -> dict:
+    def _recv_msg(self) -> bytes:
         raw = self._sock.recv(4)
         if len(raw) < 4:
             raise ConnectionError("server closed connection")
@@ -43,17 +43,17 @@ class EavtClient:
             if not chunk:
                 raise ConnectionError("server closed connection mid-message")
             data += chunk
-        return json.loads(data)
+        return data
 
     def sql(self, query: str, *params) -> list[dict]:
-        """Execute SQL and return all result chunks as a list of dicts."""
+        """Execute SQL and return all result chunks as list of dicts."""
         req = {"type": "sql", "sql": query}
         if params:
             req["params"] = list(params)
-        self._send_msg(json.dumps(req))
+        self._send_msg(msgpack.packb(req))
         results = []
         while True:
-            resp = self._recv_msg()
+            resp = msgpack.unpackb(self._recv_msg())
             if "error" in resp and resp["error"]:
                 raise RuntimeError(resp["error"])
             results.append(resp)
@@ -67,7 +67,7 @@ class EavtClient:
         rows = []
         for chunk in chunks:
             for row in chunk.get("rows", []):
-                rows.append(tuple(self._parse_value(v) for v in row))
+                rows.append(tuple(row))
         return rows
 
     def sql1(self, query: str, *params) -> tuple | None:
@@ -77,8 +77,9 @@ class EavtClient:
 
     def admin(self, command: str) -> str:
         """Send admin command and return output."""
-        self._send_msg(json.dumps({"type": "admin", "command": command}))
-        resp = self._recv_msg()
+        req = {"type": "admin", "command": command}
+        self._send_msg(msgpack.packb(req))
+        resp = msgpack.unpackb(self._recv_msg())
         return resp.get("output", "")
 
     def flush(self):
@@ -86,10 +87,3 @@ class EavtClient:
 
     def status(self) -> str:
         return self.admin("status")
-
-    @staticmethod
-    def _parse_value(v: str):
-        try:
-            return json.loads(v)
-        except (json.JSONDecodeError, TypeError):
-            return v
