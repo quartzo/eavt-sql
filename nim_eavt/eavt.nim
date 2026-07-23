@@ -260,23 +260,44 @@ proc eavtDeclareAttr*(eng: EavtEngine; name: string; valueType: uint32;
     return (aid, isNew)
 
 proc bootstrapSystemAttrs*(eng: EavtEngine) =
-  ## Write EAVT datoms for built-in system attributes if they don't exist yet.
-  if eng.kv.memtableSize() > 0: return
+  ## Write EAVT datoms for all built-in schema attributes if not already done.
+  ## Checks for existing db.ident datom to avoid re-bootstrapping.
+
+  # Check if already bootstrapped by looking for any db.ident entity
+  let probeKeys = eng.scanPrefix(1, @[0'u8, 0'u8, 0'u8, byte(DbIdentAid)])
+  var bootstrapped = false
+  for k in probeKeys:
+    if k.len >= 24:
+      let e = beUint64(k, 4).int64
+      if e == DbIdentAid.int64:
+        bootstrapped = true; break
+  if bootstrapped: return
+
   let tx = eng.resolver.allocateInPartition(PartTx)
-  for (name, vt, _) in [("db.ident", DbTypeString, false),
-                         ("db.cardinality", DbTypeRef, false),
-                         ("db.valueType", DbTypeRef, false),
-                         ("db.unique", DbTypeRef, false)]:
-    let aid = eng.resolver.lookupAttr(name).get(otherwise = 0)
-    if aid == 0: continue
+
+  proc meta(name: string): tuple[vt: uint32, cardId: uint32, uniqueId: uint32] =
+    let vt = if name in ["db.ident", "db.part/id"]: DbTypeString
+             elif name == "db.txInstant": DbTypeInstant
+             elif name in ["db.isComponent", "db.index", "db.fulltext", "db.noHistory"]: DbTypeBoolean
+             else: DbTypeRef
+    let cardId = DbCardinalityOneAid
+    let uniqueId = (if name == "db.unique.value": DbUniqueValueAid
+                    elif name == "db.unique.identity": DbUniqueIdentityAid
+                    else: 0'u32)
+    (vt, cardId, uniqueId)
+
+  for (name, aid) in BootstrapSchema:
+    let (vt, cardId, uniqueId) = meta(name)
     let e = aid.int64
     eng.batchWrite(buildEavtEntries(e, DbIdentAid,
       encodeValue(name, emVariable, 0), e, false, emVariable, true))
     eng.batchWrite(buildEavtEntries(e, DbValueTypeAid,
       encodeValue($vt, emFixed, 0), tx, false, emFixed, true))
-    let cardId = DbCardinalityOneAid
     eng.batchWrite(buildEavtEntries(e, DbCardinalityAid,
       encodeValue($cardId, emFixed, 0), tx, false, emFixed, true))
+    if uniqueId != 0:
+      eng.batchWrite(buildEavtEntries(e, DbUniqueAid,
+        encodeValue($uniqueId, emFixed, 0), tx, false, emFixed, true))
 
 # ── Resolver accessors ──
 

@@ -69,7 +69,7 @@ proc normalizeAttr*(name: string): string =
 # Bootstrap schema
 # ═══════════════════════════════════════════════════════════════════════════════
 
-const BootstrapSchema: array[26, (string, uint32)] = [
+const BootstrapSchema*: array[26, (string, uint32)] = [
   ("db.ident", 1),
   ("db.cardinality", 2),
   ("db.valueType", 3),
@@ -151,6 +151,17 @@ proc newResolver*(): Resolver =
   result.valueTypes[DbPartIdAid] = DbTypeLong
   result.valueTypes[DbTxInstantAid] = DbTypeInstant
   result.indexedAttrs.incl DbIdentAid
+
+  # Set value types for all bootstrap schema attributes
+  for (name, aid) in BootstrapSchema:
+    if aid notin result.valueTypes:
+      let vt = if name in ["db.ident", "db.part/id"]: DbTypeString
+               elif name == "db.txInstant": DbTypeInstant
+               elif name in ["db.isComponent", "db.index", "db.fulltext",
+                              "db.noHistory"]: DbTypeBoolean
+               elif name.startsWith("db.type."): DbTypeLong
+               else: DbTypeRef
+      result.valueTypes[aid] = vt
 
   result.partitions[PartDb] = PartitionCounter(nextSeq: BootstrapFirstUserId.int64)
   result.partitionNames["db.part/db"] = PartDb
