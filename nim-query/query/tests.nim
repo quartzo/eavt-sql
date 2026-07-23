@@ -2149,7 +2149,7 @@ suite "engine: select-path (yield-mode)":
 # runSql helper: full SQL → Scheme → execute pipeline
 # ═══════════════════════════════════════════════════════════════════════════════
 
-proc runSql(q: QueryStore; sql: string): seq[SExpr] =
+proc runSql(q: QueryStore; sql: string; params: seq[SExpr] = @[]): seq[SExpr] =
   let stmt = sql_parser.parse(sql)
   let cstats = CompileStats(
     lookupAttr: proc(name: string): uint32 =
@@ -2167,7 +2167,7 @@ proc runSql(q: QueryStore; sql: string): seq[SExpr] =
   let compiled = compileSql(stmt, cstats)
   let tx = q.allocateTx()
   if compiled.isSelect:
-    let proto = newQuerySession(q, compiled.program, @[], tx, none[int64]())
+    let proto = newQuerySession(q, compiled.program, params, tx, none[int64]())
     let sess = newStreamingSession(proto)
     var rows: seq[seq[SExpr]]
     while rows.len < 500:
@@ -2177,7 +2177,7 @@ proc runSql(q: QueryStore; sql: string): seq[SExpr] =
     for row in rows:
       result.add SExpr(kind: sList, items: row)
   else:
-    let session = newQuerySession(q, compiled.program, @[], tx, none[int64]())
+    let session = newQuerySession(q, compiled.program, params, tx, none[int64]())
     let r = executeProgram(session)
     result.add r
 
@@ -2375,7 +2375,12 @@ suite "engine: SQL integration (port of test_sql.py)":
     defer: kv.close()
     let q = newQueryStore(kv)
     discard runSql(q, "ATTRIBUTE person.name STRING ONE")
-    check true  # param UPSERT compiles + executes
+    let rows = runSql(q, "UPSERT AS D1 = %1 SET person.name = 'Test'",
+      @[SExpr(kind: sInt, ival: 42)])
+    check rows.len >= 1
+    let r = rows[0]
+    check r.kind == sList
+    check r.items[0].symval == "result"
 
   test "explain select":
     let kv = newMemoryKVStore()
