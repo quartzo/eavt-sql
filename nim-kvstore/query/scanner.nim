@@ -41,7 +41,7 @@ type
   V2Scanner* = ref object
     pos*: PositionStack
     indexName*: string
-    asOfTx*: Option[uint64]
+    asOfTx*: Option[int64]
     valueAttrType*: Option[uint32]
     historyMode*: bool
     prefixCache*: seq[byte]
@@ -126,7 +126,7 @@ proc isVariableValue*(vt: Option[uint32]; keyLen: int): bool =
 # V2Scanner
 # ═══════════════════════════════════════════════════════════════════════════════
 
-proc newV2Scanner*(indexName: string; idxOrder: seq[string]; asOfTx: Option[uint64];
+proc newV2Scanner*(indexName: string; idxOrder: seq[string]; asOfTx: Option[int64];
                    valueAttrType: Option[uint32]): V2Scanner =
   let invalidCursor = NimCursor(
     isValidCb: proc(): bool = false,
@@ -169,7 +169,7 @@ proc recomputePrefix*(sc: V2Scanner) =
           buf.add byte(v32 shr 24); buf.add byte((v32 shr 16) and 0xFF)
           buf.add byte((v32 shr 8) and 0xFF); buf.add byte(v32 and 0xFF)
         of "e":
-          buf.add keys.encodeRef(uint64(v.ival))
+          buf.add keys.encodeEid(v.ival)
         of "v":
           if sc.valueAttrType == some(DbTypeBlob):
             buf.add keys.encodeVariableUnordered(v.bytesval)
@@ -180,7 +180,7 @@ proc recomputePrefix*(sc: V2Scanner) =
           else:
             buf.add keys.encodeFixed(v)
         of "t":
-          let sf = keys.encodeSuffix(uint64(v.ival), false)
+          let sf = keys.encodeSuffix(v.ival, false)
           buf.add byte(sf shr 56); buf.add byte((sf shr 48) and 0xFF)
           buf.add byte((sf shr 40) and 0xFF); buf.add byte((sf shr 32) and 0xFF)
           buf.add byte(sf shr 24); buf.add byte((sf shr 16) and 0xFF)
@@ -335,7 +335,7 @@ proc extractCurrent*(sc: V2Scanner): Option[SExpr] =
           return some(SExpr(kind: sFloat, fval: keys.decodeFloat64(raw)))
         elif sc.valueAttrType == some(DbTypeBoolean):
           return some(SExpr(kind: sBool, bval: raw != 0))
-        elif sc.valueAttrType == some(DbTypeInstant):
+        elif sc.valueAttrType == some(DbTypeInstant) or sc.valueAttrType == some(DbTypeRef):
           return some(SExpr(kind: sInt, ival: keys.decodeInt64(raw)))
         else:
           return some(SExpr(kind: sInt, ival: int64(raw)))
@@ -373,7 +373,7 @@ proc advanceToActiveAt*(sc: V2Scanner) =
         return
       let suffix = extractSuffix(k)
       let (t, _) = keys.decodeSuffix(suffix)
-      if asOfTx.isSome and t > asOfTx.get:
+      if asOfTx.isSome and t.int64 > asOfTx.get:
         sc.pos.cursor.stepCb()
         continue
       sc.pos.currentActiveKey = some(k)
@@ -418,7 +418,7 @@ proc advanceToActiveAt*(sc: V2Scanner) =
       let suffix = extractSuffix(k)
       let (t, retracted) = keys.decodeSuffix(suffix)
 
-      if asOfTx.isSome and t > asOfTx.get:
+      if asOfTx.isSome and t.int64 > asOfTx.get:
         sc.pos.cursor.stepCb()
         continue
 
@@ -522,7 +522,7 @@ proc seekToValue*(sc: V2Scanner; value: SExpr) =
 
   case pn:
   of "e":
-    target.add keys.encodeRef(uint64(value.ival))
+    target.add keys.encodeEid(value.ival)
   of "a":
     let v32 = uint32(value.ival)
     target.add byte(v32 shr 24); target.add byte((v32 shr 16) and 0xFF)

@@ -47,10 +47,10 @@ const
 # Entity ID helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-proc partitionOf*(eid: uint64): uint64 = eid shr PartitionShift
-proc seqOf*(eid: uint64): uint64 = eid and SeqMask
-proc makeEntityId*(partitionId, seq: uint64): uint64 =
-  (partitionId shl PartitionShift) or seq
+proc partitionOf*(eid: int64): uint64 = cast[uint64](eid) shr PartitionShift
+proc seqOf*(eid: int64): int64 = cast[int64](cast[uint64](eid) and SeqMask)
+proc makeEntityId*(partitionId: uint64, seq: int64): int64 =
+  cast[int64]((partitionId shl PartitionShift) or cast[uint64](seq))
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Attribute name normalization
@@ -104,7 +104,7 @@ const BootstrapSchema: array[26, (string, uint32)] = [
 
 type
   PartitionCounter = object
-    nextSeq: uint64
+    nextSeq: int64
 
   Resolver* = object
     attrs: Table[string, uint32]
@@ -152,7 +152,7 @@ proc newResolver*(): Resolver =
   result.valueTypes[DbTxInstantAid] = DbTypeInstant
   result.indexedAttrs.incl DbIdentAid
 
-  result.partitions[PartDb] = PartitionCounter(nextSeq: BootstrapFirstUserId)
+  result.partitions[PartDb] = PartitionCounter(nextSeq: BootstrapFirstUserId.int64)
   result.partitionNames["db.part/db"] = PartDb
   result.partitions[PartTx] = PartitionCounter(nextSeq: 1)
   result.partitionNames["db.part/tx"] = PartTx
@@ -161,17 +161,17 @@ proc newResolver*(): Resolver =
 
 # ── Partition management (must come before attr resolution — uses forward ref) ──
 
-proc allocateInPartition*(r: var Resolver; partitionId: uint64): uint64 =
+proc allocateInPartition*(r: var Resolver; partitionId: uint64): int64 =
   if partitionId notin r.partitions:
     raise newException(ValueError, "unknown partition: " & $partitionId)
   let seqVal = r.partitions[partitionId].nextSeq
   r.partitions[partitionId].nextSeq = seqVal + 1
-  return makeEntityId(partitionId, seqVal)
+  return makeEntityId(partitionId, cast[int64](seqVal))
 
-proc allocateEntityId*(r: var Resolver): uint64 =
+proc allocateEntityId*(r: var Resolver): int64 =
   allocateInPartition(r, PartUser)
 
-proc allocateSchemaId*(r: var Resolver): uint64 =
+proc allocateSchemaId*(r: var Resolver): int64 =
   allocateInPartition(r, PartDb)
 
 proc partitionIdFor*(r: var Resolver; name: string): Option[uint64] =
@@ -265,21 +265,21 @@ proc setIndexed*(r: var Resolver; aid: uint32; indexed: bool) =
 
 # ── Sequence management ──
 
-proc advancePast*(r: var Resolver; eid: uint64) =
+proc advancePast*(r: var Resolver; eid: int64) =
   let p = partitionOf(eid)
   let s = seqOf(eid)
   if p in r.partitions:
     if s >= r.partitions[p].nextSeq:
       r.partitions[p].nextSeq = s + 1
 
-proc setPartitionSeq*(r: var Resolver; partitionId, seq: uint64) =
+proc setPartitionSeq*(r: var Resolver; partitionId: uint64, seq: int64) =
   if partitionId in r.partitions:
     if seq > r.partitions[partitionId].nextSeq:
       r.partitions[partitionId].nextSeq = seq
 
-proc nextEntId*(r: var Resolver): uint64 =
+proc nextEntId*(r: var Resolver): int64 =
   if PartDb in r.partitions: return r.partitions[PartDb].nextSeq
-  return BootstrapFirstUserId
+  return BootstrapFirstUserId.int64
 
 # ── Batch loading ──
 
@@ -294,7 +294,7 @@ proc loadAttrs*(r: var Resolver; items: seq[(seq[byte], seq[byte])]) =
     r.attrsRev[aid] = name
     if aid >= r.nextAid: r.nextAid = aid + 1
 
-proc loadUserAttr*(r: var Resolver; name: string; eid: uint64;
+proc loadUserAttr*(r: var Resolver; name: string; eid: int64;
                     valueType: uint32; many, unique, indexed: bool) =
   let aid = eid.uint32
   let isNew = aid notin r.declared

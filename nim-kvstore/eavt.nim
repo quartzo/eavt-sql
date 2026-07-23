@@ -94,9 +94,9 @@ proc seedPartitionCounters*(eng: EavtEngine) =
       let sf = beUint64(key, key.len - 8)
       if (sf and 1) == 1: continue
       let e = decodeInt64(beUint64(key, 0))
-      let p = partitionOf(cast[uint64](e))
+      let p = partitionOf(e)
       if p in targets:
-        eng.resolver.advancePast(cast[uint64](e))
+        eng.resolver.advancePast(e)
         covered.incl p
       if covered.len >= targets.len: break
 
@@ -104,18 +104,18 @@ proc seedPartitionCounters*(eng: EavtEngine) =
 
 proc bootstrapResolver*(eng: EavtEngine) =
   ## Load user attribute schema from db.* datoms.
-  var identMap = initTable[uint64, string]()
-  var vtMap = initTable[uint64, uint32]()
-  var cardMap = initTable[uint64, bool]()
-  var uniqueSet = initHashSet[uint64]()
+  var identMap = initTable[int64, string]()
+  var vtMap = initTable[int64, uint32]()
+  var cardMap = initTable[int64, bool]()
+  var uniqueSet = initHashSet[int64]()
 
   for k in eng.scanPrefix(1, @[0'u8, 0'u8, 0'u8, byte(DbIdentAid)]):
     if k.len < 24: continue
     if beUint32(k, 0) != DbIdentAid: continue
     let sf = beUint64(k, k.len - 8)
     if (sf and 1) == 1: continue
-    let e = beUint64(k, 4)
-    if e < BootstrapFirstUserId: continue
+    let e = beUint64(k, 4).int64
+    if e < BootstrapFirstUserId.int64: continue
     let name = decodeVariableStr(k, 12)
     if name.len > 0: identMap[e] = name
 
@@ -124,7 +124,7 @@ proc bootstrapResolver*(eng: EavtEngine) =
     if beUint32(k, 0) != DbValueTypeAid: continue
     let sf = beUint64(k, k.len - 8)
     if (sf and 1) == 1: continue
-    let e = beUint64(k, 4)
+    let e = beUint64(k, 4).int64
     vtMap[e] = cast[uint32](decodeInt64(beUint64(k, 12)))
 
   for k in eng.scanPrefix(1, @[0'u8, 0'u8, 0'u8, byte(DbCardinalityAid)]):
@@ -132,7 +132,7 @@ proc bootstrapResolver*(eng: EavtEngine) =
     if beUint32(k, 0) != DbCardinalityAid: continue
     let sf = beUint64(k, k.len - 8)
     if (sf and 1) == 1: continue
-    let e = beUint64(k, 4)
+    let e = beUint64(k, 4).int64
     cardMap[e] = cast[uint32](decodeInt64(beUint64(k, 12))) == DbCardinalityManyAid
 
   for k in eng.scanPrefix(1, @[0'u8, 0'u8, 0'u8, byte(DbUniqueAid)]):
@@ -140,7 +140,7 @@ proc bootstrapResolver*(eng: EavtEngine) =
     if beUint32(k, 0) != DbUniqueAid: continue
     let sf = beUint64(k, k.len - 8)
     if (sf and 1) == 1: continue
-    uniqueSet.incl beUint64(k, 4)
+    uniqueSet.incl beUint64(k, 4).int64
 
   for e, name in identMap:
     let vt = vtMap.getOrDefault(e, DbTypeString)
@@ -152,8 +152,8 @@ proc bootstrapResolver*(eng: EavtEngine) =
 
 # ── Save a datom ──
 
-proc eavtSave*(eng: EavtEngine; eid: uint64; attrName: string;
-                value: string; t: uint64): uint64 {.discardable.} =
+proc eavtSave*(eng: EavtEngine; eid: int64; attrName: string;
+                value: string; t: int64): int64 {.discardable.} =
   eng.lock.withLock:
     let attrId = eng.resolver.internAttr(attrName)
     let vt = eng.resolver.valueTypeFor(attrId).get(DbTypeString)
@@ -163,7 +163,7 @@ proc eavtSave*(eng: EavtEngine; eid: uint64; attrName: string;
     let indexed = eng.resolver.isIndexed(attrId)
     if not many:
       # Retract any existing active datoms for this eid+attr.
-      var ePrefix = encodeRef(eid)
+      var ePrefix = encodeEid(eid)
       ePrefix.add byte(attrId shr 24); ePrefix.add byte((attrId shr 16) and 0xFF)
       ePrefix.add byte((attrId shr 8) and 0xFF); ePrefix.add byte(attrId and 0xFF)
       for ek in eng.scanPrefix(0, ePrefix):
@@ -176,8 +176,8 @@ proc eavtSave*(eng: EavtEngine; eid: uint64; attrName: string;
     eng.batchWrite(entries)
     return eid
 
-proc eavtRetract*(eng: EavtEngine; eid: uint64; attrName: string;
-                   value: string; t: uint64) =
+proc eavtRetract*(eng: EavtEngine; eid: int64; attrName: string;
+                   value: string; t: int64) =
   eng.lock.withLock:
     let attrId = eng.resolver.internAttr(attrName)
     let vt = eng.resolver.valueTypeFor(attrId).get(DbTypeString)
@@ -193,7 +193,7 @@ proc nowMicros(): uint64 =
   let t = getTime()
   t.toUnix.uint64 * 1_000_000 + (t.nanosecond div 1000).uint64
 
-proc allocateTAndWriteTx*(eng: EavtEngine): uint64 =
+proc allocateTAndWriteTx*(eng: EavtEngine): int64 =
   ## Allocate a fresh tx entity and write its db.txInstant datom.
   ## Port of Rust EavtEngine::allocate_t_and_write_tx.
   eng.lock.withLock:
@@ -236,9 +236,9 @@ proc eavtDeclareAttr*(eng: EavtEngine; name: string; valueType: uint32;
     if isNew:
       # Persist schema as db.* datoms (Rust declare_attr_with_t).
       let t = eng.resolver.allocateInPartition(PartTx)
-      let e = aid.uint64
+      let e = aid.int64
       eng.batchWrite(buildEavtEntries(e, DbIdentAid,
-        encodeValue(name, emVariable, 0), t, false, emVariable, true))
+        encodeValue(name, emVariable, 0), e, false, emVariable, true))
       eng.batchWrite(buildEavtEntries(e, DbValueTypeAid,
         encodeValue($valueType, emFixed, 0), t, false, emFixed, true))
       let cardId = if many: DbCardinalityManyAid else: DbCardinalityOneAid
@@ -257,7 +257,7 @@ proc lookupAttr*(eng: EavtEngine; name: string): Option[uint32] =
 proc attrName*(eng: EavtEngine; aid: uint32): string =
   eng.lock.withLock: return eng.resolver.attrName(aid)
 
-proc allocateEntityId*(eng: EavtEngine): uint64 =
+proc allocateEntityId*(eng: EavtEngine): int64 =
   eng.lock.withLock: return eng.resolver.allocateEntityId()
 
 proc isDeclared*(eng: EavtEngine; aid: uint32): bool =
@@ -272,7 +272,7 @@ proc isUnique*(eng: EavtEngine; aid: uint32): bool =
 proc valueTypeFor*(eng: EavtEngine; aid: uint32): Option[uint32] =
   eng.lock.withLock: return eng.resolver.valueTypeFor(aid)
 
-proc allocateInPartition*(eng: EavtEngine; pid: uint64): uint64 =
+proc allocateInPartition*(eng: EavtEngine; pid: uint64): int64 =
   eng.lock.withLock: return eng.resolver.allocateInPartition(pid)
 
 proc declarePartition*(eng: EavtEngine; name: string): uint64 =

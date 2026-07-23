@@ -59,11 +59,11 @@ type
 method openCursor*(ops: EngineOps; cfId: uint32; prefix: seq[byte]): NimCursor {.base.} =
   raise newException(EvalError, "not implemented")
 
-method saveWithT*(ops: EngineOps; eid: uint64; attr: string; val: SExpr;
-                   t: uint64; asOf: uint64) {.base.} = discard
+method saveWithT*(ops: EngineOps; eid: int64; attr: string; val: SExpr;
+                   t: int64; asOf: int64) {.base.} = discard
 
-method retract*(ops: EngineOps; eid: uint64; attr: string; val: SExpr;
-                 t: uint64; asOf: uint64) {.base.} = discard
+method retract*(ops: EngineOps; eid: int64; attr: string; val: SExpr;
+                 t: int64; asOf: int64) {.base.} = discard
 
 method lookupAttr*(ops: EngineOps; name: string): Option[uint32] {.base.} =
   none[uint32]()
@@ -71,23 +71,23 @@ method lookupAttr*(ops: EngineOps; name: string): Option[uint32] {.base.} =
 method attrName*(ops: EngineOps; aid: uint32): string {.base.} = ""
 
 method declareAttrFromSql*(ops: EngineOps; attr, typeName: string;
-    many, unique: bool; t: uint64) {.base.} = discard
+    many, unique: bool; t: int64) {.base.} = discard
 
-method declarePartition*(ops: EngineOps; name: string; t: uint64): uint64 {.base.} = 0
+method declarePartition*(ops: EngineOps; name: string; t: int64): uint64 {.base.} = 0
 
-method allocateInPartition*(ops: EngineOps; partitionId: uint64): uint64 {.base.} = 0
+method allocateInPartition*(ops: EngineOps; partitionId: uint64): int64 {.base.} = 0
 
-method allocateTx*(ops: EngineOps): uint64 {.base.} = 0
+method allocateTx*(ops: EngineOps): int64 {.base.} = 0
 
 method valueTypeFor*(ops: EngineOps; aid: uint32): Option[uint32] {.base.} =
   none[uint32]()
 
 method isUniqueAttr*(ops: EngineOps; name: string): bool {.base.} = false
 
-method lookupEntity*(ops: EngineOps; attrName: string; value: SExpr): Option[uint64] {.base.} =
-  none[uint64]()
+method lookupEntity*(ops: EngineOps; attrName: string; value: SExpr): Option[int64] {.base.} =
+  none[int64]()
 
-method lookupValue*(ops: EngineOps; eid: uint64; attrName: string): Option[SExpr] {.base.} =
+method lookupValue*(ops: EngineOps; eid: int64; attrName: string): Option[SExpr] {.base.} =
   none[SExpr]()
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -218,8 +218,8 @@ type
   SchemeHostFns* = ref object of HostFns
     engine*: EngineOps
     params*: seq[SExpr]
-    tx*: uint64
-    asOfTx*: Option[uint64]
+    tx*: int64
+    asOfTx*: Option[int64]
     scanners*: seq[V2Scanner]
 
 method isNative(h: SchemeHostFns; name: string): bool =
@@ -380,14 +380,14 @@ method call(h: SchemeHostFns; name: string; args: seq[SExpr]): EvalStep =
 
   # -- DML --
   of "save":
-    let eid = uint64(expectInt(args[0]))
+    let eid = expectInt(args[0])
     let attr = expectStr(args[1])
     let val = args[2]
     h.engine.saveWithT(eid, attr, val, h.tx, h.asOfTx.get(0))
     return done(newVoid())
 
   of "retract":
-    let eid = uint64(expectInt(args[0]))
+    let eid = expectInt(args[0])
     let attr = expectStr(args[1])
     let val = args[2]
     h.engine.retract(eid, attr, val, h.tx, h.asOfTx.get(0))
@@ -405,7 +405,7 @@ method call(h: SchemeHostFns; name: string; args: seq[SExpr]): EvalStep =
   of "alloc-entity":
     let partition = if args.len > 0: uint64(expectInt(args[0])) else: 4'u64
     let eid = h.engine.allocateInPartition(partition)
-    return done(SExpr(kind: sInt, ival: int64(eid)))
+    return done(SExpr(kind: sInt, ival: eid))
 
   of "tx-entity":
     return done(SExpr(kind: sInt, ival: int64(h.tx)))
@@ -422,7 +422,7 @@ method call(h: SchemeHostFns; name: string; args: seq[SExpr]): EvalStep =
     return done(newVoid())
 
   of "lookup-value":
-    let eid = uint64(expectInt(args[0]))
+    let eid = expectInt(args[0])
     let attr = expectStr(args[1])
     let val = h.engine.lookupValue(eid, attr)
     if val.isSome: return done(val.get)

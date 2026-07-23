@@ -66,8 +66,8 @@ method openCursor(q: QueryStore; cfId: uint32; prefix: seq[byte]): NimCursor =
     invalidateCb: proc() = mc.atEnd = true,
   )
 
-method saveWithT(q: QueryStore; eid: uint64; attr: string; val: SExpr;
-                  t: uint64; asOf: uint64) =
+method saveWithT(q: QueryStore; eid: int64; attr: string; val: SExpr;
+                  t: int64; asOf: int64) =
   let attrIdOpt = q.eavt.lookupAttr(attr)
   if attrIdOpt.isNone:
     raise newException(EvalError, "save to undeclared attr: " & attr)
@@ -78,7 +78,7 @@ method saveWithT(q: QueryStore; eid: uint64; attr: string; val: SExpr;
   let encoded = encodeValue(sexprToValueForType(val, vt), mode, eid)
   let indexed = q.eavt.resolver.isIndexed(attrId)
   if not many:
-    var ePrefix = keys.encodeRef(eid)
+    var ePrefix = keys.encodeEid(eid)
     ePrefix.add byte(attrId shr 24); ePrefix.add byte((attrId shr 16) and 0xFF)
     ePrefix.add byte((attrId shr 8) and 0xFF); ePrefix.add byte(attrId and 0xFF)
     for ek in q.eavt.scanPrefix(0, ePrefix):
@@ -90,8 +90,8 @@ method saveWithT(q: QueryStore; eid: uint64; attr: string; val: SExpr;
   var entries = buildEavtEntries(eid, attrId, encoded, t, false, mode, indexed)
   q.eavt.batchWrite(entries)
 
-method retract(q: QueryStore; eid: uint64; attr: string; val: SExpr;
-                t: uint64; asOf: uint64) =
+method retract(q: QueryStore; eid: int64; attr: string; val: SExpr;
+                t: int64; asOf: int64) =
   let attrIdOpt = q.eavt.lookupAttr(attr)
   if attrIdOpt.isNone: return  # retract on undeclared attr is a no-op
   let attrId = attrIdOpt.get
@@ -109,17 +109,17 @@ method attrName(q: QueryStore; aid: uint32): string =
   q.eavt.attrName(aid)
 
 method declareAttrFromSql(q: QueryStore; attr, typeName: string;
-    many, unique: bool; t: uint64) =
+    many, unique: bool; t: int64) =
   let vt = valueTypeFromName(typeName)
   discard q.eavt.eavtDeclareAttr(attr, vt, many, unique)
 
-method declarePartition(q: QueryStore; name: string; t: uint64): uint64 =
+method declarePartition(q: QueryStore; name: string; t: int64): uint64 =
   q.eavt.declarePartition(name)
 
-method allocateInPartition(q: QueryStore; partitionId: uint64): uint64 =
+method allocateInPartition(q: QueryStore; partitionId: uint64): int64 =
   q.eavt.allocateInPartition(partitionId)
 
-method allocateTx(q: QueryStore): uint64 = 0  # TODO
+method allocateTx(q: QueryStore): int64 = 0  # TODO
 
 method valueTypeFor(q: QueryStore; aid: uint32): Option[uint32] =
   q.eavt.valueTypeFor(aid)
@@ -128,10 +128,10 @@ method isUniqueAttr(q: QueryStore; name: string): bool =
   let aid = q.eavt.lookupAttr(name)
   aid.isSome and q.eavt.isUnique(aid.get)
 
-method lookupEntity(q: QueryStore; attrName: string; value: SExpr): Option[uint64] =
+method lookupEntity(q: QueryStore; attrName: string; value: SExpr): Option[int64] =
   ## Unique-attr lookup: scan avet [attr 4B][val][eid 8B][sf 8B] by prefix.
   let aidOpt = q.eavt.lookupAttr(attrName)
-  if aidOpt.isNone: return none[uint64]()
+  if aidOpt.isNone: return none[int64]()
   let aid = aidOpt.get
   let vt = q.eavt.valueTypeFor(aid).get(resolver.DbTypeString)
   let mode = valueTypeToEncodeMode(vt)
@@ -140,19 +140,19 @@ method lookupEntity(q: QueryStore; attrName: string; value: SExpr): Option[uint6
                 byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
   prefix.add encoded
   let scanRes = q.eavt.scanPrefix(2, prefix)
-  if scanRes.len == 0: return none[uint64]()
+  if scanRes.len == 0: return none[int64]()
   let k = scanRes[0]
-  if k.len < 20: return none[uint64]()
+  if k.len < 20: return none[int64]()
   let sf = beUint64(k, k.len - 8)
-  if (sf and 1) == 1: return none[uint64]()  # retracted
-  some(beUint64(k, k.len - 16))
+  if (sf and 1) == 1: return none[int64]()  # retracted
+  some(beUint64(k, k.len - 16).int64)
 
-method lookupValue(q: QueryStore; eid: uint64; attrName: string): Option[SExpr] =
+method lookupValue(q: QueryStore; eid: int64; attrName: string): Option[SExpr] =
   let aidOpt = q.eavt.lookupAttr(attrName)
   if aidOpt.isNone: return none[SExpr]()
   let aid = aidOpt.get
   # eavt key: [eid 8B BE][attr 4B BE][val][sf 8B BE]
-  var prefix = keys.encodeRef(eid)
+  var prefix = keys.encodeEid(eid)
   prefix.add byte(aid shr 24); prefix.add byte((aid shr 16) and 0xFF)
   prefix.add byte((aid shr 8) and 0xFF); prefix.add byte(aid and 0xFF)
   let scanRes = q.eavt.scanPrefix(0, prefix)
@@ -186,8 +186,8 @@ type
     program*: SchemeProgram
 
 proc newQuerySession*(store: QueryStore; program: SchemeProgram;
-                       params: seq[SExpr]; tx: uint64;
-                       asOfTx: Option[uint64]): QuerySession =
+                       params: seq[SExpr]; tx: int64;
+                       asOfTx: Option[int64]): QuerySession =
   let host = SchemeHostFns(
     engine: store,
     params: params,

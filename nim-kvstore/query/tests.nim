@@ -426,7 +426,7 @@ suite "opsToIntervals":
 # ═══════════════════════════════════════════════════════════════════════════════
 
 proc makeArithHost(): SchemeHostFns =
-  SchemeHostFns(engine: nil, params: @[], tx: 0, asOfTx: none[uint64](), scanners: @[])
+  SchemeHostFns(engine: nil, params: @[], tx: 0, asOfTx: none[int64](), scanners: @[])
 
 suite "hostfns: arithmetic":
   test "addition ints":
@@ -564,40 +564,40 @@ suite "hostfns: isNative":
 
 suite "scanner: classifyKey":
   test "no prefix → kvpNoPrefix":
-    let sc = newV2Scanner("EAVT", @["e", "a", "v"], none[uint64](), none[uint32]())
+    let sc = newV2Scanner("EAVT", @["e", "a", "v"], none[int64](), none[uint32]())
     # prefixCache is empty by default
     check sc.classifyKey(@[byte 0, 1, 2, 3]) == kvpNoPrefix
 
   test "match on prefix":
-    let sc = newV2Scanner("EAVT", @["e", "a", "v"], none[uint64](), none[uint32]())
+    let sc = newV2Scanner("EAVT", @["e", "a", "v"], none[int64](), none[uint32]())
     sc.saveValue(SExpr(kind: sInt, ival: 1))  # eid=1
     discard sc.pos.cursor
-    # after saveValue, prefixCache has [encodeRef(1)] = 8 bytes
-    # key = encodeRef(1) + extra bytes → match
-    var key = keys.encodeRef(1)
+    # after saveValue, prefixCache has [encodeEid(1)] = 8 bytes
+    # key = encodeEid(1) + extra bytes → match
+    var key = keys.encodeEid(1)
     key.add @[byte 0, 0, 0, 1]  # attr=1
     key.add @[byte 0, 0, 0, 0, 0, 0, 0, 0]  # value=0 (8 bytes)
     key.add @[byte 0, 0, 0, 0, 0, 0, 0, 255'u8]  # suffix
     check sc.classifyKey(key) == kvpMatch
 
   test "before prefix":
-    let sc = newV2Scanner("EAVT", @["e", "a", "v"], none[uint64](), none[uint32]())
+    let sc = newV2Scanner("EAVT", @["e", "a", "v"], none[int64](), none[uint32]())
     sc.saveValue(SExpr(kind: sInt, ival: 100))
-    var key = keys.encodeRef(1)  # eid=1 < eid=100 → before
+    var key = keys.encodeEid(1)  # eid=1 < eid=100 → before
     key.add @[byte 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     check sc.classifyKey(key) == kvpBefore
 
   test "after prefix":
-    let sc = newV2Scanner("EAVT", @["e", "a", "v"], none[uint64](), none[uint32]())
+    let sc = newV2Scanner("EAVT", @["e", "a", "v"], none[int64](), none[uint32]())
     sc.saveValue(SExpr(kind: sInt, ival: 1))
-    var key = keys.encodeRef(200)  # eid=200 > eid=1 → after
+    var key = keys.encodeEid(200)  # eid=200 > eid=1 → after
     key.add @[byte 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     check sc.classifyKey(key) == kvpAfter
 
 suite "scanner: extractCurrent — eid position":
   test "extract eid from EAVT key":
-    let key = buildEavtKey(42'u64, 1'u32, @[byte 0, 0, 0, 0, 0, 0, 0, 0], 100, false)
-    let sc = newV2Scanner("EAVT", @["e", "a", "v"], none[uint64](), none[uint32]())
+    let key = buildEavtKey(42, 1'u32, @[byte 0, 0, 0, 0, 0, 0, 0, 0], 100, false)
+    let sc = newV2Scanner("EAVT", @["e", "a", "v"], none[int64](), none[uint32]())
     sc.pos.stack.setLen(0)
     let cursor = newMockCursor(@[key])
     sc.setCursor(cursor)
@@ -609,8 +609,8 @@ suite "scanner: extractCurrent — eid position":
     check extracted.get.ival == 42
 
   test "extract attr from EAVT key (at position 1)":
-    let key = buildEavtKey(42'u64, 77'u32, @[byte 0, 0, 0, 0, 0, 0, 0, 0], 100, false)
-    let sc = newV2Scanner("EAVT", @["e", "a", "v"], none[uint64](), none[uint32]())
+    let key = buildEavtKey(42, 77'u32, @[byte 0, 0, 0, 0, 0, 0, 0, 0], 100, false)
+    let sc = newV2Scanner("EAVT", @["e", "a", "v"], none[int64](), none[uint32]())
     # Push eid as fixed, move to attr position
     sc.saveValue(SExpr(kind: sInt, ival: 42))
     let cursor = newMockCursor(@[key])
@@ -623,8 +623,8 @@ suite "scanner: extractCurrent — eid position":
 
   test "extract t suffix":
     let val0 = keys.encodeFixed(SExpr(kind: sInt, ival: 0))
-    let key = buildEavtKey(42'u64, 1'u32, val0, 999, false)
-    let sc = newV2Scanner("EAVT", @["e", "a", "v"], none[uint64](), none[uint32]())
+    let key = buildEavtKey(42, 1'u32, val0, 999, false)
+    let sc = newV2Scanner("EAVT", @["e", "a", "v"], none[int64](), none[uint32]())
     sc.saveValue(SExpr(kind: sInt, ival: 42))
     sc.saveValue(SExpr(kind: sInt, ival: 1))
     sc.saveValue(SExpr(kind: sInt, ival: 0))
@@ -640,24 +640,24 @@ suite "scanner: extractCurrent — eid position":
 
 suite "scanner: advanceToActiveAt":
   test "empty cursor → atEnd":
-    let sc = newV2Scanner("EAVT", @["e"], none[uint64](), none[uint32]())
+    let sc = newV2Scanner("EAVT", @["e"], none[int64](), none[uint32]())
     let cursor = newMockCursor(@[])
     sc.setCursor(cursor)
     sc.advanceToActiveAt()
     check sc.atEnd()
 
   test "single active key → not atEnd":
-    let key = buildEavtKey(1'u64, 1'u32, @[byte 0, 0, 0, 0, 0, 0, 0, 0], 100, false)
-    let sc = newV2Scanner("EAVT", @["e"], none[uint64](), none[uint32]())
+    let key = buildEavtKey(1, 1'u32, @[byte 0, 0, 0, 0, 0, 0, 0, 0], 100, false)
+    let sc = newV2Scanner("EAVT", @["e"], none[int64](), none[uint32]())
     let cursor = newMockCursor(@[key])
     sc.setCursor(cursor)
     sc.advanceToActiveAt()
     check not sc.atEnd()
 
   test "retracted key → skip to next":
-    let retKey = buildEavtKey(1'u64, 1'u32, @[byte 0, 0, 0, 0, 0, 0, 0, 0], 100, true)
-    let actKey = buildEavtKey(2'u64, 1'u32, @[byte 0, 0, 0, 0, 0, 0, 0, 0], 100, false)
-    let sc = newV2Scanner("EAVT", @["e"], none[uint64](), none[uint32]())
+    let retKey = buildEavtKey(1, 1'u32, @[byte 0, 0, 0, 0, 0, 0, 0, 0], 100, true)
+    let actKey = buildEavtKey(2, 1'u32, @[byte 0, 0, 0, 0, 0, 0, 0, 0], 100, false)
+    let sc = newV2Scanner("EAVT", @["e"], none[int64](), none[uint32]())
     let cursor = newMockCursor(@[retKey, actKey])
     sc.setCursor(cursor)
     sc.advanceToActiveAt()
@@ -666,9 +666,9 @@ suite "scanner: advanceToActiveAt":
     check extracted.get.ival == 2
 
   test "asOfTx filtering":
-    let keyOld = buildEavtKey(1'u64, 1'u32, @[byte 0, 0, 0, 0, 0, 0, 0, 0], 50, false)
-    let keyNew = buildEavtKey(1'u64, 1'u32, @[byte 0, 0, 0, 0, 0, 0, 0, 0], 200, false)
-    let sc = newV2Scanner("EAVT", @["e"], some(100'u64), none[uint32]())
+    let keyOld = buildEavtKey(1, 1'u32, @[byte 0, 0, 0, 0, 0, 0, 0, 0], 50, false)
+    let keyNew = buildEavtKey(1, 1'u32, @[byte 0, 0, 0, 0, 0, 0, 0, 0], 200, false)
+    let sc = newV2Scanner("EAVT", @["e"], some(100'i64), none[uint32]())
     let cursor = newMockCursor(@[keyOld, keyNew])
     sc.setCursor(cursor)
     sc.advanceToActiveAt()
@@ -737,13 +737,13 @@ suite "engine: save + lookup":
     let q = newQueryStore(kv)
 
     expect EvalError:
-      q.saveWithT(1'u64, "no.such.attr", SExpr(kind: sStr, sval: "x"), 1, 0)
+      q.saveWithT(1, "no.such.attr", SExpr(kind: sStr, sval: "x"), 1, 0)
 
   test "retract on undeclared attr is no-op":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    q.retract(1'u64, "no.such.attr", SExpr(kind: sStr, sval: "x"), 1, 0)
+    q.retract(1, "no.such.attr", SExpr(kind: sStr, sval: "x"), 1, 0)
 
   test "lookupAttr after declare":
     let kv = newMemoryKVStore()
@@ -843,7 +843,7 @@ suite "engine: cursor":
     q.kv.flush()
 
     # Prefix for eid1
-    var prefix1 = keys.encodeRef(eid1)
+    var prefix1 = keys.encodeEid(eid1)
     let cursor = q.openCursor(0'u32, prefix1)
     check cursor.isValidCb()
     let key = cursor.currentKeyCb()
@@ -898,7 +898,7 @@ suite "engine: param access":
       engine: nil,
       params: @[SExpr(kind: sInt, ival: 42), SExpr(kind: sStr, sval: "hello")],
       tx: 0,
-      asOfTx: none[uint64](),
+      asOfTx: none[int64](),
       scanners: @[],
     )
     let r = h.call("param", @[SExpr(kind: sInt, ival: 1)])
@@ -926,7 +926,7 @@ suite "engine: StreamingSession → nextBatch":
                          "  (let* ((s0 (scanner-open \"EAVT\" #f))) " &
                          "    (scanner-iterate s0 (e) " &
                          "      (result-row e))))")
-    let proto = newQuerySession(q, SchemeProgram(body: program), @[], 0'u64, none[uint64]())
+    let proto = newQuerySession(q, SchemeProgram(body: program), @[], 0, none[int64]())
     let sess = newStreamingSession(proto)
 
     let (rows, more) = sess.nextBatch(10)
@@ -948,7 +948,7 @@ suite "engine: DML with batch execute":
       "  (result eid)))"
 
     let program = SchemeProgram(body: parse(progStr))
-    let session = newQuerySession(q, program, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, program, @[], 0, none[int64]())
     let result = executeProgram(session)
 
     check result.kind == sList
@@ -956,7 +956,7 @@ suite "engine: DML with batch execute":
     let eid = result.items[1].ival
     check eid > 0
 
-    let val = q.lookupValue(uint64(eid), "user.name")
+    let val = q.lookupValue(eid, "user.name")
     check val.isSome
     check val.get.sval == "UPSERT User"
 
@@ -973,7 +973,7 @@ suite "engine: DML with batch execute":
     let progStr = "(begin (retract " & $eid & " \"user.name\" \"Before\") " &
       "(result (lookup-value " & $eid & " \"user.name\")))"
     let program = SchemeProgram(body: parse(progStr))
-    let session = newQuerySession(q, program, @[], 2'u64, none[uint64]())
+    let session = newQuerySession(q, program, @[], 2, none[int64]())
     let result = executeProgram(session)
 
     # result should be (result ()) → nil lookup
@@ -992,7 +992,7 @@ suite "engine: partitions":
     let q = newQueryStore(kv)
 
     let prog = SchemeProgram(body: parse("(result (declare-partition \"my.part\"))"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.kind == sList
     let pid = result.items[1].ival
@@ -1004,11 +1004,11 @@ suite "engine: partitions":
     let q = newQueryStore(kv)
 
     let prog = SchemeProgram(body: parse("(declare-partition \"my.part\")"))
-    var session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    var session = newQuerySession(q, prog, @[], 0, none[int64]())
     discard executeProgram(session)
 
     let prog2 = SchemeProgram(body: parse("(result (declare-partition \"my.part\"))"))
-    session = newQuerySession(q, prog2, @[], 0'u64, none[uint64]())
+    session = newQuerySession(q, prog2, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].ival > 0
 
@@ -1022,7 +1022,7 @@ suite "engine: partitions":
       "  (declare-partition \"custom\") " &
       "  (let* ((pid (declare-partition \"custom\"))) " &
       "    (result (alloc-entity pid))))"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.kind == sList
     check result.items[1].ival > 0
@@ -1038,7 +1038,7 @@ suite "engine: alloc-entity / tx-entity":
     let q = newQueryStore(kv)
 
     let prog = SchemeProgram(body: parse("(result (alloc-entity))"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].ival > 0
 
@@ -1049,7 +1049,7 @@ suite "engine: alloc-entity / tx-entity":
 
     let prog = SchemeProgram(body: parse(
       "(result (alloc-entity) (alloc-entity) (alloc-entity))"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     # (result e1 e2 e3) — flattened args, not nested list
     check result.kind == sList
@@ -1064,7 +1064,7 @@ suite "engine: alloc-entity / tx-entity":
     let q = newQueryStore(kv)
 
     let prog = SchemeProgram(body: parse("(result (tx-entity))"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].ival == 0  # tx is 0
 
@@ -1074,7 +1074,7 @@ suite "engine: alloc-entity / tx-entity":
     let q = newQueryStore(kv)
 
     let prog = SchemeProgram(body: parse("(result (alloc-entity 4))"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].ival > 0
 
@@ -1105,7 +1105,7 @@ suite "engine: combined roundtrip":
       "           (lookup-value c2 \"user.name\") " &
       "           (lookup-value c2 \"user.hq\") " &
       "           (lookup-entity \"user.name\" \"Globex\"))))"))
-    let session = newQuerySession(q, prog, @[], 1'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 1, none[int64]())
     let result = executeProgram(session)
     check result.kind == sList
     # Flat (result c1 name1 hq1 c2 name2 hq2 globex-eid)
@@ -1134,13 +1134,13 @@ suite "engine: combined roundtrip":
       "(begin (let* ((e (alloc-entity))) " &
       "  (save e \"user.name\" \"Zed\") " &
       "  (result e)))"))
-    var session = newQuerySession(q, prog, @[], 1'u64, none[uint64]())
+    var session = newQuerySession(q, prog, @[], 1, none[int64]())
     let r1 = executeProgram(session)
     let eid = r1.items[1].ival
 
     prog = SchemeProgram(body: parse(
       "(result (lookup-value " & $eid & " \"user.name\"))"))
-    session = newQuerySession(q, prog, @[], 2'u64, some(0'u64))
+    session = newQuerySession(q, prog, @[], 2, some(0'i64))
     let r2 = executeProgram(session)
     check r2.items[1].sval == "Zed"
 
@@ -1156,7 +1156,7 @@ suite "engine: error paths":
 
     let prog = SchemeProgram(body: parse(
       "(let* ((e (alloc-entity))) (save e \"no.such.attr\" \"x\"))"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     expect EvalError:
       discard executeProgram(session)
 
@@ -1169,7 +1169,7 @@ suite "engine: error paths":
 
     let prog = SchemeProgram(body: parse(
       "(lookup-entity \"tag.x\" \"anything\")"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     expect EvalError:
       discard executeProgram(session)
 
@@ -1188,7 +1188,7 @@ suite "engine: error paths":
     let q = newQueryStore(kv)
 
     let prog = SchemeProgram(body: parse("(no-such-fn 1 2)"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     expect EvalError:
       discard executeProgram(session)
 
@@ -1198,7 +1198,7 @@ suite "engine: error paths":
     let q = newQueryStore(kv)
 
     let prog = SchemeProgram(body: parse("(result)"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.kind == sList
     # (result) → (result) with empty args
@@ -1277,7 +1277,7 @@ suite "engine: blob type":
     q.saveWithT(eid, "blob.many", SExpr(kind: sBytes, bytesval: @[byte(0x03), 0x04]), 2, 0)
 
     # Scan EAVT to count datoms for this eid+attr
-    var prefix = keys.encodeRef(eid)
+    var prefix = keys.encodeEid(eid)
     let aid = q.lookupAttr("blob.many").get
     prefix.add byte(aid shr 24); prefix.add byte((aid shr 16) and 0xFF)
     prefix.add byte((aid shr 8) and 0xFF); prefix.add byte(aid and 0xFF)
@@ -1367,7 +1367,7 @@ suite "engine: dedup":
     # For MANY cardinality, lookupValue returns only the latest active value (not all)
     # Verify that at least "b" is accessible
     # Scan EAVT group to check retraction behavior properly
-    var prefix = keys.encodeRef(eid)
+    var prefix = keys.encodeEid(eid)
     let aid = q.lookupAttr("empresa.tag").get
     prefix.add byte(aid shr 24); prefix.add byte((aid shr 16) and 0xFF)
     prefix.add byte((aid shr 8) and 0xFF); prefix.add byte(aid and 0xFF)
@@ -1400,7 +1400,7 @@ suite "engine: dedup":
     q.saveWithT(eid, "empresa.tag", SExpr(kind: sStr, sval: "x"), 1, 0)
     q.saveWithT(eid, "empresa.tag", SExpr(kind: sStr, sval: "x"), 1, 0)
 
-    var prefix = keys.encodeRef(eid)
+    var prefix = keys.encodeEid(eid)
     let aid = q.lookupAttr("empresa.tag").get
     prefix.add byte(aid shr 24); prefix.add byte((aid shr 16) and 0xFF)
     prefix.add byte((aid shr 8) and 0xFF); prefix.add byte(aid and 0xFF)
@@ -1493,7 +1493,7 @@ suite "engine: scanner host fns":
     let q = newQueryStore(kv)
     let prog = SchemeProgram(body: parse(
       "(let* ((s (scanner-open \"EAVT\"))) (result (scanner-prefix s)))"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.kind == sList
     # (result bytes...) — prefix should be empty
@@ -1506,7 +1506,7 @@ suite "engine: scanner host fns":
     let q = newQueryStore(kv)
     let prog = SchemeProgram(body: parse(
       "(let* ((s (scanner-open \"AEVT\"))) (result (scanner-prefix s)))"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].bytesval.len == 0
 
@@ -1516,7 +1516,7 @@ suite "engine: scanner host fns":
     let q = newQueryStore(kv)
     let prog = SchemeProgram(body: parse(
       "(let* ((s (scanner-open \"AVET\"))) (result (scanner-prefix s)))"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].bytesval.len == 0
 
@@ -1526,7 +1526,7 @@ suite "engine: scanner host fns":
     let q = newQueryStore(kv)
     let prog = SchemeProgram(body: parse(
       "(let* ((s (scanner-open \"VAET\"))) (result (scanner-prefix s)))"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].bytesval.len == 0
 
@@ -1538,7 +1538,7 @@ suite "engine: scanner host fns":
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-push s 1000) " &
       "(result (scanner-prefix s)))"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     let pref = result.items[1].bytesval
     check pref.len == 8  # eid = 8 bytes
@@ -1552,7 +1552,7 @@ suite "engine: scanner host fns":
       "(scanner-push s 1000) " &
       "(scanner-push s 42) " &
       "(result (scanner-prefix s)))"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     let pref = result.items[1].bytesval
     check pref.len == 12  # 8 eid + 4 attr
@@ -1567,7 +1567,7 @@ suite "engine: scanner host fns":
       "(scanner-push s 42) " &
       "(scanner-pop s) " &
       "(result (scanner-prefix s)))"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     let pref = result.items[1].bytesval
     check pref.len == 8  # back to eid only
@@ -1580,7 +1580,7 @@ suite "engine: scanner host fns":
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-pop s) " &
       "(result (scanner-prefix s)))"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].bytesval.len == 0
 
@@ -1593,7 +1593,7 @@ suite "engine: scanner host fns":
       "(scanner-push s 1000) " &
       "(scanner-pop s) " &
       "(result (scanner-prefix s)))"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].bytesval.len == 0
 
@@ -1608,7 +1608,7 @@ suite "engine: scanner host fns":
       "(scanner-pop s) " &
       "(scanner-push s 99) " &
       "(result (scanner-prefix s)))"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     let pref = result.items[1].bytesval
     check pref.len == 12
@@ -1620,7 +1620,7 @@ suite "engine: scanner host fns":
     let prog = SchemeProgram(body: parse(
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(result (scanner-push s 1)))"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].kind == sVoid  # push returns Void
 
@@ -1631,7 +1631,7 @@ suite "engine: scanner host fns":
     let prog = SchemeProgram(body: parse(
       "(let* ((s (scanner-open \"EAVT\" #t))) " &
       "(result (scanner-prefix s)))"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].bytesval.len == 0
 
@@ -1646,7 +1646,7 @@ suite "engine: scanner host fns":
       "    (scanner-push s0 100) " &
       "    (scanner-push s1 200) " &
       "    (result (scanner-prefix s0) (scanner-prefix s1))))"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     # (result pref0 pref1) — both should be 8 bytes (eid)
     check result.items[1].kind == sBytes
@@ -1663,6 +1663,6 @@ suite "engine: scanner host fns":
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-push s " & $large & ") " &
       "(result (scanner-prefix s)))"))
-    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].bytesval.len == 8

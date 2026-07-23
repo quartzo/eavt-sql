@@ -183,12 +183,12 @@ proc retract*(eng: PyEngine; e: uint64; attr: string; v: PyObject; t: uint64) {.
 
 # ── Entities ──
 
-proc allocateEntityId*(eng: PyEngine): uint64 {.exportpy: "allocate_entity_id".} =
+proc allocateEntityId*(eng: PyEngine): int64 {.exportpy: "allocate_entity_id".} =
   eng.eavt.allocateInPartition(PartUser)
 
 proc allocateTx*(eng: PyEngine): uint64 {.exportpy: "allocate_tx".} = 0
 
-proc allocateInPartition*(eng: PyEngine; partitionId: uint64): uint64 {.exportpy: "allocate_in_partition".} =
+proc allocateInPartition*(eng: PyEngine; partitionId: uint64): int64 {.exportpy: "allocate_in_partition".} =
   eng.eavt.allocateInPartition(partitionId)
 
 proc defaultUserPartition*(eng: PyEngine): uint64 {.exportpy: "default_user_partition".} = PartUser

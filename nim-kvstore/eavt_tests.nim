@@ -131,7 +131,7 @@ suite "eavt: save + retract":
     discard eng.eavtSave(eid, "tag.list", "a", 1)
     discard eng.eavtSave(eid, "tag.list", "b", 1)
     # Both should exist in scan
-    let keys = eng.scanPrefix(0, keys.encodeRef(eid))
+    let keys = eng.scanPrefix(0, keys.encodeEid(eid))
     check keys.len >= 2
 
   test "save overwrites with one cardinality":
@@ -141,7 +141,7 @@ suite "eavt: save + retract":
     discard eng.eavtSave(eid, "name.one", "first", 1)
     discard eng.eavtSave(eid, "name.one", "second", 1)
     # Scan should show only the latest value
-    var prefix = keys.encodeRef(eid)
+    var prefix = keys.encodeEid(eid)
     prefix.add byte(aid shr 24); prefix.add byte((aid shr 16) and 0xFF)
     prefix.add byte((aid shr 8) and 0xFF); prefix.add byte(aid and 0xFF)
     let scanKeys = eng.scanPrefix(0, prefix)
@@ -154,7 +154,7 @@ suite "eavt: save + retract":
     let eid = eng.allocateEntityId()
     discard eng.eavtSave(eid, "flag.rm", "true", 1)
     eng.eavtRetract(eid, "flag.rm", "true", 2)
-    var prefix = keys.encodeRef(eid)
+    var prefix = keys.encodeEid(eid)
     prefix.add byte(101 shr 24); prefix.add byte((101 shr 16) and 0xFF)
     prefix.add byte((101 shr 8) and 0xFF); prefix.add byte(101 and 0xFF)
     let keys = eng.scanPrefix(0, prefix)
