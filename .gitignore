@@ -56,3 +56,5 @@ nim-sql-parse/tests
 nim-datalog/datalog_ast
 nim-datalog/translate
 nim-datalog/tests
+nim-planner/planner
+nim-planner/tests
