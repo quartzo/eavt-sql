@@ -290,7 +290,7 @@ proc bootstrapSystemAttrs*(eng: EavtEngine) =
     let (vt, cardId, uniqueId) = meta(name)
     let e = aid.int64
     eng.batchWrite(buildEavtEntries(e, DbIdentAid,
-      encodeValue(name, emVariable, 0), e, false, emVariable, true))
+      encodeValue(name, emVariable, 0), tx, false, emVariable, true))
     eng.batchWrite(buildEavtEntries(e, DbValueTypeAid,
       encodeValue("", emRef, vt.int64), tx, false, emRef, true))
     eng.batchWrite(buildEavtEntries(e, DbCardinalityAid,

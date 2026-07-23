@@ -75,7 +75,7 @@ proc dumpDatoms(eng: SharedEngine; fd: SocketHandle; command: string) =
     if datom.retracted: continue
     rows.add(@[
       SExpr(kind: sInt, ival: datom.e),
-      SExpr(kind: sStr, sval: datom.attrName),
+      SExpr(kind: sStr, sval: datom.attrName & "(" & $datom.a & ")"),
       datom.value,
       SExpr(kind: sInt, ival: datom.t),
     ])
