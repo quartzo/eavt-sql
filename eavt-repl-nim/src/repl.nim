@@ -36,8 +36,13 @@ proc parseValue(raw: string): string =
 
 # ── command handlers ─────────────────────────────────────────────────
 
+template catchDisconnect(body: untyped) =
+  try: body
+  except ServerDisconnectedError: raise
+  except CatchableError as e: stderr.writeLine "Error: ", e.msg
+
 proc executeSql(sql: string) =
-  try:
+  catchDisconnect:
     for chunk in gClient.exec(sql):
       if chunk.error.len > 0:
         stderr.writeLine "Error: ", chunk.error
@@ -46,47 +51,35 @@ proc executeSql(sql: string) =
         var parts: seq[string]
         for v in row: parts.add(parseValue(v))
         echo parts.join("\t")
-  except CatchableError as e:
-    stderr.writeLine "Error: ", e.msg
 
 proc cmdFlush() =
-  try:
+  catchDisconnect:
     let r = gClient.admin("flush")
     echo r
-  except CatchableError as e:
-    stderr.writeLine "Error: ", e.msg
 
 proc cmdStatus() =
-  try:
+  catchDisconnect:
     let r = gClient.admin("status")
     echo r
-  except CatchableError as e:
-    stderr.writeLine "Error: ", e.msg
 
 proc cmdTree() =
-  try:
+  catchDisconnect:
     let r = gClient.admin("tree")
     echo r
-  except CatchableError as e:
-    stderr.writeLine "Error: ", e.msg
 
 proc cmdMemtable() =
-  try:
+  catchDisconnect:
     let r = gClient.admin("memtable")
     echo r
-  except CatchableError as e:
-    stderr.writeLine "Error: ", e.msg
 
 proc cmdDump(index: string) =
-  try:
+  catchDisconnect:
     for chunk in gClient.dump(index):
       if chunk.error.len > 0:
         stderr.writeLine "Error: ", chunk.error
         return
       for row in chunk.rows:
         echo row.join("\t")
-  except CatchableError as e:
-    stderr.writeLine "Error: ", e.msg
 
 # ── dot dispatcher ───────────────────────────────────────────────────
 
@@ -172,6 +165,9 @@ proc run*(sockPath: string = getSocketPath()) =
       try:
         let quit = handleDot(stripped)
         if quit: break
+      except ServerDisconnectedError as e:
+        stderr.writeLine "\nError: ", e.msg
+        return
       except CatchableError as e:
         stderr.writeLine "Error: ", e.msg
       continue
@@ -187,7 +183,11 @@ proc run*(sockPath: string = getSocketPath()) =
       if stmt.len == 0 or stmt.startsWith("--"):
         continue
       if isTTY: discard historyAdd((stmt & ";").cstring)
-      executeSql(stmt)
+      try:
+        executeSql(stmt)
+      except ServerDisconnectedError as e:
+        stderr.writeLine "\nError: ", e.msg
+        return
 
     let trimmed = accumulated.strip()
     if trimmed.len > 0 and not trimmed.startsWith("--"):

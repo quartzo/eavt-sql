@@ -2,6 +2,8 @@ import std/[nativesockets, posix, json, os, strutils, streams]
 import msgpack4nim, msgpack4nim/msgpack2json
 
 type
+  ServerDisconnectedError* = object of IOError
+
   SqlResult* = object
     columns*: seq[string]
     rows*: seq[seq[string]]
@@ -65,20 +67,28 @@ proc recvAll(fd: SocketHandle; data: pointer; len: int): bool =
     got += n
   return true
 
-proc sendMsg(fd: SocketHandle; data: string) =
-  writeU32(fd, uint32(data.len))
+proc sendMsg(c: var EavtClient; data: string) =
+  writeU32(c.fd, uint32(data.len))
   if data.len > 0:
-    if not sendAll(fd, unsafeAddr data[0], data.len):
-      raise newException(IOError, "send failed")
+    if not sendAll(c.fd, unsafeAddr data[0], data.len):
+      c.close()
+      raise newException(ServerDisconnectedError, "server disconnected (send)")
 
-proc recvMsg(fd: SocketHandle): string =
-  let l = readU32(fd)
-  if l <= 0 or l > 100_000_000: return ""
+proc recvMsg(c: var EavtClient): string =
+  let l = readU32(c.fd)
+  if l <= 0:
+    c.close()
+    raise newException(ServerDisconnectedError, "server disconnected (recv)")
+  if l > 100_000_000:
+    c.close()
+    raise newException(ServerDisconnectedError, "server disconnected (oversize frame)")
   result = newString(l)
   if l > 0:
-    if not recvAll(fd, addr result[0], l): return ""
+    if not recvAll(c.fd, addr result[0], l):
+      c.close()
+      raise newException(ServerDisconnectedError, "server disconnected (read body)")
 
-proc exec*(c: EavtClient; sql: string; params: seq[string] = @[]): seq[SqlResult] =
+proc exec*(c: var EavtClient; sql: string; params: seq[string] = @[]): seq[SqlResult] =
   var node = newJObject()
   node["type"] = %"sql"
   node["sql"] = %sql
@@ -86,9 +96,9 @@ proc exec*(c: EavtClient; sql: string; params: seq[string] = @[]): seq[SqlResult
     var pa = newJArray()
     for p in params: pa.add(%p)
     node["params"] = pa
-  sendMsg(c.fd, msgpack2json.fromJsonNode(node))
+  sendMsg(c, msgpack2json.fromJsonNode(node))
   while true:
-    let resp = recvMsg(c.fd)
+    let resp = recvMsg(c)
     if resp.len == 0: break
     let node = toJsonNode(resp)
     if node.hasKey("error") and node["error"].getStr.len > 0:
@@ -105,12 +115,12 @@ proc exec*(c: EavtClient; sql: string; params: seq[string] = @[]): seq[SqlResult
     result.add(sr)
     if not node["more"].getBool: break
 
-proc admin*(c: EavtClient; command: string): string =
+proc admin*(c: var EavtClient; command: string): string =
   var node = newJObject()
   node["type"] = %"admin"
   node["command"] = %command
-  sendMsg(c.fd, msgpack2json.fromJsonNode(node))
-  let resp = recvMsg(c.fd)
+  sendMsg(c, msgpack2json.fromJsonNode(node))
+  let resp = recvMsg(c)
   if resp.len == 0: return ""
   try:
     let node = toJsonNode(resp)
@@ -118,13 +128,13 @@ proc admin*(c: EavtClient; command: string): string =
   except: discard
   return ""
 
-proc dump*(c: EavtClient; index: string = "EAVT"): seq[SqlResult] =
+proc dump*(c: var EavtClient; index: string = "EAVT"): seq[SqlResult] =
   var node = newJObject()
   node["type"] = %"admin"
   node["command"] = %("dump " & index)
-  sendMsg(c.fd, msgpack2json.fromJsonNode(node))
+  sendMsg(c, msgpack2json.fromJsonNode(node))
   while true:
-    let resp = recvMsg(c.fd)
+    let resp = recvMsg(c)
     if resp.len == 0: break
     let node = toJsonNode(resp)
     if node.hasKey("error") and node["error"].getStr.len > 0:
