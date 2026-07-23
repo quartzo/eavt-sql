@@ -1481,3 +1481,188 @@ suite "engine: asOfTx":
     # Latest active should be "new"
     let val = q.lookupValue(eid, "company.name")
     check val.get.sval == "new"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Engine: scanner host fns (ported from test_scheme_scanner.py)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+suite "engine: scanner host fns":
+  test "scanner-open EAVT returns resource":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let prog = SchemeProgram(body: parse(
+      "(let* ((s (scanner-open \"EAVT\"))) (result (scanner-prefix s)))"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let result = executeProgram(session)
+    check result.kind == sList
+    # (result bytes...) — prefix should be empty
+    check result.items[1].kind == sBytes
+    check result.items[1].bytesval.len == 0
+
+  test "scanner-open AEVT":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let prog = SchemeProgram(body: parse(
+      "(let* ((s (scanner-open \"AEVT\"))) (result (scanner-prefix s)))"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let result = executeProgram(session)
+    check result.items[1].bytesval.len == 0
+
+  test "scanner-open AVET":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let prog = SchemeProgram(body: parse(
+      "(let* ((s (scanner-open \"AVET\"))) (result (scanner-prefix s)))"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let result = executeProgram(session)
+    check result.items[1].bytesval.len == 0
+
+  test "scanner-open VAET":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let prog = SchemeProgram(body: parse(
+      "(let* ((s (scanner-open \"VAET\"))) (result (scanner-prefix s)))"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let result = executeProgram(session)
+    check result.items[1].bytesval.len == 0
+
+  test "scanner-push eid in EAVT":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let prog = SchemeProgram(body: parse(
+      "(let* ((s (scanner-open \"EAVT\"))) " &
+      "(scanner-push s 1000) " &
+      "(result (scanner-prefix s)))"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let result = executeProgram(session)
+    let pref = result.items[1].bytesval
+    check pref.len == 8  # eid = 8 bytes
+
+  test "scanner-push eid + attr in EAVT":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let prog = SchemeProgram(body: parse(
+      "(let* ((s (scanner-open \"EAVT\"))) " &
+      "(scanner-push s 1000) " &
+      "(scanner-push s 42) " &
+      "(result (scanner-prefix s)))"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let result = executeProgram(session)
+    let pref = result.items[1].bytesval
+    check pref.len == 12  # 8 eid + 4 attr
+
+  test "scanner-pop restores prefix":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let prog = SchemeProgram(body: parse(
+      "(let* ((s (scanner-open \"EAVT\"))) " &
+      "(scanner-push s 1000) " &
+      "(scanner-push s 42) " &
+      "(scanner-pop s) " &
+      "(result (scanner-prefix s)))"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let result = executeProgram(session)
+    let pref = result.items[1].bytesval
+    check pref.len == 8  # back to eid only
+
+  test "scanner-pop on empty is no-op":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let prog = SchemeProgram(body: parse(
+      "(let* ((s (scanner-open \"EAVT\"))) " &
+      "(scanner-pop s) " &
+      "(result (scanner-prefix s)))"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let result = executeProgram(session)
+    check result.items[1].bytesval.len == 0
+
+  test "scanner-pop to empty":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let prog = SchemeProgram(body: parse(
+      "(let* ((s (scanner-open \"EAVT\"))) " &
+      "(scanner-push s 1000) " &
+      "(scanner-pop s) " &
+      "(result (scanner-prefix s)))"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let result = executeProgram(session)
+    check result.items[1].bytesval.len == 0
+
+  test "scanner-push-pop-push":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let prog = SchemeProgram(body: parse(
+      "(let* ((s (scanner-open \"EAVT\"))) " &
+      "(scanner-push s 1000) " &
+      "(scanner-push s 42) " &
+      "(scanner-pop s) " &
+      "(scanner-push s 99) " &
+      "(result (scanner-prefix s)))"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let result = executeProgram(session)
+    let pref = result.items[1].bytesval
+    check pref.len == 12
+
+  test "scanner-push push return void":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let prog = SchemeProgram(body: parse(
+      "(let* ((s (scanner-open \"EAVT\"))) " &
+      "(result (scanner-push s 1)))"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let result = executeProgram(session)
+    check result.items[1].kind == sVoid  # push returns Void
+
+  test "scanner-open history mode":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let prog = SchemeProgram(body: parse(
+      "(let* ((s (scanner-open \"EAVT\" #t))) " &
+      "(result (scanner-prefix s)))"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let result = executeProgram(session)
+    check result.items[1].bytesval.len == 0
+
+  test "two scanners independent":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let prog = SchemeProgram(body: parse(
+      "(begin " &
+      "  (let* ((s0 (scanner-open \"EAVT\")) " &
+      "         (s1 (scanner-open \"EAVT\"))) " &
+      "    (scanner-push s0 100) " &
+      "    (scanner-push s1 200) " &
+      "    (result (scanner-prefix s0) (scanner-prefix s1))))"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let result = executeProgram(session)
+    # (result pref0 pref1) — both should be 8 bytes (eid)
+    check result.items[1].kind == sBytes
+    check result.items[2].kind == sBytes
+    check result.items[1].bytesval.len == 8
+    check result.items[2].bytesval.len == 8
+
+  test "scanner-push large eid":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let large = (1'i64 shl 62) - 1
+    let prog = SchemeProgram(body: parse(
+      "(let* ((s (scanner-open \"EAVT\"))) " &
+      "(scanner-push s " & $large & ") " &
+      "(result (scanner-prefix s)))"))
+    let session = newQuerySession(q, prog, @[], 0'u64, none[uint64]())
+    let result = executeProgram(session)
+    check result.items[1].bytesval.len == 8
