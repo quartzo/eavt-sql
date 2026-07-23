@@ -22,3 +22,4 @@ task test, "Run all Nim unit tests":
   exec "(cd nim-datalog && nimble test)"
   exec "(cd nim-planner && nimble test)"
   exec "nim c --mm:arc --threads:on -d:release -r nim-compiler/tests.nim"
+  exec "(cd nim-sql-frontend && nimble test)"
