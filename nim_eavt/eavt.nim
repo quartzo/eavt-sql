@@ -103,7 +103,7 @@ proc seedPartitionCounters*(eng: EavtEngine) =
       if key.len < 8: continue
       let sf = beUint64(key, key.len - 8)
       if (sf and 1) == 1: continue
-      let e = decodeInt64(beUint64(key, 0))
+      let e = decodeEid(beUint64(key, 0))
       let p = partitionOf(e)
       if p in targets:
         eng.resolver.advancePast(e)
@@ -124,7 +124,7 @@ proc bootstrapResolver*(eng: EavtEngine) =
     if beUint32(k, 0) != DbIdentAid: continue
     let sf = beUint64(k, k.len - 8)
     if (sf and 1) == 1: continue
-    let e = beUint64(k, 4).int64
+    let e = decodeEid(beUint64(k, 4))
     if e < BootstrapFirstUserId.int64: continue
     let name = decodeVariableStr(k, 12)
     if name.len > 0: identMap[e] = name
@@ -134,7 +134,7 @@ proc bootstrapResolver*(eng: EavtEngine) =
     if beUint32(k, 0) != DbValueTypeAid: continue
     let sf = beUint64(k, k.len - 8)
     if (sf and 1) == 1: continue
-    let e = beUint64(k, 4).int64
+    let e = decodeEid(beUint64(k, 4))
     vtMap[e] = cast[uint32](decodeInt64(beUint64(k, 12)))
 
   for k in eng.scanPrefix(1, @[0'u8, 0'u8, 0'u8, byte(DbCardinalityAid)]):
@@ -142,7 +142,7 @@ proc bootstrapResolver*(eng: EavtEngine) =
     if beUint32(k, 0) != DbCardinalityAid: continue
     let sf = beUint64(k, k.len - 8)
     if (sf and 1) == 1: continue
-    let e = beUint64(k, 4).int64
+    let e = decodeEid(beUint64(k, 4))
     cardMap[e] = cast[uint32](decodeInt64(beUint64(k, 12))) == DbCardinalityManyAid
 
   for k in eng.scanPrefix(1, @[0'u8, 0'u8, 0'u8, byte(DbUniqueAid)]):
@@ -150,7 +150,7 @@ proc bootstrapResolver*(eng: EavtEngine) =
     if beUint32(k, 0) != DbUniqueAid: continue
     let sf = beUint64(k, k.len - 8)
     if (sf and 1) == 1: continue
-    uniqueSet.incl beUint64(k, 4).int64
+    uniqueSet.incl decodeEid(beUint64(k, 4))
 
   for e, name in identMap:
     let vt = vtMap.getOrDefault(e, DbTypeString)
@@ -268,7 +268,7 @@ proc bootstrapSystemAttrs*(eng: EavtEngine) =
   var bootstrapped = false
   for k in probeKeys:
     if k.len >= 24:
-      let e = beUint64(k, 4).int64
+      let e = decodeEid(beUint64(k, 4))
       if e == DbIdentAid.int64:
         bootstrapped = true; break
   if bootstrapped: return
@@ -292,12 +292,12 @@ proc bootstrapSystemAttrs*(eng: EavtEngine) =
     eng.batchWrite(buildEavtEntries(e, DbIdentAid,
       encodeValue(name, emVariable, 0), e, false, emVariable, true))
     eng.batchWrite(buildEavtEntries(e, DbValueTypeAid,
-      encodeValue($vt, emFixed, 0), tx, false, emFixed, true))
+      encodeValue("", emRef, vt.int64), tx, false, emRef, true))
     eng.batchWrite(buildEavtEntries(e, DbCardinalityAid,
-      encodeValue($cardId, emFixed, 0), tx, false, emFixed, true))
+      encodeValue("", emRef, cardId.int64), tx, false, emRef, true))
     if uniqueId != 0:
       eng.batchWrite(buildEavtEntries(e, DbUniqueAid,
-        encodeValue($uniqueId, emFixed, 0), tx, false, emFixed, true))
+        encodeValue("", emRef, uniqueId.int64), tx, false, emRef, true))
 
 # ── Resolver accessors ──
 
@@ -352,20 +352,20 @@ iterator scanDatoms*(eng: EavtEngine; cf: int): Datom =
 
     case cf
     of 0:
-      eid = cast[int64](beUint64(key, 0))
+      eid = decodeEid(beUint64(key, 0))
       aid = beUint32(key, 8)
       vStart = 12; vEnd = key.len - 8
     of 1:
       aid = beUint32(key, 0)
-      eid = cast[int64](beUint64(key, 4))
+      eid = decodeEid(beUint64(key, 4))
       vStart = 12; vEnd = key.len - 8
     of 2:
       aid = beUint32(key, 0)
       vStart = 4; vEnd = key.len - 16
-      eid = cast[int64](beUint64(key, key.len - 16))
+      eid = decodeEid(beUint64(key, key.len - 16))
     of 3:
       vStart = 0; vEnd = key.len - 20
-      eid = cast[int64](beUint64(key, key.len - 12))
+      eid = decodeEid(beUint64(key, key.len - 12))
       aid = beUint32(key, key.len - 16)
     else: continue
 
@@ -377,4 +377,4 @@ iterator scanDatoms*(eng: EavtEngine; cf: int): Datom =
     let attrName = eng.attrName(aid)
 
     yield Datom(e: eid, a: aid, attrName: attrName,
-                value: valSexpr, t: cast[int64](t), retracted: retracted)
+                value: valSexpr, t: t, retracted: retracted)

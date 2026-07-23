@@ -314,7 +314,7 @@ proc extractCurrent*(sc: V2Scanner): Option[SExpr] =
     return some(SExpr(kind: sInt, ival: int64(beUint32(k, vs))))
   of "e":
     let raw = beUint64(k, vs)
-    return some(SExpr(kind: sInt, ival: int64(raw)))
+    return some(SExpr(kind: sInt, ival: keys.decodeEid(raw)))
   of "v":
     if isVariableValue(sc.valueAttrType, k.len):
       let data = k[vs..<ve]
@@ -402,7 +402,7 @@ proc advanceToActiveAt*(sc: V2Scanner) =
       return
 
     var bestKey: Option[seq[byte]] = none[seq[byte]]()
-    var bestT: uint64 = 0
+    var bestT: int64 = 0
     var bestRetracted = false
     let groupEnd = firstKey.len - 8
     var curGroup = firstKey[0..<groupEnd]

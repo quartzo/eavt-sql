@@ -145,7 +145,7 @@ method lookupEntity(q: QueryStore; attrName: string; value: SExpr): Option[int64
   if k.len < 20: return none[int64]()
   let sf = beUint64(k, k.len - 8)
   if (sf and 1) == 1: return none[int64]()  # retracted
-  some(beUint64(k, k.len - 16).int64)
+  some(decodeEid(beUint64(k, k.len - 16)))
 
 method lookupValue(q: QueryStore; eid: int64; attrName: string): Option[SExpr] =
   let aidOpt = q.eavt.lookupAttr(attrName)

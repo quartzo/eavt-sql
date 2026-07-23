@@ -2,162 +2,126 @@
 
 ## Development Commands
 
-- **Nim tests:** `nimble test` (runs all ~286 unit tests)
-- **Query engine tests:** `(cd nim_kvstore && nimble query_test)`
-- **Rust tests:** `cargo test --release`
-- **Rust build:** `cargo build --workspace --release`
-- **Build PyO3 bindings:** `./build_py.sh` (all) or `./build_py.sh eavt` (one crate)
-- **Python tests:** `uv run pytest tests/`
-- **Python deps:** `uv sync --group dev` (pure-Python deps only)
-- **All Python commands must use `uv run`.**
+- **Nim tests (compile + run):** `nimble test` — compiles `build/all_tests` and runs it (~492 tests)
+- **Re-run tests without recompiling:** `./build/all_tests` — binary already compiled
+- **Check which tests failed:** `./build/all_tests 2>&1 | grep FAILED`
+- **Count failures:** `./build/all_tests 2>&1 | grep -c FAILED`
+- **Module-level tests:** `nim c --mm:arc --threads:on -d:release -r nim_eavt/test_eavt.nim` (replace module as needed)
+- **Build server + REPL:** `nimble dist` → `build/eavt-sql-server`, `build/eavt-sql-cli`
+- **Python benchmarks:** `uv run python tests/bench.py` (requires msgpack)
+- **Python deps:** `uv sync --group dev`
+
+### Testing Workflow
+
+Always verify compilation BEFORE checking test results. A missing binary
+or compile error will produce misleading output from `grep`.
+
+```bash
+# 1. Compile + run full suite, see end of output (includes compile errors + test summary)
+nimble test 2>&1 | tail -20
+
+# 2. If it compiled and ran, check specific results:
+./build/all_tests 2>&1 | grep FAILED          # which tests failed
+./build/all_tests 2>&1 | grep -c FAILED       # how many
+
+# 3. For a single module (compiles + runs, shows full output):
+nim c --mm:arc --threads:on -d:release -r nim_eavt/test_eavt.nim 2>&1 | tail -40
+```
+
+**Never:** `nimble test 2>&1 | grep "\[OK\]" | wc -l` without first seeing compiler
+output. This hides compile errors (0 OK = could be 0 tests compiled) and forces
+unnecessary recompilation.
 
 ### Prerequisites
 
-- **Nim ≥ 2.0.14** — all Nim code compiles via `nimble` / `nim c` with `--mm:arc --threads:on`.
-- **Rust** (stable, with cargo)
-- **OpenSSL libcrypto** (`libcrypto.so`, usually via `libssl-dev` / `openssl-libs`)
-  — used by the S3 backend for SHA-256 / HMAC-SHA256 in SigV4 signing.
-  Linked with `-lcrypto`. No AWS SDK is linked; the rest of the SigV4 protocol is
-  hand-rolled over `std/httpclient`.
-- **zstd** — linked via `-lzstd`.
-
-### PyO3 Binding Workflow
-
-The PyO3 crates are installed as editable packages via `maturin develop`.
-After changing Rust code that affects the Python bindings, rebuild with `./build_py.sh`.
+- **Nim ≥ 2.0.14** — with `--mm:arc --threads:on` for engine modules, `--mm:orc --threads:on` for server (thread-safe ref counting)
 
 ## Project Structure
 
 ```
-spier-value/                       # Core Value type + query codecs
-  lib.rs                           # Value, ValueType, tag constants
-  query_codec.rs                   # encode_values / decode_values / decode_rows
-spier-query-ir/                    # Program IR + range-op constants
-  opcodes.rs                       # Program enum (Scheme, SelectScheme), ProgramHandle, SelectSchemeMeta
-  spec_kind.rs                     # SpecKind
-spier-scheme/                      # Scheme IR: AST + parser + printer + evaluator (zero deps)
-spier-sql-parse/src/               # SQL parser library + SqlParseEngine trait + AST
-spier-datalog/src/                 # DatalogEngine trait + DatalogIR + resolve_ir
-  ast.rs, pattern.rs, resolve.rs, stats.rs
-spier-planner/src/                 # PlannerEngine trait + QueryPlanSt
-spier-compiler/src/                # CompilerEngine trait + scheme_compile (UPSERT→Scheme)
-spier-sql-frontend/src/            # SqlFrontendEngine trait
-spier-eavt-query/src/              # Rust query engine (deprecated — Nim engine replaces it)
-  engine/                          # types, scanner, opcodes, query_engine_inner, scheme
-  lib.rs                           # QueryState::open(config) -> impl QueryEngine
-spier-sql-parse-py/                # PyO3 bindings for spier-sql-parse
-spier-eavt-query-py/               # PyO3 bindings (wrapper layer)
-eavt-cli/src/                      # REPL client (gRPC binary: eavt-repl)
-eavt-server/                       # gRPC server (tonic, binary: eavt-server)
-src/eavt_sql/                      # Python package (nimpy bindings)
-tests/                             # Python tests (flat)
-
-nim_blobstore/                     # Pure-Nim blobstore backends
-  blobstore.nim                    # BlobStore trait (ref object + virtual methods)
-  common.nim                       # ByteArr16, compress/decompress
-  memory/backend.nim               # In-memory HashMap backend
-  file/backend.nim                 # Directory backend: hex-sharded blobs, zstd compression,
-                                   # read-only guard
-  s3/backend.nim                   # S3: SigV4 signing, ListObjectsV2, local journal
-  journal/backend.nim              # Sequential append-only file journal
-nim_memtable/                      # Persistent treap (COW) per CF
-  backend.nim                      # MemTable, TreapNode, insert, scanAll, collectKeys
-  treap_cursor.nim                 # Lazy in-order cursor (stack-based)
-nim_kvstore/                       # KVStore + PageStore + EAVT + Query engine
-  backend.nim                      # PageStoreInner, B-tree, PageCache (zstd-compressed LRU)
-  pages.nim                        # Leaf page serialization (prefix-compressed, varint)
-  page_cursor.nim                  # Lazy forward cursor over B-tree leaves
-  kvstore.nim                      # KVStore: put/get/scan/flush/GC, MergedCursor
-  eavt.nim                         # EAVT engine (save, retract, bootstrap, lookup)
-  keys.nim                         # EAVT key format helpers
-  resolver.nim                     # Schema cache + entity allocation
-  scheme.nim                       # Scheme IR evaluator (SExpr parser + stack-based VM)
-  query/                           # Native Nim query engine
-    engine.nim                     # QueryStore, QuerySession, StreamingSession
-    hostfns.nim                    # 22+ SchemeHostFns + leapfrog triejoin
-    scanner.nim                    # V2Scanner with leapfrog triejoin, NimCursor
-    types.nim                      # Value comparison, interval merging
-    codec.nim                      # Wire value codec (tagged big-endian)
-  query/pynim_query.nim            # nimpy bridge for Python
+eavt_server_nim/           # UDS server (msgpack, thread-per-connection)
+eavt-repl-nim/              # REPL client (linenoise, tab-separated output)
+py_eavt_client/             # Python UDS client (msgpack)
+nim_sql_parse/              # D.1 — SQL lexer + recursive-descent parser
+nim_datalog/                # D.2 — SQL AST → Datalog IR (EAVT patterns)
+nim_planner/                # D.3 — Cost-based join ordering (EAVT/AEVT/AVET/VAET)
+nim_compiler/               # D.4 — Datalog IR → Scheme S-expressions
+nim_sql_frontend/           # Orchestration: parse → compile → SchemeProgram
+nim_scheme/                 # S-expr parser + stack VM with yield/resume
+nim_query/                  # Scanner, hostfns (22 ops), leapfrog triejoin
+nim_eavt/                   # EAVT engine: save/retract + resolver + constraints
+nim_kvstore/                # KVStore + MergedCursor
+nim_memtable/               # Per-CF COW treap (ARC-managed)
+nim_page_store/             # COW B-tree, zstd-compressed pages, LRU cache
+nim_blobstore/              # memory / file / S3 backends + journal
+build/                      # Compiled binaries (gitignored)
+tests/                      # Python benchmarks
 ```
 
 ## Architecture
 
-### Storage Backends
+### Compiler Pipeline (Pure Nim)
 
-All 4 blobstore backends (Memory, File, S3, Journal) and the MemTable
-are implemented in **pure Nim** using native Nim types (`ref object` +
-virtual methods for BlobStore; `ref object` + COW for MemTable).
-There is no C-ABI vtable — backends are selected at construction time
-via `newKVStore(config)`.
-
-| Backend | Directory               | Storage                                                | Use Case            |
-|---------|-------------------------|--------------------------------------------------------|---------------------|
-| Memory  | `nim_blobstore/memory/` | In-memory `HashMap`                                    | `:memory:` mode     |
-| File    | `nim_blobstore/file/`   | Directory with zstd-compressed blobs (hex-sharded)     | Persistent local    |
-| S3      | `nim_blobstore/s3/`     | S3-compatible object store via hand-rolled SigV4       | Cloud/distributed   |
-| Journal | `nim_blobstore/journal/`| Sequential append-only file journal                    | WAL / crash recovery |
+```
+SQL text
+  → nim_sql_parse    (lexer + parser → AST)
+  → nim_datalog      (AST → Datalog IR)
+  → nim_planner      (join ordering + index selection)
+  → nim_compiler     (Datalog IR → Scheme S-expressions)
+  → nim_scheme       (stack VM with yield/resume)
+  → nim_query        (scanner, hostfns, leapfrog triejoin)
+  → nim_eavt         (save/retract + resolver)
+  → nim_kvstore      (MemTable + PageStore + MergedCursor)
+```
 
 ### Storage Layers
 
 ```
 BlobStore (Memory / File / S3)
   → PageStore (COW B-tree per CF, zstd-compressed blobs, LRU page cache)
-    → KVStore (single MemTable instance + PageStore)
-      │  auto-flush by threshold, journal-based crash recovery
-      → EavtEngine (EAVT: save/retract + resolver + eager constraints)
-        → Query Engine (Scheme IR evaluation)
-          ← Rust: SQL parse → datalog IR → plan → Scheme codegen
+    → KVStore (MemTable + PageStore + journal)
+      → EavtEngine (save/retract + bootstrap + resolver)
+        → Query Engine (Scheme IR → scanner → streaming results)
 ```
+
+### Server Protocol
+
+- **Transport:** Unix Domain Socket (`/run/user/$UID/eavt/eavt.sock`)
+- **Framing:** 4 bytes big-endian length prefix + MessagePack payload
+- **Streaming:** Responses chunked with `{"rows": [...], "more": bool}`
+- **Types preserved:** int64, float64, bool, string, bytes via msgpack
+
+### Key Encoding
+
+- **All int64 values sign-flipped** (XOR with `1<<63`) for lexicographic ordering
+- **EID, aid, value** in keys: all use `encodeInt` / `decodeInt64` (sign-flip)
+- **Suffix** (t + retracted): raw cast, no sign-flip (loses 1 bit to retracted flag)
+- **Strings:** 8+1 block encoding (`encodeVariable` / `decodeVariableStr`)
+- **Bytes/Blob:** 4-byte length prefix + raw bytes
 
 ### MemTable (ARC-driven COW)
 
 The persistent treap uses `--mm:arc`, so node lifetime is governed by
-**reference counting**. A `TreapNode` stays alive as long as ANY reference
-holds it. `insert` does path-copying — old versions are shared, not mutated.
-
-No snapshot registry. Cursors hold a `TreapNode` ref directly. When the
-last ref drops (cursor consumed, KVStore closed), ARC frees the treap.
+reference counting. `insert` does path-copying — old versions are shared, not mutated.
+Cursors hold a `TreapNode` ref directly. No snapshot registry.
 
 ### Flush
 
 1. `kv.flushRoots = kv.mt.hnd.live` — capture current COW roots
 2. `kv.mt.clear()` — nil live roots
 3. Scan captured roots → merge with PageStore → commit
-4. ARC releases old nodes when flushRoots goes out of scope
 
-### No Transaction Mechanism
+### Bootstrap
 
-Single-writer serial: `resolver: Mutex<Resolver>` locks per-datom, not per-statement.
-No `begin_tx`/`commit_tx`/`rollback_tx`. Multi-row UPDATE/DELETE is not atomic.
-
-### Scheme IR Execution
-
-All SQL compiles to Scheme S-expressions. The Rust compiler produces Scheme IR;
-the Nim evaluator (`nim_kvstore/scheme.nim`) executes it with yield/resume
-semantics. `SessionHandle` wraps a resumable evaluator; callers pull batches
-via `session_next_batch(handle, max_rows)`.
-
-### Streaming Scan (MergedCursor)
-
-Lazy heap-merge of 3 sources — no mass materialization:
-- `PageStoreCursor` — iterates B-tree leaves one page at a time
-- `TreapCursor` — stack-based in-order over treap, 1 key per `next()`
-- `MergedCursor` — heap merge of N cursors, O(k) memory (k = number of sources)
-
-### Key Design Points
-
-- **4 column families**: CFs 0-3 (eavt, aevt, avet, vaet indexes)
-- **Page format**: `[num_keys u16][varint plen][varint slen][suffix]...`
-- **Page cache**: LRU storing zstd-compressed bytes (~3x capacity vs raw)
-- **Config**: `flush_threshold` (64MB), `page_cache_size` (64MB), `gc_max_age_secs` (43200)
-- **Recovery**: on open, replay journal into MemTable
-- **Write path**: `put()` → journal append → MemTable → auto-flush when >= threshold
+On first startup, `bootstrapSystemAttrs()` writes 26 system attributes (db.ident,
+db.cardinality, db.valueType, etc.) with full metadata to the MemTable.
+Re-bootstrap is prevented by scanning for existing `db.ident` datom (aid=1).
 
 ## Conventions
 
-- Python >= 3.13
-- Attribute names: mandatory dot notation (e.g. `company.name`)
-- Test files: `test_*.py` in `tests/`, `test_*.nim` per Nim module
-- Binary formats: big-endian (`>""`)
-- **Never remove or weaken failing tests to get "all green".**
+- Nim module names: snake_case (`nim_sql_parse`, `nim_blobstore`)
+- Config: `Table[string, string]` (no CStringArr, no C-ABI)
+- Journal: `ref object` with direct methods (no vtable, no cdecl)
+- Binary output: `build/` directory (gitignored)
+- Attribute names: mandatory dot notation (`company.name`)
+- Binary formats: big-endian

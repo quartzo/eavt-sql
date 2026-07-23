@@ -22,102 +22,12 @@ type
 # ═══════════════════════════════════════════════════════════════════════════════
 
 proc encodeSuffix*(t: int64; retracted: bool): uint64 =
-  # Suffix is t with the lowest bit encoding retraction status.
-  # bits 63-1: t >> 1, bit 0: retracted
   result = (cast[uint64](t) shl 1) or (if retracted: 1 else: 0)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # EAVT key: [eid 8B BE][attr 4B BE][value_encoded][suffix 8B BE]
 # ═══════════════════════════════════════════════════════════════════════════════
 
-proc buildEavtKey*(eid: int64; attr: uint32; valueEncoded: openArray[byte];
-                    t: int64; retracted: bool): seq[byte] =
-  let sf = encodeSuffix(t, retracted)
-  let e = cast[uint64](eid)
-  result = newSeqOfCap[byte](8 + 4 + valueEncoded.len + 8)
-  result.add byte(e shr 56); result.add byte((e shr 48) and 0xFF)
-  result.add byte((e shr 40) and 0xFF); result.add byte((e shr 32) and 0xFF)
-  result.add byte(e shr 24); result.add byte((e shr 16) and 0xFF)
-  result.add byte((e shr 8) and 0xFF); result.add byte(e and 0xFF)
-  result.add byte(attr shr 24); result.add byte((attr shr 16) and 0xFF)
-  result.add byte((attr shr 8) and 0xFF); result.add byte(attr and 0xFF)
-  result.add valueEncoded
-  result.add byte(sf shr 56); result.add byte((sf shr 48) and 0xFF)
-  result.add byte((sf shr 40) and 0xFF); result.add byte((sf shr 32) and 0xFF)
-  result.add byte(sf shr 24); result.add byte((sf shr 16) and 0xFF)
-  result.add byte((sf shr 8) and 0xFF); result.add byte(sf and 0xFF)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# AEVT key: [attr 4B BE][eid 8B BE][value_encoded][suffix 8B BE]
-# ═══════════════════════════════════════════════════════════════════════════════
-
-proc buildAevtKey*(attr: uint32; eid: int64; valueEncoded: openArray[byte];
-                    t: int64; retracted: bool): seq[byte] =
-  let sf = encodeSuffix(t, retracted)
-  result = newSeqOfCap[byte](4 + 8 + valueEncoded.len + 8)
-  result.add byte(attr shr 24); result.add byte((attr shr 16) and 0xFF)
-  result.add byte((attr shr 8) and 0xFF); result.add byte(attr and 0xFF)
-  result.add byte(eid shr 56); result.add byte((eid shr 48) and 0xFF)
-  result.add byte((eid shr 40) and 0xFF); result.add byte((eid shr 32) and 0xFF)
-  result.add byte((eid shr 24) and 0xFF); result.add byte((eid shr 16) and 0xFF)
-  result.add byte((eid shr 8) and 0xFF); result.add byte(eid and 0xFF)
-  result.add valueEncoded
-  result.add byte(sf shr 56); result.add byte((sf shr 48) and 0xFF)
-  result.add byte((sf shr 40) and 0xFF); result.add byte((sf shr 32) and 0xFF)
-  result.add byte(sf shr 24); result.add byte((sf shr 16) and 0xFF)
-  result.add byte((sf shr 8) and 0xFF); result.add byte(sf and 0xFF)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# AVET key: [attr 4B BE][value_encoded][eid 8B BE][suffix 8B BE]
-# ═══════════════════════════════════════════════════════════════════════════════
-
-proc buildAvetKey*(attr: uint32; valueEncoded: openArray[byte]; eid: int64;
-                    t: int64; retracted: bool): seq[byte] =
-  let sf = encodeSuffix(t, retracted)
-  result = newSeqOfCap[byte](4 + valueEncoded.len + 8 + 8)
-  result.add byte(attr shr 24); result.add byte((attr shr 16) and 0xFF)
-  result.add byte((attr shr 8) and 0xFF); result.add byte(attr and 0xFF)
-  result.add valueEncoded
-  result.add byte(eid shr 56); result.add byte((eid shr 48) and 0xFF)
-  result.add byte((eid shr 40) and 0xFF); result.add byte((eid shr 32) and 0xFF)
-  result.add byte((eid shr 24) and 0xFF); result.add byte((eid shr 16) and 0xFF)
-  result.add byte((eid shr 8) and 0xFF); result.add byte(eid and 0xFF)
-  result.add byte(sf shr 56); result.add byte((sf shr 48) and 0xFF)
-  result.add byte((sf shr 40) and 0xFF); result.add byte((sf shr 32) and 0xFF)
-  result.add byte(sf shr 24); result.add byte((sf shr 16) and 0xFF)
-  result.add byte((sf shr 8) and 0xFF); result.add byte(sf and 0xFF)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# VAET key: [value_encoded][attr 4B BE][eid 8B BE][suffix 8B BE]
-# ═══════════════════════════════════════════════════════════════════════════════
-
-proc buildVaetKey*(valueEncoded: openArray[byte]; attr: uint32; eid: int64;
-                    t: int64; retracted: bool): seq[byte] =
-  let sf = encodeSuffix(t, retracted)
-  result = newSeqOfCap[byte](valueEncoded.len + 4 + 8 + 8)
-  result.add valueEncoded
-  result.add byte(attr shr 24); result.add byte((attr shr 16) and 0xFF)
-  result.add byte((attr shr 8) and 0xFF); result.add byte(attr and 0xFF)
-  result.add byte(eid shr 56); result.add byte((eid shr 48) and 0xFF)
-  result.add byte((eid shr 40) and 0xFF); result.add byte((eid shr 32) and 0xFF)
-  result.add byte((eid shr 24) and 0xFF); result.add byte((eid shr 16) and 0xFF)
-  result.add byte((eid shr 8) and 0xFF); result.add byte(eid and 0xFF)
-  result.add byte(sf shr 56); result.add byte((sf shr 48) and 0xFF)
-  result.add byte((sf shr 40) and 0xFF); result.add byte((sf shr 32) and 0xFF)
-  result.add byte(sf shr 24); result.add byte((sf shr 16) and 0xFF)
-  result.add byte((sf shr 8) and 0xFF); result.add byte(sf and 0xFF)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Value encoding
-# ═══════════════════════════════════════════════════════════════════════════════
-
-proc encodeEid*(eid: int64): seq[byte] =
-  result = newSeqOfCap[byte](8)
-  let e = cast[uint64](eid)
-  result.add byte(e shr 56); result.add byte((e shr 48) and 0xFF)
-  result.add byte((e shr 40) and 0xFF); result.add byte((e shr 32) and 0xFF)
-  result.add byte(e shr 24); result.add byte((e shr 16) and 0xFF)
-  result.add byte((e shr 8) and 0xFF); result.add byte(e and 0xFF)
 
 proc encodeInt*(n: int64): seq[byte] =
   # Flip sign bit for ordering
@@ -127,6 +37,9 @@ proc encodeInt*(n: int64): seq[byte] =
   result.add byte((x shr 40) and 0xFF); result.add byte((x shr 32) and 0xFF)
   result.add byte(x shr 24); result.add byte((x shr 16) and 0xFF)
   result.add byte((x shr 8) and 0xFF); result.add byte(x and 0xFF)
+
+proc encodeEid*(eid: int64): seq[byte] =
+  encodeInt(eid)
 
 proc encodeFloat*(f: float64): seq[byte] =
   var x = cast[uint64](f)
@@ -195,6 +108,77 @@ type
   EavtEntry* = object
     cf*: uint8
     key*: seq[byte]
+proc buildEavtKey*(eid: int64; attr: uint32; valueEncoded: openArray[byte];
+                    t: int64; retracted: bool): seq[byte] =
+  let sf = encodeSuffix(t, retracted)
+  let eBytes = encodeEid(eid)
+  result = newSeqOfCap[byte](8 + 4 + valueEncoded.len + 8)
+  result.add eBytes
+  result.add byte(attr shr 24); result.add byte((attr shr 16) and 0xFF)
+  result.add byte((attr shr 8) and 0xFF); result.add byte(attr and 0xFF)
+  result.add valueEncoded
+  result.add byte(sf shr 56); result.add byte((sf shr 48) and 0xFF)
+  result.add byte((sf shr 40) and 0xFF); result.add byte((sf shr 32) and 0xFF)
+  result.add byte(sf shr 24); result.add byte((sf shr 16) and 0xFF)
+  result.add byte((sf shr 8) and 0xFF); result.add byte(sf and 0xFF)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AEVT key: [attr 4B BE][eid 8B BE][value_encoded][suffix 8B BE]
+# ═══════════════════════════════════════════════════════════════════════════════
+
+proc buildAevtKey*(attr: uint32; eid: int64; valueEncoded: openArray[byte];
+                    t: int64; retracted: bool): seq[byte] =
+  let sf = encodeSuffix(t, retracted)
+  let eBytes = encodeEid(eid)
+  result = newSeqOfCap[byte](4 + 8 + valueEncoded.len + 8)
+  result.add byte(attr shr 24); result.add byte((attr shr 16) and 0xFF)
+  result.add byte((attr shr 8) and 0xFF); result.add byte(attr and 0xFF)
+  result.add eBytes
+  result.add valueEncoded
+  result.add byte(sf shr 56); result.add byte((sf shr 48) and 0xFF)
+  result.add byte((sf shr 40) and 0xFF); result.add byte((sf shr 32) and 0xFF)
+  result.add byte(sf shr 24); result.add byte((sf shr 16) and 0xFF)
+  result.add byte((sf shr 8) and 0xFF); result.add byte(sf and 0xFF)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AVET key: [attr 4B BE][value_encoded][eid 8B BE][suffix 8B BE]
+# ═══════════════════════════════════════════════════════════════════════════════
+
+proc buildAvetKey*(attr: uint32; valueEncoded: openArray[byte]; eid: int64;
+                    t: int64; retracted: bool): seq[byte] =
+  let sf = encodeSuffix(t, retracted)
+  let eBytes = encodeEid(eid)
+  result = newSeqOfCap[byte](4 + valueEncoded.len + 8 + 8)
+  result.add byte(attr shr 24); result.add byte((attr shr 16) and 0xFF)
+  result.add byte((attr shr 8) and 0xFF); result.add byte(attr and 0xFF)
+  result.add valueEncoded
+  result.add eBytes
+  result.add byte(sf shr 56); result.add byte((sf shr 48) and 0xFF)
+  result.add byte((sf shr 40) and 0xFF); result.add byte((sf shr 32) and 0xFF)
+  result.add byte(sf shr 24); result.add byte((sf shr 16) and 0xFF)
+  result.add byte((sf shr 8) and 0xFF); result.add byte(sf and 0xFF)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VAET key: [value_encoded][attr 4B BE][eid 8B BE][suffix 8B BE]
+# ═══════════════════════════════════════════════════════════════════════════════
+
+proc buildVaetKey*(valueEncoded: openArray[byte]; attr: uint32; eid: int64;
+                    t: int64; retracted: bool): seq[byte] =
+  let sf = encodeSuffix(t, retracted)
+  let eBytes = encodeEid(eid)
+  result = newSeqOfCap[byte](valueEncoded.len + 4 + 8 + 8)
+  result.add valueEncoded
+  result.add byte(attr shr 24); result.add byte((attr shr 16) and 0xFF)
+  result.add byte((attr shr 8) and 0xFF); result.add byte(attr and 0xFF)
+  result.add eBytes
+  result.add byte(sf shr 56); result.add byte((sf shr 48) and 0xFF)
+  result.add byte((sf shr 40) and 0xFF); result.add byte((sf shr 32) and 0xFF)
+  result.add byte(sf shr 24); result.add byte((sf shr 16) and 0xFF)
+  result.add byte((sf shr 8) and 0xFF); result.add byte(sf and 0xFF)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Value encoding
+# ═══════════════════════════════════════════════════════════════════════════════
 
 proc buildEavtEntries*(eid: int64; attr: uint32; encodedValue: seq[byte];
                         t: int64; retracted: bool; mode: EncodeMode;
@@ -229,15 +213,20 @@ proc buildEavtEntries*(eid: int64; attr: uint32; encodedValue: seq[byte];
 # Decoding (used by query engine scanner)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-proc decodeSuffix*(encoded: uint64): (uint64, bool) =
+proc decodeSuffix*(encoded: uint64): (int64, bool) =
   ## Returns (t, retracted) from an encoded suffix.
-  let t = encoded shr 1
+  let raw = encoded shr 1
+  let t = cast[int64](raw)
   let retracted = (encoded and 1) != 0
   (t, retracted)
 
 proc decodeInt64*(raw: uint64): int64 =
   ## Reverse of encodeInt — reverse sign-flip.
   cast[int64](raw xor (1'u64 shl 63))
+
+proc decodeEid*(raw: uint64): int64 =
+  ## Reverse of encodeEid — reverse sign-flip.
+  decodeInt64(raw)
 
 proc decodeFloat64*(raw: uint64): float64 =
   ## Reverse of encodeFloat — reverse sign-flip.
@@ -282,7 +271,7 @@ proc decodeStoredValue*(data: openArray[byte]; vt: uint32): SExpr =
   ## Decode a stored EAVT value given its db valueType.
   case vt:
   of DbTypeRef:
-    if data.len >= 8: SExpr(kind: sInt, ival: cast[int64](beUint64(data, 0)))
+    if data.len >= 8: SExpr(kind: sInt, ival: decodeInt64(beUint64(data, 0)))
     else: SExpr(kind: sInt, ival: 0)
   of DbTypeBoolean:
     if data.len >= 8: SExpr(kind: sBool, bval: decodeInt64(beUint64(data, 0)) != 0)
