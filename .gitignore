@@ -51,3 +51,5 @@ nim-query/query/engine
 nim-query/query/tests
 nim-eavt/tests
 nim-scheme/tests
+nim-sql-parse/parser
+nim-sql-parse/tests
