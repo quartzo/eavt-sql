@@ -18,6 +18,10 @@ import scanner
 import abi
 import hostfns
 import engine
+import parser as sql_parser
+import frontend
+import stats
+import resolver
 
 import memory/all
 import nim_memtable/all
@@ -922,7 +926,7 @@ suite "engine: StreamingSession → nextBatch":
     let eid = q.allocateInPartition(4)
     q.saveWithT(eid, "user.name", SExpr(kind: sStr, sval: "Alice"), 1, 0)
 
-    let program = parse("(begin " &
+    let program = scheme.parse("(begin " &
                          "  (let* ((s0 (scanner-open \"EAVT\" #f))) " &
                          "    (scanner-iterate s0 (e) " &
                          "      (result-row e))))")
@@ -947,7 +951,7 @@ suite "engine: DML with batch execute":
       "  (save eid \"user.name\" \"UPSERT User\") " &
       "  (result eid)))"
 
-    let program = SchemeProgram(body: parse(progStr))
+    let program = SchemeProgram(body: scheme.parse(progStr))
     let session = newQuerySession(q, program, @[], 0, none[int64]())
     let result = executeProgram(session)
 
@@ -972,7 +976,7 @@ suite "engine: DML with batch execute":
 
     let progStr = "(begin (retract " & $eid & " \"user.name\" \"Before\") " &
       "(result (lookup-value " & $eid & " \"user.name\")))"
-    let program = SchemeProgram(body: parse(progStr))
+    let program = SchemeProgram(body: scheme.parse(progStr))
     let session = newQuerySession(q, program, @[], 2, none[int64]())
     let result = executeProgram(session)
 
@@ -991,7 +995,7 @@ suite "engine: partitions":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: parse("(result (declare-partition \"my.part\"))"))
+    let prog = SchemeProgram(body: scheme.parse("(result (declare-partition \"my.part\"))"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.kind == sList
@@ -1003,11 +1007,11 @@ suite "engine: partitions":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: parse("(declare-partition \"my.part\")"))
+    let prog = SchemeProgram(body: scheme.parse("(declare-partition \"my.part\")"))
     var session = newQuerySession(q, prog, @[], 0, none[int64]())
     discard executeProgram(session)
 
-    let prog2 = SchemeProgram(body: parse("(result (declare-partition \"my.part\"))"))
+    let prog2 = SchemeProgram(body: scheme.parse("(result (declare-partition \"my.part\"))"))
     session = newQuerySession(q, prog2, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].ival > 0
@@ -1017,7 +1021,7 @@ suite "engine: partitions":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: parse(
+    let prog = SchemeProgram(body: scheme.parse(
       "(begin " &
       "  (declare-partition \"custom\") " &
       "  (let* ((pid (declare-partition \"custom\"))) " &
@@ -1037,7 +1041,7 @@ suite "engine: alloc-entity / tx-entity":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: parse("(result (alloc-entity))"))
+    let prog = SchemeProgram(body: scheme.parse("(result (alloc-entity))"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].ival > 0
@@ -1047,7 +1051,7 @@ suite "engine: alloc-entity / tx-entity":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: parse(
+    let prog = SchemeProgram(body: scheme.parse(
       "(result (alloc-entity) (alloc-entity) (alloc-entity))"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
@@ -1063,7 +1067,7 @@ suite "engine: alloc-entity / tx-entity":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: parse("(result (tx-entity))"))
+    let prog = SchemeProgram(body: scheme.parse("(result (tx-entity))"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].ival == 0  # tx is 0
@@ -1073,7 +1077,7 @@ suite "engine: alloc-entity / tx-entity":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: parse("(result (alloc-entity 4))"))
+    let prog = SchemeProgram(body: scheme.parse("(result (alloc-entity 4))"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].ival > 0
@@ -1088,7 +1092,7 @@ suite "engine: combined roundtrip":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: parse(
+    let prog = SchemeProgram(body: scheme.parse(
       "(begin " &
       "  (declare-attr \"user.name\" \":db.type/string\" #f #t) " &
       "  (declare-attr \"user.hq\" \":db.type/string\" #f #f) " &
@@ -1130,7 +1134,7 @@ suite "engine: combined roundtrip":
 
     q.declareAttrFromSql("user.name", ":db.type/string", false, false, 1)
 
-    var prog = SchemeProgram(body: parse(
+    var prog = SchemeProgram(body: scheme.parse(
       "(begin (let* ((e (alloc-entity))) " &
       "  (save e \"user.name\" \"Zed\") " &
       "  (result e)))"))
@@ -1138,7 +1142,7 @@ suite "engine: combined roundtrip":
     let r1 = executeProgram(session)
     let eid = r1.items[1].ival
 
-    prog = SchemeProgram(body: parse(
+    prog = SchemeProgram(body: scheme.parse(
       "(result (lookup-value " & $eid & " \"user.name\"))"))
     session = newQuerySession(q, prog, @[], 2, some(0'i64))
     let r2 = executeProgram(session)
@@ -1154,7 +1158,7 @@ suite "engine: error paths":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: parse(
+    let prog = SchemeProgram(body: scheme.parse(
       "(let* ((e (alloc-entity))) (save e \"no.such.attr\" \"x\"))"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     expect EvalError:
@@ -1167,7 +1171,7 @@ suite "engine: error paths":
 
     q.declareAttrFromSql("tag.x", ":db.type/string", true, false, 1)
 
-    let prog = SchemeProgram(body: parse(
+    let prog = SchemeProgram(body: scheme.parse(
       "(lookup-entity \"tag.x\" \"anything\")"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     expect EvalError:
@@ -1177,7 +1181,7 @@ suite "engine: error paths":
     # Unterminated S-expression causes ParseError
     var caught = false
     try:
-      discard parse("(result 'unterminated")
+      discard scheme.parse("(result 'unterminated")
     except CatchableError:
       caught = true
     check caught
@@ -1187,7 +1191,7 @@ suite "engine: error paths":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: parse("(no-such-fn 1 2)"))
+    let prog = SchemeProgram(body: scheme.parse("(no-such-fn 1 2)"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     expect EvalError:
       discard executeProgram(session)
@@ -1197,7 +1201,7 @@ suite "engine: error paths":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: parse("(result)"))
+    let prog = SchemeProgram(body: scheme.parse("(result)"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.kind == sList
@@ -1491,7 +1495,7 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: parse(
+    let prog = SchemeProgram(body: scheme.parse(
       "(let* ((s (scanner-open \"EAVT\"))) (result (scanner-prefix s)))"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
@@ -1504,7 +1508,7 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: parse(
+    let prog = SchemeProgram(body: scheme.parse(
       "(let* ((s (scanner-open \"AEVT\"))) (result (scanner-prefix s)))"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
@@ -1514,7 +1518,7 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: parse(
+    let prog = SchemeProgram(body: scheme.parse(
       "(let* ((s (scanner-open \"AVET\"))) (result (scanner-prefix s)))"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
@@ -1524,7 +1528,7 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: parse(
+    let prog = SchemeProgram(body: scheme.parse(
       "(let* ((s (scanner-open \"VAET\"))) (result (scanner-prefix s)))"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
@@ -1534,7 +1538,7 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: parse(
+    let prog = SchemeProgram(body: scheme.parse(
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-push s 1000) " &
       "(result (scanner-prefix s)))"))
@@ -1547,7 +1551,7 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: parse(
+    let prog = SchemeProgram(body: scheme.parse(
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-push s 1000) " &
       "(scanner-push s 42) " &
@@ -1561,7 +1565,7 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: parse(
+    let prog = SchemeProgram(body: scheme.parse(
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-push s 1000) " &
       "(scanner-push s 42) " &
@@ -1576,7 +1580,7 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: parse(
+    let prog = SchemeProgram(body: scheme.parse(
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-pop s) " &
       "(result (scanner-prefix s)))"))
@@ -1588,7 +1592,7 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: parse(
+    let prog = SchemeProgram(body: scheme.parse(
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-push s 1000) " &
       "(scanner-pop s) " &
@@ -1601,7 +1605,7 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: parse(
+    let prog = SchemeProgram(body: scheme.parse(
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-push s 1000) " &
       "(scanner-push s 42) " &
@@ -1617,7 +1621,7 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: parse(
+    let prog = SchemeProgram(body: scheme.parse(
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(result (scanner-push s 1)))"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
@@ -1628,7 +1632,7 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: parse(
+    let prog = SchemeProgram(body: scheme.parse(
       "(let* ((s (scanner-open \"EAVT\" #t))) " &
       "(result (scanner-prefix s)))"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
@@ -1639,7 +1643,7 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: parse(
+    let prog = SchemeProgram(body: scheme.parse(
       "(begin " &
       "  (let* ((s0 (scanner-open \"EAVT\")) " &
       "         (s1 (scanner-open \"EAVT\"))) " &
@@ -1659,7 +1663,7 @@ suite "engine: scanner host fns":
     defer: kv.close()
     let q = newQueryStore(kv)
     let large = (1'i64 shl 62) - 1
-    let prog = SchemeProgram(body: parse(
+    let prog = SchemeProgram(body: scheme.parse(
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-push s " & $large & ") " &
       "(result (scanner-prefix s)))"))
@@ -1674,7 +1678,7 @@ suite "engine: scanner host fns":
 
 proc runSelect(q: QueryStore; progText: string; params: seq[SExpr] = @[];
                 maxRows: int = 500): seq[seq[SExpr]] =
-  let program = SchemeProgram(body: parse(progText))
+  let program = SchemeProgram(body: scheme.parse(progText))
   let proto = newQuerySession(q, program, params, 0, none[int64]())
   let sess = newStreamingSession(proto)
   while result.len < maxRows:
@@ -2140,3 +2144,110 @@ suite "engine: select-path (yield-mode)":
     let rows = runSelect(q, "(begin (not #t) (result-row 3))")
     check rows.len == 1
     check rows[0][0].ival == 3
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# runSql helper: full SQL → Scheme → execute pipeline
+# ═══════════════════════════════════════════════════════════════════════════════
+
+proc runSql(q: QueryStore; sql: string): seq[SExpr] =
+  let stmt = sql_parser.parse(sql)
+  let cstats = CompileStats(
+    lookupAttr: proc(name: string): uint32 =
+      q.eavt.lookupAttr(name).get(otherwise = 0),
+    estimateIndexSize: proc(index: string, bound: openArray[uint64]): float64 =
+      10_000_000.0,
+    partitionIdFor: proc(name: string): uint64 =
+      q.eavt.partitionIdFor(name).get(otherwise = 0),
+    isRefAttr: proc(name: string): bool =
+      let aid = q.eavt.lookupAttr(name).get(otherwise = 0)
+      if aid == 0: false
+      else: q.eavt.valueTypeFor(aid).get(otherwise = 0) == 21'u32,
+    isIndexedAttr: proc(name: string): bool = true,
+  )
+  let compiled = compileSql(stmt, cstats)
+  let tx = q.allocateTx()
+  if compiled.isSelect:
+    let proto = newQuerySession(q, compiled.program, @[], tx, none[int64]())
+    let sess = newStreamingSession(proto)
+    var rows: seq[seq[SExpr]]
+    while rows.len < 500:
+      let (batch, more) = sess.nextBatch(100)
+      rows.add batch
+      if not more: break
+    for row in rows:
+      result.add SExpr(kind: sList, items: row)
+  else:
+    let session = newQuerySession(q, compiled.program, @[], tx, none[int64]())
+    let r = executeProgram(session)
+    result.add r
+
+proc expectRows(q: QueryStore; sql: string): seq[SExpr] =
+  result = runSql(q, sql)
+
+const PART_TX = 3'u64
+const TX_PARTITION_BASE = PART_TX shl 44
+
+func extractT(txEid: int64): int64 =
+  txEid and ((1'i64 shl 44) - 1)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TX tests (ported from test_tx.py)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TX tests (ported from test_tx.py)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+suite "engine: TX entity (port of test_tx.py)":
+  test "upsert as TX returns eid":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE tx.user STRING ONE")
+    let rows = runSql(q, "UPSERT AS TX SET tx.user = 'bob'")
+    check rows.len >= 1
+    let r = rows[0]
+    check r.kind == sList
+    check r.items[0].symval == "result"
+    let txEid = r.items[1].ival
+    check txEid >= TX_PARTITION_BASE.int64
+    check extractT(txEid) > 1
+
+  test "separate tx UPSERTs give distinct eids":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE tx.user STRING ONE")
+    let rA = runSql(q, "UPSERT AS TX SET tx.user = 'alice'")
+    let rB = runSql(q, "UPSERT AS TX SET tx.user = 'bob'")
+    let eidA = rA[0].items[1].ival
+    let eidB = rB[0].items[1].ival
+    check eidA != eidB
+    check extractT(eidB) > extractT(eidA)
+
+  test "ATTRIBUTE compiles and executes":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let rows = runSql(q, "ATTRIBUTE tx.user STRING ONE")
+    check rows.len >= 1
+    let r = rows[0]
+    check r.kind == sList
+    check r.items[0].symval == "result"
+    check r.items[1].sval == "tx.user"
+    check q.eavt.isDeclared(q.eavt.lookupAttr("tx.user").get)
+
+  test "upsert multi-clause returns result":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE tx.user STRING ONE")
+    discard runSql(q, "ATTRIBUTE company.name STRING ONE")
+    let rows = runSql(q,
+      "UPSERT AS D1 SET company.name = 'ACME', AS TX SET tx.user = 'alice'")
+    check rows.len >= 1
+    let r = rows[0]
+    check r.kind == sList
+    check r.items[0].symval == "result"
+    check r.items.len >= 2

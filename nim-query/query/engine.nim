@@ -119,7 +119,8 @@ method declarePartition(q: QueryStore; name: string; t: int64): uint64 =
 method allocateInPartition(q: QueryStore; partitionId: uint64): int64 =
   q.eavt.allocateInPartition(partitionId)
 
-method allocateTx(q: QueryStore): int64 = 0  # TODO
+method allocateTx(q: QueryStore): int64 =
+  q.eavt.allocateTAndWriteTx()
 
 method valueTypeFor(q: QueryStore; aid: uint32): Option[uint32] =
   q.eavt.valueTypeFor(aid)
