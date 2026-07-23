@@ -454,12 +454,11 @@ proc seekPastValueAt(sc: V2Scanner) =
     if suffix == 0:
       sc.pos.cursor.invalidateCb()
     else:
-      let next = cast[array[8, byte]](suffix + 1)
-      for i in 0..7: target.add next[i]
+      let nextVal = suffix + 1
+      for i in countdown(7, 0): target.add byte(nextVal shr (i * 8))
       sc.pos.cursor.seekCb(target)
     return
 
-  # extract the raw value to compute next
   let ve = sc.valueEnd(k)
   let raw = k[vs..<ve]
 
@@ -468,11 +467,13 @@ proc seekPastValueAt(sc: V2Scanner) =
     if cur == uint32.high:
       sc.pos.cursor.invalidateCb()
     else:
-      let next = cast[array[4, byte]](cur + 1)
-      for i in 0..3: target.add next[i]
+      let nextVal = cur + 1
+      target.add byte(nextVal shr 24)
+      target.add byte((nextVal shr 16) and 0xFF)
+      target.add byte((nextVal shr 8) and 0xFF)
+      target.add byte(nextVal and 0xFF)
       sc.pos.cursor.seekCb(target)
   elif isVariableValue(sc.valueAttrType, k.len):
-    # bytes: increment last byte
     var inc = raw
     var carry = true
     var i = inc.len - 1
@@ -493,8 +494,8 @@ proc seekPastValueAt(sc: V2Scanner) =
     if cur == uint64.high:
       sc.pos.cursor.invalidateCb()
     else:
-      let next = cast[array[8, byte]](cur + 1)
-      for i in 0..7: target.add next[i]
+      let nextVal = cur + 1
+      for i in countdown(7, 0): target.add byte(nextVal shr (i * 8))
       sc.pos.cursor.seekCb(target)
 
 # ── leap_next_at ──

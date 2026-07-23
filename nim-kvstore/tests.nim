@@ -393,6 +393,7 @@ suite "kvstore: journal recovery":
 # MergedCursor unit tests
 # ═══════════════════════════════════════════════════════════════════════════════
 
+import keys
 import query/scanner  # NimCursor type
 
 proc mockNimCursor(keys: seq[seq[byte]]): NimCursor =
@@ -478,3 +479,41 @@ suite "merged_cursor":
     let mc = newMergedCursor(@[s1])
     mc.seek(@[byte(20)])
     check mc.peek().get == @[byte(20)]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# V2Scanner + MergedCursor integration
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# V2Scanner + MergedCursor (raw keys, no EAVT/QueryStore)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# V2Scanner + mock cursor: leapNextAt advances correctly
+# ═══════════════════════════════════════════════════════════════════════════════
+
+suite "v2scanner_leap":
+  test "leapNextAt advances through three values":
+    let eid = 1'i64; let aid = 100'u32
+    let ekeys = @[
+      buildEavtKey(eid, aid, encodeInt(1), 1, false),
+      buildEavtKey(eid, aid, encodeInt(2), 1, false),
+      buildEavtKey(eid, aid, encodeInt(3), 1, false),
+    ]
+
+    let sc = newV2Scanner("EAVT", @["e", "a", "v"], none[int64](), some(DbTypeLong))
+    sc.saveValue(SExpr(kind: sInt, ival: eid))
+    sc.saveValue(SExpr(kind: sInt, ival: aid.int64))
+    sc.setValueAttrType(some(DbTypeLong))
+    sc.setCursor(mockNimCursor(ekeys))
+    sc.advanceToActiveAt()
+
+    check sc.extractCurrent().get.ival == 1
+    sc.leapNextAt()
+    check sc.extractCurrent().get.ival == 2
+    sc.leapNextAt()
+    check sc.extractCurrent().get.ival == 3
+    sc.leapNextAt()
+    check sc.atEnd
