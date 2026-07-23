@@ -1,7 +1,7 @@
 import std/[math, tables, sets, sequtils, algorithm, options, strutils]
 import datalog_ast, pattern, planner_ast
 
-proc fromBoundValue(bv: BoundValue): PlanValue =
+proc fromBoundValue*(bv: BoundValue): PlanValue =
   case bv.kind
   of bvInt: PlanValue(kind: pvValue, pvInt: bv.ival)
   of bvFloat: PlanValue(kind: pvValue, pvFloat: bv.fval)
@@ -11,7 +11,7 @@ proc fromBoundValue(bv: BoundValue): PlanValue =
   of bvBool: PlanValue(kind: pvValue, pvInt: if bv.bval: 1 else: 0)
   else: nil
 
-proc convertRangeBounds(bounds: Table[string, seq[seq[(string, BoundValue)]]]): RangeBoundsMap =
+proc convertRangeBounds*(bounds: Table[string, seq[seq[(string, BoundValue)]]]): RangeBoundsMap =
   for varName, branches in bounds:
     var rustBranches: seq[seq[(string, PlanValue)]]
     for branch in branches:

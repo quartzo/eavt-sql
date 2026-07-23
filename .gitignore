@@ -58,3 +58,5 @@ nim-datalog/translate
 nim-datalog/tests
 nim-planner/planner
 nim-planner/tests
+nim-compiler/compiler
+nim-compiler/tests
