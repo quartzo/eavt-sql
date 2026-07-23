@@ -3,7 +3,7 @@
 ## Development Commands
 
 - **Nim tests:** `nimble test` (runs all ~286 unit tests)
-- **Query engine tests:** `(cd nim-kvstore && nimble query_test)`
+- **Query engine tests:** `(cd nim_kvstore && nimble query_test)`
 - **Rust tests:** `cargo test --release`
 - **Rust build:** `cargo build --workspace --release`
 - **Build PyO3 bindings:** `./build_py.sh` (all) or `./build_py.sh eavt` (one crate)
@@ -52,7 +52,7 @@ eavt-server/                       # gRPC server (tonic, binary: eavt-server)
 src/eavt_sql/                      # Python package (nimpy bindings)
 tests/                             # Python tests (flat)
 
-nim-blobstore/                     # Pure-Nim blobstore backends
+nim_blobstore/                     # Pure-Nim blobstore backends
   blobstore.nim                    # BlobStore trait (ref object + virtual methods)
   common.nim                       # ByteArr16, compress/decompress
   memory/backend.nim               # In-memory HashMap backend
@@ -63,7 +63,7 @@ nim-blobstore/                     # Pure-Nim blobstore backends
 nim_memtable/                      # Persistent treap (COW) per CF
   backend.nim                      # MemTable, TreapNode, insert, scanAll, collectKeys
   treap_cursor.nim                 # Lazy in-order cursor (stack-based)
-nim-kvstore/                       # KVStore + PageStore + EAVT + Query engine
+nim_kvstore/                       # KVStore + PageStore + EAVT + Query engine
   backend.nim                      # PageStoreInner, B-tree, PageCache (zstd-compressed LRU)
   pages.nim                        # Leaf page serialization (prefix-compressed, varint)
   page_cursor.nim                  # Lazy forward cursor over B-tree leaves
@@ -93,10 +93,10 @@ via `newKVStore(config)`.
 
 | Backend | Directory               | Storage                                                | Use Case            |
 |---------|-------------------------|--------------------------------------------------------|---------------------|
-| Memory  | `nim-blobstore/memory/` | In-memory `HashMap`                                    | `:memory:` mode     |
-| File    | `nim-blobstore/file/`   | Directory with zstd-compressed blobs (hex-sharded)     | Persistent local    |
-| S3      | `nim-blobstore/s3/`     | S3-compatible object store via hand-rolled SigV4       | Cloud/distributed   |
-| Journal | `nim-blobstore/journal/`| Sequential append-only file journal                    | WAL / crash recovery |
+| Memory  | `nim_blobstore/memory/` | In-memory `HashMap`                                    | `:memory:` mode     |
+| File    | `nim_blobstore/file/`   | Directory with zstd-compressed blobs (hex-sharded)     | Persistent local    |
+| S3      | `nim_blobstore/s3/`     | S3-compatible object store via hand-rolled SigV4       | Cloud/distributed   |
+| Journal | `nim_blobstore/journal/`| Sequential append-only file journal                    | WAL / crash recovery |
 
 ### Storage Layers
 
@@ -134,7 +134,7 @@ No `begin_tx`/`commit_tx`/`rollback_tx`. Multi-row UPDATE/DELETE is not atomic.
 ### Scheme IR Execution
 
 All SQL compiles to Scheme S-expressions. The Rust compiler produces Scheme IR;
-the Nim evaluator (`nim-kvstore/scheme.nim`) executes it with yield/resume
+the Nim evaluator (`nim_kvstore/scheme.nim`) executes it with yield/resume
 semantics. `SessionHandle` wraps a resumable evaluator; callers pull batches
 via `session_next_batch(handle, max_rows)`.
 
@@ -158,6 +158,6 @@ Lazy heap-merge of 3 sources — no mass materialization:
 
 - Python >= 3.13
 - Attribute names: mandatory dot notation (e.g. `company.name`)
-- Test files: `test_*.py` in `tests/`, `tests.nim` per Nim module
+- Test files: `test_*.py` in `tests/`, `test_*.nim` per Nim module
 - Binary formats: big-endian (`>""`)
 - **Never remove or weaken failing tests to get "all green".**

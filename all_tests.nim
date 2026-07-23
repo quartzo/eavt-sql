@@ -1,0 +1,28 @@
+## all_tests.nim — Centralized test runner.
+##
+## Imports every module's test file into a single binary, so the whole
+## suite compiles and runs in one pass instead of 14 separate nim c
+## invocations. Each module's local `nimble test` still works for
+## isolated debugging.
+##
+## Run:  nim c --mm:arc --threads:on -d:release -r all_tests.nim
+
+# Storage stack
+import nim_blobstore/memory/test_memory
+import nim_blobstore/file/test_file
+import nim_blobstore/journal/test_journal
+import nim_memtable/test_memtable
+import nim_page_store/test_page_store
+import nim_kvstore/test_kvstore
+import nim_eavt/test_eavt
+
+# Query engine
+import nim_scheme/test_scheme
+import nim_query/query/test_query
+
+# SQL pipeline
+import nim_sql_parse/test_sql_parse
+import nim_datalog/test_datalog
+import nim_planner/test_planner
+import nim_compiler/test_compiler
+import nim_sql_frontend/test_sql_frontend

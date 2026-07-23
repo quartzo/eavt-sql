@@ -80,7 +80,7 @@ for label, sql in cases:
         golden.append({"label": label, "sql": sql, "error": True, "message": str(e)})
         print(f"  ERR {label}: {sql} => {e}")
 
-output_path = Path(__file__).parent.parent / "nim-sql-parse" / "golden.json"
+output_path = Path(__file__).parent.parent / "nim_sql_parse" / "golden.json"
 with open(output_path, "w") as f:
     json.dump(golden, f, indent=2, ensure_ascii=False)
 print(f"\n{len(golden)} golden entries written to {output_path}")

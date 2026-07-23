@@ -4,7 +4,7 @@
 ## that via seek(). Uses stack-based in-order traversal.
 
 import std/options
-import backend  # TreapNode, Key, cmpKey
+import treap_backend  # TreapNode, Key, cmpKey
 
 type
   TreapCursor* = ref object

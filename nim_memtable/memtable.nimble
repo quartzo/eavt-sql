@@ -13,4 +13,4 @@ backend       = "c"
 
 task test, "Run unit tests":
   exec "nim c --mm:arc --threads:on -d:release " &
-       "-r tests.nim"
+       "-r test_memtable.nim"
