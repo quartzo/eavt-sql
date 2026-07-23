@@ -231,7 +231,7 @@ type EvalError* = object of CatchableError
 
 const SpecialForms = ["let*", "let", "when", "if", "begin", "set!",
                        "print", "assert", "and", "or", "not",
-                       "scanner-iterate"]
+                       "scanner-iterate", "ranges-create"]
 
 proc isSpecialForm(name: string): bool = name in SpecialForms
 
@@ -514,6 +514,28 @@ proc evalSpecialForm(name: string; args: SExpr; env: var Environment;
     for j in countdown(body.len - 1, 0):
       state.stack.add Frame(kind: fkEval, fexpr: body[j])
     return done(newVoid())
+  of "ranges-create":
+    # (ranges-create expr) → flat list of (op val) pairs with (branch) separators
+    let inner = if args.items.len >= 2: args.items[1] else: newList(@[])
+    let opMap = {"=": 0'i32, "!=": 1, ">": 2, ">=": 3, "<": 4, "<=": 5}.toTable
+    proc walk(sexpr: SExpr; resultList: var seq[SExpr]) =
+      case sexpr.kind:
+      of sList:
+        if sexpr.items.len == 0: return
+        let head = sexpr.items[0]
+        if head.kind == sSymbol and head.symval == "and":
+          for i in 1..<sexpr.items.len: walk(sexpr.items[i], resultList)
+        elif head.kind == sSymbol and head.symval == "or":
+          for i in 1..<sexpr.items.len:
+            resultList.add newList(@[newSymbol("branch")])
+            walk(sexpr.items[i], resultList)
+        elif head.kind == sSymbol and head.symval in opMap:
+          if sexpr.items.len >= 2:
+            resultList.add newList(@[newInt(opMap[head.symval]), sexpr.items[1]])
+      else: discard
+    var items: seq[SExpr] = @[]
+    walk(inner, items)
+    return done(newList(items))
   else:
     raise newException(EvalError, "unknown special form: " & name)
 

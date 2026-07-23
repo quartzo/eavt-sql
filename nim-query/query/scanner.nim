@@ -401,7 +401,9 @@ proc advanceToActiveAt*(sc: V2Scanner) =
       sc.pos.atEnd = true
       return
 
-    var foundKey: Option[seq[byte]] = none[seq[byte]]()
+    var bestKey: Option[seq[byte]] = none[seq[byte]]()
+    var bestT: uint64 = 0
+    var bestRetracted = false
     let groupEnd = firstKey.len - 8
     var curGroup = firstKey[0..<groupEnd]
 
@@ -413,7 +415,7 @@ proc advanceToActiveAt*(sc: V2Scanner) =
       let k = key.get
       let ge = k.len - 8
       if k[0..<ge] != curGroup:
-        if foundKey.isSome: break
+        if bestKey.isSome: break
         curGroup = k[0..<ge]
 
       let suffix = extractSuffix(k)
@@ -423,14 +425,15 @@ proc advanceToActiveAt*(sc: V2Scanner) =
         sc.pos.cursor.stepCb()
         continue
 
-      if sc.historyMode or not retracted:
-        foundKey = some(k)
+      if t >= bestT:
+        bestKey = some(k)
+        bestT = t
+        bestRetracted = retracted
 
-      if foundKey.isSome: break
-      sc.pos.cursor.skipGroupCb(ge)
+      sc.pos.cursor.stepCb()
 
-    if foundKey.isSome:
-      sc.pos.currentActiveKey = foundKey
+    if bestKey.isSome and not bestRetracted:
+      sc.pos.currentActiveKey = bestKey
       sc.pos.atEnd = false
       return
 

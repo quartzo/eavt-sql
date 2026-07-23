@@ -1667,3 +1667,230 @@ suite "engine: scanner host fns":
     let result = executeProgram(session)
     check result.items[1].bytesval.len == 8
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Engine: scanner-iterate (ported from test_scheme_iterate.py)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+proc runSelect(q: QueryStore; progText: string; params: seq[SExpr] = @[];
+                maxRows: int = 500): seq[seq[SExpr]] =
+  let program = SchemeProgram(body: parse(progText))
+  let proto = newQuerySession(q, program, params, 0, none[int64]())
+  let sess = newStreamingSession(proto)
+  while result.len < maxRows:
+    let (rows, more) = sess.nextBatch(100)
+    result.add rows
+    if not more: break
+
+suite "engine: scanner-iterate basic":
+  test "iterate emits all values for eid+aid":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    q.declareAttrFromSql("tag.x", ":db.type/long", true, false, 1)
+    let eid = q.allocateInPartition(4'u64)
+    q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: 1), 1, 0)
+    q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: 2), 1, 0)
+    q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: 3), 1, 0)
+    let aid = q.lookupAttr("tag.x").get
+
+    let rows = runSelect(q,
+      "(let* ((s (scanner-open \"EAVT\"))) " &
+      "(scanner-push s " & $eid & ") " &
+      "(scanner-push s " & $aid.int64 & ") " &
+      "(scanner-iterate s (v) (result-row v)))")
+    var vals = newSeq[int64]()
+    for row in rows:
+      if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
+    check vals == @[1'i64, 2, 3]
+
+  test "iterate single value":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    q.declareAttrFromSql("user.age", ":db.type/long", false, false, 1)
+    let eid = q.allocateInPartition(4'u64)
+    q.saveWithT(eid, "user.age", SExpr(kind: sInt, ival: 25), 1, 0)
+    let aid = q.lookupAttr("user.age").get
+
+    let rows = runSelect(q,
+      "(let* ((s (scanner-open \"EAVT\"))) " &
+      "(scanner-push s " & $eid & ") " &
+      "(scanner-push s " & $aid.int64 & ") " &
+      "(scanner-iterate s (v) (result-row v)))")
+    check rows.len == 1
+    check rows[0][0].ival == 25
+
+  test "iterate order is sorted":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    q.declareAttrFromSql("tag.x", ":db.type/long", true, false, 1)
+    let eid = q.allocateInPartition(4'u64)
+    q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: 3), 1, 0)
+    q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: 1), 1, 0)
+    q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: 2), 1, 0)
+    let aid = q.lookupAttr("tag.x").get
+
+    let rows = runSelect(q,
+      "(let* ((s (scanner-open \"EAVT\"))) " &
+      "(scanner-push s " & $eid & ") " &
+      "(scanner-push s " & $aid.int64 & ") " &
+      "(scanner-iterate s (v) (result-row v)))")
+    var vals = newSeq[int64]()
+    for row in rows:
+      if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
+    check vals == @[1'i64, 2, 3]
+
+  test "iterate excludes retracted":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    q.declareAttrFromSql("tag.x", ":db.type/long", true, false, 1)
+    let eid = q.allocateInPartition(4'u64)
+    q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: 1), 1, 0)
+    q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: 2), 1, 0)
+    q.retract(eid, "tag.x", SExpr(kind: sInt, ival: 1), 2, 0)
+    q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: 3), 3, 0)
+    let aid = q.lookupAttr("tag.x").get
+
+    let rows = runSelect(q,
+      "(let* ((s (scanner-open \"EAVT\"))) " &
+      "(scanner-push s " & $eid & ") " &
+      "(scanner-push s " & $aid.int64 & ") " &
+      "(scanner-iterate s (v) (result-row v)))")
+    var vals = newSeq[int64]()
+    for row in rows:
+      if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
+    check 1'i64 notin vals
+    check vals == @[2'i64, 3]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Engine: scanner-iterate :ranges
+# ═══════════════════════════════════════════════════════════════════════════════
+
+suite "engine: scanner-iterate :ranges":
+  test "ranges filters values":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    q.declareAttrFromSql("tag.x", ":db.type/long", true, false, 1)
+    let eid = q.allocateInPartition(4'u64)
+    for v in [5'i64, 10, 15, 20, 25]:
+      q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: v), 1, 0)
+    let aid = q.lookupAttr("tag.x").get
+
+    let rows = runSelect(q,
+      "(let* ((s (scanner-open \"EAVT\")) " &
+      "       (r0 (ranges-create (and (>= 10) (<= 20))))) " &
+      "(scanner-push s " & $eid & ") " &
+      "(scanner-push s " & $aid.int64 & ") " &
+      "(scanner-iterate s (v) :ranges r0 (result-row v)))")
+    var vals = newSeq[int64]()
+    for row in rows:
+      if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
+    check vals == @[10'i64, 15, 20]
+
+  test "ranges eq single value":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    q.declareAttrFromSql("tag.x", ":db.type/long", true, false, 1)
+    let eid = q.allocateInPartition(4'u64)
+    for v in [5'i64, 10, 15, 20, 25]:
+      q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: v), 1, 0)
+    let aid = q.lookupAttr("tag.x").get
+
+    let rows = runSelect(q,
+      "(let* ((s (scanner-open \"EAVT\"))) " &
+      "(scanner-push s " & $eid & ") " &
+      "(scanner-push s " & $aid.int64 & ") " &
+      "(scanner-iterate s (v) :ranges (ranges-create (= 15)) (result-row v)))")
+    check rows.len == 1
+    check rows[0][0].ival == 15
+
+  test "ranges neq excludes value":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    q.declareAttrFromSql("tag.x", ":db.type/long", true, false, 1)
+    let eid = q.allocateInPartition(4'u64)
+    for v in [5'i64, 10, 15, 20, 25]:
+      q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: v), 1, 0)
+    let aid = q.lookupAttr("tag.x").get
+
+    let rows = runSelect(q,
+      "(let* ((s (scanner-open \"EAVT\"))) " &
+      "(scanner-push s " & $eid & ") " &
+      "(scanner-push s " & $aid.int64 & ") " &
+      "(scanner-iterate s (v) :ranges (ranges-create (!= 15)) (result-row v)))")
+    var vals = newSeq[int64]()
+    for row in rows:
+      if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
+    check vals == @[5'i64, 10, 20, 25]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Engine: multi-scanner leapfrog
+# ═══════════════════════════════════════════════════════════════════════════════
+
+suite "engine: multi-scanner leapfrog":
+  test "two scanners intersection":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    q.declareAttrFromSql("tag.x", ":db.type/long", true, false, 1)
+    let aid = q.lookupAttr("tag.x").get
+    let eid1 = q.allocateInPartition(4'u64)
+    let eid2 = q.allocateInPartition(4'u64)
+    for v in [10'i64, 20, 30]: q.saveWithT(eid1, "tag.x", SExpr(kind: sInt, ival: v), 1, 0)
+    for v in [20'i64, 30, 40]: q.saveWithT(eid2, "tag.x", SExpr(kind: sInt, ival: v), 1, 0)
+
+    let rows = runSelect(q,
+      "(let* ((s1 (scanner-open \"EAVT\")) " &
+      "       (s2 (scanner-open \"EAVT\"))) " &
+      "(scanner-push s1 " & $eid1 & ") (scanner-push s1 " & $aid.int64 & ") " &
+      "(scanner-push s2 " & $eid2 & ") (scanner-push s2 " & $aid.int64 & ") " &
+      "(scanner-iterate (s1 s2) (v) (result-row v)))")
+    var vals = newSeq[int64]()
+    for row in rows:
+      if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
+    check vals == @[20'i64, 30]
+
+  test "disjoint value sets emit nothing":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    q.declareAttrFromSql("tag.x", ":db.type/long", true, false, 1)
+    let aid = q.lookupAttr("tag.x").get
+    let eid1 = q.allocateInPartition(4'u64)
+    let eid2 = q.allocateInPartition(4'u64)
+    for v in [1'i64, 2, 3]: q.saveWithT(eid1, "tag.x", SExpr(kind: sInt, ival: v), 1, 0)
+    for v in [100'i64, 200]: q.saveWithT(eid2, "tag.x", SExpr(kind: sInt, ival: v), 1, 0)
+
+    let rows = runSelect(q,
+      "(let* ((s1 (scanner-open \"EAVT\")) " &
+      "       (s2 (scanner-open \"EAVT\"))) " &
+      "(scanner-push s1 " & $eid1 & ") (scanner-push s1 " & $aid.int64 & ") " &
+      "(scanner-push s2 " & $eid2 & ") (scanner-push s2 " & $aid.int64 & ") " &
+      "(scanner-iterate (s1 s2) (v) (result-row v)))")
+    check rows.len == 0
+
+  test "single matching value in both scanners":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    q.declareAttrFromSql("tag.x", ":db.type/long", true, false, 1)
+    let aid = q.lookupAttr("tag.x").get
+    let eid1 = q.allocateInPartition(4'u64)
+    let eid2 = q.allocateInPartition(4'u64)
+    q.saveWithT(eid1, "tag.x", SExpr(kind: sInt, ival: 42), 1, 0)
+    q.saveWithT(eid2, "tag.x", SExpr(kind: sInt, ival: 42), 1, 0)
+
+    let rows = runSelect(q,
+      "(let* ((s1 (scanner-open \"EAVT\")) " &
+      "       (s2 (scanner-open \"EAVT\"))) " &
+      "(scanner-push s1 " & $eid1 & ") (scanner-push s1 " & $aid.int64 & ") " &
+      "(scanner-push s2 " & $eid2 & ") (scanner-push s2 " & $aid.int64 & ") " &
+      "(scanner-iterate (s1 s2) (v) (result-row v)))")
+    check rows.len == 1
+    check rows[0][0].ival == 42

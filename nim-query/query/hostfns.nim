@@ -199,10 +199,9 @@ proc parseRanges(sexpr: SExpr): seq[seq[(int32, SExpr)]] =
               result.add branch
               branch = @[]
             continue
-        if item.items.len >= 3 and item.items[0].kind == sSymbol and
-           item.items[0].symval == "cond":
-          let op = int32(expectInt(item.items[1]))
-          let val = item.items[2]
+        if item.items.len >= 2 and item.items[0].kind == sInt:
+          let op = int32(expectInt(item.items[0]))
+          let val = item.items[1]
           branch.add (op, val)
           continue
       else: discard
