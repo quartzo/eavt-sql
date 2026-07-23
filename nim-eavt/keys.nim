@@ -142,15 +142,24 @@ proc encodeFloat*(f: float64): seq[byte] =
   result.add byte((x shr 8) and 0xFF); result.add byte(x and 0xFF)
 
 proc encodeVariable*(s: string): seq[byte] =
+  ## Encode a string for lexicographic ordering: 8-byte blocks + control byte.
+  ## Control: 0xFF = more blocks follow; 0..7 = last block valid bytes.
   let raw = s.cstring
-  var i = 0
-  while raw[i] != '\0': inc i
-  let length = i
-  result = newSeqOfCap[byte](length + 4)
-  result.add byte(length shr 24); result.add byte((length shr 16) and 0xFF)
-  result.add byte((length shr 8) and 0xFF); result.add byte(length and 0xFF)
-  for j in 0..<length:
-    result.add byte(raw[j])
+  var len = 0
+  while raw[len] != '\0': inc len
+  result = newSeqOfCap[byte](len + (len div 8) + 2)
+  var pos = 0
+  while pos < len:
+    let remaining = len - pos
+    let blockLen = min(remaining, 8)
+    for j in 0..<blockLen: result.add byte(raw[pos + j])
+    # Pad to 8 bytes
+    for j in blockLen..<8: result.add byte(0)
+    if remaining <= 8:
+      result.add byte(blockLen)  # last block: valid bytes count
+    else:
+      result.add byte(0xFF)      # more blocks follow
+    pos += blockLen
 
 proc encodeVariableUnordered*(data: openArray[byte]): seq[byte] =
   let length = data.len
@@ -252,13 +261,22 @@ proc beUint32*(data: openArray[byte]; start: int): uint32 =
 # ═══════════════════════════════════════════════════════════════════════════════
 
 proc decodeVariableStr*(data: openArray[byte]; start: int = 0): string =
-  ## Decode an emVariable value ([u32 len][bytes]) at `start`.
-  if start + 4 > data.len: return ""
-  let n = (uint32(data[start]) shl 24 or uint32(data[start+1]) shl 16 or
-           uint32(data[start+2]) shl 8 or uint32(data[start+3])).int
-  if start + 4 + n > data.len: return ""
-  result = newString(n)
-  if n > 0: copyMem(addr result[0], unsafeAddr data[start+4], n)
+  ## Decode an 8+1-block encoded string.
+  result = ""
+  var pos = start
+  while pos + 9 <= data.len:
+    let control = data[pos + 8]
+    # Append full 8-byte block to result
+    for j in 0..7:
+      result.add char(data[pos + j])
+    if control != 0xFF'u8:
+      # Last block — trim padding zeros
+      let validBytes = int(control)
+      if validBytes < 8:
+        result.setLen(result.len - (8 - validBytes))
+      return result
+    pos += 9
+  return result
 
 proc decodeStoredValue*(data: openArray[byte]; vt: uint32): SExpr =
   ## Decode a stored EAVT value given its db valueType.

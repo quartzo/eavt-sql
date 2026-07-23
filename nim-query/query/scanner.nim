@@ -317,16 +317,15 @@ proc extractCurrent*(sc: V2Scanner): Option[SExpr] =
     return some(SExpr(kind: sInt, ival: int64(raw)))
   of "v":
     if isVariableValue(sc.valueAttrType, k.len):
-      let hasVt = sc.valueAttrType.isSome
       let data = k[vs..<ve]
-      if hasVt and sc.valueAttrType.get == DbTypeBytes:
+      if sc.valueAttrType == some(DbTypeString):
+        return some(SExpr(kind: sStr, sval: keys.decodeVariableStr(data, 0)))
+      elif sc.valueAttrType == some(DbTypeBytes):
         return some(SExpr(kind: sBytes, bytesval: @(data)))
-      elif hasVt and sc.valueAttrType.get == DbTypeBlob:
+      elif sc.valueAttrType == some(DbTypeBlob):
         return some(SExpr(kind: sBytes, bytesval: @(data)))
       else:
-        var s = newString(data.len)
-        for i, b in data: s[i] = char(b)
-        return some(SExpr(kind: sStr, sval: s))
+        return some(SExpr(kind: sStr, sval: keys.decodeVariableStr(data, 0)))
     else:
       let raw = beUint64(k, vs)
       case true:
