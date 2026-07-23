@@ -13,7 +13,21 @@ proc createUnixSocket(sockPath: string): SocketHandle =
     raiseOSError(osLastError(), "socket()")
   let sockDir = sockPath.parentDir()
   if not dirExists(sockDir): createDir(sockDir)
-  if fileExists(sockPath): removeFile(sockPath)
+
+  # Check if another server is already running (or stale socket from crash)
+  block:
+    var testFd = nativesockets.createNativeSocket(posix.AF_UNIX, posix.SOCK_STREAM, 0)
+    var addr_un: Sockaddr_un
+    addr_un.sun_family = TSaFamily(posix.AF_UNIX)
+    copyMem(addr addr_un.sun_path, addr sockPath[0], min(sockPath.len, 108))
+    let rc = posix.connect(testFd, cast[ptr SockAddr](addr addr_un), sizeof(Sockaddr_un).SockLen)
+    discard posix.close(cint(testFd))
+    if rc >= 0:
+      stderr.writeLine "Server already running on ", sockPath
+      quit(1)
+    # Stale socket from crashed server — clean it up
+    try: removeFile(sockPath) except: discard
+
   var addr_un: Sockaddr_un
   addr_un.sun_family = TSaFamily(posix.AF_UNIX)
   copyMem(addr addr_un.sun_path, addr sockPath[0], min(sockPath.len, 108))
