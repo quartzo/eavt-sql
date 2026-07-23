@@ -49,3 +49,5 @@ nim-kvstore/query/tests
 nim-page-store/tests
 nim-query/query/engine
 nim-query/query/tests
+nim-eavt/tests
+nim-scheme/tests

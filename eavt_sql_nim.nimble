@@ -8,13 +8,20 @@ license       = "MIT"
 srcDir        = "."
 backend       = "c"
 
+const SharedPaths = "--path:nim-blobstore --path:nim-page-store " &
+                    "--path:nim-kvstore --path:nim-scheme " &
+                    "--path:nim-eavt --path:nim-query " &
+                    "--path:nim_memtable --path:. "
+
+const Flags = "--mm:arc --threads:on -d:release --passL:-lcrypto --passL:-lzstd "
+
 task test, "Run all Nim unit tests":
   exec "(cd nim-blobstore/memory  && nimble test)"
   exec "(cd nim-blobstore/file    && nimble test)"
   exec "(cd nim-blobstore/journal && nimble test)"
   exec "(cd nim_memtable          && nimble test)"
-  exec "(cd nim-kvstore           && nimble test)"
-  exec "(cd nim-eavt              && nimble test)"
-  exec "(cd nim-query             && nimble test)"
-  # nim-page-store tests are part of nim-kvstore/tests.nim (to be split)
-  # nim-scheme tests are part of nim-kvstore/tests.nim (to be split)
+  exec "nim c " & Flags & SharedPaths & "-r nim-page-store/tests.nim"
+  exec "nim c " & Flags & SharedPaths & "-r nim-scheme/tests.nim"
+  exec "nim c " & Flags & SharedPaths & "-r nim-kvstore/tests.nim"
+  exec "nim c " & Flags & SharedPaths & "-r nim-eavt/tests.nim"
+  exec "nim c " & Flags & SharedPaths & "-r nim-query/query/tests.nim"

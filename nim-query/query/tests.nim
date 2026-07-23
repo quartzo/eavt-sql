@@ -8,16 +8,16 @@
 ##      --passL:-lcrypto --passL:-lzstd -r query/tests.nim
 
 import std/[unittest, options, tables, strutils, sequtils]
-import ../../nim-scheme/scheme
-import ../nim-eavt/keys
-import ../../nim-kvstore/kvstore
-import ../nim-eavt/eavt
-import ./codec
-import ./types
-import ./scanner
-import ../../nim-kvstore/abi
-import ./hostfns
-import ./engine
+import scheme
+import keys
+import kvstore
+import eavt
+import codec
+import types
+import scanner
+import abi
+import hostfns
+import engine
 
 import memory/all
 import nim_memtable/all
