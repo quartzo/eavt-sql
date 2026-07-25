@@ -125,3 +125,8 @@ Re-bootstrap is prevented by scanning for existing `db.ident` datom (aid=1).
 - Binary output: `build/` directory (gitignored)
 - Attribute names: mandatory dot notation (`company.name`)
 - Binary formats: big-endian
+
+### Threading Rules
+
+**NEVER use `{.cast(gcsafe).}:`** — it hides real data races and wastes debugging time.
+If the compiler says something is not gcsafe, fix the root cause instead.
