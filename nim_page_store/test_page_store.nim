@@ -41,7 +41,8 @@ suite "page_cursor: seek":
   test "empty tree → atEnd":
     let s = newMemStore()
     defer: closePageStore(s)
-    let c = newPageStoreCursor(s, 0)
+    let c = PageStoreCursor(s: s, cf: 0, rootUuid: s[].trees[0].rootUuid, height: s[].trees[0].height)
+    check c.peek().isNone
     check c.atEnd
     c.seek(@[byte(5)])
     check c.atEnd
@@ -50,7 +51,7 @@ suite "page_cursor: seek":
     let s = newMemStore()
     defer: closePageStore(s)
     commitKeys(s[], 0, bigKeys(3))
-    let c = newPageStoreCursor(s, 0)
+    let c = PageStoreCursor(s: s, cf: 0, rootUuid: s[].trees[0].rootUuid, height: s[].trees[0].height)
     let target = bigKeys(3)[1]
     c.seek(target)
     check not c.atEnd
@@ -63,7 +64,7 @@ suite "page_cursor: seek":
     defer: closePageStore(s)
     let keys = bigKeys(3)
     commitKeys(s[], 0, keys)
-    let c = newPageStoreCursor(s, 0)
+    let c = PageStoreCursor(s: s, cf: 0, rootUuid: s[].trees[0].rootUuid, height: s[].trees[0].height)
     c.seek(@[byte(0), 0, 0, 0, 0])  # before first key
     check not c.atEnd
     let collected = collectAll(c)
@@ -74,7 +75,7 @@ suite "page_cursor: seek":
     let s = newMemStore()
     defer: closePageStore(s)
     commitKeys(s[], 0, bigKeys(3))
-    let c = newPageStoreCursor(s, 0)
+    let c = PageStoreCursor(s: s, cf: 0, rootUuid: s[].trees[0].rootUuid, height: s[].trees[0].height)
     c.seek(@[byte(0xFF)])
     check c.atEnd
 
@@ -85,7 +86,7 @@ suite "page_cursor: seek":
     let s = newMemStore()
     defer: closePageStore(s)
     commitKeys(s[], 0, keys)
-    let c = newPageStoreCursor(s, 0)
+    let c = PageStoreCursor(s: s, cf: 0, rootUuid: s[].trees[0].rootUuid, height: s[].trees[0].height)
     let target = keys[n div 2]
     c.seek(target)
     check not c.atEnd
@@ -99,7 +100,7 @@ suite "page_cursor: seek":
     let s = newMemStore()
     defer: closePageStore(s)
     commitKeys(s[], 0, keys)
-    let c = newPageStoreCursor(s, 0)
+    let c = PageStoreCursor(s: s, cf: 0, rootUuid: s[].trees[0].rootUuid, height: s[].trees[0].height)
     c.seek(@[byte(0), 0, 0, 0, 0])
     check not c.atEnd
     let collected = collectAll(c)
@@ -112,7 +113,7 @@ suite "page_cursor: seek":
     let s = newMemStore()
     defer: closePageStore(s)
     commitKeys(s[], 0, bigKeys(n))
-    let c = newPageStoreCursor(s, 0)
+    let c = PageStoreCursor(s: s, cf: 0, rootUuid: s[].trees[0].rootUuid, height: s[].trees[0].height)
     c.seek(@[byte(0xFF)])
     check c.atEnd
 
@@ -123,10 +124,10 @@ suite "page_cursor: seek":
     defer: closePageStore(s)
     commitKeys(s[], 0, keys)
     # Forward scan from start
-    let cFwd = newPageStoreCursor(s, 0)
+    let cFwd = PageStoreCursor(s: s, cf: 0, rootUuid: s[].trees[0].rootUuid, height: s[].trees[0].height)
     let fwd = collectAll(cFwd)
     # Seek to middle, collect rest
-    let cSeek = newPageStoreCursor(s, 0)
+    let cSeek = PageStoreCursor(s: s, cf: 0, rootUuid: s[].trees[0].rootUuid, height: s[].trees[0].height)
     cSeek.seek(keys[n div 2])
     let rest = collectAll(cSeek)
     check fwd.len == n
@@ -139,7 +140,7 @@ suite "page_cursor: seek":
     let s = newMemStore()
     defer: closePageStore(s)
     commitKeys(s[], 0, keys)
-    let c = newPageStoreCursor(s, 0)
+    let c = PageStoreCursor(s: s, cf: 0, rootUuid: s[].trees[0].rootUuid, height: s[].trees[0].height)
     # Seek to several points; each should land on key >= target.
     for idx in [0, 500, 100, 1500, 1999, 700, 1999, 0]:
       c.seek(keys[idx])
@@ -156,7 +157,7 @@ suite "page_cursor: seek":
     let s = newMemStore()
     defer: closePageStore(s)
     commitKeys(s[], 0, keys)
-    let c = newPageStoreCursor(s, 0)
+    let c = PageStoreCursor(s: s, cf: 0, rootUuid: s[].trees[0].rootUuid, height: s[].trees[0].height)
     # Land somewhere in the middle.
     c.seek(keys[1000])
     check not c.atEnd
@@ -177,13 +178,13 @@ suite "page_cursor: seek":
     let s = newMemStore()
     defer: closePageStore(s)
     commitKeys(s[], 0, bigKeys(10, 0))
-    let c = newPageStoreCursor(s, 0)
+    let c = PageStoreCursor(s: s, cf: 0, rootUuid: s[].trees[0].rootUuid, height: s[].trees[0].height)
     # Now add more keys (new root).
     commitKeys(s[], 0, bigKeys(10, 1))
     # Cursor should still see only the original 10 keys.
     let collected = collectAll(c)
     check collected.len == 10
     # A fresh cursor sees the merged tree.
-    let c2 = newPageStoreCursor(s, 0)
+    let c2 = PageStoreCursor(s: s, cf: 0, rootUuid: s[].trees[0].rootUuid, height: s[].trees[0].height)
     let collected2 = collectAll(c2)
     check collected2.len == 20

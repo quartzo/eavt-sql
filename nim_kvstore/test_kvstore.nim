@@ -473,3 +473,248 @@ suite "v2scanner_leap":
     check sc.extractCurrent().get.ival == 3
     sc.leapNextAt()
     check sc.atEnd
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# KVStore — concurrency tests
+# ═══════════════════════════════════════════════════════════════════════════════════
+
+var gKV: KVStore
+var gKeys: seq[seq[byte]]
+
+proc putWorker(cf: int) {.thread, gcsafe.} =
+  {.cast(gcsafe).}:
+    for k in gKeys:
+      gKV.put(cf, k)
+
+proc flushWorker() {.thread, gcsafe.} =
+  {.cast(gcsafe).}:
+    gKV.flush()
+
+suite "kvstore: concurrency — puts":
+  test "concurrent puts from 4 threads all survive":
+    let kv = newKVStore({"backend": "memory"}.toTable)
+    gKV = kv
+    const N = 4
+    const M = 50
+    var threadKeys: array[N, seq[seq[byte]]]
+    for t in 0..<N:
+      threadKeys[t] = newSeq[seq[byte]](M)
+      for i in 0..<M:
+        let b = byte((t shl 8) or i)
+        threadKeys[t][i] = @[b]
+
+    var threads: array[N, Thread[int]]
+    for t in 0..<N:
+      gKeys = threadKeys[t]
+      createThread(threads[t], putWorker, 0)
+    for t in 0..<N:
+      joinThread(threads[t])
+
+    var count = 0
+    for t in 0..<N:
+      for i in 0..<M:
+        if kv.get(0, threadKeys[t][i]):
+          inc count
+    check count == N * M
+    kv.close()
+
+  test "separate CFs are independent (sequential puts)":
+    let kv = newKVStore({"backend": "memory"}.toTable)
+    const N = 3
+    const M = 30
+    var cfKeys: array[N, seq[seq[byte]]]
+    for t in 0..<N:
+      cfKeys[t] = newSeq[seq[byte]](M)
+      for i in 0..<M:
+        cfKeys[t][i] = @[byte(t), byte(i)]
+
+    # Put sequentially to each CF
+    for t in 0..<N:
+      for i in 0..<M:
+        kv.put(t, cfKeys[t][i])
+
+    for t in 0..<N:
+      for i in 0..<M:
+        check kv.get(t, cfKeys[t][i])
+      for other in 0..<N:
+        if other == t: continue
+        for i in 0..<M:
+          check not kv.get(other, cfKeys[t][i])
+    kv.close()
+
+suite "kvstore: concurrency — scan snapshot isolation":
+  test "cursor opened before concurrent writes only sees old snapshot":
+    let kv = newKVStore({"backend": "memory"}.toTable)
+    gKV = kv
+    const PreN = 50
+    const ExtraN = 30
+
+    for i in 0..<PreN:
+      kv.put(0, @[byte(i)])
+
+    let mc = kv.openScanCursor(0)
+    var preCount = 0
+    while mc.next().isSome:
+      inc preCount
+    check preCount == PreN
+
+    let mcBefore = kv.openScanCursor(0)
+
+    var extraKeys = newSeq[seq[byte]](ExtraN)
+    for i in 0..<ExtraN:
+      extraKeys[i] = @[byte(PreN + i)]
+    gKeys = extraKeys
+    var thread: Thread[int]
+    createThread(thread, putWorker, 0)
+    joinThread(thread)
+
+    var oldCount = 0
+    while mcBefore.next().isSome:
+      inc oldCount
+    check oldCount == PreN
+
+    var newCount = 0
+    let mcAfter = kv.openScanCursor(0)
+    while mcAfter.next().isSome:
+      inc newCount
+    check newCount == PreN + ExtraN
+
+    kv.close()
+
+  test "cursor captures COW snapshot even during flush window":
+    let kv = newKVStore({"backend": "memory"}.toTable)
+    gKV = kv
+
+    for i in 0..<20:
+      kv.put(0, @[byte(i)])
+
+    let mc = kv.openScanCursor(0)
+
+    kv.flush()
+
+    kv.put(0, @[byte(30)])
+    kv.put(0, @[byte(31)])
+
+    var count = 0
+    while mc.next().isSome:
+      inc count
+    check count == 20
+
+    var total = 0
+    let mc2 = kv.openScanCursor(0)
+    while mc2.next().isSome:
+      inc total
+    check total == 22
+
+    kv.close()
+
+suite "kvstore: concurrency — flush atomicity":
+  test "data survives during flush + concurrent writes (no data loss)":
+    let kv = newKVStore({"backend": "memory"}.toTable)
+    gKV = kv
+
+    const PreN = 40
+    const DuringN = 25
+
+    for i in 0..<PreN:
+      kv.put(0, @[byte(i)])
+
+    var duringKeys = newSeq[seq[byte]](DuringN)
+    for i in 0..<DuringN:
+      duringKeys[i] = @[byte(PreN + i)]
+
+    gKeys = duringKeys
+    var writer: Thread[int]
+    var flusher: Thread[void]
+    createThread(writer, putWorker, 0)
+    createThread(flusher, flushWorker)
+
+    joinThread(writer)
+    joinThread(flusher)
+
+    for i in 0..<PreN:
+      check kv.get(0, @[byte(i)])
+    for i in 0..<DuringN:
+      check kv.get(0, duringKeys[i])
+
+    kv.close()
+
+suite "kvstore: concurrency — stress":
+  test "mixed put + flush + scan under concurrency":
+    let kv = newKVStore({"backend": "memory"}.toTable)
+
+    const Rounds = 3
+    const KeysPerRound = 40
+
+    var roundKeys: array[Rounds, seq[seq[byte]]]
+    for r in 0..<Rounds:
+      roundKeys[r] = newSeq[seq[byte]](KeysPerRound)
+      for i in 0..<KeysPerRound:
+        roundKeys[r][i] = @[byte(r), byte(i)]
+
+    for r in 0..<Rounds:
+      for i in 0..<KeysPerRound:
+        kv.put(0, roundKeys[r][i])
+      kv.flush()
+
+    let keys = scanKeys(kv, 0)
+    let expected = KeysPerRound * Rounds
+    check keys.len == expected
+
+    for i in 1..<keys.len:
+      check cmpSeq(keys[i-1], keys[i]) < 0
+
+    kv.close()
+
+suite "kvstore: concurrency — put + get integrity":
+  test "baseline keys remain visible during concurrent writes":
+    let kv = newKVStore({"backend": "memory"}.toTable)
+
+    const BaselineN = 40
+    const ExtraPerThread = 60
+
+    var baseline = newSeq[seq[byte]](BaselineN)
+    for i in 0..<BaselineN:
+      baseline[i] = @[byte(i)]
+      kv.put(0, baseline[i])
+
+    # Writer thread puts extra keys
+    var extraKeys = newSeq[seq[byte]](ExtraPerThread)
+    for i in 0..<ExtraPerThread:
+      extraKeys[i] = @[byte(BaselineN + i)]
+    gKV = kv
+    gKeys = extraKeys
+    var writer: Thread[int]
+    createThread(writer, putWorker, 0)
+    joinThread(writer)
+
+    # All baseline keys must still be visible
+    for i in 0..<BaselineN:
+      check kv.get(0, baseline[i])
+
+    # Extra keys must be visible
+    for i in 0..<ExtraPerThread:
+      check kv.get(0, extraKeys[i])
+
+    kv.close()
+
+  test "no false negatives under sustained concurrent read + write":
+    let kv = newKVStore({"backend": "memory"}.toTable)
+    gKV = kv
+
+    const N = 60
+    var allKeys = newSeq[seq[byte]](N)
+    for i in 0..<N:
+      allKeys[i] = @[byte(i and 0xFF), byte((i shr 8) and 0xFF)]
+
+    # Single writer thread
+    gKeys = allKeys
+    var writer: Thread[int]
+    createThread(writer, putWorker, 0)
+    joinThread(writer)
+
+    # Sequential reads
+    for i in 0..<N:
+      check kv.get(0, allKeys[i])
+
+    kv.close()

@@ -17,6 +17,10 @@ type
     entries*: seq[(seq[byte], array[16, byte])]
     pos*: int
 
+  PageStoreSnapshot* = object
+    rootUuid*: array[16, byte]
+    height*: uint8
+
   PageStoreCursor* = ref object
     s*: ptr PageStoreInner
     cf*: int
@@ -25,9 +29,6 @@ type
     leafKeys*: seq[seq[byte]]
     leafIdx*: int
     curKey*: Option[seq[byte]]
-    ## Snapshot of the tree root pinned at construction. COW guarantees
-    ## the referenced subtree is immutable; a flush may replace
-    ## trees[cf].rootUuid but cannot mutate this root.
     rootUuid*: array[16, byte]
     height*: uint8
 
@@ -116,19 +117,14 @@ proc advance(c: PageStoreCursor) =
 
 proc ensure(c: PageStoreCursor) =
   if c.curKey.isNone and not c.atEnd:
+    if c.rootUuid == default(array[16, byte]):
+      c.atEnd = true; return
+    if c.leafKeys.len == 0 and c.indexStack.len == 0:
+      if c.height == 0: loadLeaf(c, c.rootUuid)
+      else: descendToFirstLeaf(c, c.rootUuid, c.height)
     c.advance()
 
 # ── Public API ──
-
-proc newPageStoreCursor*(s: ptr PageStoreInner; cf: int): PageStoreCursor =
-  result = PageStoreCursor(s: s, cf: cf, atEnd: false)
-  if cf < 0 or cf >= s[].numCf: result.atEnd = true; return
-  let tree = s[].trees[cf]
-  if tree.rootUuid == default(array[16, byte]): result.atEnd = true; return
-  result.rootUuid = tree.rootUuid
-  result.height = tree.height
-  if tree.height == 0: loadLeaf(result, tree.rootUuid)
-  else: descendToFirstLeaf(result, tree.rootUuid, tree.height)
 
 proc peek*(c: PageStoreCursor): Option[seq[byte]] =
   c.ensure()

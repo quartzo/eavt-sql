@@ -126,11 +126,12 @@ proc newKVStore*(config: Table[string, string]): KVStore =
         if ops.len > 0: result.mtSize = result.mt.batch(ops)
       except: discard
 
-proc close*(kv: KVStore) =
+proc close*(kv: KVStore) {.gcsafe.} =
   if kv != nil:
-    if kv.ps != nil: closePageStore(kv.ps); kv.ps = nil
+    kv.lock.withLock:
+      if kv.ps != nil: closePageStore(kv.ps); kv.ps = nil
 
-proc put*(kv: KVStore; cf: int; key: openArray[byte]) =
+proc put*(kv: KVStore; cf: int; key: openArray[byte]) {.gcsafe.} =
   var k = newSeq[byte](key.len)
   if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
   kv.lock.withLock:
@@ -154,53 +155,63 @@ proc put*(kv: KVStore; cf: int; key: openArray[byte]) =
         f.close()
       except: discard
 
-proc get*(kv: KVStore; cf: int; key: openArray[byte]): bool =
+proc get*(kv: KVStore; cf: int; key: openArray[byte]): bool {.gcsafe.} =
   var k = newSeq[byte](key.len)
   if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
-  if kv.mt.contains(cf, k): return true
-  if kv.flushRoots.len > 0 and kv.flushRoots[cf] != nil and mt_be.containsKey(kv.flushRoots[cf], k): return true
+  var liveRoot, flushRoot: mt_be.TreapNode
+  kv.lock.withLock:
+    liveRoot = kv.mt.hnd.live[cf]
+    if kv.flushRoots.len > 0:
+      flushRoot = kv.flushRoots[cf]
+  if liveRoot != nil and mt_be.containsKey(liveRoot, k): return true
+  if flushRoot != nil and mt_be.containsKey(flushRoot, k): return true
   keyExists(kv.ps[], cf, k)
 
-proc flush*(kv: KVStore) =
+proc flush*(kv: KVStore) {.gcsafe.} =
   if kv.readOnly: return
-  if kv.flushRoots.len > 0: return
-  kv.flushRoots = kv.mt.hnd.live
-  kv.mt.clear(); kv.mtSize = 0
+  var roots: seq[mt_be.TreapNode]
+  kv.lock.withLock:
+    if kv.flushRoots.len > 0: return
+    roots = kv.mt.hnd.live
+    kv.mt.clear(); kv.mtSize = 0
+    kv.flushRoots = roots
   var keysByCf: seq[(int, seq[seq[byte]])] = @[]
   for cf in 0..<kv.numCf:
-    if kv.flushRoots[cf] != nil:
+    if roots[cf] != nil:
       var keys: seq[seq[byte]] = @[]
-      let tc = newTreapCursor(kv.flushRoots[cf])
+      let tc = newTreapCursor(roots[cf])
       while not tc.atEnd:
         let k = tc.next()
         if k.isSome: keys.add(k.get)
       if keys.len > 0: keysByCf.add (cf, keys)
   if keysByCf.len > 0: commitMerge(kv.ps[], keysByCf, true)
-  kv.flushRoots = @[]; kv.mtSize = 0
+  kv.lock.withLock:
+    kv.flushRoots = @[]; kv.mtSize = 0
 
-proc batchWrite*(kv: KVStore; ops: openArray[byte]) =
-  if kv.path.len > 0 and kv.path != ":memory:" and not kv.readOnly:
-    var journalPath = kv.path / "journal" / "journal"
-    try:
-      createDir(parentDir(journalPath)); var f = open(journalPath, fmAppend)
-      let raw = cast[ptr UncheckedArray[byte]](unsafeAddr ops[0]); var pos = 0
-      while pos + 5 <= ops.len:
-        let cf = raw[pos]
-        let klen = int(uint32(raw[pos+1]) shl 24 or uint32(raw[pos+2]) shl 16 or
-                      uint32(raw[pos+3]) shl 8 or uint32(raw[pos+4]))
-        let totKlen = 1 + klen
-        var hdr = newSeq[byte](4 + totKlen + 4 + 1)
-        hdr[0] = byte((totKlen shr 24) and 0xFF); hdr[1] = byte((totKlen shr 16) and 0xFF)
-        hdr[2] = byte((totKlen shr 8) and 0xFF); hdr[3] = byte(totKlen and 0xFF)
-        hdr[4] = cf
-        if klen > 0: copyMem(addr hdr[5], addr raw[pos+5], klen)
-        hdr[5+klen] = 0; hdr[6+klen] = 0; hdr[7+klen] = 0; hdr[8+klen] = 1; hdr[9+klen] = 0
-        discard f.writeBytes(hdr, 0, hdr.len); pos += 5 + klen
-      f.close()
-    except: discard
-  kv.mtSize = kv.mt.batch(ops)
+proc batchWrite*(kv: KVStore; ops: openArray[byte]) {.gcsafe.} =
+  kv.lock.withLock:
+    if kv.path.len > 0 and kv.path != ":memory:" and not kv.readOnly:
+      var journalPath = kv.path / "journal" / "journal"
+      try:
+        createDir(parentDir(journalPath)); var f = open(journalPath, fmAppend)
+        let raw = cast[ptr UncheckedArray[byte]](unsafeAddr ops[0]); var pos = 0
+        while pos + 5 <= ops.len:
+          let cf = raw[pos]
+          let klen = int(uint32(raw[pos+1]) shl 24 or uint32(raw[pos+2]) shl 16 or
+                        uint32(raw[pos+3]) shl 8 or uint32(raw[pos+4]))
+          let totKlen = 1 + klen
+          var hdr = newSeq[byte](4 + totKlen + 4 + 1)
+          hdr[0] = byte((totKlen shr 24) and 0xFF); hdr[1] = byte((totKlen shr 16) and 0xFF)
+          hdr[2] = byte((totKlen shr 8) and 0xFF); hdr[3] = byte(totKlen and 0xFF)
+          hdr[4] = cf
+          if klen > 0: copyMem(addr hdr[5], addr raw[pos+5], klen)
+          hdr[5+klen] = 0; hdr[6+klen] = 0; hdr[7+klen] = 0; hdr[8+klen] = 1; hdr[9+klen] = 0
+          discard f.writeBytes(hdr, 0, hdr.len); pos += 5 + klen
+        f.close()
+      except: discard
+    kv.mtSize = kv.mt.batch(ops)
 
-proc memtableSize*(kv: KVStore): uint64 = kv.mtSize
+proc memtableSize*(kv: KVStore): uint64 {.gcsafe.} = kv.mtSize
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MergedCursor — heap merge of N NimCursor sources (streaming, no materialization)
@@ -298,20 +309,30 @@ proc treapToNimCursor*(tc: TreapCursor): NimCursor =
 
 # ── Streaming scan entry point ──
 
-proc openScanCursor*(kv: KVStore; cf: int): MergedCursor =
+proc openScanCursor*(kv: KVStore; cf: int): MergedCursor {.gcsafe.} =
   var sources: seq[NimCursor] = @[]
 
-  let psCursor = newPageStoreCursor(kv.ps, cf)
-  if not psCursor.atEnd:
-    sources.add pageStoreToNimCursor(psCursor)
+  var psSnap: PageStoreSnapshot
+  var flushRoot, liveRoot: mt_be.TreapNode
 
-  if kv.flushRoots.len > 0 and kv.flushRoots[cf] != nil:
-    let tc = newTreapCursor(kv.flushRoots[cf])
+  kv.lock.withLock:
+    let tree = kv.ps[].trees[cf]
+    psSnap = PageStoreSnapshot(rootUuid: tree.rootUuid, height: tree.height)
+    if kv.flushRoots.len > 0:
+      flushRoot = kv.flushRoots[cf]
+    liveRoot = kv.mt.hnd.live[cf]
+
+  if psSnap.rootUuid != default(array[16, byte]):
+    sources.add pageStoreToNimCursor(PageStoreCursor(
+      s: kv.ps, cf: cf, rootUuid: psSnap.rootUuid, height: psSnap.height))
+
+  if flushRoot != nil:
+    let tc = newTreapCursor(flushRoot)
     if not tc.atEnd:
       sources.add treapToNimCursor(tc)
 
-  if kv.mt.hnd.live[cf] != nil:
-    let tc = newTreapCursor(kv.mt.hnd.live[cf])
+  if liveRoot != nil:
+    let tc = newTreapCursor(liveRoot)
     if not tc.atEnd:
       sources.add treapToNimCursor(tc)
 

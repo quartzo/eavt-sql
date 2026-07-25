@@ -13,12 +13,12 @@ export keys.beUint32, keys.beUint64
 
 type
   NimCursor* = ref object
-    isValidCb*: proc(): bool {.closure.}
-    currentKeyCb*: proc(): Option[seq[byte]] {.closure.}
-    stepCb*: proc() {.closure.}
-    skipGroupCb*: proc(groupEnd: int) {.closure.}
-    seekCb*: proc(target: seq[byte]) {.closure.}
-    invalidateCb*: proc() {.closure.}
+    isValidCb*: proc(): bool {.closure, gcsafe.}
+    currentKeyCb*: proc(): Option[seq[byte]] {.closure, gcsafe.}
+    stepCb*: proc() {.closure, gcsafe.}
+    skipGroupCb*: proc(groupEnd: int) {.closure, gcsafe.}
+    seekCb*: proc(target: seq[byte]) {.closure, gcsafe.}
+    invalidateCb*: proc() {.closure, gcsafe.}
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # KeyVsPrefix — result of classify_key

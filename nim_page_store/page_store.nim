@@ -188,7 +188,7 @@ proc parseRootUs(name: string): int64 =
 # Binary search helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-proc partitionPoint[T](s: openArray[T]; pred: proc(x: T): bool): int =
+proc partitionPoint[T](s: openArray[T]; pred: proc(x: T): bool {.gcsafe.}): int =
   var lo = 0; var hi = s.len
   while lo < hi:
     let mid = (lo + hi) shr 1
@@ -210,10 +210,10 @@ proc findPrefixRange*(entries: seq[(seq[byte], array[16, byte])];
                        prefix: seq[byte]): (int, int) =
   if prefix.len == 0: return (0, entries.len)
   let pe = prefixEnd(prefix)
-  let s = partitionPoint(entries, proc(x: auto): bool = cmpSeq(x[0], prefix) < 0)
+  let s = partitionPoint(entries, proc(x: auto): bool {.gcsafe.} = cmpSeq(x[0], prefix) < 0)
   let startIdx = if s > 0: s - 1 else: 0
   let endIdx = if pe.isSome:
-    partitionPoint(entries, proc(x: auto): bool = cmpSeq(x[0], pe.get) < 0)
+    partitionPoint(entries, proc(x: auto): bool {.gcsafe.} = cmpSeq(x[0], pe.get) < 0)
   else:
     entries.len
   (min(startIdx, endIdx), endIdx)
