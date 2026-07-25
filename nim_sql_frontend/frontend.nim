@@ -6,6 +6,7 @@ type
   CompileResult* = ref object
     program*: SchemeProgram
     isSelect*: bool
+    isExplain*: bool
     selectBody*: SchemeProgram
     traces*: seq[PlanTrace]
     orderedVars*: seq[string]
@@ -16,6 +17,7 @@ proc isDeleteDirect(stmt: DeleteStmt): bool
 
 proc compileSql*(stmt: SqlStmt, cstats: CompileStats): CompileResult =
   result = CompileResult()
+  result.isExplain = stmt.isExplain
 
   case stmt.kind
   of stmtSelect, stmtDatalogSelect:

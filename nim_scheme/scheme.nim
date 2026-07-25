@@ -53,6 +53,45 @@ proc `$`*(e: SExpr): string =
   of sList: "(" & e.items.mapIt($it).join(" ") & ")"
   of sResource: "#<resource>"
 
+proc writeScheme*(program: SchemeProgram): string =
+  $program.body
+
+const MAX_WIDTH = 100
+
+proc writeSchemePretty*(program: SchemeProgram): string =
+  var outStr = ""
+  proc writeExprPretty(expr: SExpr; indent: int): int =
+    case expr.kind:
+    of sList:
+      if expr.items.len == 0:
+        outStr.add "()"
+        return indent + 2
+      let compact = $expr
+      if indent + compact.len <= MAX_WIDTH:
+        outStr.add compact
+        return indent + compact.len
+      outStr.add "("
+      var col = indent + 1
+      var first = true
+      let childIndent = indent + 2
+      for item in expr.items:
+        if first:
+          first = false
+        else:
+          outStr.add "\n"
+          for _ in 0 ..< childIndent:
+            outStr.add " "
+          col = childIndent
+        col = writeExprPretty(item, childIndent)
+      outStr.add ")"
+      col + 1
+    else:
+      let s = $expr
+      outStr.add s
+      indent + s.len
+  discard writeExprPretty(program.body, 0)
+  outStr
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Parser — S-expression parser
 # ═══════════════════════════════════════════════════════════════════════════════

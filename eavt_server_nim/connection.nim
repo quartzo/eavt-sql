@@ -1,4 +1,4 @@
-import std/[options, nativesockets, posix, locks, strutils, tables, json]
+import std/[options, nativesockets, posix, strutils, tables, json]
 import ast, scheme, engine, hostfns, eavt, kvstore, keys, resolver
 import frontend, parser as sql_parser, scheme_compile, datalog_ast, pattern
 import translate, resolve as datalog_resolve, stats, planner_ast, planner
@@ -24,6 +24,13 @@ proc execQuery(eng: SharedEngine; req: Request; fd: SocketHandle) =
       isIndexedAttr: proc(name: string): bool = true,
     )
     let compiled = compileSql(stmt, cstats)
+    if compiled.isExplain:
+      var outStr = ""
+      for t in compiled.traces:
+        outStr.add($t & "\n")
+      outStr.add("\n" & writeSchemePretty(compiled.program))
+      writeResponse(fd, @[], @[@[SExpr(kind: sStr, sval: outStr)]], false)
+      return
     let tx = eng.store.eavt.allocateTAndWriteTx()
     if compiled.isSelect:
       let proto = newQuerySession(eng.store, compiled.program, @[], tx, none[int64]())
@@ -44,8 +51,7 @@ proc execQuery(eng: SharedEngine; req: Request; fd: SocketHandle) =
     if req.command.startsWith("dump"):
       dumpDatoms(eng, fd, req.command)
     else:
-      let output = eng.withLock(proc (): string =
-        case req.command
+      let output = case req.command
         of "flush":
           kvstore.flush(eng.kv)
           "ok: flushed"
@@ -54,7 +60,7 @@ proc execQuery(eng: SharedEngine; req: Request; fd: SocketHandle) =
         of "memtable":
           $eng.kv.memtableSize()
         else:
-          "unknown admin command: " & req.command)
+          "unknown admin command: " & req.command
       var node = newJObject()
       node["output"] = %output
       node["more"] = %false
@@ -97,17 +103,11 @@ proc handleConnection*(eng: SharedEngine; fd: SocketHandle) =
     case req.kind
     of rkSql:
       try:
-        acquire(eng.lock)
         execQuery(eng, req, fd)
-        release(eng.lock)
       except CatchableError as e:
-        release(eng.lock)
         writeResponse(fd, @[], @[], false, e.msg)
     of rkAdmin:
       try:
-        acquire(eng.lock)
         execQuery(eng, req, fd)
-        release(eng.lock)
       except CatchableError as e:
-        release(eng.lock)
         writeResponse(fd, @[], @[], false, e.msg)

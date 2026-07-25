@@ -535,7 +535,9 @@ proc parseStmt(p: Parser): SqlStmt =
   of ttPARTITION: return p.parsePartitionStmt()
   of ttEXPLAIN:
     discard p.advance()
-    return p.parseStmt()
+    var stmt = p.parseStmt()
+    stmt.isExplain = true
+    return stmt
   of ttDATALOG:
     discard p.expect(ttDATALOG)
     let inner = p.parseStmt()

@@ -109,6 +109,7 @@ type
     stmtDelete, stmtAttribute, stmtPartition
 
   SqlStmt* = ref object
+    isExplain*: bool
     case kind*: SqlStmtKind
     of stmtSelect, stmtDatalogSelect: selectStmt*: SelectStmt
     of stmtUpsert: upsertStmt*: UpsertStmt

@@ -19,6 +19,7 @@ import hostfns
 import engine
 import parser as sql_parser
 import frontend
+import planner_ast
 import stats
 import resolver
 
@@ -2120,6 +2121,13 @@ proc runSql(q: QueryStore; sql: string; params: seq[SExpr] = @[]): seq[SExpr] =
     isIndexedAttr: proc(name: string): bool = true,
   )
   let compiled = compileSql(stmt, cstats)
+  if compiled.isExplain:
+    var outStr = ""
+    for t in compiled.traces:
+      outStr.add($t & "\n")
+    outStr.add("\n" & writeSchemePretty(compiled.program))
+    result.add SExpr(kind: sStr, sval: outStr)
+    return
   let tx = q.allocateTx()
   if compiled.isSelect:
     let proto = newQuerySession(q, compiled.program, params, tx, none[int64]())
@@ -2344,38 +2352,49 @@ suite "engine: SQL integration (port of test_sql.py)":
     discard runSql(q, "ATTRIBUTE company.name STRING ONE")
     discard runSql(q, "ATTRIBUTE person.name STRING ONE")
     discard runSql(q, "ATTRIBUTE company.active BOOLEAN ONE")
-    let rows = runSql(q, "SELECT d1.company.name WHERE d1.company.name = 'ACME'")
-    check rows.len >= 0
+    let rows = runSql(q, "EXPLAIN SELECT d1.company.name WHERE d1.company.name = 'ACME'")
+    check rows.len == 1
+    check rows[0].kind == sStr
+    check "result-row" in rows[0].sval
+    check "Plan:" in rows[0].sval or "cost=" in rows[0].sval
 
   test "explain upsert":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
     discard runSql(q, "ATTRIBUTE company.name STRING ONE")
-    let rows = runSql(q, "UPSERT AS D1 SET company.name = 'TestCo'")
-    check rows.len >= 1
+    let rows = runSql(q, "EXPLAIN UPSERT AS D1 SET company.name = 'TestCo'")
+    check rows.len == 1
+    check rows[0].kind == sStr
+    check "alloc-entity" in rows[0].sval
 
   test "explain attribute":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let rows = runSql(q, "ATTRIBUTE company.revenue FLOAT ONE")
-    check rows.len >= 1
+    let rows = runSql(q, "EXPLAIN ATTRIBUTE company.revenue FLOAT ONE")
+    check rows.len == 1
+    check rows[0].kind == sStr
+    check "declare-attr" in rows[0].sval
 
   test "explain partition":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let rows = runSql(q, "PARTITION my_partition")
-    check rows.len >= 1
+    let rows = runSql(q, "EXPLAIN PARTITION my_partition")
+    check rows.len == 1
+    check rows[0].kind == sStr
+    check "declare-partition" in rows[0].sval
 
   test "explain delete":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
     discard runSql(q, "ATTRIBUTE company.name STRING ONE")
-    let rows = runSql(q, "DELETE WHERE d1.eid = 42 AND d1.company.name = 'hello'")
-    check rows.len >= 1
+    let rows = runSql(q, "EXPLAIN DELETE WHERE d1.company.name = 'hello'")
+    check rows.len == 1
+    check rows[0].kind == sStr
+    check "retract" in rows[0].sval
 
   test "attribute cardinality one":
     let kv = newMemoryKVStore()
