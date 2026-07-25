@@ -16,7 +16,8 @@ proc execQuery(eng: SharedEngine; req: Request; fd: SocketHandle) =
     let stmt = sql_parser.parse(req.sql)
     let cstats = CompileStats(
       lookupAttr: proc(name: string): uint32 = lookupAttrId(eng.store.eavt, name),
-      estimateIndexSize: proc(index: string, bound: openArray[uint64]): float64 = 10_000_000.0,
+      estimateIndexSize: proc(index: string, bound: openArray[uint64]): float64 =
+        eng.store.eavt.estimateIndexSize(index, bound),
       partitionIdFor: proc(name: string): uint64 = eng.store.eavt.partitionIdFor(name).get(otherwise = 0),
       isRefAttr: proc(name: string): bool =
         let aid = lookupAttrId(eng.store.eavt, name)

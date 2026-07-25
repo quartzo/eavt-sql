@@ -2100,7 +2100,7 @@ proc runSql(q: QueryStore; sql: string; params: seq[SExpr] = @[]): seq[SExpr] =
     lookupAttr: proc(name: string): uint32 =
       q.eavt.lookupAttr(name).get(otherwise = 0),
     estimateIndexSize: proc(index: string, bound: openArray[uint64]): float64 =
-      10_000_000.0,
+      float64(q.eavt.estimateCount(keys.cfNameToId(keys.cfForIndex(index)), @[])),
     partitionIdFor: proc(name: string): uint64 =
       q.eavt.partitionIdFor(name).get(otherwise = 0),
     isRefAttr: proc(name: string): bool =

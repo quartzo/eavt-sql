@@ -79,6 +79,32 @@ proc scanPrefix*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byte]] =
     if key.len < prefix.len or key[0..<prefix.len] != prefix: continue
     result.add key
 
+proc estimateCount*(eng: EavtEngine; cf: int; prefix: seq[byte]): int64 =
+  ## Count keys with prefix using streaming scan. Returns at least 1.
+  let mc = eng.kv.openScanCursor(cf)
+  while true:
+    let k = mc.next()
+    if k.isNone: break
+    let key = k.get
+    if key.len < prefix.len or key[0..<prefix.len] != prefix: continue
+    inc result
+  result = max(result, 1)
+
+proc estimateIndexSize*(eng: EavtEngine; index: string; bound: openArray[uint64]): float64 =
+  ## Cardinality estimate for planner: count keys matching prefix in index CF.
+  let cf = keys.cfNameToId(keys.cfForIndex(index))
+  let order = keys.indexOrder(index)
+  var prefix: seq[byte] = @[]
+  for i, pos in order:
+    if i < bound.len and bound[i] != 0:
+      let v = bound[i]
+      prefix.add byte(v shr 56); prefix.add byte((v shr 48) and 0xFF)
+      prefix.add byte((v shr 40) and 0xFF); prefix.add byte((v shr 32) and 0xFF)
+      prefix.add byte(v shr 24); prefix.add byte((v shr 16) and 0xFF)
+      prefix.add byte((v shr 8) and 0xFF); prefix.add byte(v and 0xFF)
+  let count = eng.estimateCount(cf, prefix)
+  result = float64(count)
+
 type
   Datom* = object
     e*: int64
