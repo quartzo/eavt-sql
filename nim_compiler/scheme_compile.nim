@@ -70,7 +70,13 @@ proc compileUpsertScheme*(stmt: sql_ast.UpsertStmt): SchemeProgram =
 
   whenClauses.add(resultExpr)
 
-  let body = list(@[newSymbol("let*"), list(bindings)] & whenClauses)
+  # Convert let* to begin + set!
+  var upsertBody: seq[SExpr] = @[newSymbol("begin")]
+  for b in bindings:
+    if b.kind == sList and b.items.len >= 2:
+      upsertBody.add(list(newSymbol("set!"), b.items[0], b.items[1]))
+  upsertBody.add(whenClauses)
+  let body = list(upsertBody)
   SchemeProgram(body: body)
 
 proc compileAttributeScheme*(stmt: sql_ast.AttributeStmt): SchemeProgram =
@@ -85,8 +91,9 @@ proc compileAttributeScheme*(stmt: sql_ast.AttributeStmt): SchemeProgram =
 
 proc compilePartitionScheme*(stmt: sql_ast.PartitionStmt): SchemeProgram =
   let body = list(
-    newSymbol("let*"),
-    list(list(newSymbol("pid"), list(newSymbol("declare-partition"), newStr(stmt.name)))),
+    newSymbol("begin"),
+    list(newSymbol("set!"), newSymbol("pid"),
+      list(newSymbol("declare-partition"), newStr(stmt.name))),
     list(newSymbol("result"), newSymbol("pid")),
   )
   SchemeProgram(body: body)
@@ -393,9 +400,9 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
             list(newSymbol("scanner-iterate-next"), gapIterVar)),
           gapBody)
         let gapExpr = list(
-          newSymbol("let"),
-          list(list(gapIterVar,
-            list(newSymbol("scanner-iterate-init"), scannerSym, list()))),
+          newSymbol("begin"),
+          list(newSymbol("set!"), gapIterVar,
+            list(newSymbol("scanner-iterate-init"), scannerSym, list())),
           gapWhile)
         ops.add(gapExpr)
 
@@ -434,9 +441,9 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
         list(newSymbol("scanner-iterate-next"), iterVar)),
       list(innerItems))
     let mainExpr = list(
-      newSymbol("let"),
-      list(list(iterVar,
-        list(@[newSymbol("scanner-iterate-init")] & initArgs))),
+      newSymbol("begin"),
+      list(newSymbol("set!"), iterVar,
+        list(@[newSymbol("scanner-iterate-init")] & initArgs)),
       mainWhile)
     ops.add(mainExpr)
 
@@ -468,9 +475,9 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
             list(newSymbol("scanner-iterate-next"), trailIterVar)),
           trailBody)
         let trailExpr = list(
-          newSymbol("let"),
-          list(list(trailIterVar,
-            list(newSymbol("scanner-iterate-init"), scannerSym, trailRanges))),
+          newSymbol("begin"),
+          list(newSymbol("set!"), trailIterVar,
+            list(newSymbol("scanner-iterate-init"), scannerSym, trailRanges)),
           trailWhile)
         ops.add(trailExpr)
       else:
@@ -496,11 +503,11 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
     let probeSVar = "_s_probe"
     let probeIterVar = newSymbol("_it_probe")
     body = list(
-      newSymbol("let*"),
-      list(
-        list(newSymbol(probeSVar), list(newSymbol("scanner-open"), newStr("EAVT"))),
-        list(probeIterVar,
-          list(newSymbol("scanner-iterate-init"), newSymbol(probeSVar), list()))),
+      newSymbol("begin"),
+      list(newSymbol("set!"), newSymbol(probeSVar),
+        list(newSymbol("scanner-open"), newStr("EAVT"))),
+      list(newSymbol("set!"), probeIterVar,
+        list(newSymbol("scanner-iterate-init"), newSymbol(probeSVar), list())),
       list(
         newSymbol("begin"),
         list(newSymbol("scanner-push"), newSymbol(probeSVar), eVal),
@@ -523,8 +530,14 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
       ),
     )
 
-  let fullBody = if scannerBindings.len == 0: body
-                 else: list(newSymbol("let*"), list(scannerBindings), body)
+  var fullBody = body
+  if scannerBindings.len > 0:
+    var stmts: seq[SExpr] = @[newSymbol("begin")]
+    for b in scannerBindings:
+      if b.kind == sList and b.items.len >= 2:
+        stmts.add(list(newSymbol("set!"), b.items[0], b.items[1]))
+    stmts.add(body)
+    fullBody = list(stmts)
 
   let flatBody = flattenBegins(fullBody)
   (SchemeProgram(body: flatBody), varNamesList, depthVarPairs)

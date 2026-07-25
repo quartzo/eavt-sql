@@ -214,7 +214,7 @@ method isNative*(h: HostFns; name: string): bool {.base.} = false
 
 type
   FrameKind = enum
-    fkEval, fkApply, fkLetBindings, fkWhenTest, fkIfTest,
+    fkEval, fkApply, fkWhenTest, fkIfTest,
     fkAndSeq, fkOrSeq, fkSetFrame, fkWhile
 
   Frame = ref object
@@ -225,13 +225,6 @@ type
       fargs: seq[SExpr]
       fargsEval: seq[(string, SExpr)]
       fargsRemaining: seq[SExpr]
-    of fkLetBindings:
-      lbOp: string
-      lbPairs: seq[(string, SExpr)]
-      lbNames: seq[string]
-      lbVals: seq[SExpr]
-      lbCurrent: int
-      lbBody: seq[SExpr]
     of fkWhenTest:
       wtCond: SExpr
       wtBody: seq[SExpr]
@@ -259,7 +252,7 @@ type
 
 type EvalError* = object of CatchableError
 
-const SpecialForms = ["let*", "let", "when", "if", "begin", "set!",
+const SpecialForms = ["when", "if", "begin", "set!",
                        "print", "assert", "and", "or", "not",
                        "scanner-iterate", "ranges-create", "while"]
 
@@ -277,20 +270,6 @@ proc processValue(value: SExpr; state: var YieldState; env: var Environment;
     var frame = move(state.stack[^1])
     state.stack.setLen(state.stack.len - 1)
     case frame.kind:
-    of fkLetBindings:
-      frame.lbVals.add value
-      frame.lbNames.add frame.lbPairs[frame.lbCurrent][0]
-      if frame.lbOp == "let*":
-        env.set(frame.lbNames[^1], value)
-      inc frame.lbCurrent
-      if frame.lbCurrent < frame.lbPairs.len:
-        state.stack.add frame
-        state.stack.add Frame(kind: fkEval, fexpr: frame.lbPairs[frame.lbCurrent][1])
-      else:
-        if frame.lbOp == "let":
-          for i, n in frame.lbNames: env.set(n, frame.lbVals[i])
-        for i in countdown(frame.lbBody.len - 1, 0):
-          state.stack.add Frame(kind: fkEval, fexpr: frame.lbBody[i])
     of fkWhenTest:
       if isTruthy(value):
         for i in countdown(frame.wtBody.len - 1, 0):
@@ -401,21 +380,6 @@ proc evalSpecialForm(name: string; args: SExpr; env: var Environment;
       state.stack.add Frame(kind: fkEval, fexpr: args.items[i])
     if args.items.len >= 2:
       return evalExpr(args.items[1], env, host, state)
-    return done(newVoid())
-  of "let", "let*":
-    let bindings = args.items[1]
-    var pairs: seq[(string, SExpr)] = @[]
-    if bindings.kind == sList:
-      for b in bindings.items:
-        if b.kind == sList and b.items.len >= 2:
-          pairs.add ((b.items[0].symval, b.items[1]))
-    var body: seq[SExpr] = @[]
-    for i in 2..<args.items.len: body.add args.items[i]
-    state.stack.add Frame(kind: fkLetBindings, lbOp: name, lbPairs: pairs,
-      lbCurrent: 0, lbBody: body)
-    if pairs.len > 0:
-      state.stack.add Frame(kind: fkEval, fexpr: pairs[0][1])
-      return done(newVoid())
     return done(newVoid())
   of "when":
     let testExpr = args.items[1]
