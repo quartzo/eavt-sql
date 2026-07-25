@@ -9,7 +9,10 @@ type
     isExplain*: bool
     selectBody*: SchemeProgram
     traces*: seq[PlanTrace]
+    iterPlans*: seq[IterPlanData]
     orderedVars*: seq[string]
+    history*: bool
+    existsMode*: bool
 
 proc fakeSelectFromUpdate(stmt: UpdateStmt): SelectStmt
 proc fakeSelectFromDelete(stmt: DeleteStmt): SelectStmt
@@ -42,7 +45,10 @@ proc compileSql*(stmt: SqlStmt, cstats: CompileStats): CompileResult =
     plan.rangeBounds = rangeBounds
 
     result.traces = plan.planTraces
+    result.iterPlans = plan.iterPlans
     result.orderedVars = plan.orderedVars
+    result.history = plan.history
+    result.existsMode = plan.existsMode
     result.isSelect = true
 
     let (prog, _, _) = compileSelectScheme(plan)
@@ -77,7 +83,10 @@ proc compileSql*(stmt: SqlStmt, cstats: CompileStats): CompileResult =
     plan.findVars = resolved.findVars
     plan.rangeBounds = convertRangeBounds(resolved.rangeBounds)
     result.traces = plan.planTraces
+    result.iterPlans = plan.iterPlans
     result.orderedVars = plan.orderedVars
+    result.history = plan.history
+    result.existsMode = plan.existsMode
     result.isSelect = true
 
     let (prog, _, _) = compileUpdateScheme(plan, findVarNames, stmt.updateStmt)
@@ -105,7 +114,10 @@ proc compileSql*(stmt: SqlStmt, cstats: CompileStats): CompileResult =
       plan.findVars = resolved.findVars
       plan.rangeBounds = convertRangeBounds(resolved.rangeBounds)
       result.traces = plan.planTraces
+      result.iterPlans = plan.iterPlans
       result.orderedVars = plan.orderedVars
+      result.history = plan.history
+      result.existsMode = plan.existsMode
       result.isSelect = true
 
       let firstAlias = if stmt.deleteStmt.conditions.len > 0:

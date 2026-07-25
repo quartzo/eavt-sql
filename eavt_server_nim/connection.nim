@@ -26,6 +26,42 @@ proc execQuery(eng: SharedEngine; req: Request; fd: SocketHandle) =
     let compiled = compileSql(stmt, cstats)
     if compiled.isExplain:
       var outStr = ""
+      # Plan section
+      if compiled.iterPlans.len > 0:
+        outStr.add("Plan:\n")
+        let histTag = if compiled.history: " (history)" else: ""
+        let existsTag = if compiled.existsMode: " (exists)" else: ""
+        outStr.add("  Join order: [" & compiled.orderedVars.join(", ") & "]" & histTag & existsTag & "\n")
+        for i, ip in compiled.iterPlans:
+          outStr.add("  p" & $i & " @ " & ip.indexName & "\n")
+          for posIdx, pos in ip.idxOrder:
+            let spec = ip.specs[posIdx]
+            var varLabel = ""
+            for (d, p) in ip.varDepths:
+              if p == pos:
+                varLabel = " [depth " & $d & "]"
+                break
+            case spec.kind
+            of skVar:
+              outStr.add("    " & pos & " = ?" & spec.varName & varLabel & "\n")
+            of skBound:
+              if spec.boundVal != 0:
+                outStr.add("    " & pos & " = #" & $spec.boundVal & varLabel & "\n")
+              else:
+                outStr.add("    " & pos & " = _" & varLabel & "\n")
+            of skBoundAttr:
+              outStr.add("    " & pos & " = attr(id=" & $spec.attrId & ")" & varLabel & "\n")
+            of skBoundValue:
+              if spec.bvStr != "":
+                outStr.add("    " & pos & " = \"" & spec.bvStr & "\"" & varLabel & "\n")
+              elif spec.bvFloat != 0:
+                outStr.add("    " & pos & " = " & $spec.bvFloat & varLabel & "\n")
+              else:
+                outStr.add("    " & pos & " = " & $spec.bvInt & varLabel & "\n")
+            of skBoundParam:
+              outStr.add("    " & pos & " = %" & $spec.paramIdx & varLabel & "\n")
+        outStr.add("\n")
+      # Traces
       for t in compiled.traces:
         outStr.add($t & "\n")
       outStr.add("\n" & writeSchemePretty(compiled.program))
