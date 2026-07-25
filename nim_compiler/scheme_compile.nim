@@ -381,21 +381,45 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
         let gapVar = "_skip_" & gapSlot & "_" & toLowerAscii(ip.indexName)
         scanPos[ipIdx] += 1
         let scannerSym = newSymbol("s" & $ipIdx)
-        ops.add(list(
-          newSymbol("scanner-iterate"),
-          list(scannerSym),
-          list(newSymbol(gapVar)),
-          list(
-            newSymbol("begin"),
-            list(newSymbol("scanner-push"), scannerSym, newSymbol(gapVar)),
-            newSymbol("__BODY__"),
-            list(newSymbol("scanner-pop"), scannerSym),
-          ),
-        ))
+        let gapIterVar = newSymbol("_it_" & gapVar)
+        let gapBody = list(
+          newSymbol("begin"),
+          list(newSymbol("scanner-push"), scannerSym, newSymbol(gapVar)),
+          newSymbol("__BODY__"),
+          list(newSymbol("scanner-pop"), scannerSym))
+        let gapWhile = list(
+          newSymbol("while"),
+          list(newSymbol("set!"), newSymbol(gapVar),
+            list(newSymbol("scanner-iterate-next"), gapIterVar)),
+          gapBody)
+        let gapExpr = list(
+          newSymbol("let"),
+          list(list(gapIterVar,
+            list(newSymbol("scanner-iterate-init"), scannerSym, list()))),
+          gapWhile)
+        ops.add(gapExpr)
 
-    # Emit scanner-iterate for this variable
+    # Emit while + set! for this variable using LeapIterator
     let rangesTree = if depthRanges.hasKey(depth): depthRanges[depth] else: list()
     let rangesIsEmpty = rangesTree.kind == sList and rangesTree.items.len == 0
+
+    # Build ranges expr
+    var rangesExpr: SExpr = list()
+    var isSynthetic = false
+    for synth in plan.syntheticVars:
+      if synth.name == varName:
+        rangesExpr = list(newSymbol("ranges-create"), list(newSymbol("="), newSymbol(synth.sourceVar)))
+        isSynthetic = true
+        break
+    if not isSynthetic and not rangesIsEmpty:
+      rangesExpr = list(newSymbol("ranges-create"), rangesTree)
+
+    # Build init args: scanners... ranges
+    var initArgs: seq[SExpr] = @[]
+    for s in scanners: initArgs.add(s)
+    initArgs.add(rangesExpr)
+
+    let iterVar = newSymbol("_it_" & varName)
 
     var innerItems = @[newSymbol("begin")]
     for s in scanners:
@@ -404,20 +428,17 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
     for s in scanners:
       innerItems.add(list(newSymbol("scanner-pop"), s))
 
-    var iterItems = @[newSymbol("scanner-iterate"), list(scanners), list(newSymbol(varName))]
-
-    var isSynthetic = false
-    for synth in plan.syntheticVars:
-      if synth.name == varName:
-        iterItems.add(newSymbol(":ranges"))
-        iterItems.add(list(newSymbol("ranges-create"), list(newSymbol("="), newSymbol(synth.sourceVar))))
-        isSynthetic = true
-        break
-    if not isSynthetic and not rangesIsEmpty:
-      iterItems.add(newSymbol(":ranges"))
-      iterItems.add(list(newSymbol("ranges-create"), rangesTree))
-    iterItems.add(list(innerItems))
-    ops.add(list(iterItems))
+    let mainWhile = list(
+      newSymbol("while"),
+      list(newSymbol("set!"), newSymbol(varName),
+        list(newSymbol("scanner-iterate-next"), iterVar)),
+      list(innerItems))
+    let mainExpr = list(
+      newSymbol("let"),
+      list(list(iterVar,
+        list(@[newSymbol("scanner-iterate-init")] & initArgs))),
+      mainWhile)
+    ops.add(mainExpr)
 
   # Trailing bound values
   for ipIdx, ip in plan.iterPlans:
@@ -434,19 +455,24 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
       let scannerSym = newSymbol("s" & $ipIdx)
       if i == lastIdx:
         let trailVar = "_" & posName & "_trail"
-        ops.add(list(
-          newSymbol("scanner-iterate"),
-          list(scannerSym),
-          list(newSymbol(trailVar)),
-          newSymbol(":ranges"),
-          list(newSymbol("ranges-create"), list(newSymbol("="), valExpr)),
-          list(
-            newSymbol("begin"),
-            list(newSymbol("scanner-push"), scannerSym, newSymbol(trailVar)),
-            newSymbol("__BODY__"),
-            list(newSymbol("scanner-pop"), scannerSym),
-          ),
-        ))
+        let trailIterVar = newSymbol("_it_" & trailVar)
+        let trailRanges = list(newSymbol("ranges-create"), list(newSymbol("="), valExpr))
+        let trailBody = list(
+          newSymbol("begin"),
+          list(newSymbol("scanner-push"), scannerSym, newSymbol(trailVar)),
+          newSymbol("__BODY__"),
+          list(newSymbol("scanner-pop"), scannerSym))
+        let trailWhile = list(
+          newSymbol("while"),
+          list(newSymbol("set!"), newSymbol(trailVar),
+            list(newSymbol("scanner-iterate-next"), trailIterVar)),
+          trailBody)
+        let trailExpr = list(
+          newSymbol("let"),
+          list(list(trailIterVar,
+            list(newSymbol("scanner-iterate-init"), scannerSym, trailRanges))),
+          trailWhile)
+        ops.add(trailExpr)
       else:
         ops.add(list(
           newSymbol("begin"),
@@ -468,18 +494,22 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
     let aVal = if pattern.a.kind == dsConst: boundToSexpr(pattern.a.constVal) else: continue
     let vVal = if pattern.v.kind == dsConst: boundToSexpr(pattern.v.constVal) else: continue
     let probeSVar = "_s_probe"
+    let probeIterVar = newSymbol("_it_probe")
     body = list(
       newSymbol("let*"),
-      list(list(newSymbol(probeSVar), list(newSymbol("scanner-open"), newStr("EAVT")))),
+      list(
+        list(newSymbol(probeSVar), list(newSymbol("scanner-open"), newStr("EAVT"))),
+        list(probeIterVar,
+          list(newSymbol("scanner-iterate-init"), newSymbol(probeSVar), list()))),
       list(
         newSymbol("begin"),
         list(newSymbol("scanner-push"), newSymbol(probeSVar), eVal),
         list(newSymbol("scanner-push"), newSymbol(probeSVar), aVal),
         list(newSymbol("scanner-push"), newSymbol(probeSVar), vVal),
         list(
-          newSymbol("scanner-iterate"),
-          list(newSymbol(probeSVar)),
-          list(newSymbol(tParam)),
+          newSymbol("while"),
+          list(newSymbol("set!"), newSymbol(tParam),
+            list(newSymbol("scanner-iterate-next"), probeIterVar)),
           list(
             newSymbol("begin"),
             list(newSymbol("scanner-push"), newSymbol(probeSVar), newSymbol(tParam)),

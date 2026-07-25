@@ -10,6 +10,16 @@ import types
 import scanner
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# LeapIterator — encapsulates leapfrog state across yield/resume
+# ═══════════════════════════════════════════════════════════════════════════════
+
+type
+  LeapIterator* = ref object
+    scanners*: seq[V2Scanner]
+    rawOps*: seq[seq[(int32, SExpr)]]
+    started*: bool
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -220,6 +230,7 @@ type
     tx*: int64
     asOfTx*: Option[int64]
     scanners*: seq[V2Scanner]
+    leapIters*: Table[int, LeapIterator]
 
 method isNative(h: SchemeHostFns; name: string): bool =
   name in ["alloc-entity", "tx-entity", "param",
@@ -229,6 +240,7 @@ method isNative(h: SchemeHostFns; name: string): bool =
            "scanner-open", "scanner-read",
            "scanner-push", "scanner-pop", "scanner-prefix",
            "scheme-leap-init", "scheme-leap-next",
+           "scanner-iterate-init", "scanner-iterate-next",
            "intern-a", "result-row",
            "resolve-val", "attr-name",
            "dbg-scanners", "ranges-show",
@@ -244,6 +256,15 @@ proc findScanner*(h: SchemeHostFns; resource: SExpr): V2Scanner =
       return h.scanners[idx]
   else: discard
   raise newException(EvalError, "expected scanner resource")
+
+proc findLeapIterator*(h: SchemeHostFns; resource: SExpr): LeapIterator =
+  case resource.kind:
+  of sResource:
+    let idx = resource.rid
+    if idx in h.leapIters:
+      return h.leapIters[idx]
+  else: discard
+  raise newException(EvalError, "expected leap-iterator resource")
 
 proc pushScanner*(h: SchemeHostFns; sc: V2Scanner): int =
   result = h.scanners.len
@@ -355,6 +376,71 @@ method call(h: SchemeHostFns; name: string; args: seq[SExpr]): EvalStep =
     if rawOps.len > 0 and not applyRanges(scanners, rawOps):
       return done(newBool(false))
     return done(newBool(true))
+
+  # -- LeapIterator hostfns --
+  of "scanner-iterate-init":
+    # (scanner-iterate-init scanner... ranges)
+    # Creates a LeapIterator resource without iterating.
+    var scanners: seq[V2Scanner] = @[]
+    for i in 0..<args.len - 1:
+      scanners.add h.findScanner(args[i])
+    let rangesSexpr = args[^1]
+    if scanners.len == 0: return done(newVoid())
+
+    for sc in scanners.mitems:
+      let vtOpt = sc.attrIdFromPrefixBytes()
+      var vt: Option[uint32] = none[uint32]()
+      if vtOpt.isSome:
+        vt = h.engine.valueTypeFor(vtOpt.get)
+      sc.setValueAttrType(vt)
+      sc.advanceToActiveAt()
+      if sc.valueAttrType.isNone:
+        let aid = sc.attrIdFromKey()
+        if aid.isSome:
+          sc.setValueAttrType(h.engine.valueTypeFor(aid.get))
+
+    let rawOps = parseRanges(rangesSexpr)
+    let it = LeapIterator(scanners: scanners, rawOps: rawOps, started: false)
+    let idx = h.leapIters.len
+    h.leapIters[idx] = it
+    return done(SExpr(kind: sResource, rid: idx))
+
+  of "scanner-iterate-next":
+    # (scanner-iterate-next iter)
+    # On first call: converge + apply ranges, return first value or void.
+    # On subsequent calls: advance + converge + apply ranges, return next value or void.
+    let iter = h.findLeapIterator(args[0])
+    if iter.scanners.len == 0: return done(newVoid())
+
+    if not iter.started:
+      # First call: converge and apply ranges.
+      let ok = if iter.rawOps.len == 0:
+        leapConverge(iter.scanners)
+      else:
+        applyRanges(iter.scanners, iter.rawOps)
+      if not ok: return done(newVoid())
+      iter.started = true
+    else:
+      # Subsequent call: advance the smallest scanner, then converge + ranges.
+      var minIdx = 0
+      var minVal: Option[SExpr] = none[SExpr]()
+      for i, sc in iter.scanners:
+        let val = sc.extractCurrent()
+        if minVal.isNone:
+          minVal = val; minIdx = i
+        elif val.isSome and val.get < minVal.get:
+          minVal = val; minIdx = i
+
+      iter.scanners[minIdx].leapNextAt()
+      if iter.scanners[minIdx].atEnd(): return done(newVoid())
+      if not leapConverge(iter.scanners):
+        return done(newVoid())
+      if iter.rawOps.len > 0 and not applyRanges(iter.scanners, iter.rawOps):
+        return done(newVoid())
+
+    let val = iter.scanners[0].extractCurrent()
+    if val.isSome: return done(val.get)
+    return done(newVoid())
 
   # -- Attribute access --
   of "intern-a":

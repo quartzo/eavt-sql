@@ -187,6 +187,7 @@ proc newQuerySession*(store: QueryStore; program: SchemeProgram;
     tx: tx,
     asOfTx: asOfTx,
     scanners: @[],
+    leapIters: initTable[int, LeapIterator](),
   )
   QuerySession(store: store, host: host, program: program)
 

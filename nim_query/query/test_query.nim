@@ -884,8 +884,8 @@ suite "engine: StreamingSession → nextBatch":
 
     let program = scheme.parse("(begin " &
                          "  (let* ((s0 (scanner-open \"EAVT\" #f))) " &
-                         "    (scanner-iterate s0 (e) " &
-                         "      (result-row e))))")
+                         "    (let ((_it_e (scanner-iterate-init s0 ()))) (while (set! e (scanner-iterate-next _it_e)) " &
+                         "      (result-row e))))))")
     let proto = newQuerySession(q, SchemeProgram(body: program), @[], 0, none[int64]())
     let sess = newStreamingSession(proto)
 
@@ -1658,7 +1658,7 @@ suite "engine: scanner-iterate basic":
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-push s " & $eid & ") " &
       "(scanner-push s " & $aid.int64 & ") " &
-      "(scanner-iterate s (v) (result-row v)))")
+      "(let ((_it_v (scanner-iterate-init s ()))) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
     var vals = newSeq[int64]()
     for row in rows:
       if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
@@ -1677,7 +1677,7 @@ suite "engine: scanner-iterate basic":
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-push s " & $eid & ") " &
       "(scanner-push s " & $aid.int64 & ") " &
-      "(scanner-iterate s (v) (result-row v)))")
+      "(let ((_it_v (scanner-iterate-init s ()))) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
     check rows.len == 1
     check rows[0][0].ival == 25
 
@@ -1696,7 +1696,7 @@ suite "engine: scanner-iterate basic":
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-push s " & $eid & ") " &
       "(scanner-push s " & $aid.int64 & ") " &
-      "(scanner-iterate s (v) (result-row v)))")
+      "(let ((_it_v (scanner-iterate-init s ()))) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
     var vals = newSeq[int64]()
     for row in rows:
       if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
@@ -1718,7 +1718,7 @@ suite "engine: scanner-iterate basic":
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-push s " & $eid & ") " &
       "(scanner-push s " & $aid.int64 & ") " &
-      "(scanner-iterate s (v) (result-row v)))")
+      "(let ((_it_v (scanner-iterate-init s ()))) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
     var vals = newSeq[int64]()
     for row in rows:
       if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
@@ -1745,7 +1745,7 @@ suite "engine: scanner-iterate :ranges":
       "       (r0 (ranges-create (and (>= 10) (<= 20))))) " &
       "(scanner-push s " & $eid & ") " &
       "(scanner-push s " & $aid.int64 & ") " &
-      "(scanner-iterate s (v) :ranges r0 (result-row v)))")
+      "(let ((_it_v (scanner-iterate-init s r0))) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
     var vals = newSeq[int64]()
     for row in rows:
       if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
@@ -1765,7 +1765,7 @@ suite "engine: scanner-iterate :ranges":
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-push s " & $eid & ") " &
       "(scanner-push s " & $aid.int64 & ") " &
-      "(scanner-iterate s (v) :ranges (ranges-create (= 15)) (result-row v)))")
+      "(let ((_it_v (scanner-iterate-init s (ranges-create (= 15))))) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
     check rows.len == 1
     check rows[0][0].ival == 15
 
@@ -1783,7 +1783,7 @@ suite "engine: scanner-iterate :ranges":
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-push s " & $eid & ") " &
       "(scanner-push s " & $aid.int64 & ") " &
-      "(scanner-iterate s (v) :ranges (ranges-create (!= 15)) (result-row v)))")
+      "(let ((_it_v (scanner-iterate-init s (ranges-create (!= 15))))) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
     var vals = newSeq[int64]()
     for row in rows:
       if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
@@ -1810,7 +1810,7 @@ suite "engine: multi-scanner leapfrog":
       "       (s2 (scanner-open \"EAVT\"))) " &
       "(scanner-push s1 " & $eid1 & ") (scanner-push s1 " & $aid.int64 & ") " &
       "(scanner-push s2 " & $eid2 & ") (scanner-push s2 " & $aid.int64 & ") " &
-      "(scanner-iterate (s1 s2) (v) (result-row v)))")
+      "(let ((_it_v (scanner-iterate-init s1 s2 ()))) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
     var vals = newSeq[int64]()
     for row in rows:
       if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
@@ -1832,7 +1832,7 @@ suite "engine: multi-scanner leapfrog":
       "       (s2 (scanner-open \"EAVT\"))) " &
       "(scanner-push s1 " & $eid1 & ") (scanner-push s1 " & $aid.int64 & ") " &
       "(scanner-push s2 " & $eid2 & ") (scanner-push s2 " & $aid.int64 & ") " &
-      "(scanner-iterate (s1 s2) (v) (result-row v)))")
+      "(let ((_it_v (scanner-iterate-init s1 s2 ()))) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
     check rows.len == 0
 
   test "single matching value in both scanners":
@@ -1851,7 +1851,7 @@ suite "engine: multi-scanner leapfrog":
       "       (s2 (scanner-open \"EAVT\"))) " &
       "(scanner-push s1 " & $eid1 & ") (scanner-push s1 " & $aid.int64 & ") " &
       "(scanner-push s2 " & $eid2 & ") (scanner-push s2 " & $aid.int64 & ") " &
-      "(scanner-iterate (s1 s2) (v) (result-row v)))")
+      "(let ((_it_v (scanner-iterate-init s1 s2 ()))) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
     check rows.len == 1
     check rows[0][0].ival == 42
 
@@ -1865,7 +1865,7 @@ suite "engine: scanner-iterate more":
     q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: 1), 1, 0)
     let rows = runSelect(q,
       "(let* ((s (scanner-open \"EAVT\"))) " &
-      "(scanner-iterate s (v) (result-row v)))")
+      "(let ((_it_v (scanner-iterate-init s ()))) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
     # declare+save writes entries — at least 1 datom
     check rows.len > 0
 
@@ -1881,7 +1881,7 @@ suite "engine: scanner-iterate more":
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-push s " & $eid & ") " &
       "(scanner-push s " & $aid.int64 & ") " &
-      "(scanner-iterate s (v) (result-row v (attr-name " & $aid.int64 & "))))")
+      "(let ((_it_v (scanner-iterate-init s ()))) (while (set! v (scanner-iterate-next _it_v)) (result-row v (attr-name " & $aid.int64 & ")))))")
     check rows.len >= 1
     check rows[0][1].sval == "tag.x"
 
@@ -1896,7 +1896,7 @@ suite "engine: scanner-iterate more":
     let rows = runSelect(q,
       "(let* ((s (scanner-open \"AEVT\"))) " &
       "(scanner-push s " & $aid.int64 & ") " &
-      "(scanner-iterate s (e) (result-row e)))")
+      "(let ((_it_e (scanner-iterate-init s ()))) (while (set! e (scanner-iterate-next _it_e)) (result-row e))))")
     check rows.len >= 1
 
   test "param accessible in body":
@@ -1911,7 +1911,7 @@ suite "engine: scanner-iterate more":
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-push s " & $eid & ") " &
       "(scanner-push s " & $aid.int64 & ") " &
-      "(scanner-iterate s (v) (result-row v v)))")
+      "(let ((_it_v (scanner-iterate-init s ()))) (while (set! v (scanner-iterate-next _it_v)) (result-row v v))))")
     check rows.len >= 1
     check rows[0][0] == rows[0][1]
 
@@ -1928,8 +1928,8 @@ suite "engine: scanner-iterate more":
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-push s " & $eid & ") " &
       "(scanner-push s " & $aid.int64 & ") " &
-      "(scanner-iterate s (v) :ranges (ranges-create (or (= 1) (= 20))) " &
-      "  (result-row v)))")
+      "(let ((_it_v (scanner-iterate-init s (ranges-create (or (= 1) (= 20)))))) (while (set! v (scanner-iterate-next _it_v)) " &
+      "  (result-row v)))))")
     var vals = newSeq[int64]()
     for row in rows:
       if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
@@ -1949,7 +1949,7 @@ suite "engine: scanner-iterate more":
       "       (r0 (ranges-create (and)))) " &
       "(scanner-push s " & $eid & ") " &
       "(scanner-push s " & $aid.int64 & ") " &
-      "(scanner-iterate s (v) :ranges r0 (result-row v)))")
+      "(let ((_it_v (scanner-iterate-init s r0))) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
     var vals = newSeq[int64]()
     for row in rows:
       if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
@@ -1968,8 +1968,8 @@ suite "engine: scanner-iterate more":
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-push s " & $eid & ") " &
       "(scanner-push s " & $aid.int64 & ") " &
-      "(scanner-iterate s (v) :ranges (ranges-create (and (> 100) (< 200))) " &
-      "  (result-row v)))")
+      "(let ((_it_v (scanner-iterate-init s (ranges-create (and (> 100) (< 200)))))) (while (set! v (scanner-iterate-next _it_v)) " &
+      "  (result-row v)))))")
     check rows.len == 0
 
   test "multi three-way join":
@@ -1991,7 +1991,7 @@ suite "engine: scanner-iterate more":
       "(scanner-push s1 " & $eid1 & ") (scanner-push s1 " & $aid.int64 & ") " &
       "(scanner-push s2 " & $eid2 & ") (scanner-push s2 " & $aid.int64 & ") " &
       "(scanner-push s3 " & $eid3 & ") (scanner-push s3 " & $aid.int64 & ") " &
-      "(scanner-iterate (s1 s2 s3) (v) (result-row v)))")
+      "(let ((_it_v (scanner-iterate-init s1 s2 s3 ()))) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
     check rows.len == 1
     check rows[0][0].ival == 30
 
@@ -2011,7 +2011,7 @@ suite "engine: scanner-iterate more":
       "       (r0 (ranges-create (>= 30)))) " &
       "(scanner-push s1 " & $eid1 & ") (scanner-push s1 " & $aid.int64 & ") " &
       "(scanner-push s2 " & $eid2 & ") (scanner-push s2 " & $aid.int64 & ") " &
-      "(scanner-iterate (s1 s2) (v) :ranges r0 (result-row v)))")
+      "(let ((_it_v (scanner-iterate-init s1 s2 r0))) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
     var vals = newSeq[int64]()
     for row in rows:
       if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
@@ -2029,8 +2029,8 @@ suite "engine: scanner-iterate more":
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-push s " & $eid & ") " &
       "(scanner-push s " & $aid.int64 & ") " &
-      "(scanner-iterate s (v) (result-row v)) " &
-      "(scanner-iterate s (v) (result-row v)))")
+      "(let ((_it_v (scanner-iterate-init s ()))) (while (set! v (scanner-iterate-next _it_v)) (result-row v))) " &
+      "(let ((_it_v (scanner-iterate-init s ()))) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
     # Only first iterate emits — second is empty
     var vals = newSeq[int64]()
     for row in rows:
@@ -2051,14 +2051,14 @@ suite "engine: scanner-iterate more":
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-push s " & $srcEid & ") " &
       "(scanner-push s " & $srcAid.int64 & ") " &
-      "(scanner-iterate s (v) (save " & $dstEid & " \"tag.copy\" v)))")
+      "(let ((_it_v (scanner-iterate-init s ()))) (while (set! v (scanner-iterate-next _it_v)) (save " & $dstEid & " \"tag.copy\" v))))")
     # Verify copies were saved by scanning dstEid
     let dstAid = q.lookupAttr("tag.copy").get
     let rows = runSelect(q,
       "(let* ((s (scanner-open \"EAVT\"))) " &
       "(scanner-push s " & $dstEid & ") " &
       "(scanner-push s " & $dstAid.int64 & ") " &
-      "(scanner-iterate s (v) (result-row v)))")
+      "(let ((_it_v (scanner-iterate-init s ()))) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
     var vals = newSeq[int64]()
     for row in rows:
       if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival

@@ -215,7 +215,7 @@ method isNative*(h: HostFns; name: string): bool {.base.} = false
 type
   FrameKind = enum
     fkEval, fkApply, fkLetBindings, fkWhenTest, fkIfTest,
-    fkAndSeq, fkOrSeq, fkSetFrame, fkDepthRunBody
+    fkAndSeq, fkOrSeq, fkSetFrame, fkWhile
 
   Frame = ref object
     case kind: FrameKind
@@ -244,23 +244,14 @@ type
     of fkSetFrame:
       sfName: string
       sfEnv: Environment
-    of fkDepthRunBody: discard
+    of fkWhile:
+      wCond: SExpr
+      wBody: seq[SExpr]
+      wPhase: int  # 0 = eval cond, 1 = eval body
 
   YieldState* = object
     stack*: seq[Frame]
-    dirtyDepthRunIdxs: seq[int]
-    depthRuns*: seq[DepthRunFrame]
     started*: bool
-
-  ## DepthRunFrame — one active `scanner-iterate` loop (port of the Rust
-  ## frame in spier-scheme eval.rs). `stageKey` is the depth index, matching
-  ## Rust's `state.depth_runs.len()` at push time.
-  DepthRunFrame* = object
-    stageKey*: int64
-    scannerVals*: seq[SExpr]
-    body*: seq[SExpr]
-    paramName*: string
-    ranges*: SExpr
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Evaluator
@@ -270,7 +261,7 @@ type EvalError* = object of CatchableError
 
 const SpecialForms = ["let*", "let", "when", "if", "begin", "set!",
                        "print", "assert", "and", "or", "not",
-                       "scanner-iterate", "ranges-create"]
+                       "scanner-iterate", "ranges-create", "while"]
 
 proc isSpecialForm(name: string): bool = name in SpecialForms
 
@@ -316,6 +307,19 @@ proc processValue(value: SExpr; state: var YieldState; env: var Environment;
     of fkSetFrame:
       env.set(frame.sfName, value)
       continue
+    of fkWhile:
+      if frame.wPhase == 0:
+        if isTruthy(value):
+          state.stack.add Frame(kind: fkWhile, wCond: frame.wCond,
+            wBody: frame.wBody, wPhase: 1)
+          for i in countdown(frame.wBody.len - 1, 0):
+            state.stack.add Frame(kind: fkEval, fexpr: frame.wBody[i])
+        return
+      else:
+        state.stack.add Frame(kind: fkWhile, wCond: frame.wCond,
+          wBody: frame.wBody, wPhase: 0)
+        state.stack.add Frame(kind: fkEval, fexpr: frame.wCond)
+        return
     of fkAndSeq:
       if not isTruthy(value):
         state.stack.add Frame(kind: fkEval, fexpr: newBool(false))
@@ -340,32 +344,6 @@ proc processValue(value: SExpr; state: var YieldState; env: var Environment;
       state.stack.add Frame(kind: fkOrSeq, osRemaining: restOr)
       state.stack.add Frame(kind: fkEval, fexpr: nextOr)
       return
-    of fkDepthRunBody:
-      # One iteration of a scanner-iterate loop finished: advance the
-      # leapfrog and either re-run the body or unwind.
-      if state.depthRuns.len == 0: continue
-      let dr = state.depthRuns[^1]
-      var leapArgs = @[newInt(dr.stageKey)]
-      for sv in dr.scannerVals: leapArgs.add sv
-      leapArgs.add dr.ranges
-      let okStep = host.call("scheme-leap-next", leapArgs)
-      if okStep.kind == esYield:
-        raise newException(EvalError, "unexpected yield in scheme-leap-next")
-      if isTruthy(okStep.result):
-        if dr.paramName.len > 0 and dr.scannerVals.len > 0:
-          let vStep = host.call("scanner-read", @[dr.scannerVals[0]])
-          if vStep.kind == esYield:
-            raise newException(EvalError, "unexpected yield in scanner-read")
-          env.set(dr.paramName, vStep.result)
-        state.stack.add Frame(kind: fkDepthRunBody)
-        for i in countdown(dr.body.len - 1, 0):
-          state.stack.add Frame(kind: fkEval, fexpr: dr.body[i])
-        return
-      else:
-        # Loop exhausted — the scanner-iterate form evaluates to Void.
-        state.depthRuns.setLen(state.depthRuns.len - 1)
-        state.stack.add Frame(kind: fkEval, fexpr: newVoid())
-        return
     else:
       discard
 
@@ -492,7 +470,7 @@ proc evalSpecialForm(name: string; args: SExpr; env: var Environment;
     return done(newBool(not isTruthy(v.result)))
   of "scanner-iterate":
     # (scanner-iterate scanner-expr-or-list (param) [:ranges ranges-expr] body...)
-    # Port of spier-scheme eval.rs::eval_scanner_iterate_frame.
+    # Rewritten using LeapIterator + while.
     if args.items.len < 4:
       raise newException(EvalError,
         "scanner-iterate: expected (scanner-iterate scanners (param) [:ranges r] body...+)")
@@ -535,23 +513,24 @@ proc evalSpecialForm(name: string; args: SExpr; env: var Environment;
       let sv = evalExpr(e, env, host, state)
       if sv.kind == esYield: return sv
       scannerVals.add sv.result
-    var leapArgs = @[newInt(0)]
-    for sv in scannerVals: leapArgs.add sv
-    leapArgs.add rangesVal
-    let ok = host.call("scheme-leap-init", leapArgs)
-    if ok.kind == esYield: return ok
-    if not isTruthy(ok.result):
+
+    # Build init args: scanners... ranges
+    var initArgs: seq[SExpr] = @[]
+    for sv in scannerVals: initArgs.add sv
+    initArgs.add rangesVal
+    let iterStep = host.call("scanner-iterate-init", initArgs)
+    if iterStep.kind == esYield: return iterStep
+    if iterStep.result.kind == sVoid:
       return done(newVoid())
-    let val = host.call("scanner-read", @[scannerVals[0]])
-    if val.kind == esYield: return val
-    env.set(paramName, val.result)
-    state.depthRuns.add DepthRunFrame(
-      stageKey: state.depthRuns.len.int64,
-      scannerVals: scannerVals, body: body,
-      paramName: paramName, ranges: rangesVal)
-    state.stack.add Frame(kind: fkDepthRunBody)
-    for j in countdown(body.len - 1, 0):
-      state.stack.add Frame(kind: fkEval, fexpr: body[j])
+    let iterRes = iterStep.result
+
+    # Push: (while (set! param (scanner-iterate-next iter)) body...)
+    # scanner-iterate-next returns the first value (started=true) then advances.
+    let condExpr = newList(@[newSymbol("set!"), newSymbol(paramName),
+      newList(@[newSymbol("scanner-iterate-next"), iterRes])])
+    state.stack.add Frame(kind: fkWhile,
+      wCond: condExpr, wBody: body, wPhase: 0)
+    state.stack.add Frame(kind: fkEval, fexpr: condExpr)
     return done(newVoid())
   of "ranges-create":
     # (ranges-create expr) → flat list of (op val) pairs with (branch) separators
@@ -575,6 +554,14 @@ proc evalSpecialForm(name: string; args: SExpr; env: var Environment;
     var items: seq[SExpr] = @[]
     walk(inner, items)
     return done(newList(items))
+  of "while":
+    if args.items.len < 2:
+      raise newException(EvalError, "while: expected (while cond body...)")
+    let condExpr = args.items[1]
+    var body: seq[SExpr] = @[]
+    for i in 2..<args.items.len: body.add args.items[i]
+    state.stack.add Frame(kind: fkWhile, wCond: condExpr, wBody: body, wPhase: 0)
+    return evalExpr(condExpr, env, host, state)
   else:
     raise newException(EvalError, "unknown special form: " & name)
 
