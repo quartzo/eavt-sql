@@ -1,9 +1,8 @@
-import std/[locks, tables]
+import std/tables
 import kvstore, eavt, engine
 
 type
   SharedEngine* = ref object
-    lock*: Lock
     kv*: KVStore
     store*: QueryStore
 
@@ -13,16 +12,7 @@ proc initSharedEngine*(): SharedEngine =
   let kv = newKVStore(cfg)
   let store = newQueryStore(kv)
   store.eavt.bootstrapSystemAttrs()
-  result = SharedEngine(kv: kv, store: store)
-  initLock(result.lock)
+  SharedEngine(kv: kv, store: store)
 
 proc close*(eng: SharedEngine) =
-  deinitLock(eng.lock)
   eng.kv.close()
-
-proc withLock*[T](eng: SharedEngine, action: proc (): T {.closure.}): T =
-  acquire(eng.lock)
-  try:
-    return action()
-  finally:
-    release(eng.lock)

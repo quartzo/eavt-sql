@@ -1,6 +1,13 @@
 import std/[os, nativesockets, posix, strutils]
 import shared_engine, connection
 
+var gEng: SharedEngine
+
+proc connThread(fd: SocketHandle) {.thread.} =
+  {.cast(gcsafe).}:
+    handleConnection(gEng, fd)
+    discard posix.close(cint(fd))
+
 proc getSocketPath(): string =
   let xdg = getEnv("XDG_RUNTIME_DIR")
   if xdg.len > 0:
@@ -49,13 +56,13 @@ proc main() =
     return
   let sockPath = getSocketPath()
   echo "EAVT server starting on ", sockPath
-  var eng = initSharedEngine()
+  gEng = initSharedEngine()
   echo "Engine initialized"
   let serverFd = createUnixSocket(sockPath)
   defer: discard posix.close(cint(serverFd))
   echo "Listening..."
   while true:
     let clientFd = acceptClient(serverFd)
-    handleConnection(eng, clientFd)
-    discard posix.close(cint(clientFd))
+    var thread: Thread[SocketHandle]
+    createThread(thread, connThread, clientFd)
 when isMainModule: main()
