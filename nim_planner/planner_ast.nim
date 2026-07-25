@@ -84,13 +84,13 @@ proc `$`*(sv: SyntheticVar): string =
 proc `$`*(t: PlanTrace): string =
   let vars = t.ordering.join(", ")
   let prefix = if t.pruned: "PRUNED " elif t.chosen: "\u2192 " else: ""
-  result = prefix & "[" & vars & "] cost=" & formatFloat(t.totalCost, ffDefault, 1)
+  result = prefix & "[" & vars & "] cost=" & formatFloat(t.totalCost, ffDecimal, 1)
   for i, d in t.depths:
     let clauses = d.activeClauses.mapIt("p" & $it[0] & "@" & it[1]).join(", ")
     if d.isBlind:
-      result.add("\n  depth " & $i & ": " & d.varName & " | blind | est=" & formatFloat(d.estimatedElements, ffDefault, 1))
+      result.add("\n  depth " & $i & ": " & d.varName & " | blind | est=" & formatFloat(d.estimatedElements, ffDecimal, 1))
     else:
-      result.add("\n  depth " & $i & ": " & d.varName & " | clauses=[" & clauses & "] | est=" & formatFloat(d.estimatedElements, ffDefault, 1) & " \xd7" & $d.activeClauses.len & "cl = " & formatFloat(d.stepCost, ffDefault, 1))
+      result.add("\n  depth " & $i & ": " & d.varName & " | clauses=[" & clauses & "] | est=" & formatFloat(d.estimatedElements, ffDecimal, 1) & " \xd7" & $d.activeClauses.len & "cl = " & formatFloat(d.stepCost, ffDecimal, 1))
 
 proc `$`*(plan: QueryPlanResult): string =
   if plan.orderedVars.len == 0:
