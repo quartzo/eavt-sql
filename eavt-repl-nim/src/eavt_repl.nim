@@ -1,5 +1,5 @@
 ## Entry point: optional <SOCKET_PATH> and run the REPL.
-import std/[os, strutils]
+import std/os
 import eavt_server_nim/client
 import repl
 

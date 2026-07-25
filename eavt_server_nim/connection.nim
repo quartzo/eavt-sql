@@ -1,7 +1,7 @@
-import std/[options, nativesockets, posix, strutils, tables, json]
-import ast, scheme, engine, hostfns, eavt, kvstore, keys, resolver
-import frontend, parser as sql_parser, scheme_compile, datalog_ast, pattern
-import translate, resolve as datalog_resolve, stats, planner_ast, planner
+import std/[options, nativesockets, posix, strutils, json]
+import scheme, engine, eavt, kvstore
+import frontend, parser as sql_parser
+import stats, planner_ast
 import msgpack4nim/msgpack2json
 import shared_engine, protocol
 

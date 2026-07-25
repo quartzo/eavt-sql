@@ -14,14 +14,6 @@ var gClient: EavtClient
 
 # ── helpers ──────────────────────────────────────────────────────────
 
-proc fmtSize(n: uint64): string =
-  if n < 1024: &"{n} B"
-  elif n < 1024'u64 * 1024: formatFloat(n.float / 1024.0, ffDecimal, 1) & " KB"
-  elif n < 1024'u64 * 1024 * 1024:
-    formatFloat(n.float / (1024.0 * 1024.0), ffDecimal, 1) & " MB"
-  else:
-    formatFloat(n.float / (1024.0 * 1024.0 * 1024.0), ffDecimal, 1) & " GB"
-
 proc parseValue(raw: string): string =
   try:
     let node = parseJson(raw)

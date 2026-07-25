@@ -1,5 +1,5 @@
-import std/[json, nativesockets, posix, streams, strutils]
-import msgpack4nim, msgpack4nim/msgpack2json
+import std/[json, nativesockets, posix]
+import msgpack4nim/msgpack2json
 import scheme
 
 type

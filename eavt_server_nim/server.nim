@@ -1,4 +1,4 @@
-import std/[os, nativesockets, posix, strutils]
+import std/[os, nativesockets, posix]
 import shared_engine, connection
 
 var gEng: SharedEngine
