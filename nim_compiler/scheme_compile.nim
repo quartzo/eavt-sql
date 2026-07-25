@@ -429,11 +429,14 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
     let iterVar = newSymbol("_it_" & varName)
 
     var innerItems = @[newSymbol("begin")]
-    for s in scanners:
-      innerItems.add(list(newSymbol("scanner-push"), s, newSymbol(varName)))
+    # Push/pop only needed when there are deeper levels to restrict.
+    if depth < numDepths - 1:
+      for s in scanners:
+        innerItems.add(list(newSymbol("scanner-push"), s, newSymbol(varName)))
     innerItems.add(newSymbol("__BODY__"))
-    for s in scanners:
-      innerItems.add(list(newSymbol("scanner-pop"), s))
+    if depth < numDepths - 1:
+      for s in scanners:
+        innerItems.add(list(newSymbol("scanner-pop"), s))
 
     let mainWhile = list(
       newSymbol("while"),
