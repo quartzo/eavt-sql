@@ -29,34 +29,8 @@ import nim_memtable/all
 # Helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-proc newMockCursor(keys: seq[seq[byte]]): NimCursor =
-  var pos = 0
-
-  let isValid = proc(): bool {.closure.} = pos < keys.len
-  let currentKey = proc(): Option[seq[byte]] {.closure.} =
-    if pos < keys.len: some(keys[pos]) else: none[seq[byte]]()
-  let step = proc() {.closure.} = inc pos
-  let skipGroup = proc(groupEnd: int) {.closure.} = inc pos
-  let seek = proc(target: seq[byte]) {.closure.} =
-    while pos < keys.len:
-      let k = keys[pos]
-      if k.len >= target.len:
-        var ge = true
-        for i in 0..<target.len:
-          if k[i] < target[i]: ge = false; break
-          if k[i] > target[i]: break
-        if ge: return
-      inc pos
-  let invalidate = proc() {.closure.} = pos = keys.len
-
-  NimCursor(
-    isValidCb: isValid,
-    currentKeyCb: currentKey,
-    stepCb: step,
-    skipGroupCb: skipGroup,
-    seekCb: seek,
-    invalidateCb: invalidate,
-  )
+proc newMockCursor(keys: seq[seq[byte]]): Cursor =
+  mockCursor(keys)
 
 proc newMemoryKVStore(): KVStore =
   var tbl = initTable[string, string]()
@@ -793,7 +767,7 @@ suite "engine: cursor":
     let q = newQueryStore(kv)
     # CF 0 has bootstrap data — cursor should be valid
     let cursor = q.openCursor(0'u32, @[])
-    check cursor.isValidCb()
+    check cursor.isValid()
 
   test "openCursor on populated EAVT → step through keys":
     let kv = newMemoryKVStore()
@@ -808,12 +782,12 @@ suite "engine: cursor":
     q.kv.flush()
 
     let cursor = q.openCursor(0'u32, @[])
-    check cursor.isValidCb()
-    let key = cursor.currentKeyCb()
+    check cursor.isValid()
+    let key = cursor.currentKey()
     check key.isSome
-    cursor.stepCb()
+    cursor.step()
     # Cursor may still be valid (bootstrap keys exist alongside user data)
-    check cursor.isValidCb()  # at least one key was found, stepping is safe
+    check cursor.isValid()  # at least one key was found, stepping is safe
 
   test "openCursor with prefix finds only prefix keys":
     let kv = newMemoryKVStore()
@@ -830,8 +804,8 @@ suite "engine: cursor":
     # Prefix for eid1
     var prefix1 = keys.encodeEid(eid1)
     let cursor = q.openCursor(0'u32, prefix1)
-    check cursor.isValidCb()
-    let key = cursor.currentKeyCb()
+    check cursor.isValid()
+    let key = cursor.currentKey()
     check key.isSome
 
 suite "engine: multi-attribute entities":

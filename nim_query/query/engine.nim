@@ -54,16 +54,9 @@ proc sexprToValueForType(val: SExpr; vt: uint32): string =
 
 # ── EngineOps implementation ──
 
-method openCursor(q: QueryStore; cfId: uint32; prefix: seq[byte]): NimCursor =
+method openCursor(q: QueryStore; cfId: uint32; prefix: seq[byte]): Cursor =
   let mc = q.kv.openScanCursor(cfId.int)
-  NimCursor(
-    isValidCb: proc(): bool = not mc.atEnd,
-    currentKeyCb: proc(): Option[seq[byte]] = mc.peek(),
-    stepCb: proc() = discard mc.next(),
-    seekCb: proc(target: seq[byte]) = mc.seek(target),
-    skipGroupCb: proc(ge: int) = discard mc.next(),
-    invalidateCb: proc() = mc.atEnd = true,
-  )
+  mergedCursor(mc)
 
 method saveWithT(q: QueryStore; eid: int64; attr: string; val: SExpr;
                   t: int64; asOf: int64) =

@@ -56,7 +56,7 @@ proc len*(reg: ScannerRegistry): int = reg.scanners.len
 type
   EngineOps* = ref object of RootObj
 
-method openCursor*(ops: EngineOps; cfId: uint32; prefix: seq[byte]): NimCursor {.base.} =
+method openCursor*(ops: EngineOps; cfId: uint32; prefix: seq[byte]): Cursor {.base.} =
   raise newException(EvalError, "not implemented")
 
 method saveWithT*(ops: EngineOps; eid: int64; attr: string; val: SExpr;

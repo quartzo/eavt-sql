@@ -1,0 +1,225 @@
+## cursor.nim — Cursor variant type + MergedCursor (heap merge).
+##
+## Replaces the closure-based NimCursor with a tagged union.
+## MergedCursor and MinHeap live here to avoid circular imports.
+
+import std/options
+import page_store    # cmpSeq
+import page_cursor   # PageStoreCursor, PageStoreSnapshot
+import treap_cursor  # TreapCursor
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MinHeap for merge operations
+# ═══════════════════════════════════════════════════════════════════════════════
+
+type
+  HeapEntry = tuple[key: seq[byte], srcIdx: int]
+  MinHeap* = object
+    data: seq[HeapEntry]
+
+proc parent(i: int): int = (i - 1) shr 1
+proc leftChild(i: int): int = (i shl 1) + 1
+
+proc push*(h: var MinHeap; entry: HeapEntry) =
+  h.data.add entry
+  var i = h.data.len - 1
+  while i > 0:
+    let p = parent(i)
+    if cmpSeq(h.data[i].key, h.data[p].key) < 0:
+      swap(h.data[i], h.data[p])
+      i = p
+    else: break
+
+proc pop*(h: var MinHeap): HeapEntry =
+  result = h.data[0]
+  h.data[0] = h.data[^1]
+  h.data.setLen(h.data.len - 1)
+  var i = 0
+  while true:
+    let l = leftChild(i)
+    if l >= h.data.len: break
+    var smallest = i
+    if cmpSeq(h.data[l].key, h.data[smallest].key) < 0:
+      smallest = l
+    let r = l + 1
+    if r < h.data.len and cmpSeq(h.data[r].key, h.data[smallest].key) < 0:
+      smallest = r
+    if smallest != i:
+      swap(h.data[i], h.data[smallest])
+      i = smallest
+    else: break
+
+proc len*(h: MinHeap): int = h.data.len
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Cursor variant + MergedCursor
+# ═══════════════════════════════════════════════════════════════════════════════
+
+type
+  CursorKind* = enum
+    ckPageStore
+    ckTreap
+    ckMerged
+    ckMock
+    ckInvalid
+
+  MergedCursor* = ref object
+    sources*: seq[Cursor]
+    heap*: MinHeap
+    lastKey*: seq[byte]
+    atEnd*: bool
+    curKey*: Option[seq[byte]]
+
+  Cursor* = ref object
+    case kind*: CursorKind
+    of ckPageStore:
+      ps*: PageStoreCursor
+    of ckTreap:
+      tc*: TreapCursor
+    of ckMerged:
+      mc*: MergedCursor
+    of ckMock:
+      mockKeys*: seq[seq[byte]]
+      mockPos*: int
+    of ckInvalid:
+      discard
+
+# ── Forward declarations ──
+
+proc isValid*(c: Cursor): bool {.gcsafe.}
+proc currentKey*(c: Cursor): Option[seq[byte]] {.gcsafe.}
+proc step*(c: Cursor) {.gcsafe.}
+proc seek*(c: Cursor; target: seq[byte]) {.gcsafe.}
+proc invalidate*(c: Cursor) {.gcsafe.}
+
+# ── MergedCursor procs ──
+
+proc advance*(mc: MergedCursor) {.gcsafe.} =
+  if mc.atEnd: return
+  while mc.heap.len > 0:
+    let (key, srcIdx) = mc.heap.pop()
+    if mc.lastKey.len > 0 and key == mc.lastKey:
+      var src = mc.sources[srcIdx]
+      if src.isValid():
+        src.step()
+        if src.isValid():
+          let nk = src.currentKey()
+          if nk.isSome: mc.heap.push((nk.get, srcIdx))
+      continue
+    mc.lastKey = key
+    mc.curKey = some(key)
+    var src = mc.sources[srcIdx]
+    src.step()
+    if src.isValid():
+      let nk = src.currentKey()
+      if nk.isSome: mc.heap.push((nk.get, srcIdx))
+    return
+  mc.atEnd = true
+  mc.curKey = none(seq[byte])
+
+proc newMergedCursor*(sources: seq[Cursor]): MergedCursor {.gcsafe.} =
+  result = MergedCursor(sources: sources, atEnd: false)
+  var heap: MinHeap
+  for i, src in sources:
+    if src.isValid():
+      let k = src.currentKey()
+      if k.isSome:
+        heap.push((k.get, i))
+  result.heap = heap
+
+proc ensure*(mc: MergedCursor) {.gcsafe.} =
+  if mc.curKey.isNone and not mc.atEnd:
+    mc.advance()
+
+proc peek*(mc: MergedCursor): Option[seq[byte]] {.gcsafe.} =
+  mc.ensure()
+  if mc.atEnd: none(seq[byte]) else: mc.curKey
+
+proc next*(mc: MergedCursor): Option[seq[byte]] {.gcsafe.} =
+  mc.ensure()
+  result = mc.curKey
+  mc.curKey = none(seq[byte])
+  mc.advance()
+
+proc seek*(mc: MergedCursor; target: seq[byte]) {.gcsafe.} =
+  for src in mc.sources:
+    src.seek(target)
+  mc.heap.data = @[]
+  for i, src in mc.sources:
+    if src.isValid():
+      let k = src.currentKey()
+      if k.isSome: mc.heap.push((k.get, i))
+  mc.lastKey = @[]
+  mc.atEnd = false
+  mc.curKey = none(seq[byte])
+  mc.advance()
+
+# ── Dispatch procs (call MergedCursor procs defined above) ──
+
+proc isValid*(c: Cursor): bool {.gcsafe.} =
+  case c.kind
+  of ckPageStore: not c.ps.atEnd
+  of ckTreap: not c.tc.atEnd
+  of ckMerged: not c.mc.atEnd
+  of ckMock: c.mockPos < c.mockKeys.len
+  of ckInvalid: false
+
+proc currentKey*(c: Cursor): Option[seq[byte]] {.gcsafe.} =
+  case c.kind
+  of ckPageStore: c.ps.peek()
+  of ckTreap: c.tc.peek()
+  of ckMerged: c.mc.peek()
+  of ckMock:
+    if c.mockPos < c.mockKeys.len: some(c.mockKeys[c.mockPos])
+    else: none[seq[byte]]()
+  of ckInvalid: none[seq[byte]]()
+
+proc step*(c: Cursor) {.gcsafe.} =
+  case c.kind
+  of ckPageStore: discard c.ps.next()
+  of ckTreap: discard c.tc.next()
+  of ckMerged: discard c.mc.next()
+  of ckMock: inc c.mockPos
+  of ckInvalid: discard
+
+proc seek*(c: Cursor; target: seq[byte]) {.gcsafe.} =
+  case c.kind
+  of ckPageStore: c.ps.seek(target)
+  of ckTreap: c.tc.seek(target)
+  of ckMerged: c.mc.seek(target)
+  of ckMock:
+    while c.mockPos < c.mockKeys.len:
+      let k = c.mockKeys[c.mockPos]
+      if k.len >= target.len:
+        var ge = true
+        for i in 0..<target.len:
+          if k[i] < target[i]: ge = false; break
+          if k[i] > target[i]: break
+        if ge: return
+      inc c.mockPos
+  of ckInvalid: discard
+
+proc invalidate*(c: Cursor) {.gcsafe.} =
+  case c.kind
+  of ckPageStore: c.ps.atEnd = true
+  of ckTreap: c.tc.atEnd = true
+  of ckMerged: c.mc.atEnd = true
+  of ckMock: c.mockPos = c.mockKeys.len
+  of ckInvalid: discard
+
+# ── Constructors ──
+
+proc pageStoreCursor*(psc: PageStoreCursor): Cursor =
+  Cursor(kind: ckPageStore, ps: psc)
+
+proc treapCursor*(tc: TreapCursor): Cursor =
+  Cursor(kind: ckTreap, tc: tc)
+
+proc mergedCursor*(mc: MergedCursor): Cursor =
+  Cursor(kind: ckMerged, mc: mc)
+
+proc mockCursor*(keys: seq[seq[byte]]): Cursor =
+  Cursor(kind: ckMock, mockKeys: keys, mockPos: 0)
+
+proc invalidCursor*(): Cursor =
+  Cursor(kind: ckInvalid)

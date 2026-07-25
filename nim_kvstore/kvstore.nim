@@ -10,61 +10,18 @@ import std/locks
 import nim_memtable/treap_backend as mt_be
 import treap_cursor
 import page_cursor
-import query/scanner  # NimCursor type
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# MinHeap for merge operations
-# ═══════════════════════════════════════════════════════════════════════════════
-
-type
-  HeapEntry = tuple[key: seq[byte], srcIdx: int]
-  MinHeap = object
-    data: seq[HeapEntry]
-
-proc parent(i: int): int = (i - 1) shr 1
-proc leftChild(i: int): int = (i shl 1) + 1
-
-proc push(h: var MinHeap; entry: HeapEntry) =
-  h.data.add entry
-  var i = h.data.len - 1
-  while i > 0:
-    let p = parent(i)
-    if cmpSeq(h.data[i].key, h.data[p].key) < 0:
-      swap(h.data[i], h.data[p])
-      i = p
-    else: break
-
-proc pop(h: var MinHeap): HeapEntry =
-  result = h.data[0]
-  h.data[0] = h.data[^1]
-  h.data.setLen(h.data.len - 1)
-  var i = 0
-  while true:
-    let l = leftChild(i)
-    if l >= h.data.len: break
-    var smallest = i
-    if cmpSeq(h.data[l].key, h.data[smallest].key) < 0:
-      smallest = l
-    let r = l + 1
-    if r < h.data.len and cmpSeq(h.data[r].key, h.data[smallest].key) < 0:
-      smallest = r
-    if smallest != i:
-      swap(h.data[i], h.data[smallest])
-      i = smallest
-    else: break
-
-proc len*(h: MinHeap): int = h.data.len
+import query/cursor
+export cursor
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # KVStore
-# ═══════════════════════════════════════════════════════════════════════════════
 
 type
   KVStore* = ref object
     ps*: ptr PageStoreInner
     mt*: mt_be.MemTable
     mtSize*: uint64
-    flushRoots*: seq[mt_be.TreapNode]  ## COW roots captured during flush
+    flushRoots*: seq[mt_be.TreapNode]
     lock: Lock
     config*: Table[string, string]
     path*: string
@@ -73,6 +30,9 @@ type
     flushThreshold*: uint64
     gcMaxAgeSecs*: uint64
     gcMaxRootCount*: int
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# KVStore operations
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # KVStore operations
@@ -213,104 +173,10 @@ proc batchWrite*(kv: KVStore; ops: openArray[byte]) {.gcsafe.} =
 
 proc memtableSize*(kv: KVStore): uint64 {.gcsafe.} = kv.mtSize
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# MergedCursor — heap merge of N NimCursor sources (streaming, no materialization)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-type
-  MergedCursor* = ref object
-    sources: seq[NimCursor]
-    heap: MinHeap
-    lastKey: seq[byte]
-    atEnd*: bool
-    curKey: Option[seq[byte]]
-
-proc advance(mc: MergedCursor) =
-  if mc.atEnd: return
-  while mc.heap.len > 0:
-    let (key, srcIdx) = mc.heap.pop()
-    if mc.lastKey.len > 0 and key == mc.lastKey:
-      var src = mc.sources[srcIdx]
-      if src.isValidCb():
-        src.stepCb()
-        if src.isValidCb():
-          let nk = src.currentKeyCb()
-          if nk.isSome: mc.heap.push((nk.get, srcIdx))
-      continue
-    mc.lastKey = key
-    mc.curKey = some(key)
-    var src = mc.sources[srcIdx]
-    src.stepCb()
-    if src.isValidCb():
-      let nk = src.currentKeyCb()
-      if nk.isSome: mc.heap.push((nk.get, srcIdx))
-    return
-  mc.atEnd = true
-  mc.curKey = none(seq[byte])
-
-proc newMergedCursor*(sources: seq[NimCursor]): MergedCursor =
-  result = MergedCursor(sources: sources, atEnd: false)
-  var heap: MinHeap
-  for i, src in sources:
-    if src.isValidCb():
-      let k = src.currentKeyCb()
-      if k.isSome:
-        heap.push((k.get, i))
-  result.heap = heap
-
-proc ensure(mc: MergedCursor) =
-  if mc.curKey.isNone and not mc.atEnd:
-    mc.advance()
-
-proc peek*(mc: MergedCursor): Option[seq[byte]] =
-  mc.ensure()
-  if mc.atEnd: none(seq[byte]) else: mc.curKey
-
-proc next*(mc: MergedCursor): Option[seq[byte]] =
-  mc.ensure()
-  result = mc.curKey
-  mc.curKey = none(seq[byte])
-  mc.advance()
-
-proc seek*(mc: MergedCursor; target: seq[byte]) =
-  for src in mc.sources:
-    src.seekCb(target)
-  mc.heap.data = @[]
-  for i, src in mc.sources:
-    if src.isValidCb():
-      let k = src.currentKeyCb()
-      if k.isSome: mc.heap.push((k.get, i))
-  mc.lastKey = @[]
-  mc.atEnd = false
-  mc.curKey = none(seq[byte])
-  mc.advance()
-
-# ── Adapters ──
-
-proc pageStoreToNimCursor*(psc: PageStoreCursor): NimCursor =
-  NimCursor(
-    isValidCb: proc(): bool = not psc.atEnd,
-    currentKeyCb: proc(): Option[seq[byte]] = psc.peek(),
-    stepCb: proc() = discard psc.next(),
-    seekCb: proc(target: seq[byte]) = psc.seek(target),
-    skipGroupCb: proc(ge: int) = discard psc.next(),
-    invalidateCb: proc() = psc.atEnd = true,
-  )
-
-proc treapToNimCursor*(tc: TreapCursor): NimCursor =
-  NimCursor(
-    isValidCb: proc(): bool = not tc.atEnd,
-    currentKeyCb: proc(): Option[seq[byte]] = tc.peek(),
-    stepCb: proc() = discard tc.next(),
-    seekCb: proc(target: seq[byte]) = tc.seek(target),
-    skipGroupCb: proc(ge: int) = discard tc.next(),
-    invalidateCb: proc() = tc.atEnd = true,
-  )
-
 # ── Streaming scan entry point ──
 
 proc openScanCursor*(kv: KVStore; cf: int): MergedCursor {.gcsafe.} =
-  var sources: seq[NimCursor] = @[]
+  var sources: seq[Cursor] = @[]
 
   var psSnap: PageStoreSnapshot
   var flushRoot, liveRoot: mt_be.TreapNode
@@ -323,17 +189,17 @@ proc openScanCursor*(kv: KVStore; cf: int): MergedCursor {.gcsafe.} =
     liveRoot = kv.mt.hnd.live[cf]
 
   if psSnap.rootUuid != default(array[16, byte]):
-    sources.add pageStoreToNimCursor(PageStoreCursor(
+    sources.add pageStoreCursor(PageStoreCursor(
       s: kv.ps, cf: cf, rootUuid: psSnap.rootUuid, height: psSnap.height))
 
   if flushRoot != nil:
     let tc = newTreapCursor(flushRoot)
     if not tc.atEnd:
-      sources.add treapToNimCursor(tc)
+      sources.add treapCursor(tc)
 
   if liveRoot != nil:
     let tc = newTreapCursor(liveRoot)
     if not tc.atEnd:
-      sources.add treapToNimCursor(tc)
+      sources.add treapCursor(tc)
 
   result = newMergedCursor(sources)

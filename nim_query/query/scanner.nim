@@ -5,20 +5,9 @@
 import std/[options, tables, strutils]
 import scheme
 import keys
+import cursor
 export keys.beUint32, keys.beUint64
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Cursor abstraction
-# ═══════════════════════════════════════════════════════════════════════════════
-
-type
-  NimCursor* = ref object
-    isValidCb*: proc(): bool {.closure, gcsafe.}
-    currentKeyCb*: proc(): Option[seq[byte]] {.closure, gcsafe.}
-    stepCb*: proc() {.closure, gcsafe.}
-    skipGroupCb*: proc(groupEnd: int) {.closure, gcsafe.}
-    seekCb*: proc(target: seq[byte]) {.closure, gcsafe.}
-    invalidateCb*: proc() {.closure, gcsafe.}
+export cursor
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # KeyVsPrefix — result of classify_key
@@ -32,7 +21,7 @@ type
     kvpAfter
 
   PositionStack* = ref object
-    cursor*: NimCursor
+    cursor*: Cursor
     idxOrder*: seq[string]
     stack*: seq[SExpr]         # fixed entries (values)
     currentActiveKey*: Option[seq[byte]]
@@ -66,7 +55,7 @@ const
 # PositionStack
 # ═══════════════════════════════════════════════════════════════════════════════
 
-proc newPositionStack*(cursor: NimCursor; idxOrder: seq[string]): PositionStack =
+proc newPositionStack*(cursor: Cursor; idxOrder: seq[string]): PositionStack =
   PositionStack(
     cursor: cursor,
     idxOrder: idxOrder,
@@ -128,16 +117,8 @@ proc isVariableValue*(vt: Option[uint32]; keyLen: int): bool =
 
 proc newV2Scanner*(indexName: string; idxOrder: seq[string]; asOfTx: Option[int64];
                    valueAttrType: Option[uint32]): V2Scanner =
-  let invalidCursor = NimCursor(
-    isValidCb: proc(): bool = false,
-    currentKeyCb: proc(): Option[seq[byte]] = none[seq[byte]](),
-    stepCb: proc() = discard,
-    skipGroupCb: proc(ge: int) = discard,
-    seekCb: proc(tg: seq[byte]) = discard,
-    invalidateCb: proc() = discard,
-  )
   V2Scanner(
-    pos: newPositionStack(invalidCursor, idxOrder),
+    pos: newPositionStack(invalidCursor(), idxOrder),
     indexName: indexName.toUpperAscii(),
     asOfTx: asOfTx,
     valueAttrType: valueAttrType,
@@ -146,7 +127,7 @@ proc newV2Scanner*(indexName: string; idxOrder: seq[string]; asOfTx: Option[int6
     tInPrefix: false,
   )
 
-proc setCursor*(sc: V2Scanner; cursor: NimCursor) =
+proc setCursor*(sc: V2Scanner; cursor: Cursor) =
   sc.pos.cursor = cursor
   sc.pos.atEnd = false
 
@@ -361,10 +342,10 @@ proc advanceToActiveAt*(sc: V2Scanner) =
 
   if sc.historyMode and isTPos:
     # history_each
-    while sc.pos.cursor.isValidCb():
-      let key = sc.pos.cursor.currentKeyCb()
+    while sc.pos.cursor.isValid():
+      let key = sc.pos.cursor.currentKey()
       if key.isNone or key.get.len < 8:
-        sc.pos.cursor.stepCb()
+        sc.pos.cursor.step()
         continue
       let k = key.get
       case classifyKey(sc, k):
@@ -375,7 +356,7 @@ proc advanceToActiveAt*(sc: V2Scanner) =
       let suffix = extractSuffix(k)
       let (t, _) = keys.decodeSuffix(suffix)
       if asOfTx.isSome and t.int64 > asOfTx.get:
-        sc.pos.cursor.stepCb()
+        sc.pos.cursor.step()
         continue
       sc.pos.currentActiveKey = some(k)
       sc.pos.atEnd = false
@@ -385,16 +366,16 @@ proc advanceToActiveAt*(sc: V2Scanner) =
     return
 
   # normal advance
-  while sc.pos.cursor.isValidCb():
-    let key = sc.pos.cursor.currentKeyCb()
+  while sc.pos.cursor.isValid():
+    let key = sc.pos.cursor.currentKey()
     if key.isNone or key.get.len < 8:
-      sc.pos.cursor.stepCb()
+      sc.pos.cursor.step()
       continue
     let firstKey = key.get
     case classifyKey(sc, firstKey):
     of kvpNoPrefix, kvpMatch: discard
     of kvpBefore:
-      sc.pos.cursor.seekCb(sc.prefixCache)
+      sc.pos.cursor.seek(sc.prefixCache)
       continue
     of kvpAfter:
       sc.pos.currentActiveKey = none[seq[byte]]()
@@ -407,10 +388,10 @@ proc advanceToActiveAt*(sc: V2Scanner) =
     let groupEnd = firstKey.len - 8
     var curGroup = firstKey[0..<groupEnd]
 
-    while sc.pos.cursor.isValidCb():
-      let key = sc.pos.cursor.currentKeyCb()
+    while sc.pos.cursor.isValid():
+      let key = sc.pos.cursor.currentKey()
       if key.isNone or key.get.len < 8:
-        sc.pos.cursor.stepCb()
+        sc.pos.cursor.step()
         continue
       let k = key.get
       let ge = k.len - 8
@@ -422,7 +403,7 @@ proc advanceToActiveAt*(sc: V2Scanner) =
       let (t, retracted) = keys.decodeSuffix(suffix)
 
       if asOfTx.isSome and t.int64 > asOfTx.get:
-        sc.pos.cursor.stepCb()
+        sc.pos.cursor.step()
         continue
 
       if t >= bestT:
@@ -430,7 +411,7 @@ proc advanceToActiveAt*(sc: V2Scanner) =
         bestT = t
         bestRetracted = retracted
 
-      sc.pos.cursor.stepCb()
+      sc.pos.cursor.step()
 
     if bestKey.isSome and not bestRetracted:
       sc.pos.currentActiveKey = bestKey
@@ -446,7 +427,7 @@ proc seekPastValueAt(sc: V2Scanner) =
   let pn = sc.pos.posName()
   let key = sc.pos.currentActiveKey
   if key.isNone:
-    sc.pos.cursor.invalidateCb()
+    sc.pos.cursor.invalidate()
     return
   let k = key.get
   let vs = sc.valueStart(k)
@@ -455,11 +436,11 @@ proc seekPastValueAt(sc: V2Scanner) =
   if pn == "t":
     let suffix = extractSuffix(k)
     if suffix == 0:
-      sc.pos.cursor.invalidateCb()
+      sc.pos.cursor.invalidate()
     else:
       let nextVal = suffix + 1
       for i in countdown(7, 0): target.add byte(nextVal shr (i * 8))
-      sc.pos.cursor.seekCb(target)
+      sc.pos.cursor.seek(target)
     return
 
   let ve = sc.valueEnd(k)
@@ -468,14 +449,14 @@ proc seekPastValueAt(sc: V2Scanner) =
   if pn == "a":
     let cur = beUint32(k, vs)
     if cur == uint32.high:
-      sc.pos.cursor.invalidateCb()
+      sc.pos.cursor.invalidate()
     else:
       let nextVal = cur + 1
       target.add byte(nextVal shr 24)
       target.add byte((nextVal shr 16) and 0xFF)
       target.add byte((nextVal shr 8) and 0xFF)
       target.add byte(nextVal and 0xFF)
-      sc.pos.cursor.seekCb(target)
+      sc.pos.cursor.seek(target)
   elif isVariableValue(sc.valueAttrType, k.len):
     var inc = raw
     var carry = true
@@ -488,18 +469,18 @@ proc seekPastValueAt(sc: V2Scanner) =
         inc[i] = 0
         dec i
     if carry:
-      sc.pos.cursor.invalidateCb()
+      sc.pos.cursor.invalidate()
     else:
       target.add inc
-      sc.pos.cursor.seekCb(target)
+      sc.pos.cursor.seek(target)
   else:
     let cur = beUint64(k, vs)
     if cur == uint64.high:
-      sc.pos.cursor.invalidateCb()
+      sc.pos.cursor.invalidate()
     else:
       let nextVal = cur + 1
       for i in countdown(7, 0): target.add byte(nextVal shr (i * 8))
-      sc.pos.cursor.seekCb(target)
+      sc.pos.cursor.seek(target)
 
 # ── leap_next_at ──
 
@@ -519,7 +500,7 @@ proc seekToValue*(sc: V2Scanner; value: SExpr) =
   let pn = sc.pos.posName()
   let key = sc.pos.currentActiveKey
   if key.isNone:
-    sc.pos.cursor.invalidateCb()
+    sc.pos.cursor.invalidate()
     return
   let k = key.get
   let vs = sc.valueStart(k)
@@ -544,7 +525,7 @@ proc seekToValue*(sc: V2Scanner; value: SExpr) =
   else: discard
 
   for _ in 0..7: target.add 0'u8
-  sc.pos.cursor.seekCb(target)
+  sc.pos.cursor.seek(target)
   sc.advanceToActiveAt()
 
 # ── attr_id helpers ──
