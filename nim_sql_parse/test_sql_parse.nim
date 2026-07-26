@@ -104,12 +104,15 @@ suite "SQL parser: expression projections":
     check e.eidAttr.vlit.sval == "company.name"
 
   test "SELECT unary minus on literal":
-    # -7 is tokenised by the lexer as a single ttINTEGER(-7) (minus is
-    # consumed by readNumber).  So the Projection is a literal, not a
-    # unary-op — the minus is baked into the integer literal value.
+    # -7 is now tokenised as ttMINUS + ttINTEGER(7) (minus is always a
+    # separate operator token).  parseProjection enters the expression
+    # branch via ttMINUS → parseExpr → valUnaryOp.
     let stmt = parse("SELECT -7")
-    check stmt.selectStmt.projections[0].literal.isSome
-    check stmt.selectStmt.projections[0].literal.get.ival == -7
+    let e = stmt.selectStmt.projections[0].expr.get
+    check e.vkind == valUnaryOp
+    check e.unOp == "-"
+    check e.unOperand.vkind == valLiteral
+    check e.unOperand.vlit.ival == 7
 
   test "SELECT unary minus on parenthesised expr":
     # -(1+2): ttMINUS is a separate token, so parseProjection enters

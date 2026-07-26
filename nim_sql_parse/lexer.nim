@@ -102,8 +102,6 @@ proc readString(src: string, pos: var int, start: int): LexToken =
   raise newLexError("unterminated string literal", start)
 
 proc readNumber(src: string, pos: var int, start: int): LexToken =
-  if src[pos] == '-':
-    inc pos
   while pos < src.len and src[pos].isDigit:
     inc pos
   if pos < src.len and src[pos] == '.':
@@ -203,11 +201,8 @@ proc tokenize*(source: string): seq[LexToken] =
     of '0'..'9':
       result.add readNumber(source, pos, start)
     of '-':
-      if pos + 1 < n and source[pos + 1].isDigit:
-        result.add readNumber(source, pos, start)
-      else:
-        result.add LexToken(tt: ttMINUS, value: "-", pos: pos)
-        inc pos
+      result.add LexToken(tt: ttMINUS, value: "-", pos: pos)
+      inc pos
     of ':', '_', 'a'..'z', 'A'..'Z':
       result.add readIdentOrKeyword(source, pos, start)
     else:
