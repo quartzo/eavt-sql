@@ -243,10 +243,7 @@ method isNative(h: SchemeHostFns; name: string): bool =
            "scanner-iterate-init", "scanner-iterate-next",
            "intern-a", "result-row",
            "resolve-val", "attr-name",
-           "dbg-scanners", "ranges-show",
-           "+", "-", "*", "/", "mod",
-           "<", ">", "=", "!=", "<=", ">=",
-           "min", "max", "abs"]
+           "dbg-scanners", "ranges-show"]
 
 proc findScanner*(h: SchemeHostFns; resource: SExpr): V2Scanner =
   case resource.kind:
@@ -549,118 +546,6 @@ method call(h: SchemeHostFns; name: string; args: seq[SExpr]): EvalStep =
       let r = if hi.isNone or (flags and RangeHiOpen) != 0: ")" else: "]"
       descriptions.add l & loStr & ", " & hiStr & r
     return done(SExpr(kind: sStr, sval: descriptions.join(", ")))
-
-  # -- Arithmetic --
-  of "+":
-    var anyFloat = isFloat(args[0])
-    var result = sexprNumToF64(args[0])
-    for a in args[1..^1]:
-      anyFloat = anyFloat or isFloat(a)
-      result += sexprNumToF64(a)
-    return done(if anyFloat: SExpr(kind: sFloat, fval: result) else: SExpr(kind: sInt, ival: int64(result)))
-
-  of "-":
-    var anyFloat = isFloat(args[0])
-    var result = sexprNumToF64(args[0])
-    if args.len == 1:
-      result = -result
-    else:
-      for a in args[1..^1]:
-        anyFloat = anyFloat or isFloat(a)
-        result -= sexprNumToF64(a)
-    return done(if anyFloat: SExpr(kind: sFloat, fval: result) else: SExpr(kind: sInt, ival: int64(result)))
-
-  of "*":
-    var anyFloat = isFloat(args[0])
-    var result = sexprNumToF64(args[0])
-    for a in args[1..^1]:
-      anyFloat = anyFloat or isFloat(a)
-      result *= sexprNumToF64(a)
-    return done(if anyFloat: SExpr(kind: sFloat, fval: result) else: SExpr(kind: sInt, ival: int64(result)))
-
-  of "/":
-    var result = sexprNumToF64(args[0])
-    for a in args[1..^1]:
-      let n = sexprNumToF64(a)
-      if n == 0.0: raise newException(EvalError, "division by zero")
-      result /= n
-    return done(SExpr(kind: sFloat, fval: result))
-
-  of "mod":
-    let a = expectInt(args[0])
-    let b = expectInt(args[1])
-    if b == 0: raise newException(EvalError, "mod: division by zero")
-    return done(SExpr(kind: sInt, ival: a mod b))
-
-  # -- Comparison --
-  of "<":
-    var prev = sexprNumToF64(args[0])
-    for a in args[1..^1]:
-      let cur = sexprNumToF64(a)
-      if prev >= cur: return done(newBool(false))
-      prev = cur
-    return done(newBool(true))
-
-  of ">":
-    var prev = sexprNumToF64(args[0])
-    for a in args[1..^1]:
-      let cur = sexprNumToF64(a)
-      if prev <= cur: return done(newBool(false))
-      prev = cur
-    return done(newBool(true))
-
-  of "<=":
-    var prev = sexprNumToF64(args[0])
-    for a in args[1..^1]:
-      let cur = sexprNumToF64(a)
-      if prev > cur: return done(newBool(false))
-      prev = cur
-    return done(newBool(true))
-
-  of ">=":
-    var prev = sexprNumToF64(args[0])
-    for a in args[1..^1]:
-      let cur = sexprNumToF64(a)
-      if prev < cur: return done(newBool(false))
-      prev = cur
-    return done(newBool(true))
-
-  of "=":
-    var prev = sexprNumToF64(args[0])
-    for a in args[1..^1]:
-      let cur = sexprNumToF64(a)
-      if abs(prev - cur) > 0.0:
-        return done(newBool(false))
-      prev = cur
-    return done(newBool(true))
-
-  of "!=":
-    return done(newBool(abs(sexprNumToF64(args[0]) - sexprNumToF64(args[1])) > 0.0))
-
-  # -- Min/Max/Abs --
-  of "min":
-    var anyFloat = isFloat(args[0])
-    var best = sexprNumToF64(args[0])
-    for a in args[1..^1]:
-      anyFloat = anyFloat or isFloat(a)
-      let n = sexprNumToF64(a)
-      if n < best: best = n
-    return done(if anyFloat: SExpr(kind: sFloat, fval: best) else: SExpr(kind: sInt, ival: int64(best)))
-
-  of "max":
-    var anyFloat = isFloat(args[0])
-    var best = sexprNumToF64(args[0])
-    for a in args[1..^1]:
-      anyFloat = anyFloat or isFloat(a)
-      let n = sexprNumToF64(a)
-      if n > best: best = n
-    return done(if anyFloat: SExpr(kind: sFloat, fval: best) else: SExpr(kind: sInt, ival: int64(best)))
-
-  of "abs":
-    case args[0].kind:
-    of sInt: return done(SExpr(kind: sInt, ival: args[0].ival.abs))
-    of sFloat: return done(SExpr(kind: sFloat, fval: args[0].fval.abs))
-    else: raise newException(EvalError, "abs expects number")
 
   else:
     raise newException(EvalError, "unknown host function: " & name)

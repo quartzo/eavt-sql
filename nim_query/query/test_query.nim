@@ -385,142 +385,105 @@ suite "opsToIntervals":
 # 3. HostFns — arithmetic and comparison (pure — no engine needed)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-proc makeArithHost(): SchemeHostFns =
-  SchemeHostFns(engine: nil, params: @[], tx: 0, asOfTx: none[int64](), scanners: @[])
+type DummyHost = ref object of HostFns
+method isNative(h: DummyHost; name: string): bool = false
+method call(h: DummyHost; name: string; args: seq[SExpr]): EvalStep =
+  raise newException(EvalError, "unknown host: " & name)
 
-suite "hostfns: arithmetic":
+proc evalArith(progStr: string): SExpr =
+  let prog = SchemeProgram(body: scheme.parse(progStr))
+  var env = newEnvironment()
+  var host: HostFns = DummyHost()
+  eval(prog, env, host)
+
+suite "scheme: arithmetic":
   test "addition ints":
-    let h = makeArithHost()
-    let r = h.call("+", @[SExpr(kind: sInt, ival: 2), SExpr(kind: sInt, ival: 3)])
-    check r.kind == esDone
-    check r.result.ival == 5
+    check evalArith("(+ 2 3)").ival == 5
 
   test "addition multiple":
-    let h = makeArithHost()
-    let r = h.call("+", @[SExpr(kind: sInt, ival: 1),
-                            SExpr(kind: sInt, ival: 2),
-                            SExpr(kind: sInt, ival: 3)])
-    check r.result.ival == 6
+    check evalArith("(+ 1 2 3)").ival == 6
 
   test "addition with float returns float":
-    let h = makeArithHost()
-    let r = h.call("+", @[SExpr(kind: sInt, ival: 1),
-                            SExpr(kind: sFloat, fval: 2.0)])
-    check r.result.kind == sFloat
-    check r.result.fval == 3.0
+    let r = evalArith("(+ 1 2.0)")
+    check r.kind == sFloat
+    check r.fval == 3.0
 
   test "subtraction":
-    let h = makeArithHost()
-    let r = h.call("-", @[SExpr(kind: sInt, ival: 10), SExpr(kind: sInt, ival: 3)])
-    check r.result.ival == 7
+    check evalArith("(- 10 3)").ival == 7
 
   test "unary negation":
-    let h = makeArithHost()
-    let r = h.call("-", @[SExpr(kind: sInt, ival: 5)])
-    check r.result.ival == -5
+    check evalArith("(- 5)").ival == -5
 
   test "multiplication":
-    let h = makeArithHost()
-    let r = h.call("*", @[SExpr(kind: sInt, ival: 3), SExpr(kind: sInt, ival: 4)])
-    check r.result.ival == 12
+    check evalArith("(* 3 4)").ival == 12
 
   test "division":
-    let h = makeArithHost()
-    let r = h.call("/", @[SExpr(kind: sInt, ival: 10), SExpr(kind: sInt, ival: 4)])
-    check r.result.kind == sFloat
-    check r.result.fval == 2.5
+    let r = evalArith("(/ 10 4)")
+    check r.kind == sFloat
+    check r.fval == 2.5
 
   test "division by zero raises":
-    let h = makeArithHost()
     expect EvalError:
-      discard h.call("/", @[SExpr(kind: sInt, ival: 1), SExpr(kind: sInt, ival: 0)])
+      discard evalArith("(/ 1 0)")
 
   test "mod":
-    let h = makeArithHost()
-    let r = h.call("mod", @[SExpr(kind: sInt, ival: 10), SExpr(kind: sInt, ival: 3)])
-    check r.result.ival == 1
+    check evalArith("(mod 10 3)").ival == 1
 
   test "mod by zero raises":
-    let h = makeArithHost()
     expect EvalError:
-      discard h.call("mod", @[SExpr(kind: sInt, ival: 1), SExpr(kind: sInt, ival: 0)])
+      discard evalArith("(mod 1 0)")
 
   test "min int":
-    let h = makeArithHost()
-    let r = h.call("min", @[SExpr(kind: sInt, ival: 3), SExpr(kind: sInt, ival: 1),
-                              SExpr(kind: sInt, ival: 2)])
-    check r.result.ival == 1
+    check evalArith("(min 5 3 7)").ival == 3
 
   test "max int":
-    let h = makeArithHost()
-    let r = h.call("max", @[SExpr(kind: sInt, ival: 3), SExpr(kind: sInt, ival: 7),
-                              SExpr(kind: sInt, ival: 2)])
-    check r.result.ival == 7
+    check evalArith("(max 5 3 7)").ival == 7
 
   test "abs int":
-    let h = makeArithHost()
-    check h.call("abs", @[SExpr(kind: sInt, ival: -42)]).result.ival == 42
-    check h.call("abs", @[SExpr(kind: sInt, ival: 42)]).result.ival == 42
+    check evalArith("(abs -5)").ival == 5
 
   test "abs float":
-    let h = makeArithHost()
-    check h.call("abs", @[SExpr(kind: sFloat, fval: -3.14)]).result.fval == 3.14
+    check evalArith("(abs -3.14)").fval == 3.14
 
-suite "hostfns: comparison":
+suite "scheme: comparison":
   test "less than":
-    let h = makeArithHost()
-    # Check == overload for SExpr
-    let se = newBool
-    check h.call("<", @[SExpr(kind: sInt, ival: 1), SExpr(kind: sInt, ival: 2)]).result == newBool(true)
-    check h.call("<", @[SExpr(kind: sInt, ival: 2), SExpr(kind: sInt, ival: 1)]).result == newBool(false)
-    check h.call("<", @[SExpr(kind: sInt, ival: 1), SExpr(kind: sInt, ival: 1)]).result == newBool(false)
+    check evalArith("(< 1 2)").bval == true
+    check evalArith("(< 2 1)").bval == false
 
   test "greater than":
-    let h = makeArithHost()
-    check h.call(">", @[SExpr(kind: sInt, ival: 2), SExpr(kind: sInt, ival: 1)]).result.bval == true
-    check h.call(">", @[SExpr(kind: sInt, ival: 1), SExpr(kind: sInt, ival: 2)]).result.bval == false
+    check evalArith("(> 2 1)").bval == true
+    check evalArith("(> 1 2)").bval == false
 
   test "equality (numeric via float comparison)":
-    let h = makeArithHost()
-    check h.call("=", @[SExpr(kind: sInt, ival: 5), SExpr(kind: sInt, ival: 5)]).result.bval == true
-    check h.call("=", @[SExpr(kind: sInt, ival: 5), SExpr(kind: sInt, ival: 6)]).result.bval == false
+    check evalArith("(= 5 5)").bval == true
+    check evalArith("(= 5 6)").bval == false
 
   test "not equal":
-    let h = makeArithHost()
-    check h.call("!=", @[SExpr(kind: sInt, ival: 1), SExpr(kind: sInt, ival: 2)]).result.bval == true
-    check h.call("!=", @[SExpr(kind: sInt, ival: 1), SExpr(kind: sInt, ival: 1)]).result.bval == false
+    check evalArith("(!= 1 2)").bval == true
+    check evalArith("(!= 1 1)").bval == false
 
   test "less or equal":
-    let h = makeArithHost()
-    check h.call("<=", @[SExpr(kind: sInt, ival: 1), SExpr(kind: sInt, ival: 2)]).result.bval == true
-    check h.call("<=", @[SExpr(kind: sInt, ival: 2), SExpr(kind: sInt, ival: 2)]).result.bval == true
-    check h.call("<=", @[SExpr(kind: sInt, ival: 3), SExpr(kind: sInt, ival: 2)]).result.bval == false
+    check evalArith("(<= 1 2)").bval == true
+    check evalArith("(<= 2 2)").bval == true
+    check evalArith("(<= 3 2)").bval == false
 
   test "greater or equal":
-    let h = makeArithHost()
-    check h.call(">=", @[SExpr(kind: sInt, ival: 2), SExpr(kind: sInt, ival: 1)]).result.bval == true
-    check h.call(">=", @[SExpr(kind: sInt, ival: 2), SExpr(kind: sInt, ival: 2)]).result.bval == true
+    check evalArith("(>= 2 1)").bval == true
+    check evalArith("(>= 2 2)").bval == true
 
   test "chained comparison (3 args)":
-    let h = makeArithHost()
-    check h.call("<", @[SExpr(kind: sInt, ival: 1),
-                         SExpr(kind: sInt, ival: 2),
-                         SExpr(kind: sInt, ival: 3)]).result.bval == true
-    check h.call("<", @[SExpr(kind: sInt, ival: 1),
-                         SExpr(kind: sInt, ival: 3),
-                         SExpr(kind: sInt, ival: 2)]).result.bval == false
+    check evalArith("(< 1 2 3)").bval == true
+    check evalArith("(< 1 3 2)").bval == false
 
 suite "hostfns: isNative":
-    let h = makeArithHost()
-    check h.isNative("+")
-    check h.isNative("-")
-    check h.isNative("abs")
-    check h.isNative("min")
+  test "isNative basic":
+    let h = SchemeHostFns(engine: nil, params: @[], tx: 0, asOfTx: none[int64](), scanners: @[])
+    check h.isNative("save")
+    check h.isNative("retract")
+    check h.isNative("scanner-open")
+    check not h.isNative("+")
     check not h.isNative("no-such-fn")
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 4. Scanner — unit tests with mock cursor
-# ═══════════════════════════════════════════════════════════════════════════════
 
 suite "scanner: classifyKey":
   test "no prefix → kvpNoPrefix":
@@ -868,7 +831,7 @@ suite "engine: param access":
     check r2.result.sval == "hello"
 
   test "param out of range raises":
-    let h = makeArithHost()
+    let h = SchemeHostFns(engine: nil, params: @[], tx: 0, asOfTx: none[int64](), scanners: @[])
     expect EvalError:
       discard h.call("param", @[SExpr(kind: sInt, ival: 1)])
 

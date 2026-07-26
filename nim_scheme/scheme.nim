@@ -254,9 +254,22 @@ type EvalError* = object of CatchableError
 
 const SpecialForms = ["when", "if", "begin", "set!",
                        "print", "assert", "and", "or", "not",
-                       "scanner-iterate", "ranges-create", "while"]
+                       "scanner-iterate", "ranges-create", "while",
+                       "+", "-", "*", "/", "mod",
+                       "<", ">", "<=", ">=", "=", "!=",
+                       "min", "max", "abs"]
 
 proc isSpecialForm(name: string): bool = name in SpecialForms
+
+# ── Arithmetic helpers ──
+
+proc isFloat(expr: SExpr): bool = expr.kind == sFloat
+
+proc sexprNumToF64(expr: SExpr): float64 =
+  case expr.kind:
+  of sInt: float64(expr.ival)
+  of sFloat: expr.fval
+  else: raise newException(EvalError, "expected number, got " & $expr)
 
 proc evalExpr(expr: SExpr; env: var Environment; host: HostFns;
               state: var YieldState): EvalStep {.nimcall.}
@@ -526,6 +539,102 @@ proc evalSpecialForm(name: string; args: SExpr; env: var Environment;
     for i in 2..<args.items.len: body.add args.items[i]
     state.stack.add Frame(kind: fkWhile, wCond: condExpr, wBody: body, wPhase: 0)
     return evalExpr(condExpr, env, host, state)
+  # -- Arithmetic --
+  of "+":
+    var anyFloat = isFloat(args.items[1])
+    var res = sexprNumToF64(args.items[1])
+    for i in 2..<args.items.len:
+      anyFloat = anyFloat or isFloat(args.items[i])
+      res += sexprNumToF64(args.items[i])
+    return done(if anyFloat: SExpr(kind: sFloat, fval: res) else: SExpr(kind: sInt, ival: int64(res)))
+  of "-":
+    var anyFloat = isFloat(args.items[1])
+    var res = sexprNumToF64(args.items[1])
+    if args.items.len == 2:
+      res = -res
+    else:
+      for i in 2..<args.items.len:
+        anyFloat = anyFloat or isFloat(args.items[i])
+        res -= sexprNumToF64(args.items[i])
+    return done(if anyFloat: SExpr(kind: sFloat, fval: res) else: SExpr(kind: sInt, ival: int64(res)))
+  of "*":
+    var anyFloat = isFloat(args.items[1])
+    var res = sexprNumToF64(args.items[1])
+    for i in 2..<args.items.len:
+      anyFloat = anyFloat or isFloat(args.items[i])
+      res *= sexprNumToF64(args.items[i])
+    return done(if anyFloat: SExpr(kind: sFloat, fval: res) else: SExpr(kind: sInt, ival: int64(res)))
+  of "/":
+    var res = sexprNumToF64(args.items[1])
+    for i in 2..<args.items.len:
+      let n = sexprNumToF64(args.items[i])
+      if n == 0.0: raise newException(EvalError, "division by zero")
+      res /= n
+    return done(SExpr(kind: sFloat, fval: res))
+  of "mod":
+    let a = sexprNumToF64(args.items[1])
+    let b = sexprNumToF64(args.items[2])
+    if b == 0.0: raise newException(EvalError, "mod: division by zero")
+    return done(SExpr(kind: sInt, ival: int64(a) mod int64(b)))
+  of "<":
+    var prev = sexprNumToF64(args.items[1])
+    for i in 2..<args.items.len:
+      let cur = sexprNumToF64(args.items[i])
+      if prev >= cur: return done(newBool(false))
+      prev = cur
+    return done(newBool(true))
+  of ">":
+    var prev = sexprNumToF64(args.items[1])
+    for i in 2..<args.items.len:
+      let cur = sexprNumToF64(args.items[i])
+      if prev <= cur: return done(newBool(false))
+      prev = cur
+    return done(newBool(true))
+  of "<=":
+    var prev = sexprNumToF64(args.items[1])
+    for i in 2..<args.items.len:
+      let cur = sexprNumToF64(args.items[i])
+      if prev > cur: return done(newBool(false))
+      prev = cur
+    return done(newBool(true))
+  of ">=":
+    var prev = sexprNumToF64(args.items[1])
+    for i in 2..<args.items.len:
+      let cur = sexprNumToF64(args.items[i])
+      if prev < cur: return done(newBool(false))
+      prev = cur
+    return done(newBool(true))
+  of "=":
+    var prev = sexprNumToF64(args.items[1])
+    for i in 2..<args.items.len:
+      let cur = sexprNumToF64(args.items[i])
+      if abs(prev - cur) > 0.0:
+        return done(newBool(false))
+      prev = cur
+    return done(newBool(true))
+  of "!=":
+    return done(newBool(abs(sexprNumToF64(args.items[1]) - sexprNumToF64(args.items[2])) > 0.0))
+  of "min":
+    var anyFloat = isFloat(args.items[1])
+    var best = sexprNumToF64(args.items[1])
+    for i in 2..<args.items.len:
+      anyFloat = anyFloat or isFloat(args.items[i])
+      let n = sexprNumToF64(args.items[i])
+      if n < best: best = n
+    return done(if anyFloat: SExpr(kind: sFloat, fval: best) else: SExpr(kind: sInt, ival: int64(best)))
+  of "max":
+    var anyFloat = isFloat(args.items[1])
+    var best = sexprNumToF64(args.items[1])
+    for i in 2..<args.items.len:
+      anyFloat = anyFloat or isFloat(args.items[i])
+      let n = sexprNumToF64(args.items[i])
+      if n > best: best = n
+    return done(if anyFloat: SExpr(kind: sFloat, fval: best) else: SExpr(kind: sInt, ival: int64(best)))
+  of "abs":
+    case args.items[1].kind:
+    of sInt: return done(SExpr(kind: sInt, ival: args.items[1].ival.abs))
+    of sFloat: return done(SExpr(kind: sFloat, fval: args.items[1].fval.abs))
+    else: raise newException(EvalError, "abs expects number")
   else:
     raise newException(EvalError, "unknown special form: " & name)
 
