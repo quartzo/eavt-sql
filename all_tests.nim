@@ -15,6 +15,7 @@ import nim_memtable/test_memtable
 import nim_page_store/test_page_store
 import nim_kvstore/test_kvstore
 import nim_eavt/test_eavt
+import nim_spawn/test_spawn
 
 # Query engine
 import nim_scheme/test_scheme

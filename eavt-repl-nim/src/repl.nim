@@ -49,6 +49,11 @@ proc cmdFlush() =
     let r = gClient.admin("flush")
     echo r
 
+proc cmdFlushSync() =
+  catchDisconnect:
+    let r = gClient.admin("flush-sync")
+    echo r
+
 proc cmdStatus() =
   catchDisconnect:
     let r = gClient.admin("status")
@@ -79,7 +84,8 @@ const HelpText = """
 Dot commands (no semicolon):
   .quit, .exit           Exit the REPL
   .help                  Show this help
-  .flush                 Flush MemTable to disk
+  .flush                 Request background flush (returns immediately)
+  .flush-sync            Flush and wait for completion
   .status                Database overview
   .tree                  Per-column-family stats
   .memtable              MemTable contents and sizes
@@ -98,6 +104,8 @@ proc handleDot(line: string): bool =
     echo HelpText
   of ".flush":
     cmdFlush()
+  of ".flush-sync":
+    cmdFlushSync()
   of ".status":
     cmdStatus()
   of ".tree":

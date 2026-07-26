@@ -39,6 +39,7 @@ nim_kvstore/resolver
 nim_kvstore/scheme
 nim_eavt/test_eavt
 nim_scheme/test_scheme
+nim_spawn/test_spawn
 nim_query/query/test_query
 nim_query/query/engine
 nim_sql_parse/test_sql_parse

@@ -54,6 +54,7 @@ nim_kvstore/                # KVStore + MergedCursor
 nim_memtable/               # Per-CF COW treap (ARC-managed)
 nim_page_store/             # COW B-tree, zstd-compressed pages, LRU cache
 nim_blobstore/              # memory / file / S3 backends + journal
+nim_spawn/                  # pool-less fire-and-forget spawn (server + flush)
 build/                      # Compiled binaries (gitignored)
 tests/                      # Python benchmarks
 ```
@@ -128,9 +129,6 @@ Re-bootstrap is prevented by scanning for existing `db.ident` datom (aid=1).
 
 ### Threading Rules
 
-**NEVER use `{.cast(gcsafe).}:`** — it hides real data races and wastes debugging time.
-If the compiler says something is not gcsafe, fix the root cause instead.
-
 **NEVER call `createThread` / instantiate raw `Thread[T]`** — this is a low-level
 API that requires manual lifecycle management of the thread handle. If a `Thread[T]`
 local goes out of scope before the spawned thread has read its descriptor, the main
@@ -139,8 +137,23 @@ while the child reads it in `threadProcWrapDispatch`, producing a SIGSEGV at add
 `0x0`. gdb masks this race (timing changes), making it extremely hard to diagnose.
 This bug took down `eavt_server_nim/server.nim` on every CLI command.
 
-For DB workloads (CPU/disk-intensive, thread-per-connection in the server), use the
-**malebolgia** thread pool (`spawn` / `parallel` / `Await`) instead. It owns thread
-handles internally, is built for `--mm:orc`, and lets the engine stay a plain shared
-`ref` passed as the spawn argument — no globals, no `cast(gcsafe)`. This matches the
-intent of the refactor in commit `e9587f1` ("ConnArg replaces gEng global").
+For DB workloads (thread-per-connection server, background flush) use **`nim_spawn`**
+(`spawn` / `initSpawn`) instead. It is a small pool-less, fire-and-forget spawn
+implemented in this repo: each `spawn(fn)` launches a fresh Nim thread that runs `fn`
+and exits — no fixed concurrency limit, no `awaitAll`/join, no backpressure channel.
+Thread handles live in a fixed-size global array (stable addresses, dodging the
+createThread-on-stack race above) and are reaped on each `spawn`. Built for
+`--mm:orc` (workers are Nim-native, full ORC setup incl. thread-local cycle
+collector).
+
+`malebolgia` is **optional** — keep it available only for structured, CPU-bound,
+finite parallelism (where its `awaitAll` barrier and bounded pool are a feature).
+Do not use it for the server's connection loop or for flush.
+
+**`{.cast(gcsafe).}` is forbidden in application code** — it hides real data races
+and wastes debugging time. If the compiler says something is not gcsafe, fix the
+root cause. The one explicit carve-out is `nim_spawn/spawn.nim` itself: its handle
+table is GC'ed (`ref` closure carriers), so the access procs cannot be auto-proven
+gcsafe; every access is serialised by `gLock`, and the casts there are a real
+guarantee rather than a suppression. This module is the only place cast(gcsafe)
+is permitted.

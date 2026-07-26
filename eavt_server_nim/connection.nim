@@ -78,7 +78,10 @@ proc execQuery(eng: SharedEngine; req: Request; fd: SocketHandle) {.gcsafe.} =
     else:
       let output = case req.command
         of "flush":
-          kvstore.flush(eng.kv)
+          kvstore.requestFlush(eng.kv)
+          "ok: flush requested"
+        of "flush-sync":
+          kvstore.flushSync(eng.kv)
           "ok: flushed"
         of "status":
           "memtable: " & $eng.kv.memtableSize() & " bytes"
