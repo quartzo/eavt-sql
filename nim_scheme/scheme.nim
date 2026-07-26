@@ -403,6 +403,18 @@ proc evalWithYield*(program: SchemeProgram; env: var Environment;
       processValue(newVoid(), state, env, host)
   return done(newVoid())
 
+# ── evalNumArgs — evaluate args.items[1..^1] to numbers, propagating yields ──
+
+proc evalNumArgs(args: SExpr; env: var Environment; host: HostFns;
+                 state: var YieldState; nums: var seq[float64];
+                 anyFloat: var bool): EvalStep =
+  result = done(newVoid())
+  for i in 1 ..< args.items.len:
+    let v = evalFully(args.items[i], env, host, state)
+    if v.kind == esYield: return v
+    if isFloat(v.result): anyFloat = true
+    nums.add sexprNumToF64(v.result)
+
 # ── evalSpecialForm — dispatch special forms ──
 
 proc evalSpecialForm(name: string; args: SExpr; env: var Environment;
@@ -559,102 +571,122 @@ proc evalSpecialForm(name: string; args: SExpr; env: var Environment;
     for i in 2..<args.items.len: body.add args.items[i]
     state.stack.add Frame(kind: fkWhile, wCond: condExpr, wBody: body, wPhase: 0)
     return evalExpr(condExpr, env, host, state)
-  # -- Arithmetic --
+  # -- Arithmetic (args evaluated via evalNumArgs, yields propagate) --
   of "+":
-    var anyFloat = isFloat(args.items[1])
-    var res = sexprNumToF64(args.items[1])
-    for i in 2..<args.items.len:
-      anyFloat = anyFloat or isFloat(args.items[i])
-      res += sexprNumToF64(args.items[i])
+    var anyFloat = false
+    var nums: seq[float64] = @[]
+    let s = evalNumArgs(args, env, host, state, nums, anyFloat)
+    if s.kind == esYield: return s
+    var res = 0.0
+    for n in nums: res += n
     return done(if anyFloat: SExpr(kind: sFloat, fval: res) else: SExpr(kind: sInt, ival: int64(res)))
   of "-":
-    var anyFloat = isFloat(args.items[1])
-    var res = sexprNumToF64(args.items[1])
-    if args.items.len == 2:
-      res = -res
+    var anyFloat = false
+    var nums: seq[float64] = @[]
+    let s = evalNumArgs(args, env, host, state, nums, anyFloat)
+    if s.kind == esYield: return s
+    var res = nums[0]
+    if nums.len == 1: res = -res
     else:
-      for i in 2..<args.items.len:
-        anyFloat = anyFloat or isFloat(args.items[i])
-        res -= sexprNumToF64(args.items[i])
+      for i in 1 ..< nums.len: res -= nums[i]
     return done(if anyFloat: SExpr(kind: sFloat, fval: res) else: SExpr(kind: sInt, ival: int64(res)))
   of "*":
-    var anyFloat = isFloat(args.items[1])
-    var res = sexprNumToF64(args.items[1])
-    for i in 2..<args.items.len:
-      anyFloat = anyFloat or isFloat(args.items[i])
-      res *= sexprNumToF64(args.items[i])
+    var anyFloat = false
+    var nums: seq[float64] = @[]
+    let s = evalNumArgs(args, env, host, state, nums, anyFloat)
+    if s.kind == esYield: return s
+    var res = 1.0
+    for n in nums: res *= n
     return done(if anyFloat: SExpr(kind: sFloat, fval: res) else: SExpr(kind: sInt, ival: int64(res)))
   of "/":
-    var res = sexprNumToF64(args.items[1])
-    for i in 2..<args.items.len:
-      let n = sexprNumToF64(args.items[i])
-      if n == 0.0: raise newException(EvalError, "division by zero")
-      res /= n
+    var anyFloat = false
+    var nums: seq[float64] = @[]
+    let s = evalNumArgs(args, env, host, state, nums, anyFloat)
+    if s.kind == esYield: return s
+    var res = nums[0]
+    for i in 1 ..< nums.len:
+      if nums[i] == 0.0: raise newException(EvalError, "division by zero")
+      res /= nums[i]
     return done(SExpr(kind: sFloat, fval: res))
   of "mod":
-    let a = sexprNumToF64(args.items[1])
-    let b = sexprNumToF64(args.items[2])
-    if b == 0.0: raise newException(EvalError, "mod: division by zero")
-    return done(SExpr(kind: sInt, ival: int64(a) mod int64(b)))
+    var anyFloat = false
+    var nums: seq[float64] = @[]
+    let s = evalNumArgs(args, env, host, state, nums, anyFloat)
+    if s.kind == esYield: return s
+    if nums.len < 2 or nums[1] == 0.0: raise newException(EvalError, "mod: division by zero")
+    return done(SExpr(kind: sInt, ival: int64(nums[0]) mod int64(nums[1])))
   of "<":
-    var prev = sexprNumToF64(args.items[1])
-    for i in 2..<args.items.len:
-      let cur = sexprNumToF64(args.items[i])
-      if prev >= cur: return done(newBool(false))
-      prev = cur
+    var anyFloat = false
+    var nums: seq[float64] = @[]
+    let s = evalNumArgs(args, env, host, state, nums, anyFloat)
+    if s.kind == esYield: return s
+    for i in 1 ..< nums.len:
+      if nums[i-1] >= nums[i]: return done(newBool(false))
     return done(newBool(true))
   of ">":
-    var prev = sexprNumToF64(args.items[1])
-    for i in 2..<args.items.len:
-      let cur = sexprNumToF64(args.items[i])
-      if prev <= cur: return done(newBool(false))
-      prev = cur
+    var anyFloat = false
+    var nums: seq[float64] = @[]
+    let s = evalNumArgs(args, env, host, state, nums, anyFloat)
+    if s.kind == esYield: return s
+    for i in 1 ..< nums.len:
+      if nums[i-1] <= nums[i]: return done(newBool(false))
     return done(newBool(true))
   of "<=":
-    var prev = sexprNumToF64(args.items[1])
-    for i in 2..<args.items.len:
-      let cur = sexprNumToF64(args.items[i])
-      if prev > cur: return done(newBool(false))
-      prev = cur
+    var anyFloat = false
+    var nums: seq[float64] = @[]
+    let s = evalNumArgs(args, env, host, state, nums, anyFloat)
+    if s.kind == esYield: return s
+    for i in 1 ..< nums.len:
+      if nums[i-1] > nums[i]: return done(newBool(false))
     return done(newBool(true))
   of ">=":
-    var prev = sexprNumToF64(args.items[1])
-    for i in 2..<args.items.len:
-      let cur = sexprNumToF64(args.items[i])
-      if prev < cur: return done(newBool(false))
-      prev = cur
+    var anyFloat = false
+    var nums: seq[float64] = @[]
+    let s = evalNumArgs(args, env, host, state, nums, anyFloat)
+    if s.kind == esYield: return s
+    for i in 1 ..< nums.len:
+      if nums[i-1] < nums[i]: return done(newBool(false))
     return done(newBool(true))
   of "=":
-    var prev = sexprNumToF64(args.items[1])
-    for i in 2..<args.items.len:
-      let cur = sexprNumToF64(args.items[i])
-      if abs(prev - cur) > 0.0:
-        return done(newBool(false))
-      prev = cur
+    var anyFloat = false
+    var nums: seq[float64] = @[]
+    let s = evalNumArgs(args, env, host, state, nums, anyFloat)
+    if s.kind == esYield: return s
+    for i in 1 ..< nums.len:
+      if abs(nums[i-1] - nums[i]) > 0.0: return done(newBool(false))
     return done(newBool(true))
   of "!=":
-    return done(newBool(abs(sexprNumToF64(args.items[1]) - sexprNumToF64(args.items[2])) > 0.0))
+    var anyFloat = false
+    var nums: seq[float64] = @[]
+    let s = evalNumArgs(args, env, host, state, nums, anyFloat)
+    if s.kind == esYield: return s
+    if nums.len < 2: return done(newBool(false))
+    return done(newBool(abs(nums[0] - nums[1]) > 0.0))
   of "min":
-    var anyFloat = isFloat(args.items[1])
-    var best = sexprNumToF64(args.items[1])
-    for i in 2..<args.items.len:
-      anyFloat = anyFloat or isFloat(args.items[i])
-      let n = sexprNumToF64(args.items[i])
-      if n < best: best = n
+    var anyFloat = false
+    var nums: seq[float64] = @[]
+    let s = evalNumArgs(args, env, host, state, nums, anyFloat)
+    if s.kind == esYield: return s
+    var best = nums[0]
+    for i in 1 ..< nums.len:
+      if nums[i] < best: best = nums[i]
     return done(if anyFloat: SExpr(kind: sFloat, fval: best) else: SExpr(kind: sInt, ival: int64(best)))
   of "max":
-    var anyFloat = isFloat(args.items[1])
-    var best = sexprNumToF64(args.items[1])
-    for i in 2..<args.items.len:
-      anyFloat = anyFloat or isFloat(args.items[i])
-      let n = sexprNumToF64(args.items[i])
-      if n > best: best = n
+    var anyFloat = false
+    var nums: seq[float64] = @[]
+    let s = evalNumArgs(args, env, host, state, nums, anyFloat)
+    if s.kind == esYield: return s
+    var best = nums[0]
+    for i in 1 ..< nums.len:
+      if nums[i] > best: best = nums[i]
     return done(if anyFloat: SExpr(kind: sFloat, fval: best) else: SExpr(kind: sInt, ival: int64(best)))
   of "abs":
-    case args.items[1].kind:
-    of sInt: return done(SExpr(kind: sInt, ival: args.items[1].ival.abs))
-    of sFloat: return done(SExpr(kind: sFloat, fval: args.items[1].fval.abs))
-    else: raise newException(EvalError, "abs expects number")
+    var anyFloat = false
+    var nums: seq[float64] = @[]
+    let s = evalNumArgs(args, env, host, state, nums, anyFloat)
+    if s.kind == esYield: return s
+    return done(if anyFloat: SExpr(kind: sFloat, fval: abs(nums[0]))
+                            else: SExpr(kind: sInt, ival: int64(abs(nums[0]))))
   else:
     raise newException(EvalError, "unknown special form: " & name)
 

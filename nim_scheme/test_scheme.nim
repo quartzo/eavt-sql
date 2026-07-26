@@ -69,8 +69,14 @@ suite "scheme.bindings":
   test "star chain": check ses(parse"(begin (set! a 1) (set! b a) (set! c b) c)") == "1"
 
 suite "scheme.arith":
-  test "call add":   check ses(parse"(+ 2 3)") == "5"
-  test "add chain":  check ses(parse"(+ 1 2 3 4)") == "10"
+  test "call add":        check ses(parse"(+ 2 3)") == "5"
+  test "add chain":       check ses(parse"(+ 1 2 3 4)") == "10"
+  test "add variable":    check ses(parse"(begin (set! x 5) (+ x 3))") == "8"
+  test "add nested":      check ses(parse"(+ (+ 1 2) 3)") == "6"
+  test "mul nested":      check ses(parse"(* (+ 1 2) (- 10 7))") == "9"
+  test "cmp variable":    check ses(parse"(begin (set! x 5) (> x 2))") == "#t"
+  test "cmp nested":      check ses(parse"(< 1 (+ 1 2))") == "#t"
+  test "abs variable":    check ses(parse"(begin (set! x -3) (abs x))") == "3"
 
 suite "scheme.nested":
   test "when when":  check ses(parse"(when #t (when #t 42))") == "42"
