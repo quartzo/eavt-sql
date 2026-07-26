@@ -24,6 +24,32 @@ proc compileSql*(stmt: SqlStmt, cstats: CompileStats): CompileResult {.gcsafe.} 
 
   case stmt.kind
   of stmtSelect, stmtDatalogSelect:
+    # Pure-expression projection (no field refs, no WHERE): a SELECT whose
+    # projection list is only literals/expressions produces a stream of one
+    # row directly — no scanner, no triejoin. This is the degenerate
+    # 0-scanner case of the general compileSelect algorithm: projections go
+    # through compileValue (the single expression funnel), and there are no
+    # patterns to join, so no scanner is emitted.
+    if stmt.kind == stmtSelect and stmt.selectStmt.conditions.len == 0 and
+       not stmt.selectStmt.star and not stmt.selectStmt.existsMode and
+       not stmt.selectStmt.history:
+      var allExpr = true
+      for proj in stmt.selectStmt.projections:
+        if proj.field.isSome: allExpr = false; break
+      if allExpr:
+          var projArgs: seq[SExpr] = @[]
+          for proj in stmt.selectStmt.projections:
+            if proj.expr.isSome:
+              projArgs.add(compileValue(proj.expr.get))
+            elif proj.literal.isSome:
+              projArgs.add(compileLiteral(proj.literal.get))
+            else:
+              projArgs.add(newVoid())
+          let prog = SchemeProgram(body: list(@[newSymbol("result-row")] & projArgs))
+          result.isSelect = true
+          result.program = prog
+          result.selectBody = prog
+          return result
     let ir = buildDatalogIr(stmt)
     var resolved = ir
     if not resolveIr(resolved, cstats):

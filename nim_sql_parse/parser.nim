@@ -198,33 +198,137 @@ proc parseSetValueList(p: Parser): seq[InsertValue] {.gcsafe.} =
       break
     result.add(p.parseSetValue())
 
-proc parseProjection(p: Parser): Projection {.gcsafe.} =
+# ── Expression grammar (used by SELECT projections of expressions) ──
+#   parseExpr   := parseTerm ( ('+'|'-') parseTerm )*
+#   parseTerm   := parseUnary ( ('*'|'/'|MOD) parseUnary )*
+#   parseUnary  := ('+'|'-') parseUnary | parsePrimary
+#   parsePrimary:= literal | param | eid(...) | val(...) | '(' parseExpr ')'
+# Produces a Value (valBinOp / valUnaryOp / valLiteral / valParam /
+# valEidLookup / valValLookup) — the same type used for upsert values, so
+# compileValue/compileExpr is the single funnel for both.
+
+proc parseExpr*(p: Parser): Value {.gcsafe.}
+proc parseExprRest*(p: Parser; left: Value): Value {.gcsafe.}
+proc parseTermRest*(p: Parser; left: Value): Value {.gcsafe.}
+
+proc parseExprPrimary(p: Parser): Value {.gcsafe.} =
   case p.peek().tt
   of ttINTEGER:
     let tok = p.advance()
     try:
-      let val = parseInt(tok.value).int64
-      Projection(field: none(FieldRef),
-        literal: some(Literal(lkind: litInt, ival: val)))
+      Value(vkind: valLiteral,
+        vlit: Literal(lkind: litInt, ival: parseInt(tok.value).int64))
     except ValueError:
       raise newParseError("invalid integer '" & tok.value & "'", tok.pos)
   of ttFLOAT:
     let tok = p.advance()
     try:
-      let val = parseFloat(tok.value)
-      Projection(field: none(FieldRef),
-        literal: some(Literal(lkind: litFloat, fval: val)))
+      Value(vkind: valLiteral,
+        vlit: Literal(lkind: litFloat, fval: parseFloat(tok.value)))
     except ValueError:
       raise newParseError("invalid float '" & tok.value & "'", tok.pos)
   of ttSTRING:
     let tok = p.advance()
-    Projection(field: none(FieldRef),
-      literal: some(Literal(lkind: litStr, sval: tok.value)))
+    Value(vkind: valLiteral, vlit: Literal(lkind: litStr, sval: tok.value))
+  of ttPARAM:
+    Value(vkind: valParam, vparam: p.parseParam())
+  of ttLPAREN:
+    discard p.advance()
+    let inner = p.parseExpr()
+    discard p.expect(ttRPAREN)
+    inner
+  of ttIDENT:
+    let idVal = p.peek().value
+    if idVal == "true":
+      discard p.advance()
+      Value(vkind: valLiteral, vlit: Literal(lkind: litBool, bval: true))
+    elif idVal == "false":
+      discard p.advance()
+      Value(vkind: valLiteral, vlit: Literal(lkind: litBool, bval: false))
+    elif cmpIgnoreCase(idVal, "eid") == 0:
+      discard p.advance()
+      discard p.expect(ttLPAREN)
+      let attr = p.parseEidAttrArg()
+      discard p.expect(ttCOMMA)
+      let val = p.parseLiteralOrParam()
+      discard p.expect(ttRPAREN)
+      Value(vkind: valEidLookup, eidAttr: attr, eidValue: val)
+    elif cmpIgnoreCase(idVal, "val") == 0:
+      discard p.advance()
+      discard p.expect(ttLPAREN)
+      let entity = p.parseValueOrAlias()
+      discard p.expect(ttCOMMA)
+      let attr = p.parseEidAttrArg()
+      discard p.expect(ttRPAREN)
+      Value(vkind: valValLookup, valEntity: entity, valAttr: attr)
+    else:
+      raise newParseError("unexpected identifier '" & idVal & "' in expression", p.peek().pos)
+  else:
+    raise newParseError("expected primary expression", p.peek().pos)
+
+proc parseUnary(p: Parser): Value {.gcsafe.} =
+  case p.peek().tt
+  of ttMINUS:
+    discard p.advance()
+    Value(vkind: valUnaryOp, unOp: "-", unOperand: p.parseUnary())
+  of ttPLUS:
+    discard p.advance()
+    p.parseUnary()  # unary plus is a no-op
+  else:
+    p.parseExprPrimary()
+
+proc parseTerm(p: Parser): Value {.gcsafe.} =
+  result = p.parseUnary()
+  result = p.parseTermRest(result)
+
+proc parseTermRest*(p: Parser; left: Value): Value {.gcsafe.} =
+  result = left
+  while p.peek().tt in {ttSTAR, ttSLASH, ttMOD}:
+    let opTok = p.advance()
+    let op = case opTok.tt
+      of ttSTAR: "*"
+      of ttSLASH: "/"
+      of ttMOD: "mod"
+      else: "?"
+    let rhs = p.parseUnary()
+    result = Value(vkind: valBinOp, binOp: op, binLeft: result, binRight: rhs)
+
+proc parseExpr*(p: Parser): Value {.gcsafe.} =
+  result = p.parseTerm()
+  result = p.parseExprRest(result)
+
+proc parseExprRest*(p: Parser; left: Value): Value {.gcsafe.} =
+  result = left
+  while p.peek().tt in {ttPLUS, ttMINUS}:
+    let opTok = p.advance()
+    let op = if opTok.tt == ttPLUS: "+" else: "-"
+    let rhs = p.parseTerm()
+    result = Value(vkind: valBinOp, binOp: op, binLeft: result, binRight: rhs)
+
+proc parseProjection(p: Parser): Projection {.gcsafe.} =
+  case p.peek().tt
   of ttALIAS:
     let fr = p.parseFieldRef()
-    Projection(field: some(fr), literal: none(Literal))
+    Projection(field: some(fr), literal: none(Literal), expr: none(Value))
+  of ttINTEGER, ttFLOAT, ttSTRING:
+    # Could be an isolated literal OR the start of an arithmetic expression
+    # (e.g. 20+20). Parse the primary, then if an operator follows, keep
+    # parsing as a full expression.
+    let primary = p.parseExprPrimary()
+    if p.peek().tt in {ttPLUS, ttMINUS, ttSTAR, ttSLASH, ttMOD}:
+      let rest = p.parseExprRest(p.parseTermRest(primary))
+      Projection(field: none(FieldRef), literal: none(Literal), expr: some(rest))
+    else:
+      # isolated literal: unwrap the Value back into a Literal for AST compat
+      case primary.vkind
+      of valLiteral: Projection(field: none(FieldRef), literal: some(primary.vlit), expr: none(Value))
+      else: Projection(field: none(FieldRef), literal: none(Literal), expr: some(primary))
+  of ttPLUS, ttMINUS, ttLPAREN, ttPARAM, ttIDENT:
+    # Expression: arithmetic / eid() / val() / param / parenthesised.
+    let e = p.parseExpr()
+    Projection(field: none(FieldRef), literal: none(Literal), expr: some(e))
   else:
-    raise newParseError("expected field reference or literal in SELECT", p.peek().pos)
+    raise newParseError("expected field reference, literal or expression in SELECT", p.peek().pos)
 
 proc parseProjectionList(p: Parser): seq[Projection] {.gcsafe.} =
   result = @[p.parseProjection()]

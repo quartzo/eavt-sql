@@ -8,6 +8,7 @@ type
     ttEXPLAIN, ttDATALOG, ttUNIQUE, ttPARTITION, ttHISTORY, ttSTAR,
     ttDOT, ttCOMMA, ttLPAREN, ttRPAREN,
     ttEQ, ttGT, ttLT, ttGTE, ttLTE, ttNEQ,
+    ttPLUS, ttMINUS, ttSLASH, ttMOD,
     ttINTEGER, ttFLOAT, ttSTRING, ttALIAS, ttIDENT,
     ttPARAM, ttEOF
 
@@ -19,6 +20,7 @@ const
     "EXPLAIN", "DATALOG", "UNIQUE", "PARTITION", "HISTORY", "STAR",
     "DOT", "COMMA", "LPAREN", "RPAREN",
     "EQ", "GT", "LT", "GTE", "LTE", "NEQ",
+    "PLUS", "MINUS", "SLASH", "MOD",
     "INTEGER", "FLOAT", "STRING", "ALIAS", "IDENT",
     "PARAM", "EOF",
   ]
@@ -60,6 +62,7 @@ func keywordType(word: string): TokenType =
   of "IN": ttIN
   of "PARTITION": ttPARTITION
   of "HISTORY": ttHISTORY
+  of "MOD": ttMOD
   else: ttIDENT
 
 func isKeyword(word: string): bool =
@@ -149,6 +152,12 @@ proc tokenize*(source: string): seq[LexToken] =
     of '*':
       result.add LexToken(tt: ttSTAR, value: "*", pos: pos)
       inc pos
+    of '+':
+      result.add LexToken(tt: ttPLUS, value: "+", pos: pos)
+      inc pos
+    of '/':
+      result.add LexToken(tt: ttSLASH, value: "/", pos: pos)
+      inc pos
     of '.':
       result.add LexToken(tt: ttDOT, value: ".", pos: pos)
       inc pos
@@ -197,7 +206,8 @@ proc tokenize*(source: string): seq[LexToken] =
       if pos + 1 < n and source[pos + 1].isDigit:
         result.add readNumber(source, pos, start)
       else:
-        raise newLexError("unexpected character '-'", pos)
+        result.add LexToken(tt: ttMINUS, value: "-", pos: pos)
+        inc pos
     of ':', '_', 'a'..'z', 'A'..'Z':
       result.add readIdentOrKeyword(source, pos, start)
     else:

@@ -3,10 +3,10 @@ import ast as sql_ast
 import datalog_ast, pattern, planner_ast, planner
 import scheme
 
-template list(items: varargs[SExpr]): SExpr =
+template list*(items: varargs[SExpr]): SExpr =
   newList(@items)
 
-proc compileLiteral(lit: sql_ast.Literal): SExpr =
+proc compileLiteral*(lit: sql_ast.Literal): SExpr =
   case lit.lkind
   of litInt: newInt(lit.ival)
   of litFloat: newFloat(lit.fval)
@@ -14,7 +14,7 @@ proc compileLiteral(lit: sql_ast.Literal): SExpr =
   of litBool: newBool(lit.bval)
   of litBytes: raise newException(ValueError, "BYTES values not supported in UPSERT")
 
-proc compileValue(value: sql_ast.Value): SExpr =
+proc compileValue*(value: sql_ast.Value): SExpr =
   case value.vkind
   of valLiteral: compileLiteral(value.vlit)
   of valParam: list(newSymbol("param"), newInt(value.vparam.int64))
@@ -24,6 +24,11 @@ proc compileValue(value: sql_ast.Value): SExpr =
   of valValLookup:
     let entity = compileValue(value.valEntity)
     list(newSymbol("lookup-value"), entity, compileValue(value.valAttr))
+  of valBinOp:
+    list(newSymbol(value.binOp), compileValue(value.binLeft), compileValue(value.binRight))
+  of valUnaryOp:
+    # unary "-": emit (- 0 operand) so the VM's binary "-" handles it.
+    list(newSymbol(value.unOp), newInt(0), compileValue(value.unOperand))
 
 proc compileEntityRef(eref: sql_ast.UpsertEntityRef): SExpr =
   case eref.erefKind

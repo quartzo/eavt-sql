@@ -10,7 +10,8 @@
               "alias": "d1",
               "field": "eid"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [],
@@ -70,7 +71,8 @@
               "alias": "d1",
               "field": "eid"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [
@@ -104,7 +106,8 @@
               "alias": "d1",
               "field": "eid"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [
@@ -136,21 +139,24 @@
               "alias": "d1",
               "field": "eid"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           },
           {
             "field": {
               "alias": "d1",
               "field": "name"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           },
           {
             "field": {
               "alias": "d1",
               "field": "tx"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [
@@ -182,7 +188,8 @@
               "alias": "d1",
               "field": "name"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [
@@ -213,7 +220,8 @@
             "field": null,
             "literal": {
               "Int": 1
-            }
+            },
+            "expr": null
           }
         ],
         "conditions": [
@@ -255,7 +263,8 @@
               "alias": "d1",
               "field": "name"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [
@@ -289,7 +298,8 @@
               "alias": "d1",
               "field": "name"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [
@@ -323,7 +333,8 @@
               "alias": "d1",
               "field": "name"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [
@@ -357,7 +368,8 @@
               "alias": "d1",
               "field": "name"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [
@@ -391,7 +403,8 @@
               "alias": "d1",
               "field": "ns.attr"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [
@@ -423,7 +436,8 @@
               "alias": "d1",
               "field": "ns.attr"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [
@@ -455,7 +469,8 @@
               "alias": "d1",
               "field": "ns.attr"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [
@@ -497,7 +512,8 @@
               "alias": "d1",
               "field": "ns.attr"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [
@@ -545,7 +561,8 @@
               "alias": "d1",
               "field": "ns.attr"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [
@@ -591,7 +608,8 @@
               "alias": "d1",
               "field": "name"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [
@@ -648,7 +666,8 @@
               "alias": "d2",
               "field": "name"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [
@@ -693,7 +712,8 @@
               "alias": "d1",
               "field": "company.name"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [
@@ -725,7 +745,8 @@
               "alias": "d1",
               "field": "name"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [],
@@ -745,7 +766,8 @@
             "field": null,
             "literal": {
               "Int": 42
-            }
+            },
+            "expr": null
           }
         ],
         "conditions": [],
@@ -765,7 +787,8 @@
             "field": null,
             "literal": {
               "Float": 3.14
-            }
+            },
+            "expr": null
           }
         ],
         "conditions": [],
@@ -785,7 +808,8 @@
             "field": null,
             "literal": {
               "Str": "hello"
-            }
+            },
+            "expr": null
           }
         ],
         "conditions": [],
@@ -1411,7 +1435,8 @@
               "alias": "d1",
               "field": "name"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [
@@ -1534,7 +1559,8 @@
               "alias": "d1",
               "field": "name"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [
@@ -1566,7 +1592,8 @@
               "alias": "d1",
               "field": "ns.attr"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [
@@ -1612,7 +1639,8 @@
               "alias": "d1",
               "field": "name"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [],
@@ -1662,7 +1690,8 @@
               "alias": "d1",
               "field": "name"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [
@@ -1697,7 +1726,8 @@
               "alias": "d1",
               "field": "name"
             },
-            "literal": null
+            "literal": null,
+            "expr": null
           }
         ],
         "conditions": [

@@ -13,7 +13,8 @@ type
     of litBytes: bytesval*: seq[byte]
 
   ValueKind* = enum
-    valLiteral, valParam, valAliasRef, valEidLookup, valValLookup
+    valLiteral, valParam, valAliasRef, valEidLookup, valValLookup,
+    valBinOp, valUnaryOp
 
   Value* = ref object
     case vkind*: ValueKind
@@ -26,6 +27,13 @@ type
     of valValLookup:
       valEntity*: Value
       valAttr*: Value
+    of valBinOp:
+      binOp*: string
+      binLeft*: Value
+      binRight*: Value
+    of valUnaryOp:
+      unOp*: string
+      unOperand*: Value
 
   FieldRef* = ref object
     alias*: string
@@ -34,6 +42,7 @@ type
   Projection* = ref object
     field*: Option[FieldRef]
     literal*: Option[Literal]
+    expr*: Option[Value]
 
   ConditionRightKind* = enum
     crField, crLiteral, crParam, crIn, crOr
@@ -135,6 +144,10 @@ proc toJson*(v: Value): JsonNode =
     %*{"EidLookup": {"attr": toJson(v.eidAttr), "value": toJson(v.eidValue)}}
   of valValLookup:
     %*{"ValLookup": {"entity": toJson(v.valEntity), "attr": toJson(v.valAttr)}}
+  of valBinOp:
+    %*{"BinOp": {"op": v.binOp, "left": toJson(v.binLeft), "right": toJson(v.binRight)}}
+  of valUnaryOp:
+    %*{"UnaryOp": {"op": v.unOp, "operand": toJson(v.unOperand)}}
 
 proc toJson*(v: FieldRef): JsonNode =
   %*{"alias": v.alias, "field": v.field}
@@ -149,6 +162,10 @@ proc toJson*(v: Projection): JsonNode =
     result["literal"] = toJson(v.literal.get)
   else:
     result["literal"] = newJNull()
+  if v.expr.isSome:
+    result["expr"] = toJson(v.expr.get)
+  else:
+    result["expr"] = newJNull()
 
 proc toJson*(v: ConditionRight): JsonNode =
   case v.rkind
