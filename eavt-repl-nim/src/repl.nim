@@ -76,7 +76,9 @@ proc cmdDump(index: string) =
         stderr.writeLine "Error: ", chunk.error
         return
       for row in chunk.rows:
-        echo row.join("\t")
+        var parts: seq[string]
+        for v in row: parts.add(parseValue(v))
+        echo parts.join("\t")
 
 # ── dot dispatcher ───────────────────────────────────────────────────
 
