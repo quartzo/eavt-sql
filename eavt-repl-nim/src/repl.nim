@@ -14,7 +14,7 @@ var gClient: EavtClient
 
 # ── helpers ──────────────────────────────────────────────────────────
 
-proc parseValue(raw: string): string =
+proc parseValue*(raw: string): string =
   try:
     let node = parseJson(raw)
     case node.kind
