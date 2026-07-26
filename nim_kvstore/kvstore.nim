@@ -12,6 +12,7 @@ import nim_memtable/treap_backend as mt_be
 import treap_cursor
 import page_cursor
 import query/cursor
+import spawn
 export cursor
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -38,9 +39,6 @@ type
     # Set by requestFlush while a flush is running; the running flush
     # clears it and re-iterates, so a request made mid-flush is honoured.
     flushPending: Atomic[bool]
-    # Spawned by requestFlush when no flush is in flight. nil = async
-    # requests are no-ops (background not wired up — e.g. unit tests).
-    onFlushRequest*: proc() {.gcsafe.}
 # ═══════════════════════════════════════════════════════════════════════════════
 # KVStore operations
 
@@ -68,6 +66,7 @@ proc newKVStore*(config: Table[string, string]): KVStore =
   result.gcMaxAgeSecs = parseUInt(config.getOrDefault("gc_max_age_secs", "43200")).uint64
   result.gcMaxRootCount = parseInt(config.getOrDefault("gc_max_root_count", "10"))
   initLock(result.lock)
+  initSpawn()
   # Replay journal
   if result.path.len > 0 and result.path != ":memory:" and result.path != "":
     let journalPath = result.path / "journal" / "journal"
@@ -183,19 +182,19 @@ proc flush*(kv: KVStore) {.gcsafe.} =
 proc requestFlush*(kv: KVStore) {.gcsafe.} =
   ## Ask for a background flush. Idempotent. If a flush is already running,
   ## marks flushPending so the runner re-iterates; otherwise arms a fresh
-  ## flush (flushStart++) and invokes onFlushRequest. No-op when
-  ## onFlushRequest is nil (e.g. unit tests).
+  ## flush (flushStart++) and spawns runBackgroundFlush. The storage is
+  ## self-contained — no external wiring needed.
   kv.flushPending.store(true, moRelaxed)
-  var cb: proc() {.gcsafe.} = nil
+  var fire = false
   kv.lock.withLock:
-    if kv.flushStart.load(moRelaxed) == kv.flushEnd.load(moRelaxed) and
-       kv.onFlushRequest != nil:
+    if kv.flushStart.load(moRelaxed) == kv.flushEnd.load(moRelaxed):
       discard kv.flushStart.fetchAdd(1, moRelaxed)
-      cb = kv.onFlushRequest
-  if cb != nil: cb()
+      fire = true
+  if fire:
+    spawn(proc() {.gcsafe.} = runBackgroundFlush(kv))
 
 proc runBackgroundFlush*(kv: KVStore) {.gcsafe.} =
-  ## Background flush loop. Spawned by onFlushRequest. Drains the MemTable
+  ## Background flush loop. Spawned by requestFlush. Drains the MemTable
   ## and, if flushPending was set while running, re-iterates so concurrent
   ## writes are not lost. Caller must NOT hold `kv.lock`.
   while true:

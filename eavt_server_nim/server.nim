@@ -1,16 +1,10 @@
 import std/[os, nativesockets, posix]
 import spawn
-import shared_engine, connection, kvstore
+import shared_engine, connection
 
 proc serveClient(eng: ptr SharedEngine; fd: SocketHandle) {.gcsafe.} =
   handleConnection(eng[], fd)
   discard posix.close(cint(fd))
-
-proc doFlush(eng: ptr SharedEngine) {.gcsafe.} =
-  ## Background flush task: drains the MemTable and re-iterates as long as a
-  ## flush was requested while running (honours `flushPending`). Spawned by
-  ## `eng.kv.onFlushRequest`.
-  runBackgroundFlush(eng[].kv)
 
 proc getSocketPath(): string =
   let xdg = getEnv("XDG_RUNTIME_DIR")
@@ -62,8 +56,6 @@ proc main() =
   echo "EAVT server starting on ", sockPath
   initSpawn()
   var eng = initSharedEngine()
-  eng.kv.onFlushRequest = proc() {.gcsafe.} =
-    spawn(proc() {.gcsafe.} = doFlush(addr eng))
   echo "Engine initialized"
   let serverFd = createUnixSocket(sockPath)
   defer: discard posix.close(cint(serverFd))
