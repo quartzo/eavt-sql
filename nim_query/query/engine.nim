@@ -197,43 +197,18 @@ proc executeProgram*(session: QuerySession): SExpr =
   var env = newEnvironment()
   eval(session.program, env, session.host)
 
-# ── Open streaming cursor (yield/resume) ──
+# ── Streaming cursor (yield/resume) ──
 
 type
   StreamingSession* = ref object
-    program*: SchemeProgram
-    env*: Environment
+    vm*: VmSession
     host*: SchemeHostFns
-    state*: YieldState
-    done*: bool
 
 proc newStreamingSession*(proto: QuerySession): StreamingSession =
   StreamingSession(
-    program: proto.program,
-    env: newEnvironment(),
+    vm: newVmSession(proto.program),
     host: proto.host,
-    state: YieldState(),
-    done: false,
   )
 
 proc nextBatch*(sess: StreamingSession; maxRows: int): (seq[seq[SExpr]], bool) =
-  ## Returns (rows, more_available).
-  if sess.done or maxRows == 0:
-    return (@[], false)
-
-  var rows: seq[seq[SExpr]] = @[]
-  var more = false
-
-  while rows.len < maxRows:
-    let step = evalWithYield(sess.program, sess.env, sess.host, sess.state)
-    case step.kind:
-    of esYield:
-      if step.row.kind == sList:
-        rows.add step.row.items
-      more = rows.len >= maxRows
-      if more: return (rows, true)
-    of esDone:
-      sess.done = true
-      return (rows, false)
-
-  (rows, true)
+  sess.vm.nextBatch(sess.host, maxRows)

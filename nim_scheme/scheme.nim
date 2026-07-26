@@ -567,3 +567,39 @@ proc eval*(program: SchemeProgram; env: var Environment; host: HostFns): SExpr =
   let step = evalWithYield(program, env, host, state)
   if step.kind == esDone: return step.result
   raise newException(EvalError, "unexpected yield in batch eval")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VmSession — streaming VM with yield/resume
+# ═══════════════════════════════════════════════════════════════════════════════
+
+type
+  VmSession* = ref object
+    program*: SchemeProgram
+    env*: Environment
+    state*: YieldState
+    done*: bool
+
+proc newVmSession*(program: SchemeProgram): VmSession =
+  VmSession(
+    program: program,
+    env: newEnvironment(),
+    state: YieldState(),
+    done: false,
+  )
+
+proc nextBatch*(sess: VmSession; host: HostFns; maxRows: int): (seq[seq[SExpr]], bool) =
+  if sess.done or maxRows == 0:
+    return (@[], false)
+
+  var rows: seq[seq[SExpr]] = @[]
+  while rows.len < maxRows:
+    let step = evalWithYield(sess.program, sess.env, host, sess.state)
+    case step.kind:
+    of esYield:
+      if step.row.kind == sList:
+        rows.add step.row.items
+    of esDone:
+      sess.done = true
+      return (rows, false)
+
+  (rows, true)
