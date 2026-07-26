@@ -2,29 +2,23 @@ import std/[unittest, tables, sets, sequtils]
 import datalog_ast, pattern, planner, planner_ast, resolve, stats
 
 proc makeFixedStats(): CompileStats =
-  CompileStats(
-    lookupAttr: proc(name: string): uint32 =
-      if name == "user.name": 100
-      elif name == "user.age": 101
-      elif name == "company.ceo": 200
-      else: 0,
-    estimateIndexSize: proc(index: string, bound: openArray[uint64]): float64 =
-      let key = (index, @bound)
-      if key == ("EAVT", newSeq[uint64]()): 10_000_000.0
-      elif key == ("AEVT", @[100'u64]): 100.0
-      elif key == ("AEVT", @[101'u64]): 100.0
-      elif key == ("AEVT", @[200'u64]): 100.0
-      elif key == ("AEVT", @[100'u64, 0'u64]): 10.0
-      elif key == ("AEVT", @[101'u64, 0'u64]): 10.0
-      elif key == ("AEVT", @[200'u64, 0'u64]): 10.0
-      elif key == ("AVET", @[100'u64]): 10_000.0
-      elif key == ("AVET", @[101'u64]): 10_000.0
-      elif key == ("AVET", @[200'u64]): 10_000.0
-      else: 1_000_000.0,
-    partitionIdFor: proc(name: string): uint64 = 0,
-    isRefAttr: proc(name: string): bool = name == "company.ceo",
-    isIndexedAttr: proc(name: string): bool = true,
-  )
+  result = CompileStats()
+  result.attrIds = {
+    "user.name": 100'u32,
+    "user.age": 101'u32,
+    "company.ceo": 200'u32,
+  }.toTable
+  result.refAttrs = ["company.ceo"].toHashSet
+  result.indexEstimates = {
+    "EAVT:": 10_000_000.0,
+    "AEVT:100:": 100.0,
+    "AEVT:101:": 100.0,
+    "AEVT:200:": 100.0,
+    "AVET:100:": 10_000.0,
+    "AVET:101:": 10_000.0,
+    "AVET:200:": 10_000.0,
+  }.toTable
+  result.partitionIds = initTable[string, uint64]()
 
 proc resolveAndPlan(ir: DatalogIR): QueryPlanResult =
   let stats = makeFixedStats()

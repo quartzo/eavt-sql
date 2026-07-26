@@ -13,7 +13,7 @@ import std/[random, algorithm, sets]
 type
   Key* = seq[byte]
 
-  TreapNode* = ref object
+  TreapNode* {.acyclic.} = ref object
     key*: Key
     prio*: uint32
     left*: TreapNode

@@ -1,12 +1,10 @@
 import std/[os, nativesockets, posix]
+import malebolgia
 import shared_engine, connection
 
-var gEng: SharedEngine
-
-proc connThread(fd: SocketHandle) {.thread.} =
-  {.cast(gcsafe).}:
-    handleConnection(gEng, fd)
-    discard posix.close(cint(fd))
+proc serveClient(eng: ptr SharedEngine; fd: SocketHandle) {.gcsafe.} =
+  handleConnection(eng[], fd)
+  discard posix.close(cint(fd))
 
 proc getSocketPath(): string =
   let xdg = getEnv("XDG_RUNTIME_DIR")
@@ -56,13 +54,14 @@ proc main() =
     return
   let sockPath = getSocketPath()
   echo "EAVT server starting on ", sockPath
-  gEng = initSharedEngine()
+  var eng = initSharedEngine()
   echo "Engine initialized"
   let serverFd = createUnixSocket(sockPath)
   defer: discard posix.close(cint(serverFd))
   echo "Listening..."
-  while true:
-    let clientFd = acceptClient(serverFd)
-    var thread: Thread[SocketHandle]
-    createThread(thread, connThread, clientFd)
+  var m = createMaster()
+  m.awaitAll:
+    while true:
+      let clientFd = acceptClient(serverFd)
+      m.spawn serveClient(unsafeAddr eng, clientFd)
 when isMainModule: main()

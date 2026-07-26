@@ -1,29 +1,17 @@
 import std/[options, nativesockets, posix, strutils, json]
 import scheme, engine, eavt, kvstore
 import frontend, parser as sql_parser
-import stats, planner_ast
+import planner_ast
 import msgpack4nim/msgpack2json
 import shared_engine, protocol
 
-proc lookupAttrId(e: EavtEngine; name: string): uint32 =
-  eavt.lookupAttr(e, name).get(otherwise = 0)
+proc dumpDatoms(eng: SharedEngine; fd: SocketHandle; command: string) {.gcsafe.}
 
-proc dumpDatoms(eng: SharedEngine; fd: SocketHandle; command: string)
-
-proc execQuery(eng: SharedEngine; req: Request; fd: SocketHandle) =
+proc execQuery(eng: SharedEngine; req: Request; fd: SocketHandle) {.gcsafe.} =
   case req.kind
   of rkSql:
     let stmt = sql_parser.parse(req.sql)
-    let cstats = CompileStats(
-      lookupAttr: proc(name: string): uint32 = lookupAttrId(eng.store.eavt, name),
-      estimateIndexSize: proc(index: string, bound: openArray[uint64]): float64 =
-        eng.store.eavt.estimateIndexSize(index, bound),
-      partitionIdFor: proc(name: string): uint64 = eng.store.eavt.partitionIdFor(name).get(otherwise = 0),
-      isRefAttr: proc(name: string): bool =
-        let aid = lookupAttrId(eng.store.eavt, name)
-        if aid == 0: false else: eng.store.eavt.valueTypeFor(aid).get(otherwise = 0) == 21'u32,
-      isIndexedAttr: proc(name: string): bool = true,
-    )
+    let cstats = eng.store.eavt.buildCompileStats()
     let compiled = compileSql(stmt, cstats)
     if compiled.isExplain:
       var outStr = ""
@@ -103,7 +91,7 @@ proc execQuery(eng: SharedEngine; req: Request; fd: SocketHandle) =
       node["more"] = %false
       writeMsg(fd, msgpack2json.fromJsonNode(node))
 
-proc dumpDatoms(eng: SharedEngine; fd: SocketHandle; command: string) =
+proc dumpDatoms(eng: SharedEngine; fd: SocketHandle; command: string) {.gcsafe.} =
   let parts = command.splitWhitespace()
   let index = if parts.len >= 2: parts[1].toUpperAscii()
              else: "EAVT"
@@ -127,7 +115,7 @@ proc dumpDatoms(eng: SharedEngine; fd: SocketHandle; command: string) =
       rows.setLen(0)
   writeResponse(fd, @["e", "attr", "value", "t"], rows, false)
 
-proc handleConnection*(eng: SharedEngine; fd: SocketHandle) =
+proc handleConnection*(eng: SharedEngine; fd: SocketHandle) {.gcsafe.} =
   while true:
     let raw = readMsg(fd)
     if raw.len == 0: break
