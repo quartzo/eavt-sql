@@ -8,6 +8,7 @@ import resolver
 import keys
 import kvstore
 import scheme
+import stats
 import std/locks
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -50,6 +51,8 @@ type
     kv*: KVStore                  # Nim ref — no C-ABI vtable
     resolver*: Resolver
     lock: Lock
+    cachedStats*: CompileStats
+    cachedStatsTime*: float64
 
 proc newEavtEngine*(kv: KVStore): EavtEngine =
   result = EavtEngine(kv: kv, resolver: newResolver())
@@ -104,6 +107,35 @@ proc estimateIndexSize*(eng: EavtEngine; index: string; bound: openArray[uint64]
       prefix.add byte((v shr 8) and 0xFF); prefix.add byte(v and 0xFF)
   let count = eng.estimateCount(cf, prefix)
   result = float64(count)
+
+proc buildCompileStats*(eng: EavtEngine): CompileStats =
+  ## Pre-compute all compile-time statistics with 30s TTL cache.
+  let now = epochTime()
+  if now - eng.cachedStatsTime < 30.0 and eng.cachedStats.attrIds.len > 0:
+    return eng.cachedStats
+
+  var s: CompileStats
+  s.attrIds = initTable[string, uint32]()
+  s.indexEstimates = initTable[string, float64]()
+  s.partitionIds = initTable[string, uint64]()
+  s.refAttrs = initHashSet[string]()
+
+  # Collect all declared attributes
+  for name, aid in eng.resolver.attrs:
+    s.attrIds[name] = aid
+    let vt = eng.resolver.valueTypeFor(aid).get(otherwise = 0)
+    if vt == 21'u32:  # DbTypeRef
+      s.refAttrs.incl(name)
+
+  # Pre-compute index estimates for all 4 indexes (empty prefix = total count)
+  for index in ["EAVT", "AEVT", "AVET", "VAET"]:
+    let cf = keys.cfNameToId(keys.cfForIndex(index))
+    let count = float64(eng.estimateCount(cf, @[]))
+    s.indexEstimates[index & ":"] = count
+
+  eng.cachedStats = s
+  eng.cachedStatsTime = now
+  result = s
 
 type
   Datom* = object
@@ -270,6 +302,7 @@ proc eavtDeclareAttr*(eng: EavtEngine; name: string; valueType: uint32;
     let (aid, isNew) = eng.resolver.declareAttr(name, valueType, many)
     if unique: eng.resolver.setUnique(aid, true)
     if isNew:
+      eng.cachedStatsTime = 0  # invalidate cache
       # Persist schema as db.* datoms (Rust declare_attr_with_t).
       let t = eng.resolver.allocateInPartition(PartTx)
       let e = aid.int64

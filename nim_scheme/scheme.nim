@@ -198,15 +198,35 @@ proc done*(v: SExpr): EvalStep = EvalStep(kind: esDone, result: v)
 proc yieldRow*(v: SExpr): EvalStep = EvalStep(kind: esYield, row: v)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# HostFns callback
+# HostFns — virtual methods for host functions (ref object + inheritance)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 type
   HostFns* = ref object of RootObj
 
-method call*(h: HostFns; name: string; args: seq[SExpr]): EvalStep {.base.} =
-  discard
-method isNative*(h: HostFns; name: string): bool {.base.} = false
+method scannerOpen*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method scannerRead*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method scannerPush*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method scannerPop*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method scannerPrefix*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method scannerIterateInit*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method scannerIterateNext*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method internA*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method attrName*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method resolveVal*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method param*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method save*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method retract*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method allocEntity*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method txEntity*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method lookupEntity*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method lookupValue*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method declareAttr*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method declarePartition*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method resultRow*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method result*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method dbgScanners*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method rangesShow*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Evaluator stack frames
@@ -272,7 +292,7 @@ proc sexprNumToF64(expr: SExpr): float64 =
   else: raise newException(EvalError, "expected number, got " & $expr)
 
 proc evalExpr(expr: SExpr; env: var Environment; host: HostFns;
-              state: var YieldState): EvalStep {.nimcall.}
+              state: var YieldState): EvalStep {.nimcall, gcsafe.}
 
 # ── processValue — apply a value to the next frame on stack ──
 
@@ -362,7 +382,7 @@ proc evalFully(expr: SExpr; env: var Environment; host: HostFns;
 # ── Resumable evaluator entry point ──
 
 proc evalWithYield*(program: SchemeProgram; env: var Environment;
-                     host: HostFns; state: var YieldState): EvalStep =
+                     host: HostFns; state: var YieldState): EvalStep {.gcsafe.} =
   if not state.started:
     state.started = true
     state.stack.add Frame(kind: fkEval, fexpr: program.body)
@@ -495,7 +515,7 @@ proc evalSpecialForm(name: string; args: SExpr; env: var Environment;
     var initArgs: seq[SExpr] = @[]
     for sv in scannerVals: initArgs.add sv
     initArgs.add rangesVal
-    let iterStep = host.call("scanner-iterate-init", initArgs)
+    let iterStep = host.scannerIterateInit(initArgs)
     if iterStep.kind == esYield: return iterStep
     if iterStep.result.kind == sVoid:
       return done(newVoid())
@@ -641,7 +661,7 @@ proc evalSpecialForm(name: string; args: SExpr; env: var Environment;
 # ── Expression evaluation ──
 
 proc evalExpr(expr: SExpr; env: var Environment; host: HostFns;
-              state: var YieldState): EvalStep =
+              state: var YieldState): EvalStep {.gcsafe.} =
   case expr.kind:
   of sVoid, sBool, sInt, sFloat, sStr, sBytes, sResource:
     return done(expr)
@@ -656,13 +676,37 @@ proc evalExpr(expr: SExpr; env: var Environment; host: HostFns;
       let name = first.symval
       if isSpecialForm(name):
         return evalSpecialForm(name, expr, env, host, state)
-      if host.isNative(name):
-        var args: seq[SExpr] = @[]
-        for i in 1..<expr.items.len:
-          let argStep = evalFully(expr.items[i], env, host, state)
-          if argStep.kind == esYield: return argStep
-          args.add argStep.result
-        return host.call(name, args)
+      # Host function dispatch
+      var args: seq[SExpr] = @[]
+      for i in 1..<expr.items.len:
+        let argStep = evalFully(expr.items[i], env, host, state)
+        if argStep.kind == esYield: return argStep
+        args.add argStep.result
+      case name
+      of "scanner-open": return host.scannerOpen(args)
+      of "scanner-read": return host.scannerRead(args)
+      of "scanner-push": return host.scannerPush(args)
+      of "scanner-pop": return host.scannerPop(args)
+      of "scanner-prefix": return host.scannerPrefix(args)
+      of "scanner-iterate-init": return host.scannerIterateInit(args)
+      of "scanner-iterate-next": return host.scannerIterateNext(args)
+      of "intern-a": return host.internA(args)
+      of "attr-name": return host.attrName(args)
+      of "resolve-val": return host.resolveVal(args)
+      of "param": return host.param(args)
+      of "save": return host.save(args)
+      of "retract": return host.retract(args)
+      of "alloc-entity": return host.allocEntity(args)
+      of "tx-entity": return host.txEntity(args)
+      of "lookup-entity": return host.lookupEntity(args)
+      of "lookup-value": return host.lookupValue(args)
+      of "declare-attr": return host.declareAttr(args)
+      of "declare-partition": return host.declarePartition(args)
+      of "result-row": return host.resultRow(args)
+      of "result": return host.result(args)
+      of "dbg-scanners": return host.dbgScanners(args)
+      of "ranges-show": return host.rangesShow(args)
+      else: raise newException(EvalError, "unknown host function: " & name)
       raise newException(EvalError, "unbound: " & name)
     raise newException(EvalError, "cannot apply non-symbol as function")
   return done(newVoid())
@@ -671,7 +715,7 @@ proc evalExpr(expr: SExpr; env: var Environment; host: HostFns;
 # Batch evaluator (non-yielding)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-proc eval*(program: SchemeProgram; env: var Environment; host: HostFns): SExpr =
+proc eval*(program: SchemeProgram; env: var Environment; host: HostFns): SExpr {.gcsafe.} =
   var state = YieldState()
   let step = evalWithYield(program, env, host, state)
   if step.kind == esDone: return step.result

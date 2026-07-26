@@ -1,7 +1,8 @@
+import tables, sets
+
 type
   CompileStats* = object
-    lookupAttr*: proc(name: string): uint32 {.closure.}
-    estimateIndexSize*: proc(index: string, bound: openArray[uint64]): float64 {.closure.}
-    partitionIdFor*: proc(name: string): uint64 {.closure.}
-    isRefAttr*: proc(name: string): bool {.closure.}
-    isIndexedAttr*: proc(name: string): bool {.closure.}
+    attrIds*: Table[string, uint32]
+    indexEstimates*: Table[string, float64]  # key: "EAVT:" or "AVET:100:"
+    partitionIds*: Table[string, uint64]
+    refAttrs*: HashSet[string]

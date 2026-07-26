@@ -107,7 +107,7 @@ type
     nextSeq: int64
 
   Resolver* = object
-    attrs: Table[string, uint32]
+    attrs*: Table[string, uint32]
     attrsRev: Table[uint32, string]
     nextAid: uint32
     partitions: Table[uint64, PartitionCounter]

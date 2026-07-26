@@ -5,7 +5,7 @@ type
   ParseError* = object of CatchableError
     pos*: int
 
-proc newParseError(msg: string, pos: int): ref ParseError =
+proc newParseError(msg: string, pos: int): ref ParseError {.gcsafe.} =
   new(result)
   result.msg = msg & " at position " & $pos
   result.pos = pos
@@ -15,17 +15,17 @@ type
     tokens: seq[LexToken]
     pos: int
 
-proc parseOrExpr(p: Parser): seq[Condition]
-proc parseStmt(p: Parser): SqlStmt
+proc parseOrExpr(p: Parser): seq[Condition] {.gcsafe.}
+proc parseStmt(p: Parser): SqlStmt {.gcsafe.}
 
 func peek(p: Parser): LexToken =
   p.tokens[p.pos]
 
-proc advance(p: Parser): LexToken =
+proc advance(p: Parser): LexToken {.gcsafe.} =
   result = p.tokens[p.pos]
   inc p.pos
 
-proc expect(p: Parser, tt: TokenType): LexToken =
+proc expect(p: Parser, tt: TokenType): LexToken {.gcsafe.} =
   let tok = p.peek()
   if tok.tt != tt:
     raise newParseError(
@@ -33,7 +33,7 @@ proc expect(p: Parser, tt: TokenType): LexToken =
       TokenNames[ord(tok.tt)] & " " & tok.value & ")", tok.pos)
   result = p.advance()
 
-proc expectOneof(p: Parser, tts: openArray[TokenType]): LexToken =
+proc expectOneof(p: Parser, tts: openArray[TokenType]): LexToken {.gcsafe.} =
   let tok = p.peek()
   for t in tts:
     if tok.tt == t:
@@ -45,7 +45,7 @@ proc expectOneof(p: Parser, tts: openArray[TokenType]): LexToken =
     "expected " & names.join(" or ") & " (got " &
     TokenNames[ord(tok.tt)] & " " & tok.value & ")", tok.pos)
 
-proc parseFieldRef(p: Parser): FieldRef =
+proc parseFieldRef(p: Parser): FieldRef {.gcsafe.} =
   let alias = p.expect(ttALIAS).value
   discard p.expect(ttDOT)
   var field = p.expectOneof([ttIDENT, ttALIAS]).value
@@ -55,7 +55,7 @@ proc parseFieldRef(p: Parser): FieldRef =
     field.add(p.expectOneof([ttIDENT, ttALIAS]).value)
   FieldRef(alias: alias, field: field)
 
-proc parseParam(p: Parser): uint32 =
+proc parseParam(p: Parser): uint32 {.gcsafe.} =
   let tok = p.expect(ttPARAM)
   let numStr = tok.value[1..^1]
   try:
@@ -63,13 +63,13 @@ proc parseParam(p: Parser): uint32 =
   except ValueError:
     raise newParseError("invalid parameter number '" & numStr & "'", tok.pos)
 
-proc parseAttrRef(p: Parser): string =
+proc parseAttrRef(p: Parser): string {.gcsafe.} =
   let ns = p.expectOneof([ttIDENT, ttALIAS]).value
   discard p.expect(ttDOT)
   let name = p.expectOneof([ttIDENT, ttALIAS]).value
   ns & "." & name
 
-proc parseOp(p: Parser): string =
+proc parseOp(p: Parser): string {.gcsafe.} =
   case p.peek().tt
   of ttEQ:
     discard p.advance()
@@ -92,7 +92,7 @@ proc parseOp(p: Parser): string =
   else:
     raise newParseError("expected comparison operator", p.peek().pos)
 
-proc parseLiteralOrParam(p: Parser): Value =
+proc parseLiteralOrParam(p: Parser): Value {.gcsafe.} =
   case p.peek().tt
   of ttPARAM: Value(vkind: valParam, vparam: p.parseParam())
   of ttSTRING:
@@ -115,7 +115,7 @@ proc parseLiteralOrParam(p: Parser): Value =
   else:
     raise newParseError("expected literal or parameter", p.peek().pos)
 
-proc parseEidAttrArg(p: Parser): Value =
+proc parseEidAttrArg(p: Parser): Value {.gcsafe.} =
   case p.peek().tt
   of ttSTRING:
     let tok = p.advance()
@@ -127,7 +127,7 @@ proc parseEidAttrArg(p: Parser): Value =
   else:
     raise newParseError("expected attribute name (quoted or dotted)", p.peek().pos)
 
-proc parseValueOrAlias(p: Parser): Value =
+proc parseValueOrAlias(p: Parser): Value {.gcsafe.} =
   case p.peek().tt
   of ttALIAS:
     let aliasVal = toUpperAscii(p.advance().value)
@@ -182,13 +182,13 @@ proc parseValueOrAlias(p: Parser): Value =
   else:
     raise newParseError("expected value after =", p.peek().pos)
 
-proc parseSetValue(p: Parser): InsertValue =
+proc parseSetValue(p: Parser): InsertValue {.gcsafe.} =
   let attr = p.parseAttrRef()
   discard p.expect(ttEQ)
   let value = p.parseValueOrAlias()
   InsertValue(attr: attr, value: value)
 
-proc parseSetValueList(p: Parser): seq[InsertValue] =
+proc parseSetValueList(p: Parser): seq[InsertValue] {.gcsafe.} =
   result = @[p.parseSetValue()]
   while p.peek().tt == ttCOMMA:
     let save = p.pos
@@ -198,7 +198,7 @@ proc parseSetValueList(p: Parser): seq[InsertValue] =
       break
     result.add(p.parseSetValue())
 
-proc parseProjection(p: Parser): Projection =
+proc parseProjection(p: Parser): Projection {.gcsafe.} =
   case p.peek().tt
   of ttINTEGER:
     let tok = p.advance()
@@ -226,13 +226,13 @@ proc parseProjection(p: Parser): Projection =
   else:
     raise newParseError("expected field reference or literal in SELECT", p.peek().pos)
 
-proc parseProjectionList(p: Parser): seq[Projection] =
+proc parseProjectionList(p: Parser): seq[Projection] {.gcsafe.} =
   result = @[p.parseProjection()]
   while p.peek().tt == ttCOMMA:
     discard p.advance()
     result.add(p.parseProjection())
 
-proc parseConditionValue(p: Parser): ConditionRight =
+proc parseConditionValue(p: Parser): ConditionRight {.gcsafe.} =
   case p.peek().tt
   of ttPARAM: ConditionRight(rkind: crParam, rparam: p.parseParam())
   of ttINTEGER:
@@ -249,7 +249,7 @@ proc parseConditionValue(p: Parser): ConditionRight =
   else:
     raise newParseError("expected value in IN list", p.peek().pos)
 
-proc parseCondition(p: Parser): Condition =
+proc parseCondition(p: Parser): Condition {.gcsafe.} =
   let left = p.parseFieldRef()
 
   if p.peek().tt == ttIN:
@@ -321,7 +321,7 @@ proc parseCondition(p: Parser): Condition =
 
   Condition(left: left, op: op, right: right)
 
-proc parsePrimary(p: Parser): seq[Condition] =
+proc parsePrimary(p: Parser): seq[Condition] {.gcsafe.} =
   if p.peek().tt == ttLPAREN:
     discard p.advance()
     result = p.parseOrExpr()
@@ -329,13 +329,13 @@ proc parsePrimary(p: Parser): seq[Condition] =
   else:
     result = @[p.parseCondition()]
 
-proc parseAndGroup(p: Parser): seq[Condition] =
+proc parseAndGroup(p: Parser): seq[Condition] {.gcsafe.} =
   result = p.parsePrimary()
   while p.peek().tt == ttAND:
     discard p.advance()
     result.add(p.parsePrimary())
 
-proc parseOrExpr(p: Parser): seq[Condition] =
+proc parseOrExpr(p: Parser): seq[Condition] {.gcsafe.} =
   let firstAnd = p.parseAndGroup()
   if p.peek().tt != ttOR:
     return firstAnd
@@ -358,10 +358,10 @@ proc parseOrExpr(p: Parser): seq[Condition] =
   result = @[Condition(left: left, op: "or",
     right: ConditionRight(rkind: crOr, orBranches: branches))]
 
-proc parseConditionList(p: Parser): seq[Condition] =
+proc parseConditionList(p: Parser): seq[Condition] {.gcsafe.} =
   p.parseOrExpr()
 
-proc parseUpsertAlias(p: Parser): tuple[alias: Option[string], eref: UpsertEntityRef] =
+proc parseUpsertAlias(p: Parser): tuple[alias: Option[string], eref: UpsertEntityRef] {.gcsafe.} =
   if p.peek().tt != ttAS:
     return (none(string), UpsertEntityRef(erefKind: ueNew))
 
@@ -391,7 +391,7 @@ proc parseUpsertAlias(p: Parser): tuple[alias: Option[string], eref: UpsertEntit
 
   (some(aliasName), UpsertEntityRef(erefKind: ueNew))
 
-proc parseUpsert(p: Parser): SqlStmt =
+proc parseUpsert(p: Parser): SqlStmt {.gcsafe.} =
   discard p.expect(ttUPSERT)
   var clauses: seq[UpsertClause]
 
@@ -409,7 +409,7 @@ proc parseUpsert(p: Parser): SqlStmt =
   discard p.expect(ttEOF)
   SqlStmt(kind: stmtUpsert, upsertStmt: UpsertStmt(clauses: clauses))
 
-proc parseUpdateClause(p: Parser): tuple[alias: string, values: seq[InsertValue]] =
+proc parseUpdateClause(p: Parser): tuple[alias: string, values: seq[InsertValue]] {.gcsafe.} =
   let alias = if p.peek().tt == ttAS:
     discard p.advance()
     let tok = p.advance()
@@ -423,7 +423,7 @@ proc parseUpdateClause(p: Parser): tuple[alias: string, values: seq[InsertValue]
   let values = p.parseSetValueList()
   (alias, values)
 
-proc parseUpdateStmt(p: Parser): SqlStmt =
+proc parseUpdateStmt(p: Parser): SqlStmt {.gcsafe.} =
   discard p.expect(ttUPDATE)
 
   var clauses: seq[UpdateClause]
@@ -445,14 +445,14 @@ proc parseUpdateStmt(p: Parser): SqlStmt =
   discard p.expect(ttEOF)
   SqlStmt(kind: stmtUpdate, updateStmt: UpdateStmt(clauses: clauses, conditions: conditions))
 
-proc parseDelete(p: Parser): SqlStmt =
+proc parseDelete(p: Parser): SqlStmt {.gcsafe.} =
   discard p.expect(ttDELETE)
   discard p.expect(ttWHERE)
   let conditions = p.parseConditionList()
   discard p.expect(ttEOF)
   SqlStmt(kind: stmtDelete, deleteStmt: DeleteStmt(conditions: conditions))
 
-proc parseAttribute(p: Parser): SqlStmt =
+proc parseAttribute(p: Parser): SqlStmt {.gcsafe.} =
   discard p.expect(ttATTRIBUTE)
   let attr = p.parseAttrRef()
 
@@ -481,13 +481,13 @@ proc parseAttribute(p: Parser): SqlStmt =
   SqlStmt(kind: stmtAttribute,
     attrStmt: AttributeStmt(attr: attr, valueType: upper, many: many, unique: unique))
 
-proc parsePartitionStmt(p: Parser): SqlStmt =
+proc parsePartitionStmt(p: Parser): SqlStmt {.gcsafe.} =
   discard p.expect(ttPARTITION)
   let name = p.expect(ttIDENT).value
   discard p.expect(ttEOF)
   SqlStmt(kind: stmtPartition, partStmt: PartitionStmt(name: name))
 
-proc parseSelect(p: Parser): SqlStmt =
+proc parseSelect(p: Parser): SqlStmt {.gcsafe.} =
   discard p.expect(ttSELECT)
 
   let history = if p.peek().tt == ttHISTORY:
@@ -525,7 +525,7 @@ proc parseSelect(p: Parser): SqlStmt =
       selectStmt: SelectStmt(projections: projections, conditions: conditions,
         existsMode: existsMode, star: false, history: history))
 
-proc parseStmt(p: Parser): SqlStmt =
+proc parseStmt(p: Parser): SqlStmt {.gcsafe.} =
   case p.peek().tt
   of ttSELECT: return p.parseSelect()
   of ttUPSERT: return p.parseUpsert()
@@ -550,7 +550,7 @@ proc parseStmt(p: Parser): SqlStmt =
       "expected SELECT, UPSERT, UPDATE, DELETE, ATTRIBUTE, PARTITION, or EXPLAIN (got " &
       TokenNames[ord(p.peek().tt)] & ")", p.peek().pos)
 
-proc parse*(source: string): SqlStmt =
+proc parse*(source: string): SqlStmt {.gcsafe.} =
   let tokens = tokenize(source)
   var parser = Parser(tokens: tokens, pos: 0)
   parser.parseStmt()

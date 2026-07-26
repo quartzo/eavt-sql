@@ -172,7 +172,7 @@ proc flattenBegins*(expr: SExpr): SExpr =
       list(items)
   else: expr
 
-proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string], leafBody: SExpr): tuple[prog: SchemeProgram, vars: seq[string], depthVarPairs: seq[(int, int)]]
+proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string], leafBody: SExpr): tuple[prog: SchemeProgram, vars: seq[string], depthVarPairs: seq[(int, int)]] {.gcsafe.}
 
 proc buildProjection(plan: QueryPlanResult, totalProjLen: int, constantIndices: Table[int, PlanValue]): SExpr =
   var projArgs: seq[SExpr]
@@ -220,7 +220,7 @@ proc compileSelectScheme*(plan: QueryPlanResult): tuple[prog: SchemeProgram, var
   buildTriejoinScheme(plan, findVars, leafBody)
 
 proc compileDeleteScheme*(plan: QueryPlanResult, findVars: seq[string], targetEvar: string,
-    deleteStmt: sql_ast.DeleteStmt): tuple[prog: SchemeProgram, vars: seq[string], depthVarPairs: seq[(int, int)]] =
+    deleteStmt: sql_ast.DeleteStmt): tuple[prog: SchemeProgram, vars: seq[string], depthVarPairs: seq[(int, int)]] {.gcsafe.} =
   let eidGet = newSymbol(targetEvar)
   var leafStmts: seq[SExpr]
 
@@ -282,7 +282,7 @@ proc compileUpdateScheme*(plan: QueryPlanResult, findVars: seq[string],
   buildTriejoinScheme(plan, findVars, leafBody)
 
 proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
-    leafBody: SExpr): tuple[prog: SchemeProgram, vars: seq[string], depthVarPairs: seq[(int, int)]] =
+    leafBody: SExpr): tuple[prog: SchemeProgram, vars: seq[string], depthVarPairs: seq[(int, int)]] {.gcsafe.} =
   let orderedVars = plan.orderedVars
   let numDepths = orderedVars.len
 

@@ -1,4 +1,4 @@
-import std/tables
+import std/[tables, sets]
 import datalog_ast, pattern, stats
 
 proc resolveIr*(ir: var DatalogIR, s: CompileStats): bool =
@@ -9,10 +9,10 @@ proc resolveIr*(ir: var DatalogIR, s: CompileStats): bool =
         of bvStr: pattern.a.constVal.sval
         else: ""
       if name != "":
-        let id = s.lookupAttr(name)
+        let id = s.attrIds.getOrDefault(name, 0)
         if id == 0: return false
-        let isRef = s.isRefAttr(name)
-        let isIndexed = s.isIndexedAttr(name)
+        let isRef = s.refAttrs.contains(name)
+        let isIndexed = true
         pattern.a = slotConst(newBoundResolvedAttr(id, name, isRef, isIndexed))
 
   for branches in ir.rangeBounds.mvalues:
@@ -23,16 +23,16 @@ proc resolveIr*(ir: var DatalogIR, s: CompileStats): bool =
           of bvStr: pair[1].sval
           else: ""
         if name != "":
-          let id = s.lookupAttr(name)
+          let id = s.attrIds.getOrDefault(name, 0)
           if id == 0: continue
-          let isRef = s.isRefAttr(name)
-          let isIndexed = s.isIndexedAttr(name)
+          let isRef = s.refAttrs.contains(name)
+          let isIndexed = true
           pair[1] = newBoundResolvedAttr(id, name, isRef, isIndexed)
 
   true
 
 proc computePlanStats*(ir: DatalogIR, s: CompileStats): PlanStats =
-  let totalEavt = max(s.estimateIndexSize("EAVT", []), 1.0)
+  let totalEavt = max(s.indexEstimates.getOrDefault("EAVT:", 1.0), 1.0)
   var estimates = initTable[(int, string, string), float64]()
 
   for patIdx, pattern in ir.patterns:
@@ -55,7 +55,12 @@ proc computePlanStats*(ir: DatalogIR, s: CompileStats): PlanStats =
           else:
             boundVals.add(0)
 
-        let est = max(s.estimateIndexSize(indexName, boundVals), 1.0)
+        # Build cache key: "AVET:100:200:"
+        var key = indexName & ":"
+        for bv in boundVals:
+          if bv != 0:
+            key.add($bv & ":")
+        let est = max(s.indexEstimates.getOrDefault(key, totalEavt), 1.0)
         estimates[(patIdx, $indexName, varName)] = est
 
   PlanStats(totalEavt: totalEavt, estimates: estimates)

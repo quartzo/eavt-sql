@@ -66,38 +66,38 @@ proc len*(reg: ScannerRegistry): int = reg.scanners.len
 type
   EngineOps* = ref object of RootObj
 
-method openCursor*(ops: EngineOps; cfId: uint32; prefix: seq[byte]): Cursor {.base.} =
+method openCursor*(ops: EngineOps; cfId: uint32; prefix: seq[byte]): Cursor {.base, gcsafe.} =
   raise newException(EvalError, "not implemented")
 
 method saveWithT*(ops: EngineOps; eid: int64; attr: string; val: SExpr;
-                   t: int64; asOf: int64) {.base.} = discard
+                   t: int64; asOf: int64) {.base, gcsafe.} = discard
 
 method retract*(ops: EngineOps; eid: int64; attr: string; val: SExpr;
-                 t: int64; asOf: int64) {.base.} = discard
+                 t: int64; asOf: int64) {.base, gcsafe.} = discard
 
-method lookupAttr*(ops: EngineOps; name: string): Option[uint32] {.base.} =
+method lookupAttr*(ops: EngineOps; name: string): Option[uint32] {.base, gcsafe.} =
   none[uint32]()
 
-method attrName*(ops: EngineOps; aid: uint32): string {.base.} = ""
+method attrName*(ops: EngineOps; aid: uint32): string {.base, gcsafe.} = ""
 
 method declareAttrFromSql*(ops: EngineOps; attr, typeName: string;
-    many, unique: bool; t: int64) {.base.} = discard
+    many, unique: bool; t: int64) {.base, gcsafe.} = discard
 
-method declarePartition*(ops: EngineOps; name: string; t: int64): uint64 {.base.} = 0
+method declarePartition*(ops: EngineOps; name: string; t: int64): uint64 {.base, gcsafe.} = 0
 
-method allocateInPartition*(ops: EngineOps; partitionId: uint64): int64 {.base.} = 0
+method allocateInPartition*(ops: EngineOps; partitionId: uint64): int64 {.base, gcsafe.} = 0
 
-method allocateTx*(ops: EngineOps): int64 {.base.} = 0
+method allocateTx*(ops: EngineOps): int64 {.base, gcsafe.} = 0
 
-method valueTypeFor*(ops: EngineOps; aid: uint32): Option[uint32] {.base.} =
+method valueTypeFor*(ops: EngineOps; aid: uint32): Option[uint32] {.base, gcsafe.} =
   none[uint32]()
 
-method isUniqueAttr*(ops: EngineOps; name: string): bool {.base.} = false
+method isUniqueAttr*(ops: EngineOps; name: string): bool {.base, gcsafe.} = false
 
-method lookupEntity*(ops: EngineOps; attrName: string; value: SExpr): Option[int64] {.base.} =
+method lookupEntity*(ops: EngineOps; attrName: string; value: SExpr): Option[int64] {.base, gcsafe.} =
   none[int64]()
 
-method lookupValue*(ops: EngineOps; eid: int64; attrName: string): Option[SExpr] {.base.} =
+method lookupValue*(ops: EngineOps; eid: int64; attrName: string): Option[SExpr] {.base, gcsafe.} =
   none[SExpr]()
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -232,19 +232,6 @@ type
     scanners*: seq[V2Scanner]
     leapIters*: Table[int, LeapIterator]
 
-method isNative(h: SchemeHostFns; name: string): bool =
-  name in ["alloc-entity", "tx-entity", "param",
-           "lookup-entity", "lookup-value",
-           "save", "retract", "result",
-           "declare-attr", "declare-partition",
-           "scanner-open", "scanner-read",
-           "scanner-push", "scanner-pop", "scanner-prefix",
-           "scheme-leap-init", "scheme-leap-next",
-           "scanner-iterate-init", "scanner-iterate-next",
-           "intern-a", "result-row",
-           "resolve-val", "attr-name",
-           "dbg-scanners", "ranges-show"]
-
 proc findScanner*(h: SchemeHostFns; resource: SExpr): V2Scanner =
   case resource.kind:
   of sResource:
@@ -267,13 +254,7 @@ proc pushScanner*(h: SchemeHostFns; sc: V2Scanner): int =
   result = h.scanners.len
   h.scanners.add sc
 
-method call(h: SchemeHostFns; name: string; args: seq[SExpr]): EvalStep =
-  let he = proc(s: string): EvalStep =
-    raise newException(EvalError, s)
-
-  case name:
-  # -- Scanner --
-  of "scanner-open":
+method scannerOpen(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     let idxName = expectStr(args[0])
     let history = args.len > 1 and args[1].kind == sBool and args[1].bval
     let upper = idxName.toUpperAscii()
@@ -303,28 +284,29 @@ method call(h: SchemeHostFns; name: string; args: seq[SExpr]): EvalStep =
     let rid = h.pushScanner(scanner)
     return done(SExpr(kind: sResource, rid: rid))
 
-  of "scanner-read":
+method scannerRead(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     let sc = h.findScanner(args[0])
     let val = sc.extractCurrent()
     if val.isSome: return done(val.get)
     return done(newVoid())
 
-  of "scanner-push":
+method scannerPush(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     let sc = h.findScanner(args[0])
     sc.saveValue(args[1])
     return done(newVoid())
 
-  of "scanner-pop":
+method scannerPop(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     let sc = h.findScanner(args[0])
     sc.popSavedValue()
     return done(newVoid())
 
-  of "scanner-prefix":
+method scannerPrefix(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     let sc = h.findScanner(args[0])
     return done(SExpr(kind: sBytes, bytesval: sc.prefixCache))
 
   # -- Leapfrog --
-  of "scheme-leap-init":
+
+method scannerLeapInit(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     var scanners: seq[V2Scanner] = @[]
     for i in 1..<args.len - 1:
       scanners.add h.findScanner(args[i])
@@ -349,7 +331,7 @@ method call(h: SchemeHostFns; name: string; args: seq[SExpr]): EvalStep =
       applyRanges(scanners, rawOps)
     return done(newBool(ok))
 
-  of "scheme-leap-next":
+method scannerLeapNext(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     var scanners: seq[V2Scanner] = @[]
     for i in 1..<args.len - 1:
       scanners.add h.findScanner(args[i])
@@ -375,7 +357,8 @@ method call(h: SchemeHostFns; name: string; args: seq[SExpr]): EvalStep =
     return done(newBool(true))
 
   # -- LeapIterator hostfns --
-  of "scanner-iterate-init":
+
+method scannerIterateInit(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     # (scanner-iterate-init scanner... ranges)
     # Creates a LeapIterator resource without iterating.
     var scanners: seq[V2Scanner] = @[]
@@ -402,7 +385,7 @@ method call(h: SchemeHostFns; name: string; args: seq[SExpr]): EvalStep =
     h.leapIters[idx] = it
     return done(SExpr(kind: sResource, rid: idx))
 
-  of "scanner-iterate-next":
+method scannerIterateNext(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     # (scanner-iterate-next iter)
     # On first call: converge + apply ranges, return first value or void.
     # On subsequent calls: advance + converge + apply ranges, return next value or void.
@@ -440,35 +423,37 @@ method call(h: SchemeHostFns; name: string; args: seq[SExpr]): EvalStep =
     return done(newVoid())
 
   # -- Attribute access --
-  of "intern-a":
+
+method internA(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     let name = expectStr(args[0])
     let aid = h.engine.lookupAttr(name)
     if aid.isNone:
       return done(newVoid())
     return done(SExpr(kind: sInt, ival: int64(aid.get)))
 
-  of "attr-name":
+method attrName(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     let aid = uint32(expectInt(args[0]))
     return done(SExpr(kind: sStr, sval: h.engine.attrName(aid)))
 
-  of "param":
+method param(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     let idx = int(expectInt(args[0]))
     if idx < 1 or idx > h.params.len:
       raise newException(EvalError, "param index out of range: " & $idx)
     return done(h.params[idx - 1])
 
-  of "resolve-val":
+method resolveVal(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     return done(args[0])
 
   # -- DML --
-  of "save":
+
+method save(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     let eid = expectInt(args[0])
     let attr = expectStr(args[1])
     let val = args[2]
     h.engine.saveWithT(eid, attr, val, h.tx, h.asOfTx.get(0))
     return done(newVoid())
 
-  of "retract":
+method retract(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     let eid = expectInt(args[0])
     let attr = expectStr(args[1])
     let val = args[2]
@@ -476,23 +461,24 @@ method call(h: SchemeHostFns; name: string; args: seq[SExpr]): EvalStep =
     return done(newVoid())
 
   # -- Result --
-  of "result-row":
+
+method resultRow(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     return yieldRow(SExpr(kind: sList, items: args))
 
-  of "result":
+method result(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     var items = @[SExpr(kind: sSymbol, symval: "result")]
     items.add args
     return done(SExpr(kind: sList, items: items))
 
-  of "alloc-entity":
+method allocEntity(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     let partition = if args.len > 0: uint64(expectInt(args[0])) else: 4'u64
     let eid = h.engine.allocateInPartition(partition)
     return done(SExpr(kind: sInt, ival: eid))
 
-  of "tx-entity":
+method txEntity(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     return done(SExpr(kind: sInt, ival: int64(h.tx)))
 
-  of "lookup-entity":
+method lookupEntity(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     let attr = expectStr(args[0])
     let val = args[1]
     let isUnique = h.engine.isUniqueAttr(attr)
@@ -503,14 +489,14 @@ method call(h: SchemeHostFns; name: string; args: seq[SExpr]): EvalStep =
       return done(SExpr(kind: sInt, ival: int64(eid.get)))
     return done(newVoid())
 
-  of "lookup-value":
+method lookupValue(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     let eid = expectInt(args[0])
     let attr = expectStr(args[1])
     let val = h.engine.lookupValue(eid, attr)
     if val.isSome: return done(val.get)
     return done(newVoid())
 
-  of "declare-attr":
+method declareAttr(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     let attr = expectStr(args[0])
     let vtName = expectStr(args[1])
     let many = args.len > 2 and args[2].kind == sBool and args[2].bval
@@ -518,19 +504,20 @@ method call(h: SchemeHostFns; name: string; args: seq[SExpr]): EvalStep =
     h.engine.declareAttrFromSql(attr, vtName, many, unique, h.tx)
     return done(newVoid())
 
-  of "declare-partition":
+method declarePartition(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     let name = expectStr(args[0])
     let pid = h.engine.declarePartition(name, h.tx)
     return done(SExpr(kind: sInt, ival: int64(pid)))
 
   # -- Debug --
-  of "dbg-scanners":
+
+method dbgScanners(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     for i, sc in h.scanners:
       stderr.writeLine "scanner[", i, "] at_end=", sc.atEnd(),
         " key=", (if sc.pos.currentActiveKey.isSome: $sc.pos.currentActiveKey.get.len & "b" else: "none")
     return done(newVoid())
 
-  of "ranges-show":
+method rangesShow(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     let rawOps = parseRanges(args[0])
     if rawOps.len == 0:
       return done(SExpr(kind: sStr, sval: "(-inf, +inf)"))
@@ -547,5 +534,3 @@ method call(h: SchemeHostFns; name: string; args: seq[SExpr]): EvalStep =
       descriptions.add l & loStr & ", " & hiStr & r
     return done(SExpr(kind: sStr, sval: descriptions.join(", ")))
 
-  else:
-    raise newException(EvalError, "unknown host function: " & name)

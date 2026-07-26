@@ -386,9 +386,6 @@ suite "opsToIntervals":
 # ═══════════════════════════════════════════════════════════════════════════════
 
 type DummyHost = ref object of HostFns
-method isNative(h: DummyHost; name: string): bool = false
-method call(h: DummyHost; name: string; args: seq[SExpr]): EvalStep =
-  raise newException(EvalError, "unknown host: " & name)
 
 proc evalArith(progStr: string): SExpr =
   let prog = SchemeProgram(body: scheme.parse(progStr))
@@ -477,12 +474,8 @@ suite "scheme: comparison":
 
 suite "hostfns: isNative":
   test "isNative basic":
-    let h = SchemeHostFns(engine: nil, params: @[], tx: 0, asOfTx: none[int64](), scanners: @[])
-    check h.isNative("save")
-    check h.isNative("retract")
-    check h.isNative("scanner-open")
-    check not h.isNative("+")
-    check not h.isNative("no-such-fn")
+    # isNative removed — dispatch is now via virtual methods
+    discard
 
 
 suite "scanner: classifyKey":
@@ -824,16 +817,16 @@ suite "engine: param access":
       asOfTx: none[int64](),
       scanners: @[],
     )
-    let r = h.call("param", @[SExpr(kind: sInt, ival: 1)])
+    let r = h.param(@[SExpr(kind: sInt, ival: 1)])
     check r.result.ival == 42
 
-    let r2 = h.call("param", @[SExpr(kind: sInt, ival: 2)])
+    let r2 = h.param(@[SExpr(kind: sInt, ival: 2)])
     check r2.result.sval == "hello"
 
   test "param out of range raises":
     let h = SchemeHostFns(engine: nil, params: @[], tx: 0, asOfTx: none[int64](), scanners: @[])
     expect EvalError:
-      discard h.call("param", @[SExpr(kind: sInt, ival: 1)])
+      discard h.param(@[SExpr(kind: sInt, ival: 1)])
 
 suite "engine: StreamingSession → nextBatch":
   test "nextBatch on select scheme with result-row":
@@ -2059,19 +2052,7 @@ suite "engine: select-path (yield-mode)":
 
 proc runSql(q: QueryStore; sql: string; params: seq[SExpr] = @[]): seq[SExpr] =
   let stmt = sql_parser.parse(sql)
-  let cstats = CompileStats(
-    lookupAttr: proc(name: string): uint32 =
-      q.eavt.lookupAttr(name).get(otherwise = 0),
-    estimateIndexSize: proc(index: string, bound: openArray[uint64]): float64 =
-      float64(q.eavt.estimateCount(keys.cfNameToId(keys.cfForIndex(index)), @[])),
-    partitionIdFor: proc(name: string): uint64 =
-      q.eavt.partitionIdFor(name).get(otherwise = 0),
-    isRefAttr: proc(name: string): bool =
-      let aid = q.eavt.lookupAttr(name).get(otherwise = 0)
-      if aid == 0: false
-      else: q.eavt.valueTypeFor(aid).get(otherwise = 0) == 21'u32,
-    isIndexedAttr: proc(name: string): bool = true,
-  )
+  let cstats = q.eavt.buildCompileStats()
   let compiled = compileSql(stmt, cstats)
   if compiled.isExplain:
     var outStr = ""
