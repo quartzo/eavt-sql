@@ -1,9 +1,9 @@
 import std/[tables, sets, sequtils, strutils]
-import datalog_ast, pattern
+import datalog_ast, pattern, ast as sql_ast
 
 type
   SpecKindKind* = enum
-    skVar, skBound, skBoundAttr, skBoundValue, skBoundParam
+    skVar, skBound, skBoundAttr, skBoundValue, skBoundParam, skBoundExpr
 
   SpecKind* = ref object
     case kind*: SpecKindKind
@@ -15,9 +15,10 @@ type
       bvFloat*: float64
       bvStr*: string
     of skBoundParam: paramIdx*: uint32
+    of skBoundExpr: bvExprRepr*: string
 
   PlanValueKind* = enum
-    pvValue, pvParam
+    pvValue, pvParam, pvExpr
 
   PlanValue* = ref object
     case kind*: PlanValueKind
@@ -26,6 +27,7 @@ type
       pvFloat*: float64
       pvStr*: string
     of pvParam: pvParamIdx*: uint32
+    of pvExpr: exprValue*: sql_ast.Value
 
   DepthTrace* = ref object
     varName*: string
@@ -128,6 +130,8 @@ proc `$`*(plan: QueryPlanResult): string =
             result.add("\n    " & pos & " = _" & varLabel)
         of skBoundParam:
           result.add("\n    " & pos & " = %" & $spec.paramIdx & varLabel)
+        of skBoundExpr:
+          result.add("\n    " & pos & " = expr(" & spec.bvExprRepr & ")" & varLabel)
   if plan.lookups.len > 0:
     result.add("\nLookups: " & $plan.lookups.len)
   for trace in plan.planTraces:

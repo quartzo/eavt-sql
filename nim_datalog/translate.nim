@@ -165,6 +165,7 @@ proc extractRight(right: sql_ast.ConditionRight): BoundValue =
       newBoundVar("_a_" & right.fref.alias)
     else:
       newBoundVar("_v_" & right.fref.alias & "_" & safeAttrName(right.fref.field))
+  of crExpr: newBoundExpr(right.exprValue)
   of crIn, crOr: newBoundMissing("compound")
 
 proc validateAttrName(field: string) =
@@ -198,6 +199,9 @@ proc processEq(la, lf: string, right: sql_ast.ConditionRight,
           aliases[ra].attrs.add(rf)
         let rv = aliases[ra].vVar(rf)
         aliases[la].eBoundValue = some(newBoundVar(rv))
+    of crExpr:
+      ensureAlias(aliases, la)
+      aliases[la].eBoundValue = some(newBoundExpr(right.exprValue))
     else: discard
   of "attr":
     ensureAlias(aliases, la)
@@ -262,6 +266,8 @@ proc processEq(la, lf: string, right: sql_ast.ConditionRight,
       aliases[la].attrValues[lf] = newBoundParam(right.rparam)
     of crLiteral:
       aliases[la].attrValues[lf] = extractLiteral(right.rlit)
+    of crExpr:
+      aliases[la].attrValues[lf] = newBoundExpr(right.exprValue)
     else: discard
 
 proc processRange(la, lf, op: string, right: sql_ast.ConditionRight,

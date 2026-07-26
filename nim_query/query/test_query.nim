@@ -2089,6 +2089,8 @@ proc runSql(q: QueryStore; sql: string; params: seq[SExpr] = @[]): seq[SExpr] =
               outStr.add("    " & pos & " = " & $spec.bvInt & varLabel & "\n")
           of skBoundParam:
             outStr.add("    " & pos & " = %" & $spec.paramIdx & varLabel & "\n")
+          of skBoundExpr:
+            outStr.add("    " & pos & " = expr(" & spec.bvExprRepr & ")" & varLabel & "\n")
       outStr.add("\n")
     for t in compiled.traces:
       outStr.add($t & "\n")

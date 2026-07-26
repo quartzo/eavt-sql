@@ -49,6 +49,8 @@ proc execQuery(eng: SharedEngine; req: Request; fd: SocketHandle) {.gcsafe.} =
                 outStr.add("    " & pos & " = " & $spec.bvInt & varLabel & "\n")
             of skBoundParam:
               outStr.add("    " & pos & " = %" & $spec.paramIdx & varLabel & "\n")
+            of skBoundExpr:
+              outStr.add("    " & pos & " = expr(" & spec.bvExprRepr & ")" & varLabel & "\n")
         outStr.add("\n")
       # Traces
       for t in compiled.traces:

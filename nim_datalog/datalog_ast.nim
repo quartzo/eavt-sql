@@ -1,8 +1,9 @@
-import std/[tables, sequtils, strutils]
+import std/[tables, sequtils, strutils, json]
+import ast as sql_ast
 
 type
   BoundValueKind* = enum
-    bvInt, bvFloat, bvStr, bvAttr, bvResolvedAttr, bvVar, bvMissing, bvParam, bvBool
+    bvInt, bvFloat, bvStr, bvAttr, bvResolvedAttr, bvVar, bvMissing, bvParam, bvBool, bvExpr
 
   BoundValue* = ref object
     case kind*: BoundValueKind
@@ -19,6 +20,7 @@ type
     of bvMissing: missingName*: string
     of bvParam: paramIdx*: uint32
     of bvBool: bval*: bool
+    of bvExpr: exprValue*: sql_ast.Value
 
   DatalogSlotKind* = enum
     dsVar, dsConst, dsMissing
@@ -90,6 +92,9 @@ proc newBoundParam*(idx: uint32): BoundValue =
 proc newBoundBool*(b: bool): BoundValue =
   BoundValue(kind: bvBool, bval: b)
 
+proc newBoundExpr*(v: sql_ast.Value): BoundValue =
+  BoundValue(kind: bvExpr, exprValue: v)
+
 proc slotVar*(n: string): DatalogSlot =
   DatalogSlot(kind: dsVar, varName: n)
 
@@ -129,6 +134,7 @@ proc `==`*(a, b: BoundValue): bool =
   of bvMissing: a.missingName == b.missingName
   of bvParam: a.paramIdx == b.paramIdx
   of bvBool: a.bval == b.bval
+  of bvExpr: false  # expression comparison not supported
 
 proc `$`*(bv: BoundValue): string =
   case bv.kind
@@ -142,6 +148,7 @@ proc `$`*(bv: BoundValue): string =
   of bvMissing: "_"
   of bvParam: "%" & $bv.paramIdx
   of bvBool: $bv.bval
+  of bvExpr: "Expr(" & $toJson(bv.exprValue) & ")"
 
 proc `$`*(s: DatalogSlot): string =
   case s.kind

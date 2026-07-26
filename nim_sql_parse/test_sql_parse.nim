@@ -125,3 +125,43 @@ suite "SQL parser: expression projections":
     let stmt = parse("SELECT 42")
     check stmt.selectStmt.projections[0].literal.isSome
     check(not stmt.selectStmt.projections[0].expr.isSome)
+
+suite "SQL parser: expression in WHERE":
+  test "WHERE d1.eid = eid() produces crExpr":
+    let stmt = parse("SELECT d1.eid WHERE d1.eid = eid('a', 'b')")
+    let right = stmt.selectStmt.conditions[0].right
+    check right.rkind == crExpr
+    check right.exprValue.vkind == valEidLookup
+
+  test "WHERE x = 20+20 (literal arithmetic)":
+    let stmt = parse("SELECT d1.eid WHERE d1.eid = 20+20")
+    let right = stmt.selectStmt.conditions[0].right
+    check right.rkind == crExpr
+    check right.exprValue.vkind == valBinOp
+    check right.exprValue.binOp == "+"
+
+  test "WHERE x = %1 + 10 (param arithmetic)":
+    let stmt = parse("SELECT d1.eid WHERE d1.eid = %1 + 10")
+    let right = stmt.selectStmt.conditions[0].right
+    check right.rkind == crExpr
+    check right.exprValue.vkind == valBinOp
+    check right.exprValue.binLeft.vkind == valParam
+
+  test "WHERE x = -(1+2) (unary on parenthesised expr)":
+    let stmt = parse("SELECT d1.eid WHERE d1.eid = -(1+2)")
+    let right = stmt.selectStmt.conditions[0].right
+    check right.rkind == crExpr
+    check right.exprValue.vkind == valUnaryOp
+    check right.exprValue.unOperand.vkind == valBinOp
+
+  test "WHERE x = 42 (literal stays crLiteral, not crExpr)":
+    let stmt = parse("SELECT d1.eid WHERE d1.eid = 42")
+    let right = stmt.selectStmt.conditions[0].right
+    check right.rkind == crLiteral
+    check right.rlit.ival == 42
+
+  test "WHERE x IN (1, 2) (parenthesised IN list preserved)":
+    let stmt = parse("SELECT d1.eid WHERE d1.eid IN (1, 2)")
+    let right = stmt.selectStmt.conditions[0].right
+    check right.rkind == crIn
+    check right.inValues.len == 2

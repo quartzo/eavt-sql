@@ -45,7 +45,7 @@ type
     expr*: Option[Value]
 
   ConditionRightKind* = enum
-    crField, crLiteral, crParam, crIn, crOr
+    crField, crLiteral, crParam, crIn, crOr, crExpr
 
   ConditionRight* = ref object
     case rkind*: ConditionRightKind
@@ -54,6 +54,7 @@ type
     of crParam: rparam*: uint32
     of crIn: inValues*: seq[ConditionRight]
     of crOr: orBranches*: seq[seq[OrBranchItem]]
+    of crExpr: exprValue*: Value
 
   Condition* = ref object
     left*: FieldRef
@@ -185,6 +186,8 @@ proc toJson*(v: ConditionRight): JsonNode =
         items.add(%*{"left": toJson(item.left), "op": item.op, "value": toJson(item.value)})
       arr.add(items)
     %*{"Or": arr}
+  of crExpr:
+    %*{"Expr": toJson(v.exprValue)}
 
 proc toJson*(v: Condition): JsonNode =
   %*{"left": toJson(v.left), "op": v.op, "right": toJson(v.right)}

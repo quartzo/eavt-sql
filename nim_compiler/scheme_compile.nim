@@ -120,6 +120,7 @@ proc planValueToSexpr(pv: PlanValue): SExpr =
     elif pv.pvFloat != 0: newFloat(pv.pvFloat)
     else: newInt(pv.pvInt)
   of pvParam: list(newSymbol("param"), newInt(pv.pvParamIdx.int64))
+  of pvExpr: compileValue(pv.exprValue)
 
 proc boundToSexpr(bv: BoundValue): SExpr =
   case bv.kind
@@ -130,6 +131,7 @@ proc boundToSexpr(bv: BoundValue): SExpr =
   of bvParam: list(newSymbol("param"), newInt(bv.paramIdx.int64))
   of bvVar: newSymbol("?" & bv.varName)
   of bvBool: newBool(bv.bval)
+  of bvExpr: compileValue(bv.exprValue)
   else: newSymbol("_")
 
 proc buildRangeTree(branches: seq[seq[(string, PlanValue)]]): SExpr =

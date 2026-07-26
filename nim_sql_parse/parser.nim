@@ -380,25 +380,29 @@ proc parseCondition(p: Parser): Condition {.gcsafe.} =
       ConditionRight(rkind: crField,
         fref: FieldRef(alias: aliasVal, field: "eid"))
   of ttPARAM:
-    ConditionRight(rkind: crParam, rparam: p.parseParam())
-  of ttINTEGER:
-    let tok2 = p.advance()
-    try:
-      ConditionRight(rkind: crLiteral,
-        rlit: Literal(lkind: litInt, ival: parseInt(tok2.value).int64))
-    except ValueError:
-      raise newParseError("invalid integer '" & tok2.value & "'", tok2.pos)
-  of ttFLOAT:
-    let tok2 = p.advance()
-    try:
-      ConditionRight(rkind: crLiteral,
-        rlit: Literal(lkind: litFloat, fval: parseFloat(tok2.value)))
-    except ValueError:
-      raise newParseError("invalid float '" & tok2.value & "'", tok2.pos)
-  of ttSTRING:
-    let tok2 = p.advance()
-    ConditionRight(rkind: crLiteral,
-      rlit: Literal(lkind: litStr, sval: tok2.value))
+    # Could be an isolated param OR the start of an arithmetic expression
+    # (e.g. %1+10). Parse the primary, then if an operator follows, keep
+    # parsing as a full expression.
+    let primary = p.parseExprPrimary()
+    if p.peek().tt in {ttPLUS, ttMINUS, ttSTAR, ttSLASH, ttMOD}:
+      let rest = p.parseExprRest(p.parseTermRest(primary))
+      ConditionRight(rkind: crExpr, exprValue: rest)
+    else:
+      case primary.vkind
+      of valParam: ConditionRight(rkind: crParam, rparam: primary.vparam)
+      else: ConditionRight(rkind: crExpr, exprValue: primary)
+  of ttINTEGER, ttFLOAT, ttSTRING:
+    # Could be an isolated literal OR the start of an arithmetic expression.
+    # Parse the primary, then if an operator follows, keep parsing as a full
+    # expression (same pattern as parseProjection).
+    let primary = p.parseExprPrimary()
+    if p.peek().tt in {ttPLUS, ttMINUS, ttSTAR, ttSLASH, ttMOD}:
+      let rest = p.parseExprRest(p.parseTermRest(primary))
+      ConditionRight(rkind: crExpr, exprValue: rest)
+    else:
+      case primary.vkind
+      of valLiteral: ConditionRight(rkind: crLiteral, rlit: primary.vlit)
+      else: ConditionRight(rkind: crExpr, exprValue: primary)
   of ttIDENT:
     if tok.value == "true":
       discard p.advance()
@@ -407,7 +411,12 @@ proc parseCondition(p: Parser): Condition {.gcsafe.} =
       discard p.advance()
       ConditionRight(rkind: crLiteral, rlit: Literal(lkind: litBool, bval: false))
     else:
-      raise newParseError("expected value in condition", tok.pos)
+      # eid() / val() / arithmetic expression starting with an identifier
+      let e = p.parseExpr()
+      ConditionRight(rkind: crExpr, exprValue: e)
+  of ttPLUS, ttMINUS:
+    let e = p.parseExpr()
+    ConditionRight(rkind: crExpr, exprValue: e)
   of ttLPAREN:
     discard p.advance()
     if p.peek().tt == ttSELECT:
