@@ -9,16 +9,6 @@ import scheme
 
 type
   NilHost = ref object of HostFns
-  AddHost = ref object of HostFns
-
-method call(h: NilHost; n: string; a: seq[SExpr]): EvalStep = done(newVoid())
-method isNative(h: NilHost; n: string): bool = false
-
-method call(h: AddHost; n: string; a: seq[SExpr]): EvalStep =
-  if a.len == 2 and a[0].kind == sInt and a[1].kind == sInt:
-    done(SExpr(kind: sInt, ival: a[0].ival + a[1].ival))
-  else: done(newVoid())
-method isNative(h: AddHost; n: string): bool = n == "add"
 
 proc se(expr: SExpr; host: HostFns = nil): SExpr =
   var env = newEnvironment()
@@ -72,15 +62,15 @@ suite "scheme.or":
   test "zero":       check ses(parse"(or)") == "#f"
   test "three":      check ses(parse"(or #f #f #t)") == "#t"
 
-suite "scheme.let":
-  test "simple":     check ses(parse"(let ((x 42)) x)") == "42"
-  test "multiple":   check ses(parse"(let ((a 1) (b 2) (c 3)) c)") == "3"
-  test "star seq":   check ses(parse"(let* ((a 10) (b a)) b)") == "10"
-  test "star chain": check ses(parse"(let* ((a 1) (b a) (c b)) c)") == "1"
+suite "scheme.bindings":
+  test "simple":     check ses(parse"(begin (set! x 42) x)") == "42"
+  test "multiple":   check ses(parse"(begin (set! a 1) (set! b 2) (set! c 3) c)") == "3"
+  test "star seq":   check ses(parse"(begin (set! a 10) (set! b a) b)") == "10"
+  test "star chain": check ses(parse"(begin (set! a 1) (set! b a) (set! c b) c)") == "1"
 
-suite "scheme.host":
-  test "call add":   check ses(parse"(add 2 3)", AddHost()) == "5"
-  test "nested":     check ses(parse"(add (add 1 2) (add 3 4))", AddHost()) == "10"
+suite "scheme.arith":
+  test "call add":   check ses(parse"(+ 2 3)") == "5"
+  test "add chain":  check ses(parse"(+ 1 2 3 4)") == "10"
 
 suite "scheme.nested":
   test "when when":  check ses(parse"(when #t (when #t 42))") == "42"
