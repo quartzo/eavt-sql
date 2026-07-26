@@ -2,7 +2,7 @@
 ##
 ## Unit tests for the EAVT engine (Nim API, no C-ABI).
 
-import std/[unittest, tables, os, times, options]
+import std/[unittest, tables, os, times, options, atomics]
 import eavt
 import kvstore
 import keys
@@ -10,6 +10,13 @@ import resolver
 import hostfns
 import engine
 import scheme
+import spawn
+
+proc waitForCount(c: var Atomic[int]; target: int; timeoutMs = 10000) =
+  let deadline = epochTime() + float64(timeoutMs) / 1000.0
+  while c.load(moRelaxed) < target:
+    doAssert epochTime() < deadline, "timeout waiting for " & $target & " spawns"
+    sleep(10)
 
 proc newTestEngine(): EavtEngine =
   let cfg = {"backend": "memory"}.toTable
@@ -229,32 +236,38 @@ type
   DeclareCtx = object
     eng: EavtEngine
 
-proc saveWorker(ctx: SaveCtx) {.thread, gcsafe.} =
-  for i in 0..<ctx.count:
-    let idx = ctx.startIdx + i
-    let eid = ctx.eng.allocateEntityId()
-    discard ctx.eng.eavtSave(eid, ctx.attr, "value_" & $idx, 1)
+proc saveWorkerAt(engAddr: ptr EavtEngine; attr: string; startIdx, count: int) {.gcsafe.} =
+  let eng = engAddr[]
+  for i in 0..<count:
+    let idx = startIdx + i
+    discard eng.eavtSave(eng.allocateEntityId(), attr, "value_" & $idx, 1)
 
-proc saveToSameEntity(ctx: SaveSameCtx) {.thread, gcsafe.} =
-  for i in 0..<ctx.count:
-    let idx = ctx.startIdx + i
-    discard ctx.eng.eavtSave(ctx.eid, ctx.attr, "val_" & $idx, 1)
+proc saveToSameEntityAt(engAddr: ptr EavtEngine; eid: int64; attr: string; startIdx, count: int) {.gcsafe.} =
+  let eng = engAddr[]
+  for i in 0..<count:
+    let idx = startIdx + i
+    discard eng.eavtSave(eid, attr, "val_" & $idx, 1)
 
-proc declareWorker(ctx: DeclareCtx) {.thread, gcsafe.} =
-  discard ctx.eng.eavtDeclareAttr("shared.field", DbTypeString, false)
+proc declareWorkerAt(engAddr: ptr EavtEngine) {.gcsafe.} =
+  let eng = engAddr[]
+  discard eng.eavtDeclareAttr("shared.field", DbTypeString, false)
 
 suite "eavt: concurrency":
-  test "concurrent saves — different entities":
-    let eng = newTestEngine()
+  proc runConcurrentSavesDifferent() =
+    initSpawn()
+    var eng = newTestEngine()
     discard eng.eavtDeclareAttr("person.name", DbTypeString, false)
 
     const N = 4
     const M = 20
-    var threads: array[N, Thread[SaveCtx]]
+    var done: Atomic[int]
+    done.store(0, moRelaxed)
     for t in 0..<N:
-      createThread(threads[t], saveWorker, SaveCtx(eng: eng, attr: "person.name", startIdx: t * M, count: M))
-    for t in 0..<N:
-      joinThread(threads[t])
+      let startIdx = t * M
+      spawn(proc() {.gcsafe.} =
+        saveWorkerAt(addr eng, "person.name", startIdx, M)
+        discard done.fetchAdd(1, moRelaxed))
+    waitForCount(done, N)
 
     var found = 0
     let mc = eng.kv.openScanCursor(0)
@@ -262,45 +275,55 @@ suite "eavt: concurrency":
       inc found
     check found >= N * M
 
-  test "concurrent saves — same entity, one-cardinality attr":
-    let eng = newTestEngine()
+  test "concurrent saves — different entities":
+    runConcurrentSavesDifferent()
+
+  proc runConcurrentSavesSame() =
+    initSpawn()
+    var eng = newTestEngine()
     discard eng.eavtDeclareAttr("counter.value", DbTypeString, false)
     let eid = eng.allocateEntityId()
 
     const N = 4
     const M = 25
-    var threads: array[N, Thread[SaveSameCtx]]
+    var done: Atomic[int]
+    done.store(0, moRelaxed)
     for t in 0..<N:
-      createThread(threads[t], saveToSameEntity, SaveSameCtx(eng: eng, eid: eid, attr: "counter.value", startIdx: t * M, count: M))
-    for t in 0..<N:
-      joinThread(threads[t])
+      let startIdx = t * M
+      spawn(proc() {.gcsafe.} =
+        saveToSameEntityAt(addr eng, eid, "counter.value", startIdx, M)
+        discard done.fetchAdd(1, moRelaxed))
+    waitForCount(done, N)
 
-    # One-cardinality: only 1 active value should remain (the last save).
-    # Count entries in EAVT with this eid prefix.
     let ePrefix = encodeEid(eid)
     var activeCount = 0
     for k in eng.scanPrefix(0, ePrefix):
       let sf = beUint64(k, k.len - 8)
       if (sf and 1) == 0: inc activeCount
-    # Each save writes a new active entry; retraction writes retracted entries.
-    # Multiple active entries exist for different values (val_0, val_1, ...).
-    # But only the latest per (eid,attr,value) is truly "current".
-    # Just verify no data was lost: at least N*M entries total.
     var totalCount = 0
     for k in eng.scanPrefix(0, ePrefix):
       inc totalCount
     check totalCount >= N * M
 
-  test "concurrent attr declarations are idempotent":
-    let eng = newTestEngine()
+  test "concurrent saves — same entity, one-cardinality attr":
+    runConcurrentSavesSame()
+
+  proc runConcurrentDeclares() =
+    initSpawn()
+    var eng = newTestEngine()
 
     const N = 6
-    var threads: array[N, Thread[DeclareCtx]]
+    var done: Atomic[int]
+    done.store(0, moRelaxed)
     for t in 0..<N:
-      createThread(threads[t], declareWorker, DeclareCtx(eng: eng))
-    for t in 0..<N:
-      joinThread(threads[t])
+      spawn(proc() {.gcsafe.} =
+        declareWorkerAt(addr eng)
+        discard done.fetchAdd(1, moRelaxed))
+    waitForCount(done, N)
 
     let aid = eng.lookupAttr("shared.field")
     check aid.isSome
     check aid.get > 0
+
+  test "concurrent attr declarations are idempotent":
+    runConcurrentDeclares()

@@ -1,6 +1,6 @@
 ## test_kvstore.nim — Unit tests for nim_kvstore.
 
-import std/[unittest, options, tables, strutils, math, os, times]
+import std/[unittest, options, tables, strutils, math, os, times, atomics]
 import memory/all
 import file/all
 import journal/all
@@ -9,6 +9,13 @@ import pages
 import page_store
 import kvstore
 import scheme
+import spawn
+
+proc waitForCount(c: var Atomic[int]; target: int; timeoutMs = 10000) =
+  let deadline = epochTime() + float64(timeoutMs) / 1000.0
+  while c.load(moRelaxed) < target:
+    doAssert epochTime() < deadline, "timeout waiting for " & $target & " spawns"
+    sleep(10)
 
 proc scanKeys(kv: KVStore; cf: int; prefix: seq[byte] = @[]): seq[seq[byte]] =
   let mc = kv.openScanCursor(cf)
@@ -459,44 +466,32 @@ suite "v2scanner_leap":
 # KVStore — concurrency tests
 # ═══════════════════════════════════════════════════════════════════════════════════
 
-type
-  FlatKeys = object
-    data: seq[byte]   # [len_hi, len_lo, key_bytes, ...] pairs
-    count: int
+# spawn-friendly workers (generate their keys from simple params so
+# closures only capture `addr kv` + integers, keeping the GC-safety prover
+# happy without capturing seqs/refs).
 
-  PutCtx = object
-    kv: KVStore
-    cf: int
-    keys: FlatKeys
+proc putRangeAt(kvAddr: ptr KVStore; cf, startKey, count: int) {.gcsafe.} =
+  let kv = kvAddr[]
+  for i in 0..<count:
+    kv.put(cf, @[byte(startKey + i)])
 
-  FlushCtx = object
-    kv: KVStore
+proc putThreadTaggedAt(kvAddr: ptr KVStore; cf, tag, count: int) {.gcsafe.} =
+  let kv = kvAddr[]
+  for i in 0..<count:
+    kv.put(cf, @[byte((tag shl 8) or i)])
 
-proc encodeKeys(src: seq[seq[byte]]): FlatKeys =
-  result.count = src.len
-  for k in src:
-    result.data.add byte(k.len shr 8)
-    result.data.add byte(k.len and 0xFF)
-    result.data.add k
+proc putTwoByteAt(kvAddr: ptr KVStore; cf, count: int) {.gcsafe.} =
+  let kv = kvAddr[]
+  for i in 0..<count:
+    kv.put(cf, @[byte(i and 0xFF), byte((i shr 8) and 0xFF)])
 
-iterator items(f: FlatKeys): seq[byte] =
-  var pos = 0
-  for i in 0..<f.count:
-    let len = int(f.data[pos]) shl 8 or int(f.data[pos+1])
-    pos += 2
-    yield f.data[pos..<pos+len]
-    pos += len
-
-proc putWorker(ctx: PutCtx) {.thread, gcsafe.} =
-  for k in ctx.keys:
-    ctx.kv.put(ctx.cf, k)
-
-proc flushWorker(ctx: FlushCtx) {.thread, gcsafe.} =
-  ctx.kv.flush()
+proc flushAt(kvAddr: ptr KVStore) {.gcsafe.} =
+  kvAddr[].flush()
 
 suite "kvstore: concurrency — puts":
-  test "concurrent puts from 4 threads all survive":
-    let kv = newKVStore({"backend": "memory"}.toTable)
+  proc runConcurrentPuts() =
+    initSpawn()
+    var kv = newKVStore({"backend": "memory"}.toTable)
     const N = 4
     const M = 50
     var threadKeys: array[N, seq[seq[byte]]]
@@ -506,11 +501,13 @@ suite "kvstore: concurrency — puts":
         let b = byte((t shl 8) or i)
         threadKeys[t][i] = @[b]
 
-    var threads: array[N, Thread[PutCtx]]
+    var done: Atomic[int]
+    done.store(0, moRelaxed)
     for t in 0..<N:
-      createThread(threads[t], putWorker, PutCtx(kv: kv, cf: 0, keys: encodeKeys(threadKeys[t])))
-    for t in 0..<N:
-      joinThread(threads[t])
+      spawn(proc() {.gcsafe.} =
+        putThreadTaggedAt(addr kv, 0, t, M)
+        discard done.fetchAdd(1, moRelaxed))
+    waitForCount(done, N)
 
     var count = 0
     for t in 0..<N:
@@ -519,6 +516,9 @@ suite "kvstore: concurrency — puts":
           inc count
     check count == N * M
     kv.close()
+
+  test "concurrent puts from 4 threads all survive":
+    runConcurrentPuts()
 
   test "separate CFs are independent (sequential puts)":
     let kv = newKVStore({"backend": "memory"}.toTable)
@@ -544,8 +544,9 @@ suite "kvstore: concurrency — puts":
     kv.close()
 
 suite "kvstore: concurrency — scan snapshot isolation":
-  test "cursor opened before concurrent writes only sees old snapshot":
-    let kv = newKVStore({"backend": "memory"}.toTable)
+  proc runCursorBeforeConcurrentWrites() =
+    initSpawn()
+    var kv = newKVStore({"backend": "memory"}.toTable)
     const PreN = 50
     const ExtraN = 30
 
@@ -560,12 +561,12 @@ suite "kvstore: concurrency — scan snapshot isolation":
 
     let mcBefore = kv.openScanCursor(0)
 
-    var extraKeys = newSeq[seq[byte]](ExtraN)
-    for i in 0..<ExtraN:
-      extraKeys[i] = @[byte(PreN + i)]
-    var thread: Thread[PutCtx]
-    createThread(thread, putWorker, PutCtx(kv: kv, cf: 0, keys: encodeKeys(extraKeys)))
-    joinThread(thread)
+    var done: Atomic[int]
+    done.store(0, moRelaxed)
+    spawn(proc() {.gcsafe.} =
+      putRangeAt(addr kv, 0, PreN, ExtraN)
+      discard done.fetchAdd(1, moRelaxed))
+    waitForCount(done, 1)
 
     var oldCount = 0
     while mcBefore.next().isSome:
@@ -579,6 +580,9 @@ suite "kvstore: concurrency — scan snapshot isolation":
     check newCount == PreN + ExtraN
 
     kv.close()
+
+  test "cursor opened before concurrent writes only sees old snapshot":
+    runCursorBeforeConcurrentWrites()
 
   test "cursor captures COW snapshot even during flush window":
     let kv = newKVStore({"backend": "memory"}.toTable)
@@ -607,8 +611,9 @@ suite "kvstore: concurrency — scan snapshot isolation":
     kv.close()
 
 suite "kvstore: concurrency — flush atomicity":
-  test "data survives during flush + concurrent writes (no data loss)":
-    let kv = newKVStore({"backend": "memory"}.toTable)
+  proc runFlushAtomicity() =
+    initSpawn()
+    var kv = newKVStore({"backend": "memory"}.toTable)
 
     const PreN = 40
     const DuringN = 25
@@ -620,13 +625,15 @@ suite "kvstore: concurrency — flush atomicity":
     for i in 0..<DuringN:
       duringKeys[i] = @[byte(PreN + i)]
 
-    var writer: Thread[PutCtx]
-    var flusher: Thread[FlushCtx]
-    createThread(writer, putWorker, PutCtx(kv: kv, cf: 0, keys: encodeKeys(duringKeys)))
-    createThread(flusher, flushWorker, FlushCtx(kv: kv))
-
-    joinThread(writer)
-    joinThread(flusher)
+    var done: Atomic[int]
+    done.store(0, moRelaxed)
+    spawn(proc() {.gcsafe.} =
+      putRangeAt(addr kv, 0, PreN, DuringN)
+      discard done.fetchAdd(1, moRelaxed))
+    spawn(proc() {.gcsafe.} =
+      flushAt(addr kv)
+      discard done.fetchAdd(1, moRelaxed))
+    waitForCount(done, 2)
 
     for i in 0..<PreN:
       check kv.get(0, @[byte(i)])
@@ -634,6 +641,9 @@ suite "kvstore: concurrency — flush atomicity":
       check kv.get(0, duringKeys[i])
 
     kv.close()
+
+  test "data survives during flush + concurrent writes (no data loss)":
+    runFlushAtomicity()
 
 suite "kvstore: concurrency — stress":
   test "mixed put + flush + scan under concurrency":
@@ -663,8 +673,9 @@ suite "kvstore: concurrency — stress":
     kv.close()
 
 suite "kvstore: concurrency — put + get integrity":
-  test "baseline keys remain visible during concurrent writes":
-    let kv = newKVStore({"backend": "memory"}.toTable)
+  proc runBaselineVisible() =
+    initSpawn()
+    var kv = newKVStore({"backend": "memory"}.toTable)
 
     const BaselineN = 40
     const ExtraPerThread = 60
@@ -677,9 +688,12 @@ suite "kvstore: concurrency — put + get integrity":
     var extraKeys = newSeq[seq[byte]](ExtraPerThread)
     for i in 0..<ExtraPerThread:
       extraKeys[i] = @[byte(BaselineN + i)]
-    var writer: Thread[PutCtx]
-    createThread(writer, putWorker, PutCtx(kv: kv, cf: 0, keys: encodeKeys(extraKeys)))
-    joinThread(writer)
+    var done: Atomic[int]
+    done.store(0, moRelaxed)
+    spawn(proc() {.gcsafe.} =
+      putRangeAt(addr kv, 0, BaselineN, ExtraPerThread)
+      discard done.fetchAdd(1, moRelaxed))
+    waitForCount(done, 1)
 
     for i in 0..<BaselineN:
       check kv.get(0, baseline[i])
@@ -689,19 +703,29 @@ suite "kvstore: concurrency — put + get integrity":
 
     kv.close()
 
-  test "no false negatives under sustained concurrent read + write":
-    let kv = newKVStore({"backend": "memory"}.toTable)
+  test "baseline keys remain visible during concurrent writes":
+    runBaselineVisible()
+
+  proc runNoFalseNegatives() =
+    initSpawn()
+    var kv = newKVStore({"backend": "memory"}.toTable)
 
     const N = 60
     var allKeys = newSeq[seq[byte]](N)
     for i in 0..<N:
       allKeys[i] = @[byte(i and 0xFF), byte((i shr 8) and 0xFF)]
 
-    var writer: Thread[PutCtx]
-    createThread(writer, putWorker, PutCtx(kv: kv, cf: 0, keys: encodeKeys(allKeys)))
-    joinThread(writer)
+    var done: Atomic[int]
+    done.store(0, moRelaxed)
+    spawn(proc() {.gcsafe.} =
+      putTwoByteAt(addr kv, 0, N)
+      discard done.fetchAdd(1, moRelaxed))
+    waitForCount(done, 1)
 
     for i in 0..<N:
       check kv.get(0, allKeys[i])
 
     kv.close()
+
+  test "no false negatives under sustained concurrent read + write":
+    runNoFalseNegatives()
