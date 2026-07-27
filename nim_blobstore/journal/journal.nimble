@@ -12,9 +12,9 @@ license       = "MIT"
 srcDir        = "."
 backend       = "c"
 
-# The journal uses std/os for file I/O and needs --mm:arc + --threads:on
+# The journal uses std/os for file I/O and needs --mm:atomicArc + --threads:on
 # (pthread mutex for the spinlock).
 
 task test, "Run unit tests":
-  exec "nim c --mm:arc --threads:on -d:release " &
+  exec "nim c --mm:atomicArc --threads:on -d:release -d:useMalloc " &
        "-r -d:nimStrictDelete test_journal.nim"

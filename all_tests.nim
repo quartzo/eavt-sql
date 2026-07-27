@@ -5,7 +5,7 @@
 ## invocations. Each module's local `nimble test` still works for
 ## isolated debugging.
 ##
-## Run:  nim c --mm:arc --threads:on -d:release -r all_tests.nim
+## Run:  nim c --mm:atomicArc --threads:on -d:release -d:useMalloc -r all_tests.nim
 
 # Storage stack
 import nim_blobstore/memory/test_memory

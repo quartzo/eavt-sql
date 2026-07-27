@@ -3,7 +3,7 @@
 ## Covers: codec, types, scanner, hostfns (arithmetic/comparison),
 ## and engine integration (save/retract/lookup/cursor via KVStore).
 ##
-## Run: nim c --mm:arc --threads:on -d:release \
+## Run: nim c --mm:atomicArc --threads:on -d:release -d:useMalloc \
 ##      --path:../nim_blobstore --path:.. \
 ##      --passL:-lcrypto --passL:-lzstd -r query/test_query.nim
 

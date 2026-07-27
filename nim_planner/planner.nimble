@@ -6,4 +6,4 @@ srcDir        = "."
 backend       = "c"
 
 task test, "Run planner tests":
-  exec "nim c --mm:arc --threads:on -d:release -r test_planner.nim"
+  exec "nim c --mm:atomicArc --threads:on -d:release -d:useMalloc -r test_planner.nim"

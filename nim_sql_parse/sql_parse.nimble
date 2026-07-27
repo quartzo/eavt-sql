@@ -6,5 +6,5 @@ srcDir        = "."
 backend       = "c"
 
 task test, "Run SQL parser tests":
-  exec "nim c --mm:arc --threads:on -d:release " &
+  exec "nim c --mm:atomicArc --threads:on -d:release -d:useMalloc " &
        "-r test_sql_parse.nim"

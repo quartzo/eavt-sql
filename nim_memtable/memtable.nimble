@@ -12,5 +12,5 @@ srcDir        = "."
 backend       = "c"
 
 task test, "Run unit tests":
-  exec "nim c --mm:arc --threads:on -d:release " &
+  exec "nim c --mm:atomicArc --threads:on -d:release -d:useMalloc " &
        "-r test_memtable.nim"

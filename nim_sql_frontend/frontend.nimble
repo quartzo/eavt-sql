@@ -6,4 +6,4 @@ srcDir        = "."
 backend       = "c"
 
 task test, "Run frontend tests":
-  exec "nim c --mm:arc --threads:on -d:release -r test_sql_frontend.nim"
+  exec "nim c --mm:atomicArc --threads:on -d:release -d:useMalloc -r test_sql_frontend.nim"

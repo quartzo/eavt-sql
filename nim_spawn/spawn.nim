@@ -7,8 +7,8 @@
 ## on-stack race documented in AGENTS.md); a reaper drops finished handles
 ## on each spawn, freeing slots for reuse.
 ##
-## Built for `--mm:orc`: worker threads are Nim-native (full ORC setup,
-## including the thread-local cycle collector). Call `initSpawn()` once
+## Built for `--mm:atomicArc`: worker threads are Nim-native (atomic ref
+## counting — no cycle collector needed). Call `initSpawn()` once
 ## from the main thread before the first `spawn`.
 ##
 ## GC-safety note: the global handle table is GC'ed (it holds `ref`

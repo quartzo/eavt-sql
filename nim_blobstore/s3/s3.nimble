@@ -14,4 +14,4 @@ srcDir        = "."
 backend       = "c"
 
 task test, "Run unit tests (requires rustfs)":
-  exec "nim c --mm:arc --threads:on -d:release -r test_s3.nim"
+  exec "nim c --mm:atomicArc --threads:on -d:release -d:useMalloc -r test_s3.nim"

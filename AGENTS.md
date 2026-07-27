@@ -6,7 +6,7 @@
 - **Re-run tests without recompiling:** `./build/all_tests` — binary already compiled
 - **Check which tests failed:** `./build/all_tests 2>&1 | grep FAILED`
 - **Count failures:** `./build/all_tests 2>&1 | grep -c FAILED`
-- **Module-level tests:** `nim c --mm:arc --threads:on -d:release -r nim_eavt/test_eavt.nim` (replace module as needed)
+- **Module-level tests:** `nim c --mm:atomicArc --threads:on -d:release -d:useMalloc -r nim_eavt/test_eavt.nim` (replace module as needed)
 - **Build server + REPL:** `nimble dist` → `build/eavt-sql-server`, `build/eavt-sql-cli`
 - **Python benchmarks:** `uv run python tests/bench.py` (requires msgpack)
 - **Python deps:** `uv sync --group dev`
@@ -25,7 +25,7 @@ nimble test 2>&1 | tail -20
 ./build/all_tests 2>&1 | grep -c FAILED       # how many
 
 # 3. For a single module (compiles + runs, shows full output):
-nim c --mm:arc --threads:on -d:release -r nim_eavt/test_eavt.nim 2>&1 | tail -40
+nim c --mm:atomicArc --threads:on -d:release -d:useMalloc -r nim_eavt/test_eavt.nim 2>&1 | tail -40
 ```
 
 **Never:** `nimble test 2>&1 | grep "\[OK\]" | wc -l` without first seeing compiler
@@ -34,7 +34,7 @@ unnecessary recompilation.
 
 ### Prerequisites
 
-- **Nim ≥ 2.0.14** — with `--mm:arc --threads:on` for engine modules, `--mm:orc --threads:on` for server (thread-safe ref counting)
+- **Nim ≥ 2.0.14** — with `--mm:atomicArc --threads:on -d:useMalloc` for all modules (atomic ref counting, thread-safe)
 
 ## Project Structure
 
@@ -102,7 +102,7 @@ BlobStore (Memory / File / S3)
 
 ### MemTable (ARC-driven COW)
 
-The persistent treap uses `--mm:arc`, so node lifetime is governed by
+The persistent treap uses `--mm:atomicArc`, so node lifetime is governed by
 reference counting. `insert` does path-copying — old versions are shared, not mutated.
 Cursors hold a `TreapNode` ref directly. No snapshot registry.
 
@@ -143,7 +143,7 @@ implemented in this repo: each `spawn(fn)` launches a fresh Nim thread that runs
 and exits — no fixed concurrency limit, no `awaitAll`/join, no backpressure channel.
 Thread handles live in a fixed-size global array (stable addresses, dodging the
 createThread-on-stack race above) and are reaped on each `spawn`. Built for
-`--mm:orc` (workers are Nim-native, full ORC setup incl. thread-local cycle
+`--mm:atomicArc` (workers are Nim-native, atomic ref counting — no cycle collector needed)
 collector).
 
 `malebolgia` is **optional** — keep it available only for structured, CPU-bound,

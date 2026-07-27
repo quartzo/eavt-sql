@@ -382,7 +382,7 @@ proc evalFully(expr: SExpr; env: var Environment; host: HostFns;
 # ── Resumable evaluator entry point ──
 
 proc evalWithYield*(program: SchemeProgram; env: var Environment;
-                     host: HostFns; state: var YieldState): EvalStep {.gcsafe.} =
+                     host: HostFns; state: var YieldState): EvalStep =
   if not state.started:
     state.started = true
     state.stack.add Frame(kind: fkEval, fexpr: program.body)
@@ -693,7 +693,7 @@ proc evalSpecialForm(name: string; args: SExpr; env: var Environment;
 # ── Expression evaluation ──
 
 proc evalExpr(expr: SExpr; env: var Environment; host: HostFns;
-              state: var YieldState): EvalStep {.gcsafe.} =
+              state: var YieldState): EvalStep =
   case expr.kind:
   of sVoid, sBool, sInt, sFloat, sStr, sBytes, sResource:
     return done(expr)
@@ -747,7 +747,7 @@ proc evalExpr(expr: SExpr; env: var Environment; host: HostFns;
 # Batch evaluator (non-yielding)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-proc eval*(program: SchemeProgram; env: var Environment; host: HostFns): SExpr {.gcsafe.} =
+proc eval*(program: SchemeProgram; env: var Environment; host: HostFns): SExpr =
   var state = YieldState()
   let step = evalWithYield(program, env, host, state)
   if step.kind == esDone: return step.result

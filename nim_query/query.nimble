@@ -6,4 +6,4 @@ srcDir        = "query"
 backend       = "c"
 
 task test, "Run query engine unit tests":
-  exec "nim c --mm:arc --threads:on -d:release -r query/test_query.nim"
+  exec "nim c --mm:atomicArc --threads:on -d:release -d:useMalloc -r query/test_query.nim"
