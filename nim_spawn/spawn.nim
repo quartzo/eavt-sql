@@ -11,13 +11,15 @@
 ## counting — no cycle collector needed). Call `initSpawn()` once
 ## from the main thread before the first `spawn`.
 ##
-## GC-safety note: the global handle table is GC'ed (it holds `ref`
-## closure carriers), so the procs that touch it cannot be auto-proven
-## `{.gcsafe.}`. Every access is serialised by `gLock`, so the casts below
-## are a real guarantee, not a suppression — see AGENTS.md for the
-## carve-out covering this module.
+## GC-safety note: `gThreads` holds `Thread[SpawnArg]` which contains
+## GC'ed memory internally. The compiler cannot prove `gcsafe` for any
+## access to it, even under a lock. The single `cast(gcsafe)` block in
+## `spawn` covers all `gThreads` access (reap + create); every other
+## global uses `Atomic[T]` and is auto-proven `gcsafe`. The lock
+## serialises all access, so the cast is a real guarantee, not a
+## suppression — see AGENTS.md for the carve-out covering this module.
 
-import std/[locks, typedthreads]
+import std/[atomics, locks, typedthreads]
 
 const MaxConcurrent* {.intdefine.} = 65535
 
@@ -28,8 +30,8 @@ type
 
 var
   gThreads: array[MaxConcurrent, Thread[SpawnArg]]
-  gActive: array[MaxConcurrent, bool]
-  gNextFree: int
+  gActive {.align(64).}: array[MaxConcurrent, Atomic[bool]]
+  gNextFree {.align(64).}: Atomic[int]
   gLock: Lock
   gInited: bool
 
@@ -41,18 +43,11 @@ proc initSpawn*() {.gcsafe.} =
     gInited = true
 
 proc worker(arg: SpawnArg) {.thread.} =
-  ## Thread trampoline: run the closure, then drop it (ORC releases `arg`
-  ## when this frame unwinds).
+  ## Thread trampoline: run the closure, then drop it (atomicArc releases
+  ## `arg` when this frame unwinds).
   arg.fn()
 
-proc reapLocked() =
-  ## Free slots whose threads have exited. Caller holds `gLock`.
-  for i in 0 ..< MaxConcurrent:
-    if gActive[i] and not gThreads[i].running:
-      gActive[i] = false
-      joinThread(gThreads[i])
-
-proc spawn*(fn: proc() {.gcsafe.}) =
+proc spawn*(fn: proc() {.gcsafe.}) {.gcsafe.} =
   ## Fire-and-forget: launch a fresh thread running `fn`. Returns immedi-
   ## ately; the caller does not wait. `fn` must be `{.gcsafe.}`.
   assert gInited, "initSpawn() must be called before spawn()"
@@ -60,19 +55,21 @@ proc spawn*(fn: proc() {.gcsafe.}) =
   var idx: int
   gLock.withLock:
     {.cast(gcsafe).}:
-      reapLocked()
-      while gActive[gNextFree]:
-        gNextFree = (gNextFree + 1) mod MaxConcurrent
-      idx = gNextFree
-      gActive[idx] = true
-      gNextFree = (gNextFree + 1) mod MaxConcurrent
+      # Reap finished threads
+      for i in 0 ..< MaxConcurrent:
+        if gActive[i].load(moRelaxed) and not gThreads[i].running:
+          gActive[i].store(false, moRelaxed)
+          joinThread(gThreads[i])
+      # Find free slot
+      idx = gNextFree.load(moRelaxed)
+      while gActive[idx].load(moRelaxed):
+        idx = (idx + 1) mod MaxConcurrent
+      gActive[idx].store(true, moRelaxed)
+      gNextFree.store((idx + 1) mod MaxConcurrent, moRelaxed)
       createThread(gThreads[idx], worker, arg)
 
-proc activeSlots*(): int =
+proc activeSlots*(): int {.gcsafe.} =
   ## Number of spawned threads still tracked (finished ones are reaped on
   ## each `spawn`). Mainly for tests/diagnostics.
-  gLock.withLock:
-    {.cast(gcsafe).}:
-      result = 0
-      for i in 0 ..< MaxConcurrent:
-        if gActive[i]: inc result
+  for i in 0 ..< MaxConcurrent:
+    if gActive[i].load(moRelaxed): inc result
