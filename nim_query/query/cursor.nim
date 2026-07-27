@@ -59,6 +59,7 @@ type
   CursorKind* = enum
     ckPageStore
     ckTreap
+    ckTreapKv  ## Treap cursor that filters tombstones via peekKv/nextKv
     ckMerged
     ckMock
     ckInvalid
@@ -78,6 +79,8 @@ type
       ps*: PageStoreCursor
     of ckTreap:
       tc*: TreapCursor
+    of ckTreapKv:
+      tckv*: TreapCursor
     of ckMerged:
       mc*: MergedCursor
     of ckMock:
@@ -177,6 +180,7 @@ proc isValid*(c: Cursor): bool {.gcsafe.} =
   case c.kind
   of ckPageStore: not c.ps.atEnd
   of ckTreap: not c.tc.atEnd
+  of ckTreapKv: not c.tckv.atEnd
   of ckMerged: not c.mc.atEnd
   of ckMock: c.mockPos < c.mockKeys.len
   of ckInvalid: false
@@ -185,6 +189,9 @@ proc currentKey*(c: Cursor): Option[seq[byte]] {.gcsafe.} =
   case c.kind
   of ckPageStore: c.ps.peek()
   of ckTreap: c.tc.peek()
+  of ckTreapKv:
+    let kvp = c.tckv.peekKv()
+    if kvp.isSome: some(kvp.get[0]) else: none[seq[byte]]()
   of ckMerged: c.mc.peek()
   of ckMock:
     if c.mockPos < c.mockKeys.len: some(c.mockKeys[c.mockPos])
@@ -195,6 +202,7 @@ proc currentPair*(c: Cursor): Option[(seq[byte], seq[byte])] {.gcsafe.} =
   case c.kind
   of ckPageStore: c.ps.peekKv()
   of ckTreap: c.tc.peekKv()
+  of ckTreapKv: c.tckv.peekKv()
   of ckMerged: c.mc.peekKv()
   of ckMock: none((seq[byte], seq[byte]))
   of ckInvalid: none((seq[byte], seq[byte]))
@@ -203,6 +211,7 @@ proc step*(c: Cursor) {.gcsafe.} =
   case c.kind
   of ckPageStore: discard c.ps.next()
   of ckTreap: discard c.tc.next()
+  of ckTreapKv: discard c.tckv.nextKv()
   of ckMerged: discard c.mc.next()
   of ckMock: inc c.mockPos
   of ckInvalid: discard
@@ -211,6 +220,7 @@ proc seek*(c: Cursor; target: seq[byte]) {.gcsafe.} =
   case c.kind
   of ckPageStore: c.ps.seek(target)
   of ckTreap: c.tc.seek(target)
+  of ckTreapKv: c.tckv.seek(target)
   of ckMerged: c.mc.seek(target)
   of ckMock:
     while c.mockPos < c.mockKeys.len:
@@ -228,6 +238,7 @@ proc invalidate*(c: Cursor) {.gcsafe.} =
   case c.kind
   of ckPageStore: c.ps.atEnd = true
   of ckTreap: c.tc.atEnd = true
+  of ckTreapKv: c.tckv.atEnd = true
   of ckMerged: c.mc.atEnd = true
   of ckMock: c.mockPos = c.mockKeys.len
   of ckInvalid: discard
@@ -239,6 +250,10 @@ proc pageStoreCursor*(psc: PageStoreCursor): Cursor =
 
 proc treapCursor*(tc: TreapCursor): Cursor =
   Cursor(kind: ckTreap, tc: tc)
+
+proc treapKvCursor*(tc: TreapCursor): Cursor =
+  ## Wrap a TreapCursor for key-value scan, filtering tombstones.
+  Cursor(kind: ckTreapKv, tckv: tc)
 
 proc mergedCursor*(mc: MergedCursor): Cursor =
   Cursor(kind: ckMerged, mc: mc)

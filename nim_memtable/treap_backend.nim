@@ -17,6 +17,7 @@ type
   TreapNode* {.acyclic.} = ref object
     key*: Key
     value*: Option[Value]   ## none for key-only CFs (0-3), some for key-value CFs (>=10)
+    deleted*: bool          ## tombstone marker (all CFs)
     prio*: uint32
     left*: TreapNode
     right*: TreapNode
@@ -38,14 +39,14 @@ proc cmpKey*(a, b: Key): int =
   if a.len > b.len: return 1
   return 0
 
-proc newLeaf(key: Key; value: Option[Value] = none(Value)): TreapNode =
-  TreapNode(key: key, value: value, prio: cast[uint32](rand(int.high)))
+proc newLeaf(key: Key; value: Option[Value] = none(Value); deleted: bool = false): TreapNode =
+  TreapNode(key: key, value: value, deleted: deleted, prio: cast[uint32](rand(int.high)))
 
 proc containsKey*(node: TreapNode; key: Key): bool =
   var n = node
   while n != nil:
     let c = cmpKey(key, n.key)
-    if c == 0: return true
+    if c == 0: return not n.deleted
     elif c < 0: n = n.left
     else: n = n.right
   return false
@@ -69,33 +70,39 @@ proc prefixUpperBound(prefix: Key): Key =
 proc rotateRight(n: TreapNode): TreapNode =
   let l = n.left
   result = l
-  var nn = TreapNode(key: n.key, value: n.value, prio: n.prio, left: l.right, right: n.right)
-  result = TreapNode(key: l.key, value: l.value, prio: l.prio, left: l.left, right: nn)
+  var nn = TreapNode(key: n.key, value: n.value, deleted: n.deleted, prio: n.prio, left: l.right, right: n.right)
+  result = TreapNode(key: l.key, value: l.value, deleted: l.deleted, prio: l.prio, left: l.left, right: nn)
 
 proc rotateLeft(n: TreapNode): TreapNode =
   let r = n.right
   result = r
-  var nn = TreapNode(key: n.key, value: n.value, prio: n.prio, left: n.left, right: r.left)
-  result = TreapNode(key: r.key, value: r.value, prio: r.prio, left: nn, right: r.right)
+  var nn = TreapNode(key: n.key, value: n.value, deleted: n.deleted, prio: n.prio, left: n.left, right: r.left)
+  result = TreapNode(key: r.key, value: r.value, deleted: r.deleted, prio: r.prio, left: nn, right: r.right)
 
-proc insert(node: TreapNode, key: Key; value: Option[Value] = none(Value)): TreapNode =
-  if node == nil: return newLeaf(key, value)
+proc insert(node: TreapNode, key: Key; value: Option[Value] = none(Value);
+             deleted: bool = false): TreapNode =
+  if node == nil: return newLeaf(key, value, deleted)
   let c = cmpKey(key, node.key)
   if c < 0:
-    let nl = insert(node.left, key, value)
-    var nn = TreapNode(key: node.key, value: node.value, prio: node.prio, left: nl, right: node.right)
+    let nl = insert(node.left, key, value, deleted)
+    var nn = TreapNode(key: node.key, value: node.value, deleted: node.deleted,
+                       prio: node.prio, left: nl, right: node.right)
     if nn.left != nil and nn.left.prio > nn.prio: return rotateRight(nn)
     return nn
   elif c > 0:
-    let nr = insert(node.right, key, value)
-    var nn = TreapNode(key: node.key, value: node.value, prio: node.prio, left: node.left, right: nr)
+    let nr = insert(node.right, key, value, deleted)
+    var nn = TreapNode(key: node.key, value: node.value, deleted: node.deleted,
+                       prio: node.prio, left: node.left, right: nr)
     if nn.right != nil and nn.right.prio > nn.prio: return rotateLeft(nn)
     return nn
   else:
-    # Key exists: if value is provided, update it (upsert semantics for KV CFs)
-    if value.isSome:
-      return TreapNode(key: node.key, value: value, prio: node.prio, left: node.left, right: node.right)
-    return node
+    # Key exists: update value and/or deleted flag.
+    # When deleted, clear the value so tombstone detection works.
+    let newVal = if deleted: none(Value)
+                 elif value.isSome: value
+                 else: node.value
+    return TreapNode(key: node.key, value: newVal, deleted: deleted,
+                     prio: node.prio, left: node.left, right: node.right)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════════════════════════
@@ -144,6 +151,14 @@ proc putKv*(mt: MemTable; cf: int; key, value: openArray[byte]): uint64 =
   if wasNew: mt.hnd.cfSize[cf] += k.len + v.len
   mt.size()
 
+proc deleteKv*(mt: MemTable; cf: int; key: openArray[byte]) =
+  ## Mark a key as deleted (tombstone). If the key doesn't exist, create a
+  ## tombstone node so the deletion is persisted through flush.
+  if cf < 0 or cf >= mt.numCf: raise newException(ValueError, "invalid cf")
+  var k = newSeq[byte](key.len)
+  if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
+  mt.hnd.live[cf] = insert(mt.hnd.live[cf], k, none(Value), deleted=true)
+
 proc getValue*(mt: MemTable; cf: int; key: openArray[byte]): Option[Value] =
   if cf < 0 or cf >= mt.hnd.live.len: return none(Value)
   var n = mt.hnd.live[cf]
@@ -151,7 +166,7 @@ proc getValue*(mt: MemTable; cf: int; key: openArray[byte]): Option[Value] =
   if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
   while n != nil:
     let c = cmpKey(k, n.key)
-    if c == 0: return n.value
+    if c == 0: return if n.deleted: none(Value) else: n.value
     elif c < 0: n = n.left
     else: n = n.right
   return none(Value)
@@ -163,7 +178,7 @@ proc getValue*(node: TreapNode; key: openArray[byte]): Option[Value] =
   if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
   while n != nil:
     let c = cmpKey(k, n.key)
-    if c == 0: return n.value
+    if c == 0: return if n.deleted: none(Value) else: n.value
     elif c < 0: n = n.left
     else: n = n.right
   return none(Value)

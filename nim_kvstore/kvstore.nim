@@ -192,10 +192,39 @@ proc getKv*(kv: KVStore; cf: int; key: openArray[byte]): Option[seq[byte]] {.gcs
   if liveRoot != nil:
     let v = mt_be.getValue(liveRoot, k)
     if v.isSome: return v
+    # Check if key exists but is a tombstone
+    if mt_be.containsKey(liveRoot, k): return none(seq[byte])
   if flushRoot != nil:
     let v = mt_be.getValue(flushRoot, k)
     if v.isSome: return v
+    if mt_be.containsKey(flushRoot, k): return none(seq[byte])
   keyExistsKv(kv.ps[], cf, k)
+
+proc deleteKv*(kv: KVStore; cf: int; key: openArray[byte]) {.gcsafe.} =
+  var k = newSeq[byte](key.len)
+  if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
+  kv.lock.withLock:
+    mt_be.deleteKv(kv.mt, cf, k)
+    if kv.path.len > 0 and kv.path != ":memory:" and not kv.readOnly:
+      try:
+        let journalPath = kv.path / "journal" / "journal"
+        createDir(parentDir(journalPath))
+        var f = open(journalPath, fmAppend)
+        var jk = newSeq[byte](1 + key.len)
+        jk[0] = byte(cf)
+        if key.len > 0: copyMem(addr jk[1], unsafeAddr key[0], key.len)
+        let totKlen = 1 + key.len
+        # vlen = 0xFFFFFFFF marks a delete
+        var hdr = newSeq[byte](4 + totKlen + 4 + 1)
+        hdr[0] = byte((totKlen shr 24) and 0xFF); hdr[1] = byte((totKlen shr 16) and 0xFF)
+        hdr[2] = byte((totKlen shr 8) and 0xFF); hdr[3] = byte(totKlen and 0xFF)
+        copyMem(addr hdr[4], addr jk[0], totKlen)
+        hdr[4 + totKlen] = 0xFF; hdr[5 + totKlen] = 0xFF
+        hdr[6 + totKlen] = 0xFF; hdr[7 + totKlen] = 0xFF
+        hdr[8 + totKlen] = 0
+        discard f.writeBytes(hdr, 0, hdr.len)
+        f.close()
+      except: discard
 
 proc flush*(kv: KVStore) {.gcsafe.} =
   if kv.readOnly: return
@@ -207,17 +236,25 @@ proc flush*(kv: KVStore) {.gcsafe.} =
     kv.flushRoots = roots
   var keysByCf: seq[(int, seq[seq[byte]])] = @[]
   var pairsByCf: seq[(int, seq[(seq[byte], seq[byte])])] = @[]
+  var deletedByCf: seq[(int, seq[seq[byte]])] = @[]
   for cf in 0..<kv.numCf:
     if roots[cf] != nil:
       if cf >= 10:
         var pairs: seq[(seq[byte], seq[byte])] = @[]
+        var deleted: seq[seq[byte]] = @[]
         let tc = newTreapCursor(roots[cf])
         while not tc.atEnd:
           let kvp = tc.nextKv()
           if kvp.isSome:
             let (key, val) = kvp.get
             pairs.add (key, val)
+        # Collect tombstones from the same treap
+        let tc2 = newTreapCursor(roots[cf])
+        while not tc2.atEnd:
+          let dk = tc2.nextDeleted()
+          if dk.isSome: deleted.add(dk.get)
         if pairs.len > 0: pairsByCf.add (cf, pairs)
+        if deleted.len > 0: deletedByCf.add (cf, deleted)
       else:
         var keys: seq[seq[byte]] = @[]
         let tc = newTreapCursor(roots[cf])
@@ -226,7 +263,8 @@ proc flush*(kv: KVStore) {.gcsafe.} =
           if k.isSome: keys.add(k.get)
         if keys.len > 0: keysByCf.add (cf, keys)
   if keysByCf.len > 0: commitMerge(kv.ps[], keysByCf, true)
-  if pairsByCf.len > 0: commitMergeKv(kv.ps[], pairsByCf, true)
+  if pairsByCf.len > 0 or deletedByCf.len > 0:
+    commitMergeKv(kv.ps[], pairsByCf, deletedByCf, true)
   kv.lock.withLock:
     kv.flushRoots = @[]; kv.mtSize = 0
 
@@ -362,6 +400,10 @@ proc openScanCursor*(kv: KVStore; cf: int): MergedCursor {.gcsafe.} =
 proc openScanCursorKv*(kv: KVStore; cf: int): MergedCursor {.gcsafe.} =
   ## Open a scan cursor for key-value CFs (>= 10). Returns a MergedCursor
   ## with isKv=true; use peekKv/nextKv to read (key, value) pairs.
+  ##
+  ## Implementation: manually merges PageStore + flushRoot + liveRoot,
+  ## skipping tombstones from Treap sources. The PageStore is assumed to
+  ## have no tombstones (they are removed during flush).
   var sources: seq[Cursor] = @[]
 
   var psSnap: PageStoreSnapshot
@@ -383,12 +425,13 @@ proc openScanCursorKv*(kv: KVStore; cf: int): MergedCursor {.gcsafe.} =
   if flushRoot != nil:
     let tc = newTreapCursor(flushRoot)
     if not tc.atEnd:
-      sources.add treapCursor(tc)
+      # Wrap in a cursor that filters tombstones via peekKv/nextKv
+      sources.add treapKvCursor(tc)
 
   if liveRoot != nil:
     let tc = newTreapCursor(liveRoot)
     if not tc.atEnd:
-      sources.add treapCursor(tc)
+      sources.add treapKvCursor(tc)
 
   result = newMergedCursor(sources)
   result.isKv = true

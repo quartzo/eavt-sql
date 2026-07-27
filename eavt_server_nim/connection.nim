@@ -122,6 +122,9 @@ proc execQuery(eng: SharedEngine; req: Request; fd: SocketHandle) {.gcsafe.} =
           writeResponse(fd, @["key", "value"], rows, true)
           rows.setLen(0)
       writeResponse(fd, @["key", "value"], rows, false)
+    of "delete":
+      eng.kv.deleteKv(req.kvCf, req.kvKey)
+      writeResponse(fd, @[], @[], false)
     else:
       writeResponse(fd, @[], @[], false, "unknown kv op: " & req.kvOp)
 

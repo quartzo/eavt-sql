@@ -97,6 +97,10 @@ proc cmdKvScan(cf: int) =
       for row in chunk.rows:
         echo row.join("\t")
 
+proc cmdKvDelete(cf: int; key: string) =
+  catchDisconnect:
+    echo gClient.kvDelete(cf, key)
+
 # ── dot dispatcher ───────────────────────────────────────────────────
 
 const HelpText = """
@@ -111,6 +115,7 @@ Dot commands (no semicolon):
   .dump [EAVT|AEVT|...|CF]  Dump active datoms (or KV CF if number >= 10)
   .kv-put <cf> <key> <value>  Put key-value pair (CFs >= 10)
   .kv-get <cf> <key>          Get value by key
+  .kv-delete <cf> <key>       Delete key
   .kv-scan <cf>               Scan all pairs in a CF
 
 SQL statements must end with ;"""
@@ -173,6 +178,15 @@ proc handleDot(line: string): bool =
       stderr.writeLine "Error: cf must be >= 10 for key-value operations"
       return false
     cmdKvScan(cf)
+  of ".kv-delete":
+    if args.len < 2:
+      stderr.writeLine "Usage: .kv-delete <cf> <key>"
+      return false
+    let cf = try: parseInt(args[0]) except: -1
+    if cf < 10:
+      stderr.writeLine "Error: cf must be >= 10 for key-value operations"
+      return false
+    cmdKvDelete(cf, args[1])
   else:
     stderr.writeLine &"Unknown command: {line}"
   return false

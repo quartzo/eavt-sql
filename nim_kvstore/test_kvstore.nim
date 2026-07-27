@@ -935,3 +935,99 @@ suite "kvstore: key-value concurrency":
 
   test "putKv survives concurrent flush":
     runPutKvSurvivesConcurrentFlush()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Key-value delete tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+suite "kvstore: key-value delete":
+  test "delete existing key removes it from get":
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
+    kv.putKv(10, @[byte(1)], @[byte(10)])
+    check kv.getKv(10, @[byte(1)]).isSome
+    kv.deleteKv(10, @[byte(1)])
+    check kv.getKv(10, @[byte(1)]).isNone
+    kv.close()
+
+  test "delete non-existing key is harmless":
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
+    kv.deleteKv(10, @[byte(99)])
+    check kv.getKv(10, @[byte(99)]).isNone
+    kv.close()
+
+  test "delete then re-put works":
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
+    kv.putKv(10, @[byte(1)], @[byte(10)])
+    kv.deleteKv(10, @[byte(1)])
+    kv.putKv(10, @[byte(1)], @[byte(20)])
+    let val = kv.getKv(10, @[byte(1)])
+    check val.isSome
+    check val.get == @[byte(20)]
+    kv.close()
+
+  test "deleted key not visible in scan":
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
+    kv.putKv(10, @[byte(1)], @[byte(10)])
+    kv.putKv(10, @[byte(2)], @[byte(20)])
+    kv.putKv(10, @[byte(3)], @[byte(30)])
+    kv.deleteKv(10, @[byte(2)])
+    let mc = kv.openScanCursorKv(10)
+    var pairs: seq[(seq[byte], seq[byte])]
+    while true:
+      let kvp = mc.nextKv()
+      if kvp.isNone: break
+      pairs.add kvp.get
+    check pairs.len == 2
+    check pairs[0] == (@[byte(1)], @[byte(10)])
+    check pairs[1] == (@[byte(3)], @[byte(30)])
+    kv.close()
+
+  test "delete survives flush":
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
+    kv.putKv(10, @[byte(1)], @[byte(10)])
+    kv.putKv(10, @[byte(2)], @[byte(20)])
+    kv.flush()
+    kv.deleteKv(10, @[byte(1)])
+    kv.flush()
+    check kv.getKv(10, @[byte(1)]).isNone
+    check kv.getKv(10, @[byte(2)]).isSome
+    kv.close()
+
+  test "delete before flush removes from page store":
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
+    kv.putKv(10, @[byte(1)], @[byte(10)])
+    kv.putKv(10, @[byte(2)], @[byte(20)])
+    kv.deleteKv(10, @[byte(1)])
+    kv.flush()
+    check kv.getKv(10, @[byte(1)]).isNone
+    check kv.getKv(10, @[byte(2)]).isSome
+    # After another flush, still gone
+    kv.flush()
+    check kv.getKv(10, @[byte(1)]).isNone
+    kv.close()
+
+  test "delete all keys leaves empty CF":
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
+    kv.putKv(10, @[byte(1)], @[byte(10)])
+    kv.putKv(10, @[byte(2)], @[byte(20)])
+    kv.deleteKv(10, @[byte(1)])
+    kv.deleteKv(10, @[byte(2)])
+    kv.flush()
+    let mc = kv.openScanCursorKv(10)
+    check mc.nextKv().isNone
+    kv.close()
+
+  test "delete-only key (never put) survives flush":
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
+    kv.deleteKv(10, @[byte(5)])
+    kv.flush()
+    check kv.getKv(10, @[byte(5)]).isNone
+    kv.close()

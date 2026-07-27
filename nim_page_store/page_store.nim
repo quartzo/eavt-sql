@@ -613,16 +613,63 @@ proc commitMerge*(s: var PageStoreInner; keysByCf: seq[(int, seq[seq[byte]])];
     journalTruncate(s)
 
 proc commitMergeKv*(s: var PageStoreInner; pairsByCf: seq[(int, seq[(seq[byte], seq[byte])])];
-                    clearJournal: bool) =
+                    deletedByCf: seq[(int, seq[seq[byte]])] = @[];
+                    clearJournal: bool = true) =
   ## Like commitMerge but for key-value CFs (>= 10). Builds leaf pages with
   ## serializePageKv. Index pages are identical (boundary keys only, no values).
+  ## deletedByCf lists keys to remove from the PageStore.
   if s.readOnly:
     raise newException(IOError, "read-only")
+
+  # Build a lookup of deleted keys per CF
+  var deletedKeys: Table[int, HashSet[seq[byte]]]
+  for (cf, keys) in deletedByCf:
+    deletedKeys[cf] = initHashSet[seq[byte]]()
+    for k in keys: deletedKeys[cf].incl(k)
+
+  # Also build a set of CFs that appear in pairsByCf
+  var pairCfs: HashSet[int]
+  for (cf, _) in pairsByCf: pairCfs.incl(cf)
+
+  # Process CFs that have only deletions (no new pairs)
+  for (cf, delKeys) in deletedByCf:
+    if cf in pairCfs: continue  # handled in the main loop below
+    if cf >= s.numCf: continue
+    let tree = s.trees[cf]
+    if tree.rootUuid == default(array[16, byte]): continue  # nothing to delete
+    var allPairs = getPairsInPrefix(s, cf, @[])
+    var livePairs: seq[(seq[byte], seq[byte])] = @[]
+    let delSet = deletedKeys.getOrDefault(cf, initHashSet[seq[byte]]())
+    for (k, v) in allPairs:
+      if k notin delSet: livePairs.add((k, v))
+    if livePairs.len == 0:
+      s.trees[cf] = CfTree(rootUuid: default(array[16, byte]), height: 0, numLeaves: 0)
+      continue
+    let pageList = buildPagesKv(livePairs)
+    var entries: seq[(seq[byte], array[16, byte])] = @[]
+    for (boundary, pageData) in pageList:
+      discard deserializePageKv(pageData)
+      let uuid = blobPut(s.blobs, pageData)
+      entries.add (boundary, uuid)
+    let numLeaves = entries.len.uint32
+    var (root, height) = buildIndexTree(s, entries, 0)
+    if height == 0:
+      s.trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: 0)
+    else:
+      s.trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: numLeaves)
+
   for (cf, sortedPairs) in pairsByCf:
     if cf >= s.numCf or sortedPairs.len == 0: continue
     let tree = s.trees[cf]
+    let delSet = deletedKeys.getOrDefault(cf, initHashSet[seq[byte]]())
+
     if tree.rootUuid == default(array[16, byte]):
-      let pageList = buildPagesKv(sortedPairs)
+      # No existing data — just filter out deleted keys from new pairs
+      var filtered: seq[(seq[byte], seq[byte])] = @[]
+      for (k, v) in sortedPairs:
+        if k notin delSet: filtered.add((k, v))
+      if filtered.len == 0: continue
+      let pageList = buildPagesKv(filtered)
       var entries: seq[(seq[byte], array[16, byte])] = @[]
       for (boundary, pageData) in pageList:
         discard deserializePageKv(pageData)
@@ -636,23 +683,35 @@ proc commitMergeKv*(s: var PageStoreInner; pairsByCf: seq[(int, seq[(seq[byte], 
         s.trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: numLeaves)
     else:
       # Merge into existing tree: collect all existing pairs, merge-sort with new,
-      # rebuild pages. Simple but correct; the existing mergeSubtree is key-only.
+      # rebuild pages. Remove keys present in delSet.
       var allPairs = getPairsInPrefix(s, cf, @[])
+      # Filter out deleted keys from existing pairs
+      var livePairs: seq[(seq[byte], seq[byte])] = @[]
+      for (k, v) in allPairs:
+        if k notin delSet: livePairs.add((k, v))
       # Merge-sort: both are sorted, combine deduplicating by key (newer wins)
       var merged: seq[(seq[byte], seq[byte])] = @[]
       var ai = 0; var bi = 0
-      while ai < allPairs.len and bi < sortedPairs.len:
-        let c = cmpSeq(allPairs[ai][0], sortedPairs[bi][0])
+      while ai < livePairs.len and bi < sortedPairs.len:
+        let c = cmpSeq(livePairs[ai][0], sortedPairs[bi][0])
         if c < 0:
-          merged.add allPairs[ai]; inc ai
+          if livePairs[ai][0] notin delSet: merged.add livePairs[ai]
+          inc ai
         elif c > 0:
-          merged.add sortedPairs[bi]; inc bi
+          if sortedPairs[bi][0] notin delSet: merged.add sortedPairs[bi]
+          inc bi
         else:
-          merged.add sortedPairs[bi]; inc ai; inc bi
-      while ai < allPairs.len:
-        merged.add allPairs[ai]; inc ai
+          if sortedPairs[bi][0] notin delSet: merged.add sortedPairs[bi]
+          inc ai; inc bi
+      while ai < livePairs.len:
+        if livePairs[ai][0] notin delSet: merged.add livePairs[ai]
+        inc ai
       while bi < sortedPairs.len:
-        merged.add sortedPairs[bi]; inc bi
+        if sortedPairs[bi][0] notin delSet: merged.add sortedPairs[bi]
+        inc bi
+      if merged.len == 0:
+        s.trees[cf] = CfTree(rootUuid: default(array[16, byte]), height: 0, numLeaves: 0)
+        continue
       let pageList = buildPagesKv(merged)
       var entries: seq[(seq[byte], array[16, byte])] = @[]
       for (boundary, pageData) in pageList:

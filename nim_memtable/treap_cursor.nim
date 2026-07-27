@@ -30,6 +30,8 @@ proc seekStack(c: TreapCursor; target: Key) =
 # ── Internal: advance to next key ──
 
 proc advance(c: TreapCursor) =
+  ## Advance to next node (including tombstones). Callers that need to
+  ## skip deleted nodes should use peekKv/nextKv (which filter).
   if c.atEnd: return
   c.current = none(Key)
   c.currentKv = none(KvPair)
@@ -65,19 +67,51 @@ proc next*(c: TreapCursor): Option[Key] =
   c.advance()
 
 proc peekKv*(c: TreapCursor): Option[(seq[byte], seq[byte])] =
-  c.ensure()
-  if c.atEnd: none((seq[byte], seq[byte]))
-  elif c.currentKv.isSome:
-    let (key, val) = c.currentKv.get
-    some((key, val.get(@[])))
-  else: none((seq[byte], seq[byte]))
+  ## Peek next non-deleted key-value pair. Skips tombstones.
+  while true:
+    c.ensure()
+    if c.atEnd: return none((seq[byte], seq[byte]))
+    if c.currentKv.isSome:
+      let (key, val) = c.currentKv.get
+      if val.isSome:
+        return some((key, val.get(@[])))
+      # Tombstone — skip
+      c.advance()
+      continue
+    return none((seq[byte], seq[byte]))
 
 proc nextKv*(c: TreapCursor): Option[(seq[byte], seq[byte])] =
-  c.ensure()
-  if c.currentKv.isSome:
-    let (key, val) = c.currentKv.get
-    result = some((key, val.get(@[])))
-  c.advance()
+  ## Return next non-deleted key-value pair and advance. Skips tombstones.
+  while true:
+    c.ensure()
+    if c.atEnd: return none((seq[byte], seq[byte]))
+    if c.currentKv.isSome:
+      let (key, val) = c.currentKv.get
+      if val.isSome:
+        result = some((key, val.get(@[])))
+        c.advance()
+        return
+      # Tombstone — skip
+      c.advance()
+      continue
+    return none((seq[byte], seq[byte]))
+
+proc nextDeleted*(c: TreapCursor): Option[seq[byte]] =
+  ## Return next deleted key (tombstone) and advance. Skips non-deleted.
+  while true:
+    c.ensure()
+    if c.atEnd: return none(seq[byte])
+    if c.currentKv.isSome:
+      let (key, val) = c.currentKv.get
+      # A node is a tombstone if value is none (CF >= 10) or explicitly deleted
+      if val.isNone:
+        result = some(key)
+        c.advance()
+        return
+      # Non-deleted — skip
+      c.advance()
+      continue
+    return none(seq[byte])
 
 proc seek*(c: TreapCursor; target: Key) =
   c.atEnd = false

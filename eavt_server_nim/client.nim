@@ -214,6 +214,23 @@ proc kvGet*(c: var EavtClient; cf: int; key: string): string =
   except: discard
   return "(none)"
 
+proc kvDelete*(c: var EavtClient; cf: int; key: string): string =
+  ## Send a kv delete request.
+  var node = newJObject()
+  node["type"] = %"kv"
+  node["op"] = %"delete"
+  node["cf"] = %cf
+  node["key"] = %key
+  sendMsg(c, msgpack2json.fromJsonNode(node))
+  let resp = recvMsg(c)
+  if resp.len == 0: return "ok"
+  try:
+    let n = toJsonNode(resp)
+    if n.hasKey("error") and n["error"].getStr.len > 0:
+      return "error: " & n["error"].getStr
+  except: discard
+  return "ok"
+
 proc kvScan*(c: var EavtClient; cf: int): seq[SqlResult] =
   ## Send a kv scan request. Returns streaming results like exec().
   var node = newJObject()

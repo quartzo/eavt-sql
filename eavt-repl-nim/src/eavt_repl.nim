@@ -84,6 +84,16 @@ proc executeCommands(client: var EavtClient; commands: string): int =
             return 1
           for row in chunk.rows:
             echo row.join("\t")
+      of ".kv-delete":
+        let parts = stripped.splitWhitespace()
+        if parts.len < 3:
+          stderr.writeLine "Usage: .kv-delete <cf> <key>"
+          return 1
+        let cf = try: parseInt(parts[1]) except: -1
+        if cf < 10:
+          stderr.writeLine "Error: cf must be >= 10"
+          return 1
+        echo client.kvDelete(cf, parts[2])
       of ".help":
         echo UsageText
       else:
