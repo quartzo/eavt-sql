@@ -379,6 +379,66 @@ proc keyExists*(s: var PageStoreInner; cf: int; key: seq[byte]): bool =
   return false
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Key-value leaf operations (CFs >= 10)
+# ══════════════════════════════════════════════════════════════════════════════
+
+proc loadLeafPairs*(s: var PageStoreInner; uuid: array[16, byte]): seq[(seq[byte], seq[byte])] =
+  let raw = loadLeafRaw(s, uuid)
+  deserializePageKv(raw)
+
+proc loadLeafPairsNoput(s: var PageStoreInner; uuid: array[16, byte]): seq[(seq[byte], seq[byte])] =
+  let compressed = s.blobs.get(uuid)
+  if compressed.isNone:
+    raise newException(IOError, "leaf blob not found")
+  deserializePageKv(decompress(compressed.get))
+
+proc getPairsInPrefix*(s: var PageStoreInner; cf: int; prefix: seq[byte]): seq[(seq[byte], seq[byte])] =
+  if cf >= s.numCf: return @[]
+  let tree = s.trees[cf]
+  if tree.rootUuid == default(array[16, byte]): return @[]
+  if tree.height == 0:
+    let pairs = loadLeafPairs(s, tree.rootUuid)
+    for (k, v) in pairs:
+      if k.len >= prefix.len and k[0..<prefix.len] == prefix:
+        result.add (k, v)
+  else:
+    let data = blobGet(s.blobs, tree.rootUuid)
+    if data.isNone: return @[]
+    let entries = deserializeIndexPage(data.get)
+    let (start, endIdx) = findPrefixRange(entries, prefix)
+    for i in start..<endIdx:
+      let (_, childUuid) = entries[i]
+      if tree.height == 1:
+        let pairs = loadLeafPairs(s, childUuid)
+        for (k, v) in pairs:
+          if k.len >= prefix.len and k[0..<prefix.len] == prefix:
+            result.add (k, v)
+      else:
+        # recurse through index levels
+        var stack: seq[(array[16, byte], uint8)] = @[(childUuid, tree.height - 1)]
+        while stack.len > 0:
+          let (uuid, h) = stack.pop()
+          let d = blobGet(s.blobs, uuid)
+          if d.isNone: continue
+          let ents = deserializeIndexPage(d.get)
+          let (s2, e2) = findPrefixRange(ents, prefix)
+          for j in s2..<e2:
+            let (_, cu) = ents[j]
+            if h == 1:
+              let pairs = loadLeafPairs(s, cu)
+              for (k, v) in pairs:
+                if k.len >= prefix.len and k[0..<prefix.len] == prefix:
+                  result.add (k, v)
+            else:
+              stack.add (cu, h - 1)
+
+proc keyExistsKv*(s: var PageStoreInner; cf: int; key: seq[byte]): Option[seq[byte]] =
+  let pairs = getPairsInPrefix(s, cf, key)
+  for (k, v) in pairs:
+    if k == key: return some(v)
+  return none(seq[byte])
+
+# ══════════════════════════════════════════════════════════════════════════════
 # COW recursive merge
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -552,6 +612,65 @@ proc commitMerge*(s: var PageStoreInner; keysByCf: seq[(int, seq[seq[byte]])];
   if clearJournal:
     journalTruncate(s)
 
+proc commitMergeKv*(s: var PageStoreInner; pairsByCf: seq[(int, seq[(seq[byte], seq[byte])])];
+                    clearJournal: bool) =
+  ## Like commitMerge but for key-value CFs (>= 10). Builds leaf pages with
+  ## serializePageKv. Index pages are identical (boundary keys only, no values).
+  if s.readOnly:
+    raise newException(IOError, "read-only")
+  for (cf, sortedPairs) in pairsByCf:
+    if cf >= s.numCf or sortedPairs.len == 0: continue
+    let tree = s.trees[cf]
+    if tree.rootUuid == default(array[16, byte]):
+      let pageList = buildPagesKv(sortedPairs)
+      var entries: seq[(seq[byte], array[16, byte])] = @[]
+      for (boundary, pageData) in pageList:
+        discard deserializePageKv(pageData)
+        let uuid = blobPut(s.blobs, pageData)
+        entries.add (boundary, uuid)
+      let numLeaves = entries.len.uint32
+      var (root, height) = buildIndexTree(s, entries, 0)
+      if height == 0:
+        s.trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: 0)
+      else:
+        s.trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: numLeaves)
+    else:
+      # Merge into existing tree: collect all existing pairs, merge-sort with new,
+      # rebuild pages. Simple but correct; the existing mergeSubtree is key-only.
+      var allPairs = getPairsInPrefix(s, cf, @[])
+      # Merge-sort: both are sorted, combine deduplicating by key (newer wins)
+      var merged: seq[(seq[byte], seq[byte])] = @[]
+      var ai = 0; var bi = 0
+      while ai < allPairs.len and bi < sortedPairs.len:
+        let c = cmpSeq(allPairs[ai][0], sortedPairs[bi][0])
+        if c < 0:
+          merged.add allPairs[ai]; inc ai
+        elif c > 0:
+          merged.add sortedPairs[bi]; inc bi
+        else:
+          merged.add sortedPairs[bi]; inc ai; inc bi
+      while ai < allPairs.len:
+        merged.add allPairs[ai]; inc ai
+      while bi < sortedPairs.len:
+        merged.add sortedPairs[bi]; inc bi
+      let pageList = buildPagesKv(merged)
+      var entries: seq[(seq[byte], array[16, byte])] = @[]
+      for (boundary, pageData) in pageList:
+        discard deserializePageKv(pageData)
+        let uuid = blobPut(s.blobs, pageData)
+        entries.add (boundary, uuid)
+      let numLeaves = entries.len.uint32
+      var (root, height) = buildIndexTree(s, entries, 0)
+      if height == 0:
+        s.trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: 0)
+      else:
+        s.trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: numLeaves)
+  let newRoot = makeRootName()
+  discard blobPutRoot(s.blobs, newRoot, serializeRoot(s.trees))
+  s.currentRoot = newRoot
+  if clearJournal:
+    journalTruncate(s)
+
 # ══════════════════════════════════════════════════════════════════════════════
 # GC
 # ══════════════════════════════════════════════════════════════════════════════
@@ -646,7 +765,7 @@ proc newPageStore*(config: Table[string, string]): ptr PageStoreInner =
   let readOnly = config.getOrDefault("read_only", "false") == "true"
   let path = config.getOrDefault("path", "")
   let pageCacheSize = parseInt(config.getOrDefault("page_cache_size", "67108864"))
-  let numCf = 4
+  let numCf = parseInt(config.getOrDefault("num_cf", "64"))
 
   let blobs: BlobStore =
     case backend:

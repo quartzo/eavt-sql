@@ -729,3 +729,209 @@ suite "kvstore: concurrency — put + get integrity":
 
   test "no false negatives under sustained concurrent read + write":
     runNoFalseNegatives()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Key-value CF tests (CFs >= 10)
+# ══════════════════════════════════════════════════════════════════════════════
+
+suite "kvstore: key-value API (putKv/getKv)":
+  test "putKv + getKv round-trip":
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
+    kv.putKv(10, @[byte(1), 2, 3], @[byte(10), 20, 30])
+    let val = kv.getKv(10, @[byte(1), 2, 3])
+    check val.isSome
+    check val.get == @[byte(10), 20, 30]
+    kv.close()
+
+  test "getKv returns none for missing key":
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
+    let val = kv.getKv(10, @[byte(9), 9])
+    check val.isNone
+    kv.close()
+
+  test "putKv overwrites existing key":
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
+    kv.putKv(10, @[byte(1)], @[byte(100)])
+    kv.putKv(10, @[byte(1)], @[byte(200)])
+    let val = kv.getKv(10, @[byte(1)])
+    check val.isSome
+    check val.get == @[byte(200)]
+    kv.close()
+
+  test "key-value CFs are independent from key-only CFs":
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
+    kv.put(0, @[byte(5)])
+    kv.putKv(10, @[byte(5)], @[byte(99)])
+    check kv.get(0, @[byte(5)])
+    let val = kv.getKv(10, @[byte(5)])
+    check val.isSome
+    check val.get == @[byte(99)]
+    kv.close()
+
+  test "empty value is preserved":
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
+    let emptyVal: seq[byte] = @[]
+    kv.putKv(10, @[byte(7)], emptyVal)
+    let val = kv.getKv(10, @[byte(7)])
+    check val.isSome
+    check val.get == emptyVal
+    kv.close()
+
+suite "kvstore: key-value flush":
+  test "putKv survives flush":
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
+    kv.putKv(10, @[byte(1)], @[byte(11)])
+    kv.putKv(10, @[byte(2)], @[byte(22)])
+    kv.flush()
+    check kv.getKv(10, @[byte(1)]).get == @[byte(11)]
+    check kv.getKv(10, @[byte(2)]).get == @[byte(22)]
+    kv.close()
+
+  test "putKv survives flush + more writes":
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
+    kv.putKv(10, @[byte(1)], @[byte(10)])
+    kv.flush()
+    kv.putKv(10, @[byte(2)], @[byte(20)])
+    check kv.getKv(10, @[byte(1)]).get == @[byte(10)]
+    check kv.getKv(10, @[byte(2)]).get == @[byte(20)]
+    kv.flush()
+    check kv.getKv(10, @[byte(1)]).get == @[byte(10)]
+    check kv.getKv(10, @[byte(2)]).get == @[byte(20)]
+    kv.close()
+
+  test "overwrite survives flush":
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
+    kv.putKv(10, @[byte(1)], @[byte(100)])
+    kv.flush()
+    kv.putKv(10, @[byte(1)], @[byte(200)])
+    kv.flush()
+    check kv.getKv(10, @[byte(1)]).get == @[byte(200)]
+    kv.close()
+
+suite "kvstore: key-value scan":
+  proc scanPairs(kv: KVStore; cf: int): seq[(seq[byte], seq[byte])] =
+    let mc = kv.openScanCursorKv(cf)
+    while true:
+      let kvp = mc.nextKv()
+      if kvp.isNone: break
+      result.add kvp.get
+
+  test "scan returns pairs in key order":
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
+    kv.putKv(10, @[byte(3)], @[byte(30)])
+    kv.putKv(10, @[byte(1)], @[byte(10)])
+    kv.putKv(10, @[byte(2)], @[byte(20)])
+    let pairs = scanPairs(kv, 10)
+    check pairs.len == 3
+    check pairs[0] == (@[byte(1)], @[byte(10)])
+    check pairs[1] == (@[byte(2)], @[byte(20)])
+    check pairs[2] == (@[byte(3)], @[byte(30)])
+    kv.close()
+
+  test "scan after flush returns all pairs":
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
+    kv.putKv(10, @[byte(5)], @[byte(55)])
+    kv.putKv(10, @[byte(2)], @[byte(22)])
+    kv.flush()
+    kv.putKv(10, @[byte(8)], @[byte(88)])
+    let pairs = scanPairs(kv, 10)
+    check pairs.len == 3
+    check pairs[0] == (@[byte(2)], @[byte(22)])
+    check pairs[1] == (@[byte(5)], @[byte(55)])
+    check pairs[2] == (@[byte(8)], @[byte(88)])
+    kv.close()
+
+  test "scan empty CF returns nothing":
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
+    let pairs = scanPairs(kv, 10)
+    check pairs.len == 0
+    kv.close()
+
+  test "scan with many keys (multi-page)":
+    let cfg = {"backend": "memory"}.toTable
+    let kv = newKVStore(cfg)
+    for i in 0..<200:
+      var k = newSeq[byte](32)
+      k[0] = byte((i shr 24) and 0xFF)
+      k[1] = byte((i shr 16) and 0xFF)
+      k[2] = byte((i shr 8) and 0xFF)
+      k[3] = byte(i and 0xFF)
+      for j in 4..<32: k[j] = byte('A'.ord + (i mod 26))
+      var v = @[byte(i and 0xFF)]
+      kv.putKv(10, k, v)
+    kv.flush()
+    let pairs = scanPairs(kv, 10)
+    check pairs.len == 200
+    for i in 0..<199:
+      check cmpSeq(pairs[i][0], pairs[i+1][0]) < 0
+    kv.close()
+
+suite "kvstore: key-value concurrency":
+  proc runConcurrentPutKv() =
+    initSpawn()
+    var kv = newKVStore({"backend": "memory"}.toTable)
+    const N = 4
+    const M = 30
+
+    var done: Atomic[int]
+    done.store(0, moRelaxed)
+    for t in 0..<N:
+      spawn(proc() {.gcsafe.} =
+        # Use same pattern as putThreadTaggedAt but with putKv
+        let kvRef = (addr kv)[]
+        for i in 0..<M:
+          let key = @[byte((t shl 8) or i)]
+          let val = @[byte(t), byte(i)]
+          kvRef.putKv(10, key, val)
+        discard done.fetchAdd(1, moRelaxed))
+    waitForCount(done, N)
+
+    for t in 0..<N:
+      for i in 0..<M:
+        let key = @[byte((t shl 8) or i)]
+        let val = kv.getKv(10, key)
+        check val.isSome
+        check val.get == @[byte(t), byte(i)]
+    kv.close()
+
+  test "concurrent putKv from multiple threads":
+    runConcurrentPutKv()
+
+  proc runPutKvSurvivesConcurrentFlush() =
+    initSpawn()
+    var kv = newKVStore({"backend": "memory"}.toTable)
+
+    for i in 0..<30:
+      kv.putKv(10, @[byte(i)], @[byte(i * 2)])
+
+    var done: Atomic[int]
+    done.store(0, moRelaxed)
+    spawn(proc() {.gcsafe.} =
+      let kvRef = (addr kv)[]
+      for i in 30..<50:
+        kvRef.putKv(10, @[byte(i)], @[byte(i * 2)])
+      discard done.fetchAdd(1, moRelaxed))
+    spawn(proc() {.gcsafe.} =
+      flushAt(addr kv)
+      discard done.fetchAdd(1, moRelaxed))
+    waitForCount(done, 2)
+
+    for i in 0..<50:
+      let val = kv.getKv(10, @[byte(i)])
+      check val.isSome
+      check val.get == @[byte(i * 2)]
+    kv.close()
+
+  test "putKv survives concurrent flush":
+    runPutKvSurvivesConcurrentFlush()

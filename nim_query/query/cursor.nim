@@ -69,6 +69,8 @@ type
     lastKey*: seq[byte]
     atEnd*: bool
     curKey*: Option[seq[byte]]
+    curPair*: Option[(seq[byte], seq[byte])]
+    isKv*: bool
 
   Cursor* = ref object
     case kind*: CursorKind
@@ -88,6 +90,7 @@ type
 
 proc isValid*(c: Cursor): bool {.gcsafe.}
 proc currentKey*(c: Cursor): Option[seq[byte]] {.gcsafe.}
+proc currentPair*(c: Cursor): Option[(seq[byte], seq[byte])] {.gcsafe.}
 proc step*(c: Cursor) {.gcsafe.}
 proc seek*(c: Cursor; target: seq[byte]) {.gcsafe.}
 proc invalidate*(c: Cursor) {.gcsafe.}
@@ -108,14 +111,18 @@ proc advance*(mc: MergedCursor) {.gcsafe.} =
       continue
     mc.lastKey = key
     mc.curKey = some(key)
-    var src = mc.sources[srcIdx]
-    src.step()
-    if src.isValid():
-      let nk = src.currentKey()
+    if mc.isKv:
+      var src = mc.sources[srcIdx]
+      mc.curPair = src.currentPair()
+    var src2 = mc.sources[srcIdx]
+    src2.step()
+    if src2.isValid():
+      let nk = src2.currentKey()
       if nk.isSome: mc.heap.push((nk.get, srcIdx))
     return
   mc.atEnd = true
   mc.curKey = none(seq[byte])
+  mc.curPair = none((seq[byte], seq[byte]))
 
 proc newMergedCursor*(sources: seq[Cursor]): MergedCursor {.gcsafe.} =
   result = MergedCursor(sources: sources, atEnd: false)
@@ -139,6 +146,16 @@ proc next*(mc: MergedCursor): Option[seq[byte]] {.gcsafe.} =
   mc.ensure()
   result = mc.curKey
   mc.curKey = none(seq[byte])
+  mc.advance()
+
+proc peekKv*(mc: MergedCursor): Option[(seq[byte], seq[byte])] {.gcsafe.} =
+  mc.ensure()
+  if mc.atEnd: none((seq[byte], seq[byte])) else: mc.curPair
+
+proc nextKv*(mc: MergedCursor): Option[(seq[byte], seq[byte])] {.gcsafe.} =
+  mc.ensure()
+  result = mc.curPair
+  mc.curPair = none((seq[byte], seq[byte]))
   mc.advance()
 
 proc seek*(mc: MergedCursor; target: seq[byte]) {.gcsafe.} =
@@ -173,6 +190,14 @@ proc currentKey*(c: Cursor): Option[seq[byte]] {.gcsafe.} =
     if c.mockPos < c.mockKeys.len: some(c.mockKeys[c.mockPos])
     else: none[seq[byte]]()
   of ckInvalid: none[seq[byte]]()
+
+proc currentPair*(c: Cursor): Option[(seq[byte], seq[byte])] {.gcsafe.} =
+  case c.kind
+  of ckPageStore: c.ps.peekKv()
+  of ckTreap: c.tc.peekKv()
+  of ckMerged: c.mc.peekKv()
+  of ckMock: none((seq[byte], seq[byte]))
+  of ckInvalid: none((seq[byte], seq[byte]))
 
 proc step*(c: Cursor) {.gcsafe.} =
   case c.kind

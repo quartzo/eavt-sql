@@ -7,10 +7,13 @@ import std/options
 import treap_backend  # TreapNode, Key, cmpKey
 
 type
+  KvPair* = tuple[key: Key, value: Option[Value]]
+
   TreapCursor* = ref object
     root: TreapNode
     stack: seq[TreapNode]
     current: Option[Key]
+    currentKv: Option[KvPair]
     atEnd*: bool
 
 # ── Internal: seek stack to first node >= target ──
@@ -29,9 +32,11 @@ proc seekStack(c: TreapCursor; target: Key) =
 proc advance(c: TreapCursor) =
   if c.atEnd: return
   c.current = none(Key)
+  c.currentKv = none(KvPair)
   while c.stack.len > 0:
     let cur = c.stack.pop()
     c.current = some(cur.key)
+    c.currentKv = some((key: cur.key, value: cur.value))
     var r = cur.right
     while r != nil:
       c.stack.add(r); r = r.left
@@ -57,6 +62,21 @@ proc peek*(c: TreapCursor): Option[Key] =
 proc next*(c: TreapCursor): Option[Key] =
   c.ensure()
   result = c.current
+  c.advance()
+
+proc peekKv*(c: TreapCursor): Option[(seq[byte], seq[byte])] =
+  c.ensure()
+  if c.atEnd: none((seq[byte], seq[byte]))
+  elif c.currentKv.isSome:
+    let (key, val) = c.currentKv.get
+    some((key, val.get(@[])))
+  else: none((seq[byte], seq[byte]))
+
+proc nextKv*(c: TreapCursor): Option[(seq[byte], seq[byte])] =
+  c.ensure()
+  if c.currentKv.isSome:
+    let (key, val) = c.currentKv.get
+    result = some((key, val.get(@[])))
   c.advance()
 
 proc seek*(c: TreapCursor; target: Key) =

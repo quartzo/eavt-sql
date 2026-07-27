@@ -52,16 +52,20 @@ proc runBackgroundFlush*(kv: KVStore) {.gcsafe.}
 
 proc newKVStore*(config: Table[string, string]): KVStore =
   let readOnly = config.getOrDefault("read_only", "false") == "true"
-  let ps = newPageStore(config)
+  var cfg = config
+  if not cfg.hasKey("num_cf"):
+    cfg["num_cf"] = "64"  ## CFs 0-3: EAVT indexes (key-only). CFs 10+: key-value.
+  let ps = newPageStore(cfg)
   if ps == nil: return nil
-  let mt = mt_be.newMemTable(4)
+  let numCf = parseInt(cfg["num_cf"])
+  let mt = mt_be.newMemTable(numCf)
   if mt == nil: closePageStore(ps); return nil
   result = KVStore()
   result.ps = ps; result.mt = mt
   result.config = config
   result.path = config.getOrDefault("path", ":memory:")
   result.readOnly = readOnly
-  result.numCf = 4
+  result.numCf = numCf
   result.flushThreshold = parseUInt(config.getOrDefault("flush_threshold", "67108864")).uint64
   result.gcMaxAgeSecs = parseUInt(config.getOrDefault("gc_max_age_secs", "43200")).uint64
   result.gcMaxRootCount = parseInt(config.getOrDefault("gc_max_root_count", "10"))
@@ -143,6 +147,56 @@ proc get*(kv: KVStore; cf: int; key: openArray[byte]): bool {.gcsafe.} =
   if flushRoot != nil and mt_be.containsKey(flushRoot, k): return true
   keyExists(kv.ps[], cf, k)
 
+proc putKv*(kv: KVStore; cf: int; key, value: openArray[byte]) {.gcsafe.} =
+  var k = newSeq[byte](key.len)
+  if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
+  var v = newSeq[byte](value.len)
+  if value.len > 0: copyMem(addr v[0], unsafeAddr value[0], value.len)
+  var needsFlush = false
+  kv.lock.withLock:
+    kv.mtSize = kv.mt.putKv(cf, k, v)
+    if kv.mtSize >= kv.flushThreshold: needsFlush = true
+    if kv.path.len > 0 and kv.path != ":memory:" and not kv.readOnly:
+      try:
+        let journalPath = kv.path / "journal" / "journal"
+        createDir(parentDir(journalPath))
+        var f = open(journalPath, fmAppend)
+        var jk = newSeq[byte](1 + key.len)
+        jk[0] = byte(cf)
+        if key.len > 0: copyMem(addr jk[1], unsafeAddr key[0], key.len)
+        let totKlen = 1 + key.len
+        var hdr = newSeq[byte](4 + totKlen + 4 + value.len + 1)
+        hdr[0] = byte((totKlen shr 24) and 0xFF); hdr[1] = byte((totKlen shr 16) and 0xFF)
+        hdr[2] = byte((totKlen shr 8) and 0xFF); hdr[3] = byte(totKlen and 0xFF)
+        copyMem(addr hdr[4], addr jk[0], totKlen)
+        let vlen = value.len
+        hdr[4 + totKlen] = byte((vlen shr 24) and 0xFF)
+        hdr[5 + totKlen] = byte((vlen shr 16) and 0xFF)
+        hdr[6 + totKlen] = byte((vlen shr 8) and 0xFF)
+        hdr[7 + totKlen] = byte(vlen and 0xFF)
+        if value.len > 0: copyMem(addr hdr[8 + totKlen], addr v[0], value.len)
+        hdr[8 + totKlen + value.len] = 0
+        discard f.writeBytes(hdr, 0, hdr.len)
+        f.close()
+      except: discard
+  if needsFlush: kv.requestFlush()
+
+proc getKv*(kv: KVStore; cf: int; key: openArray[byte]): Option[seq[byte]] {.gcsafe.} =
+  var k = newSeq[byte](key.len)
+  if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
+  var liveRoot, flushRoot: mt_be.TreapNode
+  kv.lock.withLock:
+    liveRoot = kv.mt.hnd.live[cf]
+    if kv.flushRoots.len > 0:
+      flushRoot = kv.flushRoots[cf]
+  if liveRoot != nil:
+    let v = mt_be.getValue(liveRoot, k)
+    if v.isSome: return v
+  if flushRoot != nil:
+    let v = mt_be.getValue(flushRoot, k)
+    if v.isSome: return v
+  keyExistsKv(kv.ps[], cf, k)
+
 proc flush*(kv: KVStore) {.gcsafe.} =
   if kv.readOnly: return
   var roots: seq[mt_be.TreapNode]
@@ -152,15 +206,27 @@ proc flush*(kv: KVStore) {.gcsafe.} =
     kv.mt.clear(); kv.mtSize = 0
     kv.flushRoots = roots
   var keysByCf: seq[(int, seq[seq[byte]])] = @[]
+  var pairsByCf: seq[(int, seq[(seq[byte], seq[byte])])] = @[]
   for cf in 0..<kv.numCf:
     if roots[cf] != nil:
-      var keys: seq[seq[byte]] = @[]
-      let tc = newTreapCursor(roots[cf])
-      while not tc.atEnd:
-        let k = tc.next()
-        if k.isSome: keys.add(k.get)
-      if keys.len > 0: keysByCf.add (cf, keys)
+      if cf >= 10:
+        var pairs: seq[(seq[byte], seq[byte])] = @[]
+        let tc = newTreapCursor(roots[cf])
+        while not tc.atEnd:
+          let kvp = tc.nextKv()
+          if kvp.isSome:
+            let (key, val) = kvp.get
+            pairs.add (key, val)
+        if pairs.len > 0: pairsByCf.add (cf, pairs)
+      else:
+        var keys: seq[seq[byte]] = @[]
+        let tc = newTreapCursor(roots[cf])
+        while not tc.atEnd:
+          let k = tc.next()
+          if k.isSome: keys.add(k.get)
+        if keys.len > 0: keysByCf.add (cf, keys)
   if keysByCf.len > 0: commitMerge(kv.ps[], keysByCf, true)
+  if pairsByCf.len > 0: commitMergeKv(kv.ps[], pairsByCf, true)
   kv.lock.withLock:
     kv.flushRoots = @[]; kv.mtSize = 0
 
@@ -276,8 +342,10 @@ proc openScanCursor*(kv: KVStore; cf: int): MergedCursor {.gcsafe.} =
     liveRoot = kv.mt.hnd.live[cf]
 
   if psSnap.rootUuid != default(array[16, byte]):
-    sources.add pageStoreCursor(PageStoreCursor(
-      s: kv.ps, cf: cf, rootUuid: psSnap.rootUuid, height: psSnap.height))
+    var psc = PageStoreCursor(
+      s: kv.ps, cf: cf, rootUuid: psSnap.rootUuid, height: psSnap.height,
+      isKv: cf >= 10)
+    sources.add pageStoreCursor(psc)
 
   if flushRoot != nil:
     let tc = newTreapCursor(flushRoot)
@@ -290,3 +358,37 @@ proc openScanCursor*(kv: KVStore; cf: int): MergedCursor {.gcsafe.} =
       sources.add treapCursor(tc)
 
   result = newMergedCursor(sources)
+
+proc openScanCursorKv*(kv: KVStore; cf: int): MergedCursor {.gcsafe.} =
+  ## Open a scan cursor for key-value CFs (>= 10). Returns a MergedCursor
+  ## with isKv=true; use peekKv/nextKv to read (key, value) pairs.
+  var sources: seq[Cursor] = @[]
+
+  var psSnap: PageStoreSnapshot
+  var flushRoot, liveRoot: mt_be.TreapNode
+
+  kv.lock.withLock:
+    let tree = kv.ps[].trees[cf]
+    psSnap = PageStoreSnapshot(rootUuid: tree.rootUuid, height: tree.height)
+    if kv.flushRoots.len > 0:
+      flushRoot = kv.flushRoots[cf]
+    liveRoot = kv.mt.hnd.live[cf]
+
+  if psSnap.rootUuid != default(array[16, byte]):
+    var psc = PageStoreCursor(
+      s: kv.ps, cf: cf, rootUuid: psSnap.rootUuid, height: psSnap.height,
+      isKv: true)
+    sources.add pageStoreCursor(psc)
+
+  if flushRoot != nil:
+    let tc = newTreapCursor(flushRoot)
+    if not tc.atEnd:
+      sources.add treapCursor(tc)
+
+  if liveRoot != nil:
+    let tc = newTreapCursor(liveRoot)
+    if not tc.atEnd:
+      sources.add treapCursor(tc)
+
+  result = newMergedCursor(sources)
+  result.isKv = true

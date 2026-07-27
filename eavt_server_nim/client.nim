@@ -110,7 +110,15 @@ proc exec*(c: var EavtClient; sql: string; params: seq[string] = @[]): seq[SqlRe
     if node.hasKey("rows"):
       for row in node["rows"]:
         var r: seq[string]
-        for v in row: r.add($v)
+        for v in row:
+          if v.kind == JArray:
+            var bs: seq[byte]
+            for b in v: bs.add(byte(b.getInt()))
+            var s = newString(bs.len)
+            if bs.len > 0: copyMem(addr s[0], addr bs[0], bs.len)
+            r.add(s)
+          else:
+            r.add($v)
         sr.rows.add(r)
     result.add(sr)
     if not node["more"].getBool: break
@@ -146,7 +154,95 @@ proc dump*(c: var EavtClient; index: string = "EAVT"): seq[SqlResult] =
     if node.hasKey("rows"):
       for row in node["rows"]:
         var r: seq[string]
-        for v in row: r.add($v)
+        for v in row:
+          if v.kind == JArray:
+            var bs: seq[byte]
+            for b in v: bs.add(byte(b.getInt()))
+            var s = newString(bs.len)
+            if bs.len > 0: copyMem(addr s[0], addr bs[0], bs.len)
+            r.add(s)
+          else:
+            r.add($v)
+        sr.rows.add(r)
+    result.add(sr)
+    if not node["more"].getBool: break
+
+proc kvPut*(c: var EavtClient; cf: int; key, value: string): string =
+  ## Send a kv put request. key and value are raw byte strings.
+  var node = newJObject()
+  node["type"] = %"kv"
+  node["op"] = %"put"
+  node["cf"] = %cf
+  node["key"] = %key
+  node["value"] = %value
+  sendMsg(c, msgpack2json.fromJsonNode(node))
+  let resp = recvMsg(c)
+  if resp.len == 0: return "ok"
+  try:
+    let n = toJsonNode(resp)
+    if n.hasKey("error") and n["error"].getStr.len > 0:
+      return "error: " & n["error"].getStr
+  except: discard
+  return "ok"
+
+proc kvGet*(c: var EavtClient; cf: int; key: string): string =
+  ## Send a kv get request. Returns the value as a raw string, or "(none)".
+  var node = newJObject()
+  node["type"] = %"kv"
+  node["op"] = %"get"
+  node["cf"] = %cf
+  node["key"] = %key
+  sendMsg(c, msgpack2json.fromJsonNode(node))
+  let resp = recvMsg(c)
+  if resp.len == 0: return "(none)"
+  try:
+    let n = toJsonNode(resp)
+    if n.hasKey("error") and n["error"].getStr.len > 0:
+      return "error: " & n["error"].getStr
+    if n.hasKey("rows") and n["rows"].len > 0:
+      let row = n["rows"][0]
+      if row.len > 0:
+        # If it's a JSON array of ints (bytes), decode to string
+        if row[0].kind == JArray:
+          var bs: seq[byte]
+          for v in row[0]:
+            bs.add(byte(v.getInt()))
+          var s = newString(bs.len)
+          if bs.len > 0: copyMem(addr s[0], addr bs[0], bs.len)
+          return s
+        return $row[0]
+  except: discard
+  return "(none)"
+
+proc kvScan*(c: var EavtClient; cf: int): seq[SqlResult] =
+  ## Send a kv scan request. Returns streaming results like exec().
+  var node = newJObject()
+  node["type"] = %"kv"
+  node["op"] = %"scan"
+  node["cf"] = %cf
+  sendMsg(c, msgpack2json.fromJsonNode(node))
+  while true:
+    let resp = recvMsg(c)
+    if resp.len == 0: break
+    let node = toJsonNode(resp)
+    if node.hasKey("error") and node["error"].getStr.len > 0:
+      result.add(SqlResult(error: node["error"].getStr))
+      break
+    var sr = SqlResult()
+    if node.hasKey("columns"):
+      for col in node["columns"]: sr.columns.add(col.getStr)
+    if node.hasKey("rows"):
+      for row in node["rows"]:
+        var r: seq[string]
+        for v in row:
+          if v.kind == JArray:
+            var bs: seq[byte]
+            for b in v: bs.add(byte(b.getInt()))
+            var s = newString(bs.len)
+            if bs.len > 0: copyMem(addr s[0], addr bs[0], bs.len)
+            r.add(s)
+          else:
+            r.add($v)
         sr.rows.add(r)
     result.add(sr)
     if not node["more"].getBool: break

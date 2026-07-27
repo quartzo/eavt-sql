@@ -4,7 +4,7 @@ import scheme
 
 type
   RequestKind* = enum
-    rkSql, rkAdmin
+    rkSql, rkAdmin, rkKv
   Request* = object
     case kind*: RequestKind
     of rkSql:
@@ -12,6 +12,11 @@ type
       params*: seq[string]
     of rkAdmin:
       command*: string
+    of rkKv:
+      kvOp*: string       ## "put", "get", "scan"
+      kvCf*: int
+      kvKey*: seq[byte]
+      kvValue*: seq[byte]  ## used for "put"
 
 proc parseRequest*(data: string): Request =
   let node = toJsonNode(data)
@@ -24,6 +29,12 @@ proc parseRequest*(data: string): Request =
         result.params.add(p.getStr)
   of "admin":
     result = Request(kind: rkAdmin, command: node["command"].getStr)
+  of "kv":
+    result = Request(kind: rkKv, kvOp: node["op"].getStr, kvCf: node["cf"].getInt)
+    if node.hasKey("key"):
+      result.kvKey = cast[seq[byte]](node["key"].getStr)
+    if node.hasKey("value"):
+      result.kvValue = cast[seq[byte]](node["value"].getStr)
   else:
     raise newException(ValueError, "unknown request type: " & t)
 

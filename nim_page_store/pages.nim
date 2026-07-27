@@ -88,3 +88,70 @@ proc buildPages*(keys: seq[seq[byte]]): seq[(seq[byte], seq[byte])] =
   let mid = keys.len div 2
   result = buildPages(keys[0 ..< mid])
   result.add buildPages(keys[mid .. ^1])
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Key-value leaf page serialization (CFs >= 10)
+# ══════════════════════════════════════════════════════════════════════════════
+
+proc serializePageKv*(pairs: seq[(seq[byte], seq[byte])]): seq[byte] =
+  ## Serialize key-value pairs with prefix compression on keys.
+  ## Format: count(u16) + for each: plen(varint) slen(varint) suffix(bytes) vlen(varint) value(bytes)
+  result = newSeqOfCap[byte](pairs.len * 16)
+  let count = pairs.len.uint16
+  result.add byte(count shr 8)
+  result.add byte(count and 0xFF)
+  var prev: seq[byte] = @[]
+  for (key, value) in pairs:
+    let plen = commonPrefixLen(prev, key)
+    let suffix = key[plen .. ^1]
+    writeVarint(result, plen)
+    writeVarint(result, suffix.len)
+    result.add suffix
+    writeVarint(result, value.len)
+    result.add value
+    prev = key
+
+proc deserializePageKv*(data: openArray[byte]): seq[(seq[byte], seq[byte])] =
+  if data.len < 2:
+    raise newException(ValueError, "page too short")
+  let count = (uint16(data[0]) shl 8 or uint16(data[1])).int
+  result = newSeqOfCap[(seq[byte], seq[byte])](count)
+  var offset = 2
+  var prev: seq[byte] = @[]
+  for _ in 0 ..< count:
+    let (plenRaw, next1) = readVarint(data, offset)
+    offset = next1
+    let (slen, next2) = readVarint(data, offset)
+    offset = next2
+    let keyEnd = offset + slen
+    if keyEnd > data.len:
+      raise newException(ValueError, "truncated key")
+    let plen = min(plenRaw, prev.len)
+    var key = newSeqOfCap[byte](plen + slen)
+    key.add prev[0 ..< plen]
+    key.add data[offset ..< keyEnd]
+    offset = keyEnd
+    let (vlen, next3) = readVarint(data, offset)
+    offset = next3
+    let valEnd = offset + vlen
+    if valEnd > data.len:
+      raise newException(ValueError, "truncated value")
+    var value = newSeq[byte](vlen)
+    if vlen > 0: copyMem(addr value[0], unsafeAddr data[offset], vlen)
+    offset = valEnd
+    prev = key
+    result.add (key, value)
+
+proc buildPagesKv*(pairs: seq[(seq[byte], seq[byte])]): seq[(seq[byte], seq[byte])] =
+  if pairs.len == 0:
+    return @[]
+  if pairs.len == 1:
+    return @[(pairs[0][0], serializePageKv(pairs))]
+  var total: int = 0
+  for (k, v) in pairs:
+    total += k.len + v.len
+  if total <= MaxRawSize:
+    return @[(pairs[0][0], serializePageKv(pairs))]
+  let mid = pairs.len div 2
+  result = buildPagesKv(pairs[0 ..< mid])
+  result.add buildPagesKv(pairs[mid .. ^1])

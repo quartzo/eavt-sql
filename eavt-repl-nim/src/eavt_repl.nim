@@ -30,7 +30,8 @@ proc executeCommands(client: var EavtClient; commands: string): int =
       continue
     if stripped.startsWith('.'):
       # dot commands handled inline
-      case stripped.toLowerAscii()
+      let cmd = stripped.splitWhitespace()[0].toLowerAscii()
+      case cmd
       of ".quit", ".exit":
         return 0
       of ".flush":
@@ -48,18 +49,62 @@ proc executeCommands(client: var EavtClient; commands: string): int =
       of ".tree":
         let r = client.admin("tree")
         echo r
+      of ".kv-put":
+        let parts = stripped.splitWhitespace()
+        if parts.len < 4:
+          stderr.writeLine "Usage: .kv-put <cf> <key> <value>"
+          return 1
+        let cf = try: parseInt(parts[1]) except: -1
+        if cf < 10:
+          stderr.writeLine "Error: cf must be >= 10"
+          return 1
+        echo client.kvPut(cf, parts[2], parts[3])
+      of ".kv-get":
+        let parts = stripped.splitWhitespace()
+        if parts.len < 3:
+          stderr.writeLine "Usage: .kv-get <cf> <key>"
+          return 1
+        let cf = try: parseInt(parts[1]) except: -1
+        if cf < 10:
+          stderr.writeLine "Error: cf must be >= 10"
+          return 1
+        echo client.kvGet(cf, parts[2])
+      of ".kv-scan":
+        let parts = stripped.splitWhitespace()
+        if parts.len < 2:
+          stderr.writeLine "Usage: .kv-scan <cf>"
+          return 1
+        let cf = try: parseInt(parts[1]) except: -1
+        if cf < 10:
+          stderr.writeLine "Error: cf must be >= 10"
+          return 1
+        for chunk in client.kvScan(cf):
+          if chunk.error.len > 0:
+            stderr.writeLine "Error: ", chunk.error
+            return 1
+          for row in chunk.rows:
+            echo row.join("\t")
       of ".help":
         echo UsageText
       else:
-        if stripped.startsWith(".dump"):
+        if cmd == ".dump":
           let parts = stripped.splitWhitespace()
-          let index = if parts.len > 1: parts[1].toUpperAscii() else: "EAVT"
-          for chunk in client.dump(index):
-            if chunk.error.len > 0:
-              stderr.writeLine "Error: ", chunk.error
-              return 1
-            for row in chunk.rows:
-              echo row.join("\t")
+          let arg = if parts.len > 1: parts[1] else: "EAVT"
+          let cfNum = try: parseInt(arg) except: -1
+          if cfNum >= 10:
+            for chunk in client.kvScan(cfNum):
+              if chunk.error.len > 0:
+                stderr.writeLine "Error: ", chunk.error
+                return 1
+              for row in chunk.rows:
+                echo row.join("\t")
+          else:
+            for chunk in client.dump(arg.toUpperAscii()):
+              if chunk.error.len > 0:
+                stderr.writeLine "Error: ", chunk.error
+                return 1
+              for row in chunk.rows:
+                echo row.join("\t")
         else:
           stderr.writeLine "Unknown command: ", stripped
           return 1

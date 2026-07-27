@@ -96,6 +96,35 @@ proc execQuery(eng: SharedEngine; req: Request; fd: SocketHandle) {.gcsafe.} =
       node["more"] = %false
       writeMsg(fd, msgpack2json.fromJsonNode(node))
 
+  of rkKv:
+    case req.kvOp
+    of "put":
+      eng.kv.putKv(req.kvCf, req.kvKey, req.kvValue)
+      writeResponse(fd, @[], @[], false)
+    of "get":
+      let val = eng.kv.getKv(req.kvCf, req.kvKey)
+      if val.isSome:
+        writeResponse(fd, @[], @[@[SExpr(kind: sBytes, bytesval: val.get)]], false)
+      else:
+        writeResponse(fd, @[], @[], false)
+    of "scan":
+      let mc = eng.kv.openScanCursorKv(req.kvCf)
+      var rows: seq[seq[SExpr]]
+      while true:
+        let kvp = mc.nextKv()
+        if kvp.isNone: break
+        let (key, value) = kvp.get
+        rows.add(@[
+          SExpr(kind: sBytes, bytesval: key),
+          SExpr(kind: sBytes, bytesval: value),
+        ])
+        if rows.len >= 100:
+          writeResponse(fd, @["key", "value"], rows, true)
+          rows.setLen(0)
+      writeResponse(fd, @["key", "value"], rows, false)
+    else:
+      writeResponse(fd, @[], @[], false, "unknown kv op: " & req.kvOp)
+
 proc dumpDatoms(eng: SharedEngine; fd: SocketHandle; command: string) {.gcsafe.} =
   let parts = command.splitWhitespace()
   let index = if parts.len >= 2: parts[1].toUpperAscii()
@@ -137,6 +166,11 @@ proc handleConnection*(eng: SharedEngine; fd: SocketHandle) {.gcsafe.} =
       except CatchableError as e:
         writeResponse(fd, @[], @[], false, e.msg)
     of rkAdmin:
+      try:
+        execQuery(eng, req, fd)
+      except CatchableError as e:
+        writeResponse(fd, @[], @[], false, e.msg)
+    of rkKv:
       try:
         execQuery(eng, req, fd)
       except CatchableError as e:

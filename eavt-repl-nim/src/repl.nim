@@ -80,6 +80,23 @@ proc cmdDump(index: string) =
         for v in row: parts.add(parseValue(v))
         echo parts.join("\t")
 
+proc cmdKvPut(cf: int; key, value: string) =
+  catchDisconnect:
+    echo gClient.kvPut(cf, key, value)
+
+proc cmdKvGet(cf: int; key: string) =
+  catchDisconnect:
+    echo gClient.kvGet(cf, key)
+
+proc cmdKvScan(cf: int) =
+  catchDisconnect:
+    for chunk in gClient.kvScan(cf):
+      if chunk.error.len > 0:
+        stderr.writeLine "Error: ", chunk.error
+        return
+      for row in chunk.rows:
+        echo row.join("\t")
+
 # ── dot dispatcher ───────────────────────────────────────────────────
 
 const HelpText = """
@@ -91,7 +108,10 @@ Dot commands (no semicolon):
   .status                Database overview
   .tree                  Per-column-family stats
   .memtable              MemTable contents and sizes
-  .dump [EAVT|AEVT|...]  Dump active datoms
+  .dump [EAVT|AEVT|...|CF]  Dump active datoms (or KV CF if number >= 10)
+  .kv-put <cf> <key> <value>  Put key-value pair (CFs >= 10)
+  .kv-get <cf> <key>          Get value by key
+  .kv-scan <cf>               Scan all pairs in a CF
 
 SQL statements must end with ;"""
 
@@ -115,12 +135,44 @@ proc handleDot(line: string): bool =
   of ".memtable":
     cmdMemtable()
   of ".dump":
-    let index = if args.len > 0: args[0].toUpperAscii() else: "EAVT"
-    const valid = ["EAVT", "AEVT", "AVET", "VAET"]
-    if index notin valid:
-      stderr.writeLine &"Error: index must be one of {valid.join(\", \")}"
+    let arg = if args.len > 0: args[0] else: "EAVT"
+    let cfNum = try: parseInt(arg) except: -1
+    if cfNum >= 10:
+      cmdKvScan(cfNum)
+    else:
+      let index = arg.toUpperAscii()
+      const valid = ["EAVT", "AEVT", "AVET", "VAET"]
+      if index notin valid:
+        stderr.writeLine &"Error: index must be one of {valid.join(\", \")} or a CF number >= 10"
+        return false
+      cmdDump(index)
+  of ".kv-put":
+    if args.len < 3:
+      stderr.writeLine "Usage: .kv-put <cf> <key> <value>"
       return false
-    cmdDump(index)
+    let cf = try: parseInt(args[0]) except: -1
+    if cf < 10:
+      stderr.writeLine "Error: cf must be >= 10 for key-value operations"
+      return false
+    cmdKvPut(cf, args[1], args[2])
+  of ".kv-get":
+    if args.len < 2:
+      stderr.writeLine "Usage: .kv-get <cf> <key>"
+      return false
+    let cf = try: parseInt(args[0]) except: -1
+    if cf < 10:
+      stderr.writeLine "Error: cf must be >= 10 for key-value operations"
+      return false
+    cmdKvGet(cf, args[1])
+  of ".kv-scan":
+    if args.len < 1:
+      stderr.writeLine "Usage: .kv-scan <cf>"
+      return false
+    let cf = try: parseInt(args[0]) except: -1
+    if cf < 10:
+      stderr.writeLine "Error: cf must be >= 10 for key-value operations"
+      return false
+    cmdKvScan(cf)
   else:
     stderr.writeLine &"Unknown command: {line}"
   return false

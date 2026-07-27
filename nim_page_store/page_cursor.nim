@@ -27,10 +27,13 @@ type
     atEnd*: bool
     indexStack: seq[IndexPos]
     leafKeys*: seq[seq[byte]]
+    leafPairs*: seq[(seq[byte], seq[byte])]  ## used when cf >= 10
     leafIdx*: int
     curKey*: Option[seq[byte]]
+    curPair*: Option[(seq[byte], seq[byte])]
     rootUuid*: array[16, byte]
     height*: uint8
+    isKv*: bool  ## true if this cursor reads key-value leaf pages
 
 # ── Helpers ──
 
@@ -41,7 +44,10 @@ proc loadIndexPage(s: var PageStoreInner; uuid: array[16, byte]): seq[(seq[byte]
   deserializeIndexPage(data.get)
 
 proc loadLeaf(c: PageStoreCursor; uuid: array[16, byte]) =
-  c.leafKeys = loadLeafKeys(c.s[], uuid)
+  if c.isKv:
+    c.leafPairs = loadLeafPairs(c.s[], uuid)
+  else:
+    c.leafKeys = loadLeafKeys(c.s[], uuid)
   c.leafIdx = -1
 
 # ── Navigation ──
@@ -103,11 +109,18 @@ proc advanceToNextLeaf(c: PageStoreCursor) =
 proc advance(c: PageStoreCursor) =
   if c.atEnd: return
   c.curKey = none(seq[byte])
+  c.curPair = none((seq[byte], seq[byte]))
   while true:
     inc c.leafIdx
-    if c.leafIdx < c.leafKeys.len:
-      c.curKey = some(c.leafKeys[c.leafIdx])
-      return
+    if c.isKv:
+      if c.leafIdx < c.leafPairs.len:
+        c.curPair = some(c.leafPairs[c.leafIdx])
+        c.curKey = some(c.leafPairs[c.leafIdx][0])
+        return
+    else:
+      if c.leafIdx < c.leafKeys.len:
+        c.curKey = some(c.leafKeys[c.leafIdx])
+        return
     if c.indexStack.len > 0:
       advanceToNextLeaf(c)
       if c.atEnd: return
@@ -135,29 +148,39 @@ proc next*(c: PageStoreCursor): Option[seq[byte]] =
   result = c.curKey
   c.advance()
 
+proc peekKv*(c: PageStoreCursor): Option[(seq[byte], seq[byte])] =
+  c.ensure()
+  if c.atEnd: none((seq[byte], seq[byte])) else: c.curPair
+
+proc nextKv*(c: PageStoreCursor): Option[(seq[byte], seq[byte])] =
+  c.ensure()
+  result = c.curPair
+  c.advance()
+
 proc seek*(c: PageStoreCursor; target: seq[byte]) =
   if c.rootUuid == default(array[16, byte]): c.atEnd = true; return
 
   # Fast-path: if the current leaf already contains target (its first key
-  # <= target <= its last key), binary-search within leafKeys — no descent,
-  # no page loads. This is the hot case in leapfrog triejoin, where
-  # seekPastValueAt/seekToValue issue many seeks that stay within the same
-  # leaf. Safe because the cursor is pinned to an immutable COW root, so
-  # the cached leafKeys cannot be invalidated by a concurrent flush.
-  if c.leafKeys.len > 0 and
-     cmpSeq(c.leafKeys[0], target) <= 0 and
-     cmpSeq(c.leafKeys[^1], target) >= 0:
-    var lo = 0
-    var hi = c.leafKeys.len
-    while lo < hi:
-      let mid = (lo + hi) shr 1
-      if cmpSeq(c.leafKeys[mid], target) < 0: lo = mid + 1
-      else: hi = mid
-    c.leafIdx = lo - 1
-    c.curKey = none(seq[byte])
-    c.atEnd = false
-    c.advance()
-    return
+  # <= target <= its last key), binary-search within leafKeys/leafPairs — no descent,
+  # no page loads.
+  let keyCount = if c.isKv: c.leafPairs.len else: c.leafKeys.len
+  if keyCount > 0:
+    let firstKey = if c.isKv: c.leafPairs[0][0] else: c.leafKeys[0]
+    let lastKey = if c.isKv: c.leafPairs[^1][0] else: c.leafKeys[^1]
+    if cmpSeq(firstKey, target) <= 0 and cmpSeq(lastKey, target) >= 0:
+      var lo = 0
+      var hi = keyCount
+      while lo < hi:
+        let mid = (lo + hi) shr 1
+        let midKey = if c.isKv: c.leafPairs[mid][0] else: c.leafKeys[mid]
+        if cmpSeq(midKey, target) < 0: lo = mid + 1
+        else: hi = mid
+      c.leafIdx = lo - 1
+      c.curKey = none(seq[byte])
+      c.curPair = none((seq[byte], seq[byte]))
+      c.atEnd = false
+      c.advance()
+      return
 
   # Slow path: descend from the pinned root to the leaf that should hold
   # target (binary search per index level), then scan forward within the

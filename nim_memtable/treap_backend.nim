@@ -4,7 +4,7 @@
 ## TreapNode refs directly (ARC manages lifetime). No lock — KVStore
 ## serializes all writes.
 
-import std/[random, algorithm, sets]
+import std/[random, algorithm, sets, options]
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Persistent treap node
@@ -12,9 +12,11 @@ import std/[random, algorithm, sets]
 
 type
   Key* = seq[byte]
+  Value* = seq[byte]
 
   TreapNode* {.acyclic.} = ref object
     key*: Key
+    value*: Option[Value]   ## none for key-only CFs (0-3), some for key-value CFs (>=10)
     prio*: uint32
     left*: TreapNode
     right*: TreapNode
@@ -36,8 +38,8 @@ proc cmpKey*(a, b: Key): int =
   if a.len > b.len: return 1
   return 0
 
-proc newLeaf(key: Key): TreapNode =
-  TreapNode(key: key, prio: cast[uint32](rand(int.high)))
+proc newLeaf(key: Key; value: Option[Value] = none(Value)): TreapNode =
+  TreapNode(key: key, value: value, prio: cast[uint32](rand(int.high)))
 
 proc containsKey*(node: TreapNode; key: Key): bool =
   var n = node
@@ -67,29 +69,32 @@ proc prefixUpperBound(prefix: Key): Key =
 proc rotateRight(n: TreapNode): TreapNode =
   let l = n.left
   result = l
-  var nn = TreapNode(key: n.key, prio: n.prio, left: l.right, right: n.right)
-  result = TreapNode(key: l.key, prio: l.prio, left: l.left, right: nn)
+  var nn = TreapNode(key: n.key, value: n.value, prio: n.prio, left: l.right, right: n.right)
+  result = TreapNode(key: l.key, value: l.value, prio: l.prio, left: l.left, right: nn)
 
 proc rotateLeft(n: TreapNode): TreapNode =
   let r = n.right
   result = r
-  var nn = TreapNode(key: n.key, prio: n.prio, left: n.left, right: r.left)
-  result = TreapNode(key: r.key, prio: r.prio, left: nn, right: r.right)
+  var nn = TreapNode(key: n.key, value: n.value, prio: n.prio, left: n.left, right: r.left)
+  result = TreapNode(key: r.key, value: r.value, prio: r.prio, left: nn, right: r.right)
 
-proc insert(node: TreapNode, key: Key): TreapNode =
-  if node == nil: return newLeaf(key)
+proc insert(node: TreapNode, key: Key; value: Option[Value] = none(Value)): TreapNode =
+  if node == nil: return newLeaf(key, value)
   let c = cmpKey(key, node.key)
   if c < 0:
-    let nl = insert(node.left, key)
-    var nn = TreapNode(key: node.key, prio: node.prio, left: nl, right: node.right)
+    let nl = insert(node.left, key, value)
+    var nn = TreapNode(key: node.key, value: node.value, prio: node.prio, left: nl, right: node.right)
     if nn.left != nil and nn.left.prio > nn.prio: return rotateRight(nn)
     return nn
   elif c > 0:
-    let nr = insert(node.right, key)
-    var nn = TreapNode(key: node.key, prio: node.prio, left: node.left, right: nr)
+    let nr = insert(node.right, key, value)
+    var nn = TreapNode(key: node.key, value: node.value, prio: node.prio, left: node.left, right: nr)
     if nn.right != nil and nn.right.prio > nn.prio: return rotateLeft(nn)
     return nn
   else:
+    # Key exists: if value is provided, update it (upsert semantics for KV CFs)
+    if value.isSome:
+      return TreapNode(key: node.key, value: value, prio: node.prio, left: node.left, right: node.right)
     return node
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -127,6 +132,41 @@ proc put*(mt: MemTable; cf: int; key: openArray[byte]): uint64 =
   mt.hnd.live[cf] = insert(mt.hnd.live[cf], k)
   if wasNew: mt.hnd.cfSize[cf] += k.len
   mt.size()
+
+proc putKv*(mt: MemTable; cf: int; key, value: openArray[byte]): uint64 =
+  if cf < 0 or cf >= mt.numCf: raise newException(ValueError, "invalid cf")
+  var k = newSeq[byte](key.len)
+  if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
+  var v = newSeq[byte](value.len)
+  if value.len > 0: copyMem(addr v[0], unsafeAddr value[0], value.len)
+  let wasNew = not containsKey(mt.hnd.live[cf], k)
+  mt.hnd.live[cf] = insert(mt.hnd.live[cf], k, some(v))
+  if wasNew: mt.hnd.cfSize[cf] += k.len + v.len
+  mt.size()
+
+proc getValue*(mt: MemTable; cf: int; key: openArray[byte]): Option[Value] =
+  if cf < 0 or cf >= mt.hnd.live.len: return none(Value)
+  var n = mt.hnd.live[cf]
+  var k = newSeq[byte](key.len)
+  if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
+  while n != nil:
+    let c = cmpKey(k, n.key)
+    if c == 0: return n.value
+    elif c < 0: n = n.left
+    else: n = n.right
+  return none(Value)
+
+proc getValue*(node: TreapNode; key: openArray[byte]): Option[Value] =
+  ## Search a specific TreapNode root for a key, returning its value.
+  var n = node
+  var k = newSeq[byte](key.len)
+  if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
+  while n != nil:
+    let c = cmpKey(k, n.key)
+    if c == 0: return n.value
+    elif c < 0: n = n.left
+    else: n = n.right
+  return none(Value)
 
 proc batch*(mt: MemTable; ops: openArray[byte]): uint64 =
   var pos = 0
