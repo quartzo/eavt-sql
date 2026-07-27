@@ -179,117 +179,8 @@ proc flattenBegins*(expr: SExpr): SExpr =
       list(items)
   else: expr
 
-proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string], leafBody: SExpr): tuple[prog: SchemeProgram, vars: seq[string], depthVarPairs: seq[(int, int)]] {.gcsafe.}
-
-proc buildProjection(plan: QueryPlanResult, totalProjLen: int, constantIndices: Table[int, PlanValue]): SExpr =
-  var projArgs: seq[SExpr]
-  var fvIdx = 0
-  let findVars = plan.findVars.mapIt(
-    case it.kind
-    of fvVar: it.varName
-    of fvConst: it.cName
-  )
-
-  for i in 0..<totalProjLen:
-    if i in constantIndices:
-      projArgs.add(planValueToSexpr(constantIndices[i]))
-      fvIdx += 1
-      continue
-    if fvIdx >= findVars.len:
-      projArgs.add(newVoid())
-      continue
-    let varName = findVars[fvIdx]
-    fvIdx += 1
-    let bnd = newSymbol(varName)
-    if varName in plan.attrVars:
-      projArgs.add(list(newSymbol("attr-name"), bnd))
-    else:
-      projArgs.add(list(newSymbol("resolve-val"), bnd))
-
-  list(@[newSymbol("result-row")] & projArgs)
-
-proc compileSelectScheme*(plan: QueryPlanResult): tuple[prog: SchemeProgram, vars: seq[string], depthVarPairs: seq[(int, int)]] =
-  var findVars: seq[string]
-  var constantIndices = initTable[int, PlanValue]()
-  for i, fv in plan.findVars:
-    case fv.kind
-    of fvVar: findVars.add(fv.varName)
-    of fvConst:
-      findVars.add(fv.cName)
-      let pv = fromBoundValue(fv.cVal)
-      if pv != nil: constantIndices[i] = pv
-
-  let leafBody = if plan.existsMode and constantIndices.len == 0:
-    list(newSymbol("result-row"), newInt(1))
-  else:
-    buildProjection(plan, plan.findVars.len, constantIndices)
-
-  buildTriejoinScheme(plan, findVars, leafBody)
-
-proc compileDeleteScheme*(plan: QueryPlanResult, findVars: seq[string], targetEvar: string,
-    deleteStmt: sql_ast.DeleteStmt): tuple[prog: SchemeProgram, vars: seq[string], depthVarPairs: seq[(int, int)]] {.gcsafe.} =
-  let eidGet = newSymbol(targetEvar)
-  var leafStmts: seq[SExpr]
-
-  for cond in deleteStmt.conditions:
-    if cond.left.field == "eid": continue
-    let attr = cond.left.field
-    let valSexpr = case cond.right.rkind
-      of crParam: list(newSymbol("param"), newInt(cond.right.rparam.int64))
-      of crLiteral:
-        case cond.right.rlit.lkind
-        of litInt: newInt(cond.right.rlit.ival)
-        of litFloat: newFloat(cond.right.rlit.fval)
-        of litStr: newStr(cond.right.rlit.sval)
-        of litBool: newBool(cond.right.rlit.bval)
-        of litBytes: newBytes(cond.right.rlit.bytesval)
-      else: newInt(0)
-
-    leafStmts.add(list(newSymbol("retract"), eidGet, newStr(attr), valSexpr))
-
-  leafStmts.add(list(newSymbol("result-row"), eidGet))
-
-  let leafBody = if leafStmts.len == 1: leafStmts[0]
-                 else: list(@[newSymbol("begin")] & leafStmts)
-
-  buildTriejoinScheme(plan, findVars, leafBody)
-
-proc compileUpdateScheme*(plan: QueryPlanResult, findVars: seq[string],
-    updateStmt: sql_ast.UpdateStmt): tuple[prog: SchemeProgram, vars: seq[string], depthVarPairs: seq[(int, int)]] =
-  var leafStmts: seq[SExpr]
-  var firstEidGet: SExpr
-
-  for clause in updateStmt.clauses:
-    let clauseEvar = "_e_" & toLowerAscii(clause.alias)
-    let eidGet = newSymbol(clauseEvar)
-    if firstEidGet == nil: firstEidGet = eidGet
-
-    for iv in clause.values:
-      let valSexpr = case iv.value.vkind
-        of valLiteral:
-          case iv.value.vlit.lkind
-          of litInt: newInt(iv.value.vlit.ival)
-          of litFloat: newFloat(iv.value.vlit.fval)
-          of litStr: newStr(iv.value.vlit.sval)
-          of litBool: newBool(iv.value.vlit.bval)
-          of litBytes: newBytes(iv.value.vlit.bytesval)
-        of valParam: list(newSymbol("param"), newInt(iv.value.vparam.int64))
-        of valAliasRef:
-          let refEvar = "_e_" & toLowerAscii(iv.value.vref)
-          newSymbol(refEvar)
-        else: newInt(0)
-
-      leafStmts.add(list(newSymbol("save"), eidGet, newStr(iv.attr), valSexpr))
-
-  leafStmts.add(list(newSymbol("result-row"), firstEidGet))
-
-  let leafBody = if leafStmts.len == 1: leafStmts[0]
-                 else: list(@[newSymbol("begin")] & leafStmts)
-
-  buildTriejoinScheme(plan, findVars, leafBody)
-
 proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
-    leafBody: SExpr): tuple[prog: SchemeProgram, vars: seq[string], depthVarPairs: seq[(int, int)]] {.gcsafe.} =
+    leafBody: SExpr): tuple[prog: SchemeProgram, vars: seq[string], depthVarPairs: seq[(int, int)]] =
   let orderedVars = plan.orderedVars
   let numDepths = orderedVars.len
 
@@ -551,3 +442,111 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
 
   let flatBody = flattenBegins(fullBody)
   (SchemeProgram(body: flatBody), varNamesList, depthVarPairs)
+
+proc buildProjection(plan: QueryPlanResult, totalProjLen: int, constantIndices: Table[int, PlanValue]): SExpr =
+  var projArgs: seq[SExpr]
+  var fvIdx = 0
+  let findVars = plan.findVars.mapIt(
+    case it.kind
+    of fvVar: it.varName
+    of fvConst: it.cName
+  )
+
+  for i in 0..<totalProjLen:
+    if i in constantIndices:
+      projArgs.add(planValueToSexpr(constantIndices[i]))
+      fvIdx += 1
+      continue
+    if fvIdx >= findVars.len:
+      projArgs.add(newVoid())
+      continue
+    let varName = findVars[fvIdx]
+    fvIdx += 1
+    let bnd = newSymbol(varName)
+    if varName in plan.attrVars:
+      projArgs.add(list(newSymbol("attr-name"), bnd))
+    else:
+      projArgs.add(list(newSymbol("resolve-val"), bnd))
+
+  list(@[newSymbol("result-row")] & projArgs)
+
+proc compileSelectScheme*(plan: QueryPlanResult): tuple[prog: SchemeProgram, vars: seq[string], depthVarPairs: seq[(int, int)]] =
+  var findVars: seq[string]
+  var constantIndices = initTable[int, PlanValue]()
+  for i, fv in plan.findVars:
+    case fv.kind
+    of fvVar: findVars.add(fv.varName)
+    of fvConst:
+      findVars.add(fv.cName)
+      let pv = fromBoundValue(fv.cVal)
+      if pv != nil: constantIndices[i] = pv
+
+  let leafBody = if plan.existsMode and constantIndices.len == 0:
+    list(newSymbol("result-row"), newInt(1))
+  else:
+    buildProjection(plan, plan.findVars.len, constantIndices)
+
+  buildTriejoinScheme(plan, findVars, leafBody)
+
+proc compileDeleteScheme*(plan: QueryPlanResult, findVars: seq[string], targetEvar: string,
+    deleteStmt: sql_ast.DeleteStmt): tuple[prog: SchemeProgram, vars: seq[string], depthVarPairs: seq[(int, int)]] =
+  let eidGet = newSymbol(targetEvar)
+  var leafStmts: seq[SExpr]
+
+  for cond in deleteStmt.conditions:
+    if cond.left.field == "eid": continue
+    let attr = cond.left.field
+    let valSexpr = case cond.right.rkind
+      of crParam: list(newSymbol("param"), newInt(cond.right.rparam.int64))
+      of crLiteral:
+        case cond.right.rlit.lkind
+        of litInt: newInt(cond.right.rlit.ival)
+        of litFloat: newFloat(cond.right.rlit.fval)
+        of litStr: newStr(cond.right.rlit.sval)
+        of litBool: newBool(cond.right.rlit.bval)
+        of litBytes: newBytes(cond.right.rlit.bytesval)
+      else: newInt(0)
+
+    leafStmts.add(list(newSymbol("retract"), eidGet, newStr(attr), valSexpr))
+
+  leafStmts.add(list(newSymbol("result-row"), eidGet))
+
+  let leafBody = if leafStmts.len == 1: leafStmts[0]
+                 else: list(@[newSymbol("begin")] & leafStmts)
+
+  buildTriejoinScheme(plan, findVars, leafBody)
+
+proc compileUpdateScheme*(plan: QueryPlanResult, findVars: seq[string],
+    updateStmt: sql_ast.UpdateStmt): tuple[prog: SchemeProgram, vars: seq[string], depthVarPairs: seq[(int, int)]] =
+  var leafStmts: seq[SExpr]
+  var firstEidGet: SExpr
+
+  for clause in updateStmt.clauses:
+    let clauseEvar = "_e_" & toLowerAscii(clause.alias)
+    let eidGet = newSymbol(clauseEvar)
+    if firstEidGet == nil: firstEidGet = eidGet
+
+    for iv in clause.values:
+      let valSexpr = case iv.value.vkind
+        of valLiteral:
+          case iv.value.vlit.lkind
+          of litInt: newInt(iv.value.vlit.ival)
+          of litFloat: newFloat(iv.value.vlit.fval)
+          of litStr: newStr(iv.value.vlit.sval)
+          of litBool: newBool(iv.value.vlit.bval)
+          of litBytes: newBytes(iv.value.vlit.bytesval)
+        of valParam: list(newSymbol("param"), newInt(iv.value.vparam.int64))
+        of valAliasRef:
+          let refEvar = "_e_" & toLowerAscii(iv.value.vref)
+          newSymbol(refEvar)
+        else: newInt(0)
+
+      leafStmts.add(list(newSymbol("save"), eidGet, newStr(iv.attr), valSexpr))
+
+  leafStmts.add(list(newSymbol("result-row"), firstEidGet))
+
+  let leafBody = if leafStmts.len == 1: leafStmts[0]
+                 else: list(@[newSymbol("begin")] & leafStmts)
+
+  buildTriejoinScheme(plan, findVars, leafBody)
+

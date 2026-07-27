@@ -14,11 +14,34 @@ type
     history*: bool
     existsMode*: bool
 
-proc fakeSelectFromUpdate(stmt: UpdateStmt): SelectStmt {.gcsafe.}
-proc fakeSelectFromDelete(stmt: DeleteStmt): SelectStmt {.gcsafe.}
-proc isDeleteDirect(stmt: DeleteStmt): bool {.gcsafe.}
 
-proc compileSql*(stmt: SqlStmt, cstats: CompileStats): CompileResult {.gcsafe.} =
+proc isDeleteDirect(stmt: DeleteStmt): bool =
+  for cond in stmt.conditions:
+    if cond.left.field == "eid":
+      return true
+  false
+
+proc fakeSelectFromUpdate(stmt: UpdateStmt): SelectStmt =
+  let firstAlias = if stmt.clauses.len > 0: toLowerAscii(stmt.clauses[0].alias) else: "d1"
+  SelectStmt(
+    projections: @[Projection(
+      field: some(FieldRef(alias: firstAlias, field: "eid")),
+      literal: none(Literal),
+    )],
+    conditions: stmt.conditions,
+  )
+
+proc fakeSelectFromDelete(stmt: DeleteStmt): SelectStmt =
+  let firstAlias = if stmt.conditions.len > 0: toLowerAscii(stmt.conditions[0].left.alias) else: "d1"
+  SelectStmt(
+    projections: @[Projection(
+      field: some(FieldRef(alias: firstAlias, field: "eid")),
+      literal: none(Literal),
+    )],
+    conditions: stmt.conditions,
+  )
+
+proc compileSql*(stmt: SqlStmt, cstats: CompileStats): CompileResult =
   result = CompileResult()
   result.isExplain = stmt.isExplain
 
@@ -153,28 +176,3 @@ proc compileSql*(stmt: SqlStmt, cstats: CompileStats): CompileResult {.gcsafe.} 
       let (prog, _, _) = compileDeleteScheme(plan, findVarNames, targetEvar, stmt.deleteStmt)
       result.program = prog
 
-proc isDeleteDirect(stmt: DeleteStmt): bool {.gcsafe.} =
-  for cond in stmt.conditions:
-    if cond.left.field == "eid":
-      return true
-  false
-
-proc fakeSelectFromUpdate(stmt: UpdateStmt): SelectStmt {.gcsafe.} =
-  let firstAlias = if stmt.clauses.len > 0: toLowerAscii(stmt.clauses[0].alias) else: "d1"
-  SelectStmt(
-    projections: @[Projection(
-      field: some(FieldRef(alias: firstAlias, field: "eid")),
-      literal: none(Literal),
-    )],
-    conditions: stmt.conditions,
-  )
-
-proc fakeSelectFromDelete(stmt: DeleteStmt): SelectStmt {.gcsafe.} =
-  let firstAlias = if stmt.conditions.len > 0: toLowerAscii(stmt.conditions[0].left.alias) else: "d1"
-  SelectStmt(
-    projections: @[Projection(
-      field: some(FieldRef(alias: firstAlias, field: "eid")),
-      literal: none(Literal),
-    )],
-    conditions: stmt.conditions,
-  )
