@@ -3,6 +3,8 @@ __pycache__/
 *.py[oc]
 build/
 dist/
+eavt_server_nim/server
+eavt-repl-nim/src/eavt_repl
 wheels/
 *.egg-info
 
