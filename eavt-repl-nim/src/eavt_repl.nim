@@ -105,19 +105,22 @@ proc main =
   if sockPath.len == 0:
     sockPath = getSocketPath()
 
-  var client: EavtClient
-  if not client.connect(sockPath):
-    stderr.writeLine "Error: cannot connect to ", sockPath
-    quit 1
-
   # -e mode: execute commands and exit
   if execCmd.len > 0:
+    var client: EavtClient
+    if not client.connect(sockPath):
+      stderr.writeLine "Error: cannot connect to ", sockPath
+      quit 1
     let rc = client.executeCommands(execCmd)
     client.close()
     quit rc
 
   # Pipe mode: stdin is not a TTY → read and execute from stdin
   if not stdin.isatty:
+    var client: EavtClient
+    if not client.connect(sockPath):
+      stderr.writeLine "Error: cannot connect to ", sockPath
+      quit 1
     let rc = client.executeCommands(stdin.readAll())
     client.close()
     quit rc
