@@ -301,6 +301,14 @@ class QuerySession:
         """
         self.engine.save(eid, attr, val, self.tx)
 
+    def commit(self, sync: bool = False):
+        """(commit [sync]) → void.
+
+        Flushes the engine's pending buffer to RocksDB in a single WriteBatch.
+        There is no rollback: `close()` also commits. `sync=True` fsyncs the WAL.
+        """
+        self.engine.commit(sync)
+
     def retract(self, eid: int, attr: str, val):
         """(retract eid attr val) → void.
 

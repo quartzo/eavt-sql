@@ -242,6 +242,50 @@ def test_scanner_iterate_two_scanners(session):
     assert e3 in entities
 
 
+def test_query_sees_pending_without_commit(session):
+    """Triejoin queries read pending (uncommitted) saves via the merged iterator."""
+    sess, e1, e2, e3 = session
+    e4 = sess.alloc_entity()
+    sess.save(e4, "person.name", "Dana")
+    sess.save(e4, "person.age", 40)
+
+    sc_name = sess.scanner_open("AEVT")
+    sess.scanner_push(sc_name, sess.intern_a("person.name"))
+    sc_age = sess.scanner_open("AEVT")
+    sess.scanner_push(sc_age, sess.intern_a("person.age"))
+    it = sess.scanner_iterate_init(sc_name, sc_age)
+
+    entities = set()
+    while True:
+        eid = sess.scanner_iterate_next(it)
+        if eid is None:
+            break
+        entities.add(eid)
+
+    assert e4 in entities
+    assert e1 in entities
+
+
+def test_session_commit(tmp_path):
+    """Session commit persists; reopen sees the data."""
+    eng = EavtEngine(str(tmp_path / "db"))
+    eng.bootstrap()
+    eng.declare_attr("person.name", "string")
+
+    sess = QuerySession(eng)
+    eid = sess.alloc_entity()
+    sess.save(eid, "person.name", "Zed")
+    assert sess.lookup_value(eid, "person.name") == "Zed"
+    sess.commit()
+
+    eng.close()
+
+    eng2 = EavtEngine(str(tmp_path / "db"))
+    eng2.bootstrap()
+    assert eng2.lookup_value(eid, "person.name") == "Zed"
+    eng2.close()
+
+
 def test_scanner_iterate_with_range(session):
     """Two AEVT scanners with range filter on value."""
     sess, e1, e2, e3 = session

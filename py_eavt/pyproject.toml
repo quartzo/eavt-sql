@@ -5,6 +5,7 @@ description = "EAVT database engine — Python port with RocksDB storage"
 requires-python = ">=3.13"
 dependencies = [
     "rocksdict>=0.3",
+    "sortedcontainers>=2.4",
 ]
 
 [build-system]

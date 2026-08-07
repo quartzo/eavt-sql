@@ -2,13 +2,22 @@
 
 Port of nim_eavt/eavt.nim. Coordinates Resolver + RocksDB for
 entity-attribute-value-time operations.
+
+Write model: writes accumulate in an in-memory pending buffer and are
+flushed to RocksDB by an explicit `commit()` (single cross-CF WriteBatch).
+There is no rollback and a single pending window: `commit()` flushes
+everything accumulated, `close()` commits. Reads merge the pending buffer
+with the committed keys (read-your-writes); a concurrent process can never
+open the same RocksDB path (exclusive file lock).
 """
 from __future__ import annotations
 
+import bisect
 import time
 from typing import Iterator
 
 import rocksdict as rdb
+from sortedcontainers import SortedSet
 
 from . import keys
 from .resolver import Resolver, partition_of, seq_of
@@ -42,6 +51,25 @@ def _open_db(path: str):
     opts = rdb.Options()
     opts.create_if_missing(True)
     opts.create_missing_column_families(True)
+
+    # Header / block compression tuning: fewer restart points (less full-key
+    # rewriting between keys), larger blocks (better zstd ratio), filter+index
+    # kept in block cache instead of rewritten per block.
+    bbo = rdb.BlockBasedOptions()
+    bbo.set_block_restart_interval(128)
+    bbo.set_block_size(64 * 1024)
+    bbo.set_cache_index_and_filter_blocks(True)
+    opts.set_block_based_table_factory(bbo)
+
+    opts.set_compression_type(rdb.DBCompressionType.zstd())
+    opts.set_compression_options(-14, 3, 0, 0)
+    opts.set_bottommost_compression_type(rdb.DBCompressionType.zstd())
+    opts.set_write_buffer_size(64 * 1024 * 1024)
+    opts.set_max_write_buffer_number(2)
+    opts.set_arena_block_size(64 * 1024)
+    opts.set_bytes_per_sync(1 << 20)
+    opts.set_wal_bytes_per_sync(1 << 20)
+
     cf_opts = {name: opts for name in CF_NAMES}
     db = rdb.Rdict(path, options=opts, column_families=cf_opts)
     # Rdict per CF (for dict-like access + iterators)
@@ -73,6 +101,94 @@ class Datom:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# PendingMergeIter
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class PendingMergeIter:
+    """Merged iterator: RocksDB iterator + pending (uncommitted) keys.
+
+    Presents the same interface as rocksdict's RdictIter (valid/key/next/
+    seek/seek_to_first/seek_to_last) so it can be consumed anywhere a raw
+    iterator is used (RocksCursor, scan_prefix, scan_datoms). Sorted k-way
+    merge of the committed keys and the pending buffer, dedup on equal keys
+    (pending shadows committed).
+    """
+
+    __slots__ = ("_it", "_pending", "_p_idx", "_cur", "_valid")
+
+    def __init__(self, it, pending):
+        self._it = it
+        # Materialize the sorted SortedSet once: O(K) at open, O(1) per step.
+        self._pending = list(pending)
+        self._p_idx = 0
+        self._cur: bytes | None = None
+        self._valid = False
+
+    def _recompute(self):
+        raw = self._it.key() if self._it.valid() else None
+        pend = self._pending[self._p_idx] if self._p_idx < len(self._pending) else None
+        if raw is None and pend is None:
+            self._cur = None
+            self._valid = False
+            return
+        if pend is None or (raw is not None and raw < pend):
+            self._cur = raw
+        elif raw is None or pend < raw:
+            self._cur = pend
+        else:
+            self._cur = raw
+        self._valid = True
+
+    def valid(self) -> bool:
+        return self._valid
+
+    def key(self) -> bytes:
+        return self._cur
+
+    def next(self):
+        cur = self._cur
+        raw = self._it.key() if self._it.valid() else None
+        pend = self._pending[self._p_idx] if self._p_idx < len(self._pending) else None
+        if raw is not None and raw == cur:
+            self._it.next()
+        if pend is not None and pend == cur:
+            self._p_idx += 1
+        self._recompute()
+
+    def seek(self, target: bytes):
+        self._it.seek(target)
+        self._p_idx = bisect.bisect_left(self._pending, target)
+        self._recompute()
+
+    def seek_to_first(self):
+        self._it.seek_to_first()
+        self._p_idx = 0
+        self._recompute()
+
+    def seek_to_last(self):
+        self._it.seek_to_last()
+        if self._pending:
+            self._p_idx = len(self._pending) - 1
+        else:
+            self._p_idx = 0
+        raw = self._it.key() if self._it.valid() else None
+        pend = self._pending[self._p_idx] if self._p_idx < len(self._pending) else None
+        if raw is None and pend is None:
+            self._cur = None
+            self._valid = False
+        elif pend is None or (raw is not None and raw > pend):
+            self._cur = raw
+            self._valid = True
+        elif raw is None or pend > raw:
+            self._cur = pend
+            self._valid = True
+        else:
+            self._cur = raw
+            self._valid = True
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # EavtEngine
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -84,9 +200,11 @@ class EavtEngine:
         self.path = path
         self.db, self.cf, self.cf_handles = _open_db(path)
         self.resolver = Resolver()
+        self._pending: dict[int, SortedSet] = {}
 
     def close(self):
-        """Flush and release all resources."""
+        """Commit pending entries and release all resources."""
+        self.commit()
         for cf in self.cf.values():
             del cf
         for h in self.cf_handles.values():
@@ -102,25 +220,104 @@ class EavtEngine:
     def __exit__(self, *_):
         self.close()
 
+    # ── Pending (uncommitted) buffer ──
+
+    def _pending_add(self, cf: int, key: bytes) -> None:
+        ss = self._pending.get(cf)
+        if ss is None:
+            ss = SortedSet()
+            self._pending[cf] = ss
+        ss.add(key)
+
+    def _pending_remove(self, cf: int, key: bytes) -> None:
+        ss = self._pending.get(cf)
+        if ss is not None:
+            ss.discard(key)
+
+    def _pending_keys(self, cf: int) -> SortedSet | None:
+        return self._pending.get(cf)
+
+    # ── Commit ──
+
+    def commit(self, sync: bool = False) -> None:
+        """Flush all pending entries to RocksDB in a single cross-CF WriteBatch.
+
+        One WriteBatch for all column families (a single group commit instead
+        of one WriteBatch per CF). `sync=True` forces an fsync of the WAL.
+        The pending buffer is cleared after a successful write.
+        """
+        batch = rdb.WriteBatch()
+        for cf in range(len(CF_NAMES)):
+            cf_handle = self.cf_handles[CF_NAMES[cf]]
+            ss = self._pending.get(cf)
+            if not ss:
+                continue
+            for k in ss:
+                batch.put(k, b"", cf_handle)
+        if batch.is_empty():
+            return
+        opts = rdb.WriteOptions()
+        opts.sync = sync
+        self.db.write(batch, opts)
+        self._pending.clear()
+
     # ── Batch write helper ──
 
     def _batch_write(self, entries: list[keys.EavtEntry]):
         if not entries:
             return
-        # Group entries by CF for efficient batch writes
-        by_cf: dict[int, rdb.WriteBatch] = {}
         for e in entries:
-            if e.cf not in by_cf:
-                by_cf[e.cf] = rdb.WriteBatch()
-            cf_handle = self.cf_handles[CF_NAMES[e.cf]]
-            by_cf[e.cf].put(e.key, b"", cf_handle)
-        for cf_id, batch in by_cf.items():
-            self.db.write(batch)
+            self._pending_add(e.cf, e.key)
 
     # ── Scan prefix ──
 
+    def _merged_active_key(self, cf: int, prefix: bytes, bound: bytes) -> bytes | None:
+        """Return the last active (non-retracted) key matching `prefix`.
+
+        Walks the merged committed+pending stream backward from the range's
+        last key, skipping trailing retracts. The active value of a not-many
+        attribute is the highest non-retracted key, and a save() always ends
+        with an assert, so it is found in O(log K) with no backward walk.
+        `bound` must be a key greater than every key matching `prefix` (e.g.
+        the same eid with attr+1).
+        """
+        ss = self._pending_keys(cf)
+        pid: int | None = None
+        if ss:
+            j = bisect.bisect_left(ss, bound)
+            if j > 0 and ss[j - 1].startswith(prefix):
+                pid = j - 1
+
+        it = self.cf[CF_NAMES[cf]].iter()
+        it.seek_for_prev(bound)
+        ckey: bytes | None = it.key() if it.valid() and it.key().startswith(prefix) else None
+
+        while ckey is not None or pid is not None:
+            if ckey is not None and pid is not None and ckey == ss[pid]:
+                pick = ckey
+                it.prev()
+                ckey = it.key() if it.valid() and it.key().startswith(prefix) else None
+                pid -= 1
+                if pid < 0:
+                    pid = None
+            elif pid is None or (ckey is not None and ckey > ss[pid]):
+                pick = ckey
+                it.prev()
+                ckey = it.key() if it.valid() and it.key().startswith(prefix) else None
+            else:
+                pick = ss[pid]
+                pid -= 1
+                if pid < 0:
+                    pid = None
+            if len(pick) < 20:
+                continue
+            esf = keys.be_uint64(pick, len(pick) - 8)
+            if (esf & 1) == 0:
+                return pick
+        return None
+
     def scan_prefix(self, cf: int, prefix: bytes) -> list[bytes]:
-        """Scan all keys in CF with given prefix."""
+        """Scan all keys in CF with given prefix (committed + pending)."""
         cf_db = self.cf[CF_NAMES[cf]]
         it = cf_db.iter()
         it.seek(prefix)
@@ -131,7 +328,55 @@ class EavtEngine:
                 break
             result.append(key)
             it.next()
-        return result
+        pending = self._pending_keys(cf)
+        if not pending:
+            return result
+        return self._merge_sorted_with_pending(result, pending, prefix)
+
+    @staticmethod
+    def _merge_sorted_with_pending(
+        committed: list[bytes], pending: SortedSet, prefix: bytes
+    ) -> list[bytes]:
+        """Linear merge of sorted committed + pending keys matching prefix, dedup.
+
+        Keys matching `prefix` are a contiguous range in the sorted pending set
+        starting at bisect_left(prefix). The matching slice is collected once
+        (O(P·log K), typically P == 1 for not-many scans) then merged in a
+        single O(1)-per-key pass over both lists.
+        """
+        j = bisect.bisect_left(pending, prefix)
+        n = len(pending)
+        pmatch: list[bytes] = []
+        while j < n and pending[j].startswith(prefix):
+            pmatch.append(pending[j])
+            j += 1
+        if not pmatch:
+            return committed
+        out: list[bytes] = []
+        i = 0
+        k = 0
+        len_c = len(committed)
+        len_p = len(pmatch)
+        while i < len_c or k < len_p:
+            if i >= len_c:
+                out.extend(pmatch[k:])
+                break
+            if k >= len_p:
+                out.extend(committed[i:])
+                break
+            ck = committed[i]
+            pk = pmatch[k]
+            if ck == pk:
+                out.append(ck)
+                i += 1
+                k += 1
+            elif pk < ck:
+                out.append(pk)
+                k += 1
+            else:
+                out.append(ck)
+                i += 1
+        return out
 
     # ── Bootstrap ──
 
@@ -325,16 +570,22 @@ class EavtEngine:
 
         if not many:
             e_prefix = keys.encode_eid(eid) + keys._attr_bytes(attr_id)
-            for ek in self.scan_prefix(0, e_prefix):
-                if len(ek) < 20:
-                    continue
-                esf = keys.be_uint64(ek, len(ek) - 8)
-                if (esf & 1) != 0:
-                    continue
+            bound = keys.encode_eid(eid) + keys._attr_bytes(attr_id + 1)
+            active_key = self._merged_active_key(0, e_prefix, bound)
+            if active_key is not None and active_key[12 : len(active_key) - 8] != encoded:
+                # Retracting the active value at the same t would shadow the
+                # new assert (retracted suffix sorts after the active one),
+                # leaving the value looking retracted — skipped when the value
+                # is re-asserted.
                 ret_entries = keys.build_eavt_entries(
-                    eid, attr_id, ek[12 : len(ek) - 8], tx, True, mode, indexed
+                    eid, attr_id, active_key[12 : len(active_key) - 8], tx, True, mode, indexed
                 )
                 self._batch_write(ret_entries)
+            # Re-asserting a value that has a pending retract at the same tx
+            # (from a not-many overwrite earlier in this window): drop the
+            # pending retract so the assert isn't shadowed by it.
+            for re in keys.build_eavt_entries(eid, attr_id, encoded, tx, True, mode, indexed):
+                self._pending_remove(re.cf, re.key)
 
         entries = keys.build_eavt_entries(eid, attr_id, encoded, tx, False, mode, indexed)
         self._batch_write(entries)
@@ -500,9 +751,8 @@ class EavtEngine:
     # ── Scan datoms ──
 
     def scan_datoms(self, cf: int) -> Iterator[Datom]:
-        """Decode all datoms from a column family."""
-        cf_db = self.cf[CF_NAMES[cf]]
-        it = cf_db.iter()
+        """Decode all datoms from a column family (committed + pending)."""
+        it = self.open_iterator(cf)
         it.seek_to_first()
         while it.valid():
             key = it.key()
@@ -558,5 +808,13 @@ class EavtEngine:
     # ── Open raw iterator (for scanner) ──
 
     def open_iterator(self, cf: int):
-        """Open a raw RocksDB iterator for a column family."""
-        return self.cf[CF_NAMES[cf]].iter()
+        """Open a merged iterator (RocksDB + pending) for a column family.
+
+        Returns the raw RocksDB iterator when there is nothing pending (zero
+        overhead fast path), otherwise a PendingMergeIter.
+        """
+        raw = self.cf[CF_NAMES[cf]].iter()
+        pending = self._pending_keys(cf)
+        if not pending:
+            return raw
+        return PendingMergeIter(raw, pending)
