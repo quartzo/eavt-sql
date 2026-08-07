@@ -25,22 +25,24 @@ def be_uint32(data: bytes, start: int) -> int:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Suffix: [t (8 bytes big-endian)] + [1 byte: 0=active, 1=retracted]
+# Suffix: [tx 8 bytes big-endian sign-flipped] + [1 byte retracted: 0x00/0x01]
 # ═══════════════════════════════════════════════════════════════════════════════
 
-
-def encode_suffix(t: int, retracted: bool) -> int:
-    """Encode suffix as uint64: (t << 1) | retracted."""
-    return ((t & 0xFFFFFFFFFFFFFFFF) << 1) | (1 if retracted else 0)
+_SUFFIX_SIZE = 9
 
 
-def decode_suffix(encoded: int) -> tuple[int, bool]:
-    """Return (t, retracted) from encoded suffix uint64."""
-    raw = encoded >> 1
-    # sign-extend from 63-bit
-    if raw >= (1 << 63):
-        raw -= 1 << 64
-    return raw, (encoded & 1) != 0
+def encode_suffix(t: int, retracted: bool) -> tuple[bytes, int]:
+    """Return (tx_bytes, retracted_byte) for the suffix."""
+    tx_bytes = encode_int(t)
+    ret_byte = 1 if retracted else 0
+    return tx_bytes, ret_byte
+
+
+def decode_suffix(tx_bytes: bytes, ret_byte: int) -> tuple[int, bool]:
+    """Return (t, retracted) from suffix bytes."""
+    raw = _U64.unpack_from(tx_bytes, 0)[0]
+    t = decode_int64(raw)
+    return t, (ret_byte & 1) != 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -201,7 +203,8 @@ def _attr_bytes(attr: int) -> bytes:
 
 
 def _sf_bytes(t: int, retracted: bool) -> bytes:
-    return _U64.pack(encode_suffix(t, retracted))
+    tx_bytes, ret_byte = encode_suffix(t, retracted)
+    return tx_bytes + bytes([ret_byte])
 
 
 def _eid_bytes(eid: int) -> bytes:
@@ -249,6 +252,17 @@ class EavtEntry:
         self.key = key
 
 
+def _make_key(parts: tuple[bytes, ...]) -> bytes:
+    """Build a key from parts using a single bytearray allocation."""
+    total = sum(len(p) for p in parts)
+    buf = bytearray(total)
+    pos = 0
+    for p in parts:
+        buf[pos : pos + len(p)] = p
+        pos += len(p)
+    return bytes(buf)
+
+
 def build_eavt_entries(
     eid: int,
     attr: int,
@@ -266,19 +280,19 @@ def build_eavt_entries(
     entries: list[EavtEntry] = []
 
     # CF 0: eavt [eid][attr][val][sf]
-    entries.append(EavtEntry(0, e_bytes + a_bytes + encoded_value + sf_bytes))
+    entries.append(EavtEntry(0, _make_key((e_bytes, a_bytes, encoded_value, sf_bytes))))
     # CF 1: aevt [attr][eid][val][sf]
-    entries.append(EavtEntry(1, a_bytes + e_bytes + encoded_value + sf_bytes))
+    entries.append(EavtEntry(1, _make_key((a_bytes, e_bytes, encoded_value, sf_bytes))))
 
     if mode == EncodeMode.REF:
         # CF 3: vaet [val][attr][eid][sf]
-        entries.append(EavtEntry(3, encoded_value + a_bytes + e_bytes + sf_bytes))
+        entries.append(EavtEntry(3, _make_key((encoded_value, a_bytes, e_bytes, sf_bytes))))
         if indexed:
             # CF 2: avet [attr][val][eid][sf]
-            entries.append(EavtEntry(2, a_bytes + encoded_value + e_bytes + sf_bytes))
+            entries.append(EavtEntry(2, _make_key((a_bytes, encoded_value, e_bytes, sf_bytes))))
     else:
         if indexed:
-            entries.append(EavtEntry(2, a_bytes + encoded_value + e_bytes + sf_bytes))
+            entries.append(EavtEntry(2, _make_key((a_bytes, encoded_value, e_bytes, sf_bytes))))
 
     return entries
 

@@ -201,6 +201,7 @@ class EavtEngine:
         self.db, self.cf, self.cf_handles = _open_db(path)
         self.resolver = Resolver()
         self._pending: dict[int, SortedSet] = {}
+        self._fresh_eids: set[int] = set()
 
     def close(self):
         """Commit pending entries and release all resources."""
@@ -311,8 +312,7 @@ class EavtEngine:
                     pid = None
             if len(pick) < 20:
                 continue
-            esf = keys.be_uint64(pick, len(pick) - 8)
-            if (esf & 1) == 0:
+            if (pick[-1] & 1) == 0:
                 return pick
         return None
 
@@ -473,8 +473,7 @@ class EavtEngine:
                 continue
             if keys.be_uint32(k, 0) != 1:
                 continue
-            sf = keys.be_uint64(k, len(k) - 8)
-            if (sf & 1) == 1:
+            if (k[-1] & 1) == 1:
                 continue
             e = keys.decode_eid(keys.be_uint64(k, 4))
             if e < 100:  # BOOTSTRAP_FIRST_USER_ID
@@ -489,8 +488,7 @@ class EavtEngine:
                 continue
             if keys.be_uint32(k, 0) != 3:
                 continue
-            sf = keys.be_uint64(k, len(k) - 8)
-            if (sf & 1) == 1:
+            if (k[-1] & 1) == 1:
                 continue
             e = keys.decode_eid(keys.be_uint64(k, 4))
             vt_map[e] = keys.decode_int64(keys.be_uint64(k, 12))
@@ -501,8 +499,7 @@ class EavtEngine:
                 continue
             if keys.be_uint32(k, 0) != 2:
                 continue
-            sf = keys.be_uint64(k, len(k) - 8)
-            if (sf & 1) == 1:
+            if (k[-1] & 1) == 1:
                 continue
             e = keys.decode_eid(keys.be_uint64(k, 4))
             card_map[e] = keys.decode_int64(keys.be_uint64(k, 12)) == 36
@@ -513,8 +510,7 @@ class EavtEngine:
                 continue
             if keys.be_uint32(k, 0) != 5:
                 continue
-            sf = keys.be_uint64(k, len(k) - 8)
-            if (sf & 1) == 1:
+            if (k[-1] & 1) == 1:
                 continue
             unique_set.add(keys.decode_eid(keys.be_uint64(k, 4)))
 
@@ -536,8 +532,7 @@ class EavtEngine:
             if len(key) < 8:
                 it.next()
                 continue
-            sf = keys.be_uint64(key, len(key) - 8)
-            if (sf & 1) == 1:
+            if (key[-1] & 1) == 1:
                 it.next()
                 continue
             e = keys.decode_eid(keys.be_uint64(key, 0))
@@ -569,23 +564,20 @@ class EavtEngine:
             encoded = keys.encode_value(val_str, mode, 0)
 
         if not many:
-            e_prefix = keys.encode_eid(eid) + keys._attr_bytes(attr_id)
-            bound = keys.encode_eid(eid) + keys._attr_bytes(attr_id + 1)
-            active_key = self._merged_active_key(0, e_prefix, bound)
-            if active_key is not None and active_key[12 : len(active_key) - 8] != encoded:
-                # Retracting the active value at the same t would shadow the
-                # new assert (retracted suffix sorts after the active one),
-                # leaving the value looking retracted — skipped when the value
-                # is re-asserted.
-                ret_entries = keys.build_eavt_entries(
-                    eid, attr_id, active_key[12 : len(active_key) - 8], tx, True, mode, indexed
-                )
-                self._batch_write(ret_entries)
-            # Re-asserting a value that has a pending retract at the same tx
-            # (from a not-many overwrite earlier in this window): drop the
-            # pending retract so the assert isn't shadowed by it.
-            for re in keys.build_eavt_entries(eid, attr_id, encoded, tx, True, mode, indexed):
-                self._pending_remove(re.cf, re.key)
+            if eid in self._fresh_eids:
+                self._fresh_eids.discard(eid)
+            else:
+                e_prefix = keys.encode_eid(eid) + keys._attr_bytes(attr_id)
+                bound = keys.encode_eid(eid) + keys._attr_bytes(attr_id + 1)
+                active_key = self._merged_active_key(0, e_prefix, bound)
+                if active_key is not None and active_key[12 : len(active_key) - keys._SUFFIX_SIZE] != encoded:
+                    ret_entries = keys.build_eavt_entries(
+                        eid, attr_id, active_key[12 : len(active_key) - keys._SUFFIX_SIZE], tx, True, mode, indexed
+                    )
+                    self._batch_write(ret_entries)
+                # Re-asserting a value that has a pending retract at the same tx
+                for re in keys.build_eavt_entries(eid, attr_id, encoded, tx, True, mode, indexed):
+                    self._pending_remove(re.cf, re.key)
 
         entries = keys.build_eavt_entries(eid, attr_id, encoded, tx, False, mode, indexed)
         self._batch_write(entries)
@@ -683,7 +675,9 @@ class EavtEngine:
     # ── Entity allocation ──
 
     def alloc_entity(self, partition: int = PART_USER) -> int:
-        return self.resolver.allocate_in_partition(partition)
+        eid = self.resolver.allocate_in_partition(partition)
+        self._fresh_eids.add(eid)
+        return eid
 
     # ── Lookup ──
 
@@ -719,10 +713,9 @@ class EavtEngine:
         k = scan_res[0]
         if len(k) < 20:
             return None
-        sf = keys.be_uint64(k, len(k) - 8)
-        if (sf & 1) == 1:
+        if (k[-1] & 1) == 1:
             return None
-        return keys.decode_eid(keys.be_uint64(k, len(k) - 16))
+        return keys.decode_eid(keys.be_uint64(k, len(k) - keys._SUFFIX_SIZE - 8))
 
     def lookup_value(self, eid: int, attr_name: str):
         """Lookup the current active value for an entity+attribute."""
@@ -737,15 +730,14 @@ class EavtEngine:
             k = scan_res[j]
             if len(k) < 20:
                 continue
-            sf = keys.be_uint64(k, len(k) - 8)
-            group = k[: len(k) - 8]
-            if (sf & 1) == 1:
+            group = k[: len(k) - keys._SUFFIX_SIZE]
+            if (k[-1] & 1) == 1:
                 retracted_group = group
                 continue
             if group == retracted_group:
                 continue
             vt = self.value_type_for(aid) or 20
-            return keys.decode_stored_value(k[12 : len(k) - 8], vt)
+            return keys.decode_stored_value(k[12 : len(k) - keys._SUFFIX_SIZE], vt)
         return None
 
     # ── Scan datoms ──
@@ -760,33 +752,26 @@ class EavtEngine:
                 it.next()
                 continue
 
-            suffix_raw = keys.be_uint64(key, len(key) - 8)
-            t, retracted = keys.decode_suffix(suffix_raw)
+            suffix_raw = keys.be_uint64(key, len(key) - keys._SUFFIX_SIZE)
+            t = keys.decode_int64(suffix_raw)
+            retracted = (key[-1] & 1) != 0
 
             if cf == 0:  # EAVT
                 eid = keys.decode_eid(keys.be_uint64(key, 0))
                 aid = keys.be_uint32(key, 8)
-                v_start, v_end = 12, len(key) - 8
+                v_start, v_end = 12, len(key) - keys._SUFFIX_SIZE
             elif cf == 1:  # AEVT
                 aid = keys.be_uint32(key, 0)
                 eid = keys.decode_eid(keys.be_uint64(key, 4))
-                v_start, v_end = 12, len(key) - 8
+                v_start, v_end = 12, len(key) - keys._SUFFIX_SIZE
             elif cf == 2:  # AVET
                 aid = keys.be_uint32(key, 0)
                 v_start = 4
-                v_end = len(key) - 16
-                eid = keys.decode_eid(keys.be_uint64(key, len(key) - 16))
-            elif cf == 3:  # VAET: [value][attr 4B][eid 8B][suffix 8B]
+                v_end = len(key) - keys._SUFFIX_SIZE - 8
+                eid = keys.decode_eid(keys.be_uint64(key, len(key) - keys._SUFFIX_SIZE - 8))
+            elif cf == 3:  # VAET: [value][attr 4B][eid 8B][suffix 9B]
                 v_start = 0
-                # Value length varies by type; attr starts after value.
-                # For ref: 8 bytes; for variable: need to find end.
-                # We know suffix is last 8 bytes, eid is 8 bytes before suffix,
-                # attr is 4 bytes before eid. So attr starts at len(key)-20.
-                # But value length varies, so we need to find v_end.
-                # The attr is always at len(key)-20 relative to end of value.
-                # Actually: suffix=8, eid=8, attr=4 → total tail = 20
-                # So v_end = len(key) - 20 is correct.
-                v_end = len(key) - 20
+                v_end = len(key) - keys._SUFFIX_SIZE - 12
                 aid = keys.be_uint32(key, v_end)
                 eid = keys.decode_eid(keys.be_uint64(key, v_end + 4))
             else:

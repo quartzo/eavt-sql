@@ -11,6 +11,7 @@ from pathlib import Path
 _root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_root / "py_eavt" / "src"))
 from eavt.engine import EavtEngine
+from eavt import keys
 from eavt.keys import encode_int, encode_variable, decode_int64, decode_variable_str, decode_suffix
 
 _U64 = struct.Struct(">Q")
@@ -46,14 +47,12 @@ def scan_aevt_values(eng, attr_name):
     for key in eng.scan_prefix(1, _aid_prefix(aid)):
         if len(key) < 20:
             continue
-        sf_raw = _U64.unpack_from(key, len(key) - 8)[0]
-        _, retracted = decode_suffix(sf_raw)
-        if retracted:
+        if (key[-1] & 1) != 0:
             continue
         eid_raw = _U64.unpack_from(key, 4)[0]
         eid = eid_raw ^ (1 << 63)
         v_start = 12
-        v_end = len(key) - 8
+        v_end = len(key) - keys._SUFFIX_SIZE
         raw = key[v_start:v_end]
         if vt == 20:  # STRING
             val = decode_variable_str(raw, 0)
@@ -78,11 +77,9 @@ def scan_avet_lookup(eng, attr_name, value):
     for key in eng.scan_prefix(2, prefix):
         if len(key) < 16:
             continue
-        sf_raw = _U64.unpack_from(key, len(key) - 8)[0]
-        _, retracted = decode_suffix(sf_raw)
-        if retracted:
+        if (key[-1] & 1) != 0:
             continue
-        eid_raw = _U64.unpack_from(key, len(key) - 16)[0]
+        eid_raw = _U64.unpack_from(key, len(key) - keys._SUFFIX_SIZE - 8)[0]
         eid = eid_raw ^ (1 << 63)
         results.append(eid)
     return results
@@ -96,11 +93,9 @@ def scan_eavt_by_eid(eng, eid, attr_name):
     for key in eng.scan_prefix(0, prefix):
         if len(key) < 20:
             continue
-        sf_raw = _U64.unpack_from(key, len(key) - 8)[0]
-        _, retracted = decode_suffix(sf_raw)
-        if retracted:
+        if (key[-1] & 1) != 0:
             continue
-        raw = key[12 : len(key) - 8]
+        raw = key[12 : len(key) - keys._SUFFIX_SIZE]
         if vt == 20:
             return decode_variable_str(raw, 0)
         elif vt == 22:

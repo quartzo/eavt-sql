@@ -114,7 +114,7 @@ def _is_unordered_attr(vt: int | None) -> bool:
 def _is_variable_value(vt: int | None, key_len: int) -> bool:
     if vt is not None and vt in (DB_TYPE_STRING, DB_TYPE_BYTES, DB_TYPE_BLOB):
         return True
-    return key_len != 28  # not the fixed-size 28-byte key
+    return key_len != (20 + keys._SUFFIX_SIZE)  # not the fixed-size key
 
 
 def _find_v_end(key: bytes, start: int, is_unordered: bool) -> int:
@@ -234,8 +234,8 @@ class V2Scanner:
                         else:
                             buf.extend(keys.encode_int(0))
                     elif pn == "t":
-                        sf = keys.encode_suffix(v, False)
-                        buf.extend(keys._U64.pack(sf))
+                        tx_bytes, _ = keys.encode_suffix(v, False)
+                        buf.extend(tx_bytes)
                         t_in_prefix = True
                     else:
                         # Generic bound value
@@ -280,30 +280,13 @@ class V2Scanner:
             return KVP_NO_PREFIX
         n = min(len(bp), len(key))
         ord_result = 0
-        if self.t_in_prefix:
-            last = n - 1
-            for i in range(last):
-                if key[i] < bp[i]:
-                    ord_result = -1
-                    break
-                if key[i] > bp[i]:
-                    ord_result = 1
-                    break
-            if ord_result == 0:
-                k = key[last] & 0xFE
-                p = bp[last] & 0xFE
-                if k < p:
-                    ord_result = -1
-                elif k > p:
-                    ord_result = 1
-        else:
-            for i in range(n):
-                if key[i] < bp[i]:
-                    ord_result = -1
-                    break
-                if key[i] > bp[i]:
-                    ord_result = 1
-                    break
+        for i in range(n):
+            if key[i] < bp[i]:
+                ord_result = -1
+                break
+            if key[i] > bp[i]:
+                ord_result = 1
+                break
         if ord_result < 0:
             return KVP_BEFORE
         if ord_result > 0:
@@ -318,7 +301,7 @@ class V2Scanner:
         ci = self.pos.current_position()
         pn = self.pos.pos_name()
         if ci >= len(self.pos.idx_order) or pn in ("t", "added"):
-            return len(key) - 8
+            return len(key) - keys._SUFFIX_SIZE
         if self.index_name == "EAVT":
             return [0, 8, 12][min(ci, 2)]
         if self.index_name == "AEVT":
@@ -363,8 +346,9 @@ class V2Scanner:
         ci = self.pos.current_position()
 
         if ci >= len(self.pos.idx_order) or pn in ("t", "added"):
-            suffix = keys.be_uint64(key, len(key) - 8)
-            t, retracted = keys.decode_suffix(suffix)
+            tx_raw = keys.be_uint64(key, len(key) - keys._SUFFIX_SIZE)
+            t = keys.decode_int64(tx_raw)
+            retracted = (key[-1] & 1) != 0
             if pn == "added":
                 return (bool, not retracted)
             return (int, t)
@@ -418,8 +402,8 @@ class V2Scanner:
                 if cls in (KVP_BEFORE, KVP_AFTER):
                     self.pos.at_end = True
                     return
-                suffix = keys.be_uint64(key, len(key) - 8)
-                t, _ = keys.decode_suffix(suffix)
+                tx_raw = keys.be_uint64(key, len(key) - keys._SUFFIX_SIZE)
+                t = keys.decode_int64(tx_raw)
                 if as_of_tx is not None and t > as_of_tx:
                     self.pos.cursor.step()
                     continue
@@ -460,7 +444,7 @@ class V2Scanner:
             best_key: bytes | None = None
             best_t = 0
             best_retracted = False
-            group_end = len(first_key) - 8
+            group_end = len(first_key) - keys._SUFFIX_SIZE
             cur_group = first_key[:group_end]
 
             while self.pos.cursor.is_valid():
@@ -468,14 +452,15 @@ class V2Scanner:
                 if key is None or len(key) < 8:
                     self.pos.cursor.step()
                     continue
-                ge = len(key) - 8
+                ge = len(key) - keys._SUFFIX_SIZE
                 if key[:ge] != cur_group:
                     if best_key is not None:
                         break
                     cur_group = key[:ge]
 
-                suffix = keys.be_uint64(key, len(key) - 8)
-                t, retracted = keys.decode_suffix(suffix)
+                tx_raw = keys.be_uint64(key, len(key) - keys._SUFFIX_SIZE)
+                t = keys.decode_int64(tx_raw)
+                retracted = (key[-1] & 1) != 0
 
                 if as_of_tx is not None and t > as_of_tx:
                     self.pos.cursor.step()
@@ -508,12 +493,12 @@ class V2Scanner:
         target = bytearray(key[:vs])
 
         if pn == "t":
-            suffix = keys.be_uint64(key, len(key) - 8)
-            if suffix == 0:
+            tx_raw = keys.be_uint64(key, len(key) - keys._SUFFIX_SIZE)
+            t = keys.decode_int64(tx_raw)
+            if t == 0 and key[-1] & 1:
                 self.pos.cursor.invalidate()
             else:
-                next_val = suffix + 1
-                target.extend(keys._U64.pack(next_val))
+                target.extend(b"\xff" * keys._SUFFIX_SIZE)
                 self.pos.cursor.seek(bytes(target))
             return
 
@@ -598,7 +583,7 @@ class V2Scanner:
             else:
                 target.extend(keys.encode_int(0))
 
-        target.extend(b"\x00" * 8)
+        target.extend(b"\x00" * keys._SUFFIX_SIZE)
         self.pos.cursor.seek(bytes(target))
         self.advance_to_active_at()
 
