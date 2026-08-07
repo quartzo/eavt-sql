@@ -193,6 +193,9 @@ class PendingMergeIter:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+_MAX_FRESH = 100
+
+
 class EavtEngine:
     """EAVT engine backed by RocksDB with 4 column families."""
 
@@ -201,7 +204,8 @@ class EavtEngine:
         self.db, self.cf, self.cf_handles = _open_db(path)
         self.resolver = Resolver()
         self._pending: dict[int, SortedSet] = {}
-        self._fresh_eids: set[int] = set()
+        self._fresh: dict[int, set[int]] = {}       # eid → set of used attr_ids
+        self._fresh_order: list[int] = []            # FIFO for eviction
 
     def close(self):
         """Commit pending entries and release all resources."""
@@ -564,8 +568,9 @@ class EavtEngine:
             encoded = keys.encode_value(val_str, mode, 0)
 
         if not many:
-            if eid in self._fresh_eids:
-                self._fresh_eids.discard(eid)
+            fresh_attrs = self._fresh.get(eid)
+            if fresh_attrs is not None and attr_id not in fresh_attrs:
+                fresh_attrs.add(attr_id)
             else:
                 e_prefix = keys.encode_eid(eid) + keys._attr_bytes(attr_id)
                 bound = keys.encode_eid(eid) + keys._attr_bytes(attr_id + 1)
@@ -676,7 +681,11 @@ class EavtEngine:
 
     def alloc_entity(self, partition: int = PART_USER) -> int:
         eid = self.resolver.allocate_in_partition(partition)
-        self._fresh_eids.add(eid)
+        self._fresh[eid] = set()
+        self._fresh_order.append(eid)
+        if len(self._fresh_order) > _MAX_FRESH:
+            old = self._fresh_order.pop(0)
+            del self._fresh[old]
         return eid
 
     # ── Lookup ──
