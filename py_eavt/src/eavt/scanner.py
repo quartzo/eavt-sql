@@ -1,0 +1,924 @@
+"""scanner.py — V2Scanner + leapfrog triejoin.
+
+Port of nim_query/query/scanner.nim + hostfns.nim. Implements the scanner
+abstraction over RocksDB iterators and the leapfrog triejoin algorithm.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from . import keys
+from .types import (
+    DB_TYPE_BOOLEAN,
+    DB_TYPE_BLOB,
+    DB_TYPE_BYTES,
+    DB_TYPE_FLOAT,
+    DB_TYPE_INSTANT,
+    DB_TYPE_LONG,
+    DB_TYPE_REF,
+    DB_TYPE_STRING,
+    RANGE_LO_OPEN,
+    RANGE_HI_OPEN,
+    RANGE_OP_EQ,
+    RANGE_OP_GT,
+    RANGE_OP_GTE,
+    RANGE_OP_IN,
+    RANGE_OP_LT,
+    RANGE_OP_LTE,
+    RANGE_OP_NEQ,
+    RangeSpec,
+)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# KeyVsPrefix — result of classify_key
+# ═══════════════════════════════════════════════════════════════════════════════
+
+KVP_NO_PREFIX = 0
+KVP_BEFORE = 1
+KVP_MATCH = 2
+KVP_AFTER = 3
+
+
+class LeapIterator:
+    """Encapsulates leapfrog state across multiple scanners with range filtering."""
+
+    __slots__ = ("scanners", "raw_ops", "started")
+
+    def __init__(self, scanners: list[V2Scanner], raw_ops: list, started: bool = False):
+        self.scanners = scanners
+        self.raw_ops = raw_ops
+        self.started = started
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RocksDB Cursor wrapper
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class RocksCursor:
+    """Thin wrapper around rocksdict.RdictIter providing the cursor interface.
+
+    Tracks `_fell_past_end`: True when a forward seek/step ran off the end of
+    the key range. `advance_to_active_at` must NOT re-seek to the prefix in
+    that case — the scanner is genuinely exhausted. Falling past the physical
+    end of the index is level-independent: no push/pop or re-seek at any
+    shallower level can find data beyond it, so the flag is only cleared by an
+    explicit fresh scan (`iterate_init` calls `reset_fell()` + `seek`).
+    """
+
+    __slots__ = ("_it", "_fell_past_end")
+
+    def __init__(self, it):
+        self._it = it
+        self._fell_past_end = False
+
+    def is_valid(self) -> bool:
+        return self._it.valid()
+
+    def current_key(self) -> bytes | None:
+        if not self._it.valid():
+            return None
+        return self._it.key()
+
+    def step(self):
+        self._it.next()
+        if not self._it.valid():
+            self._fell_past_end = True
+
+    def seek(self, target: bytes):
+        self._it.seek(target)
+        self._fell_past_end = not self._it.valid()
+
+    def invalidate(self):
+        self._it.seek_to_last()
+        self._it.next()  # move past last → invalid
+        self._fell_past_end = True
+
+    def fell_past_end(self) -> bool:
+        return self._fell_past_end
+
+    def reset_fell(self):
+        self._fell_past_end = False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# V2Scanner
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _is_unordered_attr(vt: int | None) -> bool:
+    return vt is not None and vt == DB_TYPE_BLOB
+
+
+def _is_variable_value(vt: int | None, key_len: int) -> bool:
+    if vt is not None and vt in (DB_TYPE_STRING, DB_TYPE_BYTES, DB_TYPE_BLOB):
+        return True
+    return key_len != 28  # not the fixed-size 28-byte key
+
+
+def _find_v_end(key: bytes, start: int, is_unordered: bool) -> int:
+    if is_unordered:
+        if start + 4 > len(key):
+            return len(key)
+        length = keys.be_uint32(key, start)
+        return start + 4 + length
+    pos = start
+    while pos + 9 <= len(key):
+        if key[pos + 8] == 0xFF:
+            pos += 9
+        else:
+            return pos + 9
+    return len(key)
+
+
+class PositionStack:
+    __slots__ = ("cursor", "idx_order", "stack", "current_active_key", "at_end")
+
+    def __init__(self, cursor: RocksCursor, idx_order: list[str]):
+        self.cursor = cursor
+        self.idx_order = idx_order
+        self.stack: list = []  # list of (index, value) tuples
+        self.current_active_key: bytes | None = None
+        self.at_end = True
+
+    def push_fixed(self, val):
+        idx = len(self.stack)
+        self.stack.append((idx, val))
+
+    def pop_fixed(self):
+        if self.stack:
+            return self.stack.pop()
+        return None
+
+    def fixed_entries(self) -> list[tuple[int, Any]]:
+        return list(self.stack)
+
+    def current_position(self) -> int:
+        return len(self.stack)
+
+    def pos_name(self) -> str:
+        ci = self.current_position()
+        if ci < len(self.idx_order):
+            return self.idx_order[ci]
+        return "t"
+
+
+class V2Scanner:
+    __slots__ = (
+        "pos",
+        "index_name",
+        "as_of_tx",
+        "value_attr_type",
+        "history_mode",
+        "prefix_cache",
+        "t_in_prefix",
+        "raw_ops",
+    )
+
+    def __init__(
+        self,
+        index_name: str,
+        idx_order: list[str],
+        as_of_tx: int | None,
+        value_attr_type: int | None,
+    ):
+        self.pos = PositionStack(RocksCursor(None), idx_order)
+        self.index_name = index_name.upper()
+        self.as_of_tx = as_of_tx
+        self.value_attr_type = value_attr_type
+        self.history_mode = False
+        self.prefix_cache: bytes = b""
+        self.t_in_prefix = False
+        self.raw_ops: list = []
+
+    def set_cursor(self, cursor: RocksCursor):
+        self.pos.cursor = cursor
+        self.pos.at_end = False
+
+    def at_end(self) -> bool:
+        return self.pos.at_end
+
+    # ── prefix_cache ──
+
+    def recompute_prefix(self):
+        buf = bytearray()
+        t_in_prefix = False
+        fixed = self.pos.fixed_entries()
+        for pi, pn in enumerate(self.pos.idx_order):
+            found = False
+            for idx, v in fixed:
+                if idx == pi:
+                    found = True
+                    if pn == "a":
+                        v32 = v & 0xFFFFFFFF
+                        buf.extend(keys._ATTR.pack(v32))
+                    elif pn == "e":
+                        buf.extend(keys.encode_eid(v))
+                    elif pn == "v":
+                        if self.value_attr_type == DB_TYPE_BLOB:
+                            if isinstance(v, (bytes, bytearray)):
+                                buf.extend(keys.encode_variable_unordered(bytes(v)))
+                            else:
+                                buf.extend(keys.encode_variable(str(v)))
+                        elif isinstance(v, str):
+                            buf.extend(keys.encode_variable(v))
+                        elif isinstance(v, (bytes, bytearray)):
+                            buf.extend(keys.encode_variable_unordered(bytes(v)))
+                        elif isinstance(v, float):
+                            buf.extend(keys.encode_float(v))
+                        elif isinstance(v, bool):
+                            buf.extend(keys.encode_fixed_bool(v))
+                        elif isinstance(v, int):
+                            buf.extend(keys.encode_int(v))
+                        else:
+                            buf.extend(keys.encode_int(0))
+                    elif pn == "t":
+                        sf = keys.encode_suffix(v, False)
+                        buf.extend(keys._U64.pack(sf))
+                        t_in_prefix = True
+                    else:
+                        # Generic bound value
+                        if isinstance(v, str):
+                            buf.extend(keys.encode_variable(v))
+                        elif isinstance(v, (bytes, bytearray)):
+                            buf.extend(keys.encode_variable_unordered(bytes(v)))
+                        elif isinstance(v, float):
+                            buf.extend(keys.encode_float(v))
+                        elif isinstance(v, bool):
+                            buf.extend(keys.encode_fixed_bool(v))
+                        elif isinstance(v, int):
+                            buf.extend(keys.encode_int(v))
+                    break
+            if not found:
+                break
+        self.prefix_cache = bytes(buf)
+        self.t_in_prefix = t_in_prefix
+
+    def save_value(self, val):
+        self.pos.push_fixed(val)
+        self.recompute_prefix()
+        self.pos.cursor.reset_fell()  # push descends to a never-scanned position; re-seek is safe
+        self.raw_ops = []  # ranges are position-scoped; descending clears them
+
+    def pop_saved_value(self):
+        self.pos.pop_fixed()
+        self.recompute_prefix()
+
+    def set_value_attr_type(self, vt: int | None):
+        self.value_attr_type = vt
+        self.recompute_prefix()
+
+    def set_ranges(self, ranges: list):
+        self.raw_ops = ranges
+
+    # ── classify_key ──
+
+    def classify_key(self, key: bytes) -> int:
+        bp = self.prefix_cache
+        if len(bp) == 0:
+            return KVP_NO_PREFIX
+        n = min(len(bp), len(key))
+        ord_result = 0
+        if self.t_in_prefix:
+            last = n - 1
+            for i in range(last):
+                if key[i] < bp[i]:
+                    ord_result = -1
+                    break
+                if key[i] > bp[i]:
+                    ord_result = 1
+                    break
+            if ord_result == 0:
+                k = key[last] & 0xFE
+                p = bp[last] & 0xFE
+                if k < p:
+                    ord_result = -1
+                elif k > p:
+                    ord_result = 1
+        else:
+            for i in range(n):
+                if key[i] < bp[i]:
+                    ord_result = -1
+                    break
+                if key[i] > bp[i]:
+                    ord_result = 1
+                    break
+        if ord_result < 0:
+            return KVP_BEFORE
+        if ord_result > 0:
+            return KVP_AFTER
+        if len(key) < len(bp):
+            return KVP_BEFORE
+        return KVP_MATCH
+
+    # ── value_start / value_end ──
+
+    def value_start(self, key: bytes) -> int:
+        ci = self.pos.current_position()
+        pn = self.pos.pos_name()
+        if ci >= len(self.pos.idx_order) or pn in ("t", "added"):
+            return len(key) - 8
+        if self.index_name == "EAVT":
+            return [0, 8, 12][min(ci, 2)]
+        if self.index_name == "AEVT":
+            return [0, 4, 12][min(ci, 2)]
+        if self.index_name == "AVET":
+            if ci <= 1:
+                return [0, 4][ci]
+            vs = 4
+            if _is_variable_value(self.value_attr_type, len(key)):
+                return _find_v_end(key, vs, _is_unordered_attr(self.value_attr_type))
+            return vs + 8
+        if self.index_name == "VAET":
+            return [0, 8, 12][min(ci, 2)]
+        return 12
+
+    def value_end(self, key: bytes) -> int:
+        ci = self.pos.current_position()
+        if ci >= len(self.pos.idx_order):
+            return len(key)
+        pn = self.pos.pos_name()
+        vs = self.value_start(key)
+        if pn == "e":
+            return vs + 8
+        if pn == "a":
+            return vs + 4
+        if pn == "v":
+            if _is_variable_value(self.value_attr_type, len(key)):
+                return _find_v_end(key, vs, _is_unordered_attr(self.value_attr_type))
+            return vs + 8
+        return len(key)
+
+    # ── extract_current ──
+
+    def extract_current(self):
+        """Extract the current value at the scanner's position. Returns None if exhausted."""
+        key = self.pos.current_active_key
+        if key is None:
+            return None
+        if self.classify_key(key) not in (KVP_MATCH, KVP_NO_PREFIX):
+            return None
+        pn = self.pos.pos_name()
+        ci = self.pos.current_position()
+
+        if ci >= len(self.pos.idx_order) or pn in ("t", "added"):
+            suffix = keys.be_uint64(key, len(key) - 8)
+            t, retracted = keys.decode_suffix(suffix)
+            if pn == "added":
+                return (bool, not retracted)
+            return (int, t)
+
+        vs = self.value_start(key)
+        ve = self.value_end(key)
+
+        if pn == "a":
+            return (int, keys.be_uint32(key, vs))
+        if pn == "e":
+            return (int, keys.decode_eid(keys.be_uint64(key, vs)))
+        if pn == "v":
+            if _is_variable_value(self.value_attr_type, len(key)):
+                data = key[vs:ve]
+                if self.value_attr_type == DB_TYPE_STRING:
+                    return (str, keys.decode_variable_str(data, 0))
+                if self.value_attr_type in (DB_TYPE_BYTES, DB_TYPE_BLOB):
+                    return (bytes, data)
+                return (str, keys.decode_variable_str(data, 0))
+            else:
+                raw = keys.be_uint64(key, vs)
+                if self.value_attr_type == DB_TYPE_FLOAT:
+                    return (float, keys.decode_float64(raw))
+                if self.value_attr_type == DB_TYPE_BOOLEAN:
+                    return (bool, raw != 0)
+                if self.value_attr_type in (DB_TYPE_INSTANT, DB_TYPE_REF, DB_TYPE_LONG):
+                    return (int, keys.decode_int64(raw))
+                return (int, raw)
+        return None
+
+    # ── advance_to_active_at ──
+
+    def advance_to_active_at(self):
+        """Find the latest active (non-retracted) datom at current prefix."""
+        pn = self.pos.pos_name()
+
+        if pn == "added":
+            self.pos.at_end = self.pos.current_active_key is None
+            return
+
+        as_of_tx = self.as_of_tx
+        is_t_pos = pn == "t"
+
+        if self.history_mode and is_t_pos:
+            while self.pos.cursor.is_valid():
+                key = self.pos.cursor.current_key()
+                if key is None or len(key) < 8:
+                    self.pos.cursor.step()
+                    continue
+                cls = self.classify_key(key)
+                if cls in (KVP_BEFORE, KVP_AFTER):
+                    self.pos.at_end = True
+                    return
+                suffix = keys.be_uint64(key, len(key) - 8)
+                t, _ = keys.decode_suffix(suffix)
+                if as_of_tx is not None and t > as_of_tx:
+                    self.pos.cursor.step()
+                    continue
+                self.pos.current_active_key = key
+                self.pos.at_end = False
+                return
+            self.pos.current_active_key = None
+            self.pos.at_end = True
+            return
+
+        # Normal advance
+        # If the cursor is invalid because a forward seek ran past the end of
+        # the key range, the scanner is exhausted — do NOT re-seek to the
+        # prefix (that would loop forever). Only re-position when the cursor
+        # was explicitly reset for a fresh scan (new prefix from push/pop).
+        if not self.pos.cursor.is_valid():
+            if self.pos.cursor.fell_past_end():
+                self.pos.current_active_key = None
+                self.pos.at_end = True
+                return
+            if self.prefix_cache:
+                self.pos.cursor.seek(self.prefix_cache)
+
+        while self.pos.cursor.is_valid():
+            first_key = self.pos.cursor.current_key()
+            if first_key is None or len(first_key) < 8:
+                self.pos.cursor.step()
+                continue
+            cls = self.classify_key(first_key)
+            if cls == KVP_BEFORE:
+                self.pos.cursor.seek(self.prefix_cache)
+                continue
+            if cls == KVP_AFTER:
+                self.pos.current_active_key = None
+                self.pos.at_end = True
+                return
+
+            best_key: bytes | None = None
+            best_t = 0
+            best_retracted = False
+            group_end = len(first_key) - 8
+            cur_group = first_key[:group_end]
+
+            while self.pos.cursor.is_valid():
+                key = self.pos.cursor.current_key()
+                if key is None or len(key) < 8:
+                    self.pos.cursor.step()
+                    continue
+                ge = len(key) - 8
+                if key[:ge] != cur_group:
+                    if best_key is not None:
+                        break
+                    cur_group = key[:ge]
+
+                suffix = keys.be_uint64(key, len(key) - 8)
+                t, retracted = keys.decode_suffix(suffix)
+
+                if as_of_tx is not None and t > as_of_tx:
+                    self.pos.cursor.step()
+                    continue
+
+                if t >= best_t:
+                    best_key = key
+                    best_t = t
+                    best_retracted = retracted
+
+                self.pos.cursor.step()
+
+            if best_key is not None and not best_retracted:
+                self.pos.current_active_key = best_key
+                self.pos.at_end = False
+                return
+
+        self.pos.current_active_key = None
+        self.pos.at_end = True
+
+    # ── seek_past_value_at ──
+
+    def _seek_past_value_at(self):
+        pn = self.pos.pos_name()
+        key = self.pos.current_active_key
+        if key is None:
+            self.pos.cursor.invalidate()
+            return
+        vs = self.value_start(key)
+        target = bytearray(key[:vs])
+
+        if pn == "t":
+            suffix = keys.be_uint64(key, len(key) - 8)
+            if suffix == 0:
+                self.pos.cursor.invalidate()
+            else:
+                next_val = suffix + 1
+                target.extend(keys._U64.pack(next_val))
+                self.pos.cursor.seek(bytes(target))
+            return
+
+        if pn == "a":
+            cur = keys.be_uint32(key, vs)
+            if cur == 0xFFFFFFFF:
+                self.pos.cursor.invalidate()
+            else:
+                next_val = cur + 1
+                target.extend(keys._ATTR.pack(next_val))
+                self.pos.cursor.seek(bytes(target))
+        elif _is_variable_value(self.value_attr_type, len(key)):
+            raw = bytearray(key[vs : self.value_end(key)])
+            carry = True
+            i = len(raw) - 1
+            while carry and i >= 0:
+                if raw[i] < 0xFF:
+                    raw[i] += 1
+                    carry = False
+                else:
+                    raw[i] = 0
+                    i -= 1
+            if carry:
+                self.pos.cursor.invalidate()
+            else:
+                target.extend(raw)
+                self.pos.cursor.seek(bytes(target))
+        else:
+            cur = keys.be_uint64(key, vs)
+            if cur == 0xFFFFFFFFFFFFFFFF:
+                self.pos.cursor.invalidate()
+            else:
+                next_val = cur + 1
+                target.extend(keys._U64.pack(next_val))
+                self.pos.cursor.seek(bytes(target))
+
+    # ── leap_next_at ──
+
+    def leap_next_at(self):
+        pn = self.pos.pos_name()
+        if pn == "added":
+            self.pos.at_end = True
+            return
+        if self.pos.current_active_key is not None:
+            self._seek_past_value_at()
+        self.advance_to_active_at()
+
+    # ── seek_to_value ──
+
+    def seek_to_value(self, value):
+        """Seek scanner to a specific value. value is a (type, raw) tuple."""
+        pn = self.pos.pos_name()
+        key = self.pos.current_active_key
+        if key is None:
+            self.pos.cursor.invalidate()
+            return
+        vs = self.value_start(key)
+        target = bytearray(key[:vs])
+
+        vtype, vraw = value
+        if pn == "e":
+            target.extend(keys.encode_eid(vraw))
+        elif pn == "a":
+            v32 = vraw & 0xFFFFFFFF
+            target.extend(keys._ATTR.pack(v32))
+        elif pn == "v":
+            if _is_unordered_attr(self.value_attr_type):
+                if isinstance(vraw, (bytes, bytearray)):
+                    target.extend(keys.encode_variable_unordered(bytes(vraw)))
+                else:
+                    target.extend(keys.encode_variable(str(vraw)))
+            elif vtype == str:
+                target.extend(keys.encode_variable(str(vraw)))
+            elif vtype == bytes:
+                target.extend(keys.encode_variable_unordered(bytes(vraw)))
+            elif vtype == float:
+                target.extend(keys.encode_float(vraw))
+            elif vtype == bool:
+                target.extend(keys.encode_fixed_bool(vraw))
+            elif vtype == int:
+                target.extend(keys.encode_int(vraw))
+            else:
+                target.extend(keys.encode_int(0))
+
+        target.extend(b"\x00" * 8)
+        self.pos.cursor.seek(bytes(target))
+        self.advance_to_active_at()
+
+    # ── attr_id helpers ──
+
+    def attr_id_from_prefix_bytes(self) -> int | None:
+        off = 8 if self.index_name in ("EAVT", "VAET") else 0
+        if len(self.prefix_cache) >= off + 4:
+            return keys.be_uint32(self.prefix_cache, off)
+        return None
+
+    def attr_id_from_key(self) -> int | None:
+        key = self.pos.current_active_key
+        if key is None:
+            return None
+        off = 8 if self.index_name in ("EAVT", "VAET") else 0
+        if len(key) >= off + 4:
+            return keys.be_uint32(key, off)
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Leapfrog converge
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _cmp_value(a, b) -> int:
+    """Compare two (type, value) tuples."""
+    at, av = a
+    bt, bv = b
+    if at != bt:
+        return -1 if at.__name__ < bt.__name__ else 1
+    if av < bv:
+        return -1
+    if av > bv:
+        return 1
+    return 0
+
+
+def leap_converge(scanners: list[V2Scanner]) -> bool:
+    """Classic leapfrog triejoin convergence.
+
+    Find max value across all scanners, seek lagging scanners to max, repeat
+    until all equal or exhausted.
+    """
+    max_iters = len(scanners) * 2 + 1
+    for _ in range(max_iters):
+        max_val = None
+        all_equal = True
+        at_end_indices: list[int] = []
+
+        for i, sc in enumerate(scanners):
+            v = sc.extract_current()
+            if v is not None:
+                if max_val is None:
+                    max_val = v
+                elif _cmp_value(v, max_val) != 0:
+                    all_equal = False
+                    if _cmp_value(v, max_val) > 0:
+                        max_val = v
+            else:
+                at_end_indices.append(i)
+                all_equal = False
+
+        if all_equal:
+            return True
+
+        if max_val is not None:
+            mv = max_val
+            for i, sc in enumerate(scanners):
+                needs_seek = False
+                cv = sc.extract_current()
+                if cv is not None and _cmp_value(cv, mv) < 0:
+                    needs_seek = True
+                if i in at_end_indices:
+                    needs_seek = True
+                if needs_seek:
+                    sc.seek_to_value(mv)
+                    if sc.at_end():
+                        return False
+        else:
+            return False
+    return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Interval merging + apply_ranges
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _ops_to_intervals(ops: list[tuple[int, Any]]) -> list[tuple]:
+    """Convert range ops into canonical intervals."""
+    neq_vals = []
+    range_ops = []
+    in_vals = []
+
+    for op, val in ops:
+        if op == RANGE_OP_NEQ:
+            neq_vals.append(val)
+        elif op == RANGE_OP_IN:
+            in_vals.append(val)
+        else:
+            range_ops.append((op, val))
+
+    if in_vals and not range_ops and not neq_vals:
+        sorted_vals = sorted(in_vals)
+        intervals = [(v, v, 0) for v in sorted_vals]
+        return _merge_intervals(intervals)
+
+    lo = None
+    hi = None
+    lo_open = False
+    hi_open = False
+
+    for op, val in range_ops:
+        if op in (RANGE_OP_GT, RANGE_OP_GTE):
+            if lo is None or val > lo or (val == lo and op == RANGE_OP_GT):
+                lo = val
+                lo_open = op == RANGE_OP_GT
+        elif op in (RANGE_OP_LT, RANGE_OP_LTE):
+            if hi is None or val < hi or (val == hi and op == RANGE_OP_LT):
+                hi = val
+                hi_open = op == RANGE_OP_LT
+        elif op == RANGE_OP_EQ:
+            lo = val
+            hi = val
+            lo_open = False
+            hi_open = False
+
+    if lo is not None and hi is not None and lo > hi:
+        return []
+
+    flags = 0
+    if lo_open:
+        flags |= RANGE_LO_OPEN
+    if hi_open:
+        flags |= RANGE_HI_OPEN
+
+    intervals = [(lo, hi, flags)]
+
+    for nv in neq_vals:
+        new_intervals = []
+        for iv_lo, iv_hi, iv_flags in intervals:
+            in_range = True
+            if iv_lo is not None:
+                if iv_flags & RANGE_LO_OPEN:
+                    if nv <= iv_lo:
+                        in_range = False
+                else:
+                    if nv < iv_lo:
+                        in_range = False
+            if in_range and iv_hi is not None:
+                if iv_flags & RANGE_HI_OPEN:
+                    if nv >= iv_hi:
+                        in_range = False
+                else:
+                    if nv > iv_hi:
+                        in_range = False
+            if not in_range:
+                new_intervals.append((iv_lo, iv_hi, iv_flags))
+            else:
+                left_flags = (iv_flags & ~RANGE_HI_OPEN) | RANGE_HI_OPEN
+                new_intervals.append((iv_lo, nv, left_flags))
+                right_flags = (iv_flags & ~RANGE_LO_OPEN) | RANGE_LO_OPEN
+                new_intervals.append((nv, iv_hi, right_flags))
+        intervals = new_intervals
+
+    return _merge_intervals(intervals)
+
+
+def _merge_intervals(intervals: list[tuple]) -> list[tuple]:
+    if len(intervals) <= 1:
+        return intervals
+
+    def sort_key(item):
+        lo = item[0]
+        if lo is None:
+            return (0, 0)
+        if isinstance(lo, bool):
+            return (1, int(lo))
+        if isinstance(lo, str):
+            return (2, lo)
+        if isinstance(lo, (int, float)):
+            return (3, lo)
+        if isinstance(lo, (bytes, bytearray)):
+            return (4, lo)
+        return (5, 0)
+
+    sorted_intervals = sorted(intervals, key=sort_key)
+    result = [sorted_intervals[0]]
+
+    for lo, hi, flags in sorted_intervals[1:]:
+        prev_lo, prev_hi, prev_flags = result[-1]
+
+        can_merge = False
+        if prev_hi is None:
+            can_merge = True
+        elif lo is not None:
+            if type(lo) == type(prev_hi):
+                if lo < prev_hi:
+                    can_merge = True
+                elif lo == prev_hi:
+                    prev_hi_closed = (prev_flags & RANGE_HI_OPEN) == 0
+                    lo_closed = (flags & RANGE_LO_OPEN) == 0
+                    can_merge = prev_hi_closed and lo_closed
+
+        if can_merge:
+            if prev_hi is None:
+                new_hi = hi
+            elif hi is None:
+                new_hi = None
+            elif hi > prev_hi:
+                new_hi = hi
+            else:
+                new_hi = prev_hi
+
+            if prev_hi is None:
+                new_hi_open = (flags & RANGE_HI_OPEN) != 0
+            elif hi is None:
+                new_hi_open = False
+            elif hi > prev_hi:
+                new_hi_open = (flags & RANGE_HI_OPEN) != 0
+            elif hi < prev_hi:
+                new_hi_open = (prev_flags & RANGE_HI_OPEN) != 0
+            else:
+                new_hi_open = (prev_flags & RANGE_HI_OPEN) != 0 and (flags & RANGE_HI_OPEN) != 0
+
+            new_flags = (prev_flags & RANGE_LO_OPEN) | (RANGE_HI_OPEN if new_hi_open else 0)
+            result[-1] = (prev_lo, new_hi, new_flags)
+        else:
+            result.append((lo, hi, flags))
+
+    return result
+
+
+def apply_ranges(scanners: list[V2Scanner], raw_ops: list[list[tuple[int, Any]]]) -> bool:
+    """After convergence, check if current value falls within merged range intervals."""
+    if not raw_ops:
+        return True
+
+    all_intervals = []
+    for branch in raw_ops:
+        all_intervals.extend(_ops_to_intervals(branch))
+    merged = _merge_intervals(all_intervals)
+    range_specs = [RangeSpec(lo=lo, hi=hi, flags=flags) for lo, hi, flags in merged]
+
+    if not range_specs:
+        return False
+
+    max_iter = len(range_specs) + 2
+    for _ in range(max_iter):
+        cur = scanners[0].extract_current()
+        if cur is None:
+            return False
+
+        any_applied = False
+        for spec in range_specs:
+            past_hi = False
+            if spec.hi is not None:
+                hi_open = (spec.flags & RANGE_HI_OPEN) != 0
+                if hi_open:
+                    past_hi = _cmp_value(cur, (type(spec.hi), spec.hi)) >= 0
+                else:
+                    past_hi = _cmp_value(cur, (type(spec.hi), spec.hi)) > 0
+            if past_hi:
+                continue
+
+            before_lo = False
+            if spec.lo is not None:
+                lo_open = (spec.flags & RANGE_LO_OPEN) != 0
+                if lo_open:
+                    before_lo = _cmp_value(cur, (type(spec.lo), spec.lo)) <= 0
+                else:
+                    before_lo = _cmp_value(cur, (type(spec.lo), spec.lo)) < 0
+            if before_lo:
+                if type(cur[1]) != type(spec.lo):
+                    return False
+                lo = (type(spec.lo), spec.lo)
+                for sc in scanners:
+                    sc.seek_to_value(lo)
+                if not leap_converge(scanners):
+                    return False
+                if lo_open:
+                    cv = scanners[0].extract_current()
+                    if cv is not None and _cmp_value(cv, lo) == 0:
+                        for sc in scanners:
+                            sc.leap_next_at()
+                        if not leap_converge(scanners):
+                            return False
+                any_applied = True
+                break
+            else:
+                return True
+
+        if not any_applied:
+            return False
+    return False
+
+
+def parse_ranges(sexpr) -> list[list[tuple[int, Any]]]:
+    """Parse a ranges expression (list of lists of (op, val) tuples)."""
+    if not isinstance(sexpr, list):
+        return []
+    result = []
+    branch = []
+    for item in sexpr:
+        if isinstance(item, list):
+            if len(item) == 1 and item[0] == "branch":
+                if branch:
+                    result.append(branch)
+                    branch = []
+                continue
+            if len(item) >= 2 and isinstance(item[0], int):
+                branch.append((item[0], item[1]))
+                continue
+        elif isinstance(item, str) and item == "branch":
+            if branch:
+                result.append(branch)
+                branch = []
+            continue
+    if branch:
+        result.append(branch)
+    return result

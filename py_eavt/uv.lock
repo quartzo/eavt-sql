@@ -1,0 +1,108 @@
+version = 1
+revision = 3
+requires-python = ">=3.13"
+
+[[package]]
+name = "colorama"
+version = "0.4.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d8/53/6f443c9a4a8358a93a6792e2acffb9d9d5cb0a5cfd8802644b7b1c9a02e4/colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44", size = 27697, upload-time = "2022-10-25T02:36:22.414Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6", size = 25335, upload-time = "2022-10-25T02:36:20.889Z" },
+]
+
+[[package]]
+name = "eavt"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "rocksdict" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "rocksdict", specifier = ">=0.3" }]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=9.0.3" }]
+
+[[package]]
+name = "iniconfig"
+version = "2.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/72/34/14ca021ce8e5dfedc35312d08ba8bf51fdd999c576889fc2c24cb97f4f10/iniconfig-2.3.0.tar.gz", hash = "sha256:c76315c77db068650d49c5b56314774a7804df16fee4402c1f19d6d15d8c4730", size = 20503, upload-time = "2025-10-18T21:55:43.219Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cb/b1/3846dd7f199d53cb17f49cba7e651e9ce294d8497c8c150530ed11865bb8/iniconfig-2.3.0-py3-none-any.whl", hash = "sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12", size = 7484, upload-time = "2025-10-18T21:55:41.639Z" },
+]
+
+[[package]]
+name = "packaging"
+version = "26.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/7d/fa/3944b40b07da9ce895c0e6303a5ab7d53da063554f534556b134a54d6093/packaging-26.3.tar.gz", hash = "sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79", size = 313412, upload-time = "2026-08-04T18:15:28.737Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl", hash = "sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c", size = 129956, upload-time = "2026-08-04T18:15:27.159Z" },
+]
+
+[[package]]
+name = "pluggy"
+version = "1.6.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
+]
+
+[[package]]
+name = "pygments"
+version = "2.20.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c3/b2/bc9c9196916376152d655522fdcebac55e66de6603a76a02bca1b6414f6c/pygments-2.20.0.tar.gz", hash = "sha256:6757cd03768053ff99f3039c1a36d6c0aa0b263438fcab17520b30a303a82b5f", size = 4955991, upload-time = "2026-03-29T13:29:33.898Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f4/7e/a72dd26f3b0f4f2bf1dd8923c85f7ceb43172af56d63c7383eb62b332364/pygments-2.20.0-py3-none-any.whl", hash = "sha256:81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176", size = 1231151, upload-time = "2026-03-29T13:29:30.038Z" },
+]
+
+[[package]]
+name = "pytest"
+version = "9.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "iniconfig" },
+    { name = "packaging" },
+    { name = "pluggy" },
+    { name = "pygments" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e4/47/b9efed96c114afcfa3c9d3fe98a76a1d14c74a9e266d397cf6eb64be5e01/pytest-9.1.1.tar.gz", hash = "sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313", size = 1636369, upload-time = "2026-06-19T10:58:32.857Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/24/25/1de2678b631f5a49215c6c96fff41ba892b0a34df68d6d80292b1b48aa7f/pytest-9.1.1-py3-none-any.whl", hash = "sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c", size = 386536, upload-time = "2026-06-19T10:58:31.347Z" },
+]
+
+[[package]]
+name = "rocksdict"
+version = "0.3.29"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/77/95/3658e1751381bb4e30df4733057f2feec883e3d74091feeb162548a70933/rocksdict-0.3.29-cp313-cp313-macosx_10_14_x86_64.whl", hash = "sha256:b881e786360e6caa12b29170cae2bbb4e7b95aff737b3f2c0426d4a66d322985", size = 4032054, upload-time = "2025-12-01T02:22:48.842Z" },
+    { url = "https://files.pythonhosted.org/packages/9f/0e/5764e0cca78d7b347a6908ec070297c2bc35b04b989a833d1ad1a0fdf513/rocksdict-0.3.29-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:6195956c1ad600827ea1b782752031caba671073fa1b60d50991d07b596984ea", size = 3678609, upload-time = "2025-12-01T02:22:50.084Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/91/79b248fa1931324e4dcbce96a3208406272357372947e82d9ab15259e0f1/rocksdict-0.3.29-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:4effb7f611243cb821d9be0b8115a9f5ab61dc0321245c2bb0501703ae7f89c0", size = 4072852, upload-time = "2025-12-01T02:22:51.274Z" },
+    { url = "https://files.pythonhosted.org/packages/21/6b/f325aba1b5c5de58412fed4c67286577b782427fa3d0c0e3a80e79ddac9e/rocksdict-0.3.29-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:66866e1226cd49e20e37125320893059c3f43307999b06e323971f23e7dd5219", size = 4216771, upload-time = "2025-12-01T02:22:52.593Z" },
+    { url = "https://files.pythonhosted.org/packages/9d/05/af78d04750c9ad563d7a7d754b8d08930b5c2542426fc2eb367ec12916fa/rocksdict-0.3.29-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:b286433f9ffbd7dbcc274f331f7e0ba5556f797fd9b3bcad46d2b42c4042066d", size = 4028614, upload-time = "2025-12-01T02:22:53.837Z" },
+    { url = "https://files.pythonhosted.org/packages/2f/e8/c3c6ed31d5ce89357dba065f4345c525488bee259585a174c49b81cc7f4c/rocksdict-0.3.29-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:a9f1589664b138d92dfbd709714509c339dbacb096dc708b5cd1245f823ede58", size = 4206623, upload-time = "2025-12-01T02:22:55.133Z" },
+    { url = "https://files.pythonhosted.org/packages/c5/c1/d9e4cbc526dc424048d87b1ca282eb8bf0a847e6d2647f5cfd6fe25b2561/rocksdict-0.3.29-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:d272421ed42a4dfbcaef61afb9799589a80e9329874ea76076470b03ec901c6a", size = 5069650, upload-time = "2025-12-01T02:22:56.399Z" },
+    { url = "https://files.pythonhosted.org/packages/ae/d2/06eaae0d4693b08640a01c5a41a2f41aba263ec49dc37d8387c64e5f8464/rocksdict-0.3.29-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:1eb9af720898b7d2365e1577d46fc1f746d5a5bbe791d45462b33d30fd65d2a7", size = 5312282, upload-time = "2025-12-01T02:22:57.674Z" },
+    { url = "https://files.pythonhosted.org/packages/5b/59/f898bedf1fe8c688e13e27f42206bb620ae2d45882ab4aa5f1c4da6e59c7/rocksdict-0.3.29-cp313-cp313-win_amd64.whl", hash = "sha256:9b0ebdeb51210d8cc50a8c4bf86e0fd69d300b5ed322e5d1dd7ace7a9176d342", size = 3895350, upload-time = "2025-12-01T02:22:58.992Z" },
+    { url = "https://files.pythonhosted.org/packages/7d/47/cfc0753de1e69bbda33b071bcda88f764c09de43c6ecdb45beefeadd9e50/rocksdict-0.3.29-cp314-cp314-macosx_10_14_x86_64.whl", hash = "sha256:449e5edc731018abcf043213ab97ccbbca81ba1c4041454847532c464dd460d2", size = 4046562, upload-time = "2025-12-01T02:23:00.291Z" },
+    { url = "https://files.pythonhosted.org/packages/7e/63/e577b3033fb5e822ca4b7924fcf1cafaf48aa27a1ebed5d18a07991e392f/rocksdict-0.3.29-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:fb12366bf75cb28c9126eec84524a9ba7d1a81934d6fec2b873ed6ed142361e6", size = 3691451, upload-time = "2025-12-01T02:23:01.591Z" },
+    { url = "https://files.pythonhosted.org/packages/d9/20/eb64c36439db85329ef46ccb02bd85562e5d1a090cbc0ea013ae3edcd7e5/rocksdict-0.3.29-cp314-cp314-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:961012099f10c146da68241af8e098cd7e534b705e7b2f2f629c242449ec2366", size = 4086360, upload-time = "2025-12-01T02:23:03.188Z" },
+    { url = "https://files.pythonhosted.org/packages/f6/9d/c891a3bd6e53eb1be6b36db6c4553ef72233e0b68b049eaffe4c0f0e8e1a/rocksdict-0.3.29-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:56e818b919531f38020cfcd055721361990eb22e5f4fbe64f08ec1708b4e9271", size = 4232136, upload-time = "2025-12-01T02:23:04.363Z" },
+    { url = "https://files.pythonhosted.org/packages/90/d6/43f46cc9039138a04095816aa8c22904e65f3565278116cf3ccdbf9acb51/rocksdict-0.3.29-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:8bd5e4e3863f61e6f6537f6419e20f5d76051e72553a49353fbdc8c81ead0399", size = 4039371, upload-time = "2025-12-01T02:23:05.662Z" },
+    { url = "https://files.pythonhosted.org/packages/d4/d5/8e90cad5e1bc1e05a5125cbf9550fa73194c44599f7b1291a314b1191e5d/rocksdict-0.3.29-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:cb5f0a75a4d490822a4f09a76bc1fee24979c0ae04e0efb2a83aeb8f37457ef9", size = 4221400, upload-time = "2025-12-01T02:23:07.177Z" },
+    { url = "https://files.pythonhosted.org/packages/a1/47/d651488f8827aa5fc1e54575de5c416ce12b08dd2aee5efe1077aa85c6b2/rocksdict-0.3.29-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:372a96002f412121fda7853810baa396f06356c30b90973ed64784318379b41a", size = 5081294, upload-time = "2025-12-01T02:23:08.577Z" },
+    { url = "https://files.pythonhosted.org/packages/6f/1e/0f4372b289ac549541b6546f4f2b0f65aee9640a346b7093c10cc4cdbfc9/rocksdict-0.3.29-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:092a0e6540de764bd196879bf2c93141e073e8f80f1b81a0b8ccb417d3e67cc8", size = 5326033, upload-time = "2025-12-01T02:23:09.862Z" },
+    { url = "https://files.pythonhosted.org/packages/10/09/8335ce02b9cf0f21a750ca4458bc2c052d7bd361057d2f6a0e869bdbeb43/rocksdict-0.3.29-cp314-cp314-win_amd64.whl", hash = "sha256:73ebb2ea670492c22a77b6042980953583cfcb2c62d2699f1afbbecdbe02cc6f", size = 3918558, upload-time = "2025-12-01T02:23:11.598Z" },
+]
