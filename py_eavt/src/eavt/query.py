@@ -60,10 +60,8 @@ class ClausePlan:
     clause_idx: int
     index: str
     cf: int
-    const_pushes: list       # [(position_name, value)] in index order
-    var_pushes: list         # [(position_name, var_name)] for bound vars before this var
-    var_position: str         # position of the bound variable in this clause
-    scanner_handle: int = -1  # filled during execution
+    pushes: list[tuple[str, Any]]  # [("const"|"var", value_or_name)] in index order
+    var_position: str               # "e"|"a"|"v"|"t"|"added" — position being iterated
 
 
 @dataclass
@@ -315,13 +313,11 @@ def _validate_plan(
 
             cf = _INDEX_CF[index]
             pos_order = _INDEX_POSITIONS[index]
-            # Map pattern slot to index position
             slot_name = _SLOT_NAMES[slot_idx]
-            var_pos_in_index = slot_name  # "e", "a", or "v"
+            var_pos_in_index = slot_name
 
-            # Collect constant pushes for index positions before the variable
-            const_pushes = []
-            var_pushes = []
+            # Build pushes list in index order for positions before the variable
+            pushes = []
             vp = pos_order.index(var_pos_in_index)
             for ip in range(vp):
                 pn = pos_order[ip]
@@ -338,17 +334,16 @@ def _validate_plan(
                                 f"clause {p.clause_idx}: attribute '{val}' not declared"
                             )
                         val = aid
-                    const_pushes.append((pn, val))
+                    pushes.append(("const", val))
                 elif _is_var(s):
-                    var_pushes.append((pn, s.name))
+                    pushes.append(("var", s.name))
 
             clause_plans.append(ClausePlan(
                 clause_idx=p.clause_idx,
                 index=index,
                 cf=cf,
-                const_pushes=const_pushes,
-                var_pushes=var_pushes,
-                var_position=var_pos_in_index or "v",
+                pushes=pushes,
+                var_position=var_pos_in_index,
             ))
 
         bound_vars.add(var_name)
@@ -468,9 +463,15 @@ def explain(plan: QueryPlan) -> str:
     lines.append("")
     lines.append("binding order:")
     for depth in plan.depths:
-        idxs = [f"{cp.index}[{cp.cf}]" for cp in depth.clauses]
+        parts = []
+        for cp in depth.clauses:
+            push_strs = []
+            for kind, val in cp.pushes:
+                push_strs.append(f"{'const' if kind == 'const' else '?'+val}={val if kind == 'const' else val}")
+            push_desc = " ".join(push_strs) if push_strs else "(no pushes)"
+            parts.append(f"{cp.index}[{cp.cf}] {push_desc}")
         ranges_str = f"  ranges={depth.ranges}" if depth.ranges else ""
-        lines.append(f"  ?{depth.var}: {', '.join(idxs)}{ranges_str}")
+        lines.append(f"  ?{depth.var}: {'; '.join(parts)}{ranges_str}")
 
     return "\n".join(lines)
 
@@ -484,25 +485,18 @@ def _open_and_push(depth_plan: DepthPlan, session, bindings: dict) -> list[int]:
     handles = []
     for cp in depth_plan.clauses:
         h = session.scanner_open(cp.index)
-        pos_order = _INDEX_POSITIONS[cp.index]
 
-        # Merge const_pushes and var_pushes, sort by index position
-        all_pushes = []
-        for pn, val in cp.const_pushes:
-            all_pushes.append((pos_order.index(pn), val))
-        for pn, var_name in cp.var_pushes:
-            if var_name in bindings:
-                all_pushes.append((pos_order.index(pn), bindings[var_name]))
-        all_pushes.sort(key=lambda x: x[0])
-
-        # Push in index order
-        for _, val in all_pushes:
+        # Push in index order (pre-computed at plan time)
+        for kind, val in cp.pushes:
+            if kind == "var":
+                val = bindings[val]
             session.scanner_push(h, val)
 
         # Set value attr type for "v" position
         if cp.var_position == "v":
-            for pn, val in cp.const_pushes:
-                if pn == "a":
+            for kind, val in cp.pushes:
+                if kind == "const":
+                    # The constant at the "a" position is the attr ID
                     aid = val if isinstance(val, int) else session.intern_a(str(val))
                     if aid is not None:
                         sc = session._find_scanner(h)
