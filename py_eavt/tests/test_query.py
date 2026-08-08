@@ -280,6 +280,54 @@ class TestExecute:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# first() and collect()
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestFirstCollect:
+    def test_first(self, eng, sess):
+        eng.declare_attr("person.name", "string")
+        eid = sess.alloc_entity()
+        sess.save(eid, "person.name", "Alice")
+        sess.commit()
+        q = prepare(sess, ["?name"], [(eid, "person.name", "?name")])
+        assert q.first() == ("Alice",)
+
+    def test_first_empty(self, eng, sess):
+        eng.declare_attr("person.name", "string")
+        sess.commit()
+        q = prepare(sess, ["?name"], [("_", "person.name", "?name")])
+        assert q.first() is None
+
+    def test_collect(self, eng, sess):
+        eng.declare_attr("person.name", "string")
+        for name in ["Alice", "Bob", "Charlie"]:
+            eid = sess.alloc_entity()
+            sess.save(eid, "person.name", name)
+        sess.commit()
+        q = prepare(sess, ["?name"], [("_", "person.name", "?name")])
+        rows = q.collect()
+        assert sorted(rows) == [("Alice",), ("Bob",), ("Charlie",)]
+
+    def test_collect_limit(self, eng, sess):
+        eng.declare_attr("person.name", "string")
+        for name in ["Alice", "Bob", "Charlie"]:
+            eid = sess.alloc_entity()
+            sess.save(eid, "person.name", name)
+        sess.commit()
+        q = prepare(sess, ["?name"], [("_", "person.name", "?name")])
+        rows = q.collect(limit=2)
+        assert len(rows) == 2
+
+    def test_first_matches_execute(self, eng, sess):
+        eng.declare_attr("person.name", "string")
+        eid = sess.alloc_entity()
+        sess.save(eid, "person.name", "Alice")
+        sess.commit()
+        q = prepare(sess, ["?name"], [(eid, "person.name", "?name")])
+        assert q.first() == list(q.execute())[0]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Trailing constants and repeated variables
 # ═══════════════════════════════════════════════════════════════════════════════
 

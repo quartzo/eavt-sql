@@ -69,7 +69,8 @@ def main():
             test_eid = eids[0]
             q_eid = prepare(sess, ["?name"],
                             [(test_eid, "bench.name", "?name")])
-            bench("SELECT by eid", lambda: list(q_eid.execute()), 10)
+            bench("SELECT by eid (execute)", lambda: list(q_eid.execute()), 10)
+            bench("SELECT by eid (first)", lambda: q_eid.first(), 10)
 
             # SELECT by attr value (AVET lookup)
             q_val = prepare(sess, ["?eid"],
@@ -77,7 +78,10 @@ def main():
             bench("SELECT by attr value", lambda: list(q_val.execute()), 10)
 
             # SELECT all names again
-            bench("SELECT all names (2nd)", lambda: list(q_all.execute()), 3)
+            bench("SELECT all names (2nd exec)", lambda: list(q_all.execute()), 3)
+            bench("SELECT all names (collect)", lambda: q_all.collect(), 3)
+            bench("SELECT all names (collect 10)", lambda: q_all.collect(limit=10), 3)
+            bench("SELECT all names (first)", lambda: q_all.first(), 3)
 
             # Range query: value >= n//4 and value < n//2
             q_range = prepare(sess, ["?eid", "?val"],

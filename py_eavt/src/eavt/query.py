@@ -86,6 +86,14 @@ class QueryPlan:
     def execute(self):
         return execute(self)
 
+    def first(self):
+        """Return first result or None. No generator overhead."""
+        return first(self)
+
+    def collect(self, limit: int | None = None):
+        """Return list of results. No generator overhead."""
+        return collect(self, limit)
+
     def explain(self) -> str:
         return explain(self)
 
@@ -742,6 +750,135 @@ def _exec_recurse(depth_idx: int, plan: QueryPlan, session, bindings: dict,
                 session.scanner_pop(h)
 
     # Pop the pushes for this depth (both bind and validate)
+    for h, count in zip(participating, push_counts):
+        for _ in range(count):
+            session.scanner_pop(h)
+
+
+def first(plan: QueryPlan):
+    """Return first result or None. Direct execution — no generator."""
+    if not plan.depths:
+        return None
+    session = plan.session
+    handles = [session.scanner_open(cc.index) for cc in plan.clauses]
+    return _exec_find_first(0, plan, session, {}, handles)
+
+
+def _exec_find_first(depth_idx: int, plan: QueryPlan, session, bindings: dict,
+                     handles: list[int]):
+    if depth_idx >= len(plan.depths):
+        return tuple(bindings[v] for v in plan.find_vars)
+
+    depth = plan.depths[depth_idx]
+    participating = [handles[i] for i in depth.clause_indices]
+
+    push_counts = []
+    for h, pushes, start_ip in zip(participating, depth.pushes, depth.start_ips):
+        cc = plan.clauses[depth.clause_indices[participating.index(h)]]
+        pos_order = _INDEX_POSITIONS[cc.index]
+        for pi, (kind, val) in enumerate(pushes):
+            pos_name = pos_order[start_ip + pi]
+            _push_scanner(session, h, kind, val, bindings, pos_name)
+        push_counts.append(len(pushes))
+
+    if depth.ranges:
+        for h in participating:
+            resolved = _resolve_range(depth.ranges, bindings)
+            flat = session.ranges_create(resolved)
+            if flat:
+                session.scanner_set_ranges(h, flat)
+
+    if len(participating) == 1:
+        iter_h = session.scanner_iterate_init(participating[0])
+    else:
+        iter_h = session.scanner_iterate_init(*participating)
+
+    result = None
+    while True:
+        val = session.scanner_iterate_next(iter_h)
+        if val is None:
+            break
+
+        if depth.kind == "bind":
+            bindings[depth.var] = val
+            for h in participating:
+                session.scanner_push(h, val)
+
+        result = _exec_find_first(depth_idx + 1, plan, session, bindings, handles)
+        if result is not None:
+            break  # found — unwind
+
+        if depth.kind == "bind":
+            for h in participating:
+                session.scanner_pop(h)
+
+    for h, count in zip(participating, push_counts):
+        for _ in range(count):
+            session.scanner_pop(h)
+    return result
+
+
+def collect(plan: QueryPlan, limit: int | None = None):
+    """Return list of results. Direct execution — no generator."""
+    if not plan.depths:
+        return []
+    session = plan.session
+    handles = [session.scanner_open(cc.index) for cc in plan.clauses]
+    results = []
+    _exec_collect(0, plan, session, {}, handles, results, limit)
+    return results
+
+
+def _exec_collect(depth_idx: int, plan: QueryPlan, session, bindings: dict,
+                  handles: list[int], results: list, limit: int | None):
+    if limit is not None and len(results) >= limit:
+        return
+    if depth_idx >= len(plan.depths):
+        results.append(tuple(bindings[v] for v in plan.find_vars))
+        return
+
+    depth = plan.depths[depth_idx]
+    participating = [handles[i] for i in depth.clause_indices]
+
+    push_counts = []
+    for h, pushes, start_ip in zip(participating, depth.pushes, depth.start_ips):
+        cc = plan.clauses[depth.clause_indices[participating.index(h)]]
+        pos_order = _INDEX_POSITIONS[cc.index]
+        for pi, (kind, val) in enumerate(pushes):
+            pos_name = pos_order[start_ip + pi]
+            _push_scanner(session, h, kind, val, bindings, pos_name)
+        push_counts.append(len(pushes))
+
+    if depth.ranges:
+        for h in participating:
+            resolved = _resolve_range(depth.ranges, bindings)
+            flat = session.ranges_create(resolved)
+            if flat:
+                session.scanner_set_ranges(h, flat)
+
+    if len(participating) == 1:
+        iter_h = session.scanner_iterate_init(participating[0])
+    else:
+        iter_h = session.scanner_iterate_init(*participating)
+
+    while True:
+        if limit is not None and len(results) >= limit:
+            break
+        val = session.scanner_iterate_next(iter_h)
+        if val is None:
+            break
+
+        if depth.kind == "bind":
+            bindings[depth.var] = val
+            for h in participating:
+                session.scanner_push(h, val)
+
+        _exec_collect(depth_idx + 1, plan, session, bindings, handles, results, limit)
+
+        if depth.kind == "bind":
+            for h in participating:
+                session.scanner_pop(h)
+
     for h, count in zip(participating, push_counts):
         for _ in range(count):
             session.scanner_pop(h)
