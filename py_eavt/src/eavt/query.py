@@ -1,0 +1,555 @@
+"""query.py — Datalog query API over the scanner infrastructure.
+
+Usage:
+    q = prepare(
+        session=sess,
+        find=["?eid", "?name", "?age"],
+        where=[
+            ("?eid", "person.name", "?name"),
+            ("?eid", "person.age",  "?age"),
+        ],
+        ranges={"?age": (">=", 18)},
+    )
+    for eid, name, age in q.execute():
+        print(eid, name, age)
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+from .types import DB_TYPE_REF
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Types
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@dataclass(frozen=True)
+class Var:
+    name: str  # without "?" prefix
+
+
+@dataclass(frozen=True)
+class Wildcard:
+    pass
+
+
+_WILD = Wildcard()
+
+Slot = Var | Wildcard | Any  # Any = constant (int, str, float, bytes, bool)
+
+_INDEXES = ("EAVT", "AEVT", "AVET", "VAET")
+_INDEX_POSITIONS = {
+    "EAVT": ("e", "a", "v", "t", "added"),
+    "AEVT": ("a", "e", "v", "t", "added"),
+    "AVET": ("a", "v", "e", "t", "added"),
+    "VAET": ("v", "a", "e", "t", "added"),
+}
+_INDEX_CF = {"EAVT": 0, "AEVT": 1, "AVET": 2, "VAET": 3}
+
+
+@dataclass
+class Pattern:
+    slots: tuple  # (e, a, v, t, added) — each is Slot
+    clause_idx: int
+
+
+@dataclass
+class ClausePlan:
+    clause_idx: int
+    index: str
+    cf: int
+    const_pushes: list       # [(position_name, value)] in index order
+    var_pushes: list         # [(position_name, var_name)] for bound vars before this var
+    var_position: str         # position of the bound variable in this clause
+    scanner_handle: int = -1  # filled during execution
+
+
+@dataclass
+class DepthPlan:
+    var: str
+    clauses: list[ClausePlan]
+    ranges: list | None = None
+
+
+@dataclass
+class QueryPlan:
+    depths: list[DepthPlan]
+    find_vars: list[str]
+    patterns: list[Pattern]
+    session: Any  # QuerySession
+
+    def execute(self):
+        """Execute the query, yielding tuples of find_vars values."""
+        return execute(self)
+
+    def explain(self) -> str:
+        """Return a human-readable description of the query plan."""
+        return explain(self)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Slot helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _parse_slot(x) -> Slot:
+    if isinstance(x, str):
+        if x.startswith("?"):
+            return Var(x[1:])
+        if x == "_":
+            return _WILD
+    return x  # constant
+
+
+def _is_var(s: Slot) -> bool:
+    return isinstance(s, Var)
+
+
+def _is_const(s: Slot) -> bool:
+    return not isinstance(s, (Var, Wildcard))
+
+
+def _parse_clause(clause: tuple, idx: int) -> Pattern:
+    if len(clause) < 3 or len(clause) > 5:
+        raise ValueError(
+            f"clause {idx}: expected 3-5 elements (e, a, v[, t[, added]]), "
+            f"got {len(clause)}"
+        )
+    e, a, v = _parse_slot(clause[0]), _parse_slot(clause[1]), _parse_slot(clause[2])
+    t = _parse_slot(clause[3]) if len(clause) >= 4 else _WILD
+    added = _parse_slot(clause[4]) if len(clause) >= 5 else _WILD
+    return Pattern(slots=(e, a, v, t, added), clause_idx=idx)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Index feasibility
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _slot_bound_at(s: Slot, bound_vars: set[str]) -> bool:
+    """Is this slot bound as a pushable value (const or resolved var)?
+
+    Wildcards return False — they match anything but can't be pushed
+    into the scanner's position stack, so they block feasibility.
+    """
+    if isinstance(s, Wildcard):
+        return False
+    if isinstance(s, Var):
+        return s.name in bound_vars
+    return True  # constant
+
+
+_SLOT_NAMES = ("e", "a", "v", "t", "added")
+
+
+def _slot_index_in_pattern(var_name: str, pattern: Pattern) -> int | None:
+    """Return the pattern slot index (0-4) for a variable, or None."""
+    for i, s in enumerate(pattern.slots):
+        if _is_var(s) and s.name == var_name:
+            return i
+    return None
+
+
+def _find_feasible_index(
+    pattern: Pattern,
+    var_name: str,
+    bound_vars: set[str],
+    resolver,
+) -> str | None:
+    """Find the best index for binding var_name in this pattern.
+
+    Pattern slots are always in EAVT order: (e, a, v, t, added).
+    Index positions vary: EAVT=(e,a,v,t,added), AEVT=(a,e,v,t,added), etc.
+
+    Returns index name or None if no index is feasible.
+    """
+    slot_idx = _slot_index_in_pattern(var_name, pattern)
+    if slot_idx is None:
+        return None
+
+    slot_name = _SLOT_NAMES[slot_idx]  # "e", "a", "v", "t", or "added"
+    if slot_name not in ("e", "a", "v", "t", "added"):
+        return None
+
+    best_index = None
+    best_prefix_len = -1
+
+    for idx_name in _INDEXES:
+        positions = _INDEX_POSITIONS[idx_name]
+
+        # Find the index position of this slot
+        try:
+            vp = positions.index(slot_name)
+        except ValueError:
+            continue
+
+        # VAET requires REF attr (only relevant for e/a/v positions)
+        if idx_name == "VAET" and slot_name in ("e", "a", "v"):
+            a_slot = pattern.slots[1]
+            if _is_const(a_slot):
+                aid = resolver.lookup_attr(str(a_slot))
+                if aid is None:
+                    continue
+                vt = resolver.value_type_for(aid)
+                if vt != DB_TYPE_REF:
+                    continue
+            else:
+                continue
+
+        # AVET requires indexed attr (only relevant for e/a/v positions)
+        if idx_name == "AVET" and slot_name in ("e", "a", "v"):
+            a_slot = pattern.slots[1]
+            if _is_const(a_slot):
+                aid = resolver.lookup_attr(str(a_slot))
+                if aid is None:
+                    continue
+                if not resolver.is_indexed(aid):
+                    continue
+            else:
+                continue
+
+        # Check all index positions before vp are bound
+        all_before_bound = True
+        for ip in range(vp):
+            pos_name = positions[ip]
+            if pos_name in ("t", "added"):
+                continue
+            # Map index position back to pattern slot
+            slot_for_pos = _SLOT_NAMES.index(pos_name)
+            if not _slot_bound_at(pattern.slots[slot_for_pos], bound_vars):
+                all_before_bound = False
+                break
+
+        if not all_before_bound:
+            continue
+
+        # Count how many e/a/v positions before vp are bound
+        prefix_len = sum(
+            1 for ip in range(vp)
+            if positions[ip] in ("e", "a", "v")
+            and _slot_bound_at(pattern.slots[_SLOT_NAMES.index(positions[ip])], bound_vars)
+        )
+
+        if prefix_len > best_prefix_len:
+            best_prefix_len = prefix_len
+            best_index = idx_name
+
+    return best_index
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Validation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _validate_plan(
+    find_vars: list[str],
+    patterns: list[Pattern],
+    ranges: dict[str, list],
+    session,
+) -> list[DepthPlan]:
+    """Validate that each variable can be bound in the given order."""
+    resolver = session.engine.resolver
+    bound_vars: set[str] = set()
+    depths: list[DepthPlan] = []
+
+    # Collect all variable names from clauses
+    all_var_names = set()
+    for p in patterns:
+        for s in p.slots:
+            if _is_var(s):
+                all_var_names.add(s.name)
+
+    for var_name in find_vars:
+        if var_name not in all_var_names:
+            raise ValueError(f"variable '?{var_name}' does not appear in any clause")
+
+    # Validate: all variables in clauses must be in find
+    find_set = set(find_vars)
+    for var_name in all_var_names:
+        if var_name not in find_set:
+            raise ValueError(
+                f"variable '?{var_name}' appears in clauses but not in find. "
+                f"All variables must be listed in find in binding order."
+            )
+
+    for var_name in find_vars:
+        var_clauses = []
+        for p in patterns:
+            for i, s in enumerate(p.slots):
+                if _is_var(s) and s.name == var_name:
+                    var_clauses.append((p, i))
+                    break
+
+        if not var_clauses:
+            raise ValueError(f"variable '?{var_name}' not found in any clause")
+
+        clause_plans = []
+        for p, slot_idx in var_clauses:
+            index = _find_feasible_index(p, var_name, bound_vars, resolver)
+            if index is None:
+                reasons = []
+                for idx_name in _INDEXES:
+                    pos_list = _INDEX_POSITIONS[idx_name]
+                    slot_name = _SLOT_NAMES[slot_idx]
+                    try:
+                        vp = pos_list.index(slot_name)
+                    except ValueError:
+                        continue
+                    unbound = []
+                    for ip in range(vp):
+                        pn = pos_list[ip]
+                        if pn in ("t", "added"):
+                            continue
+                        slot_for_pos = _SLOT_NAMES.index(pn)
+                        if not _slot_bound_at(p.slots[slot_for_pos], bound_vars):
+                            unbound.append(f"'{pn}'")
+                    if unbound:
+                        reasons.append(f"{idx_name}: needs {', '.join(unbound)} bound")
+                    else:
+                        reasons.append(f"{idx_name}: attr type incompatible")
+                detail = "; ".join(reasons) if reasons else "no compatible index"
+                raise ValueError(
+                    f"clause {p.clause_idx}: no feasible index for "
+                    f"'?{var_name}' ({detail})"
+                )
+
+            cf = _INDEX_CF[index]
+            pos_order = _INDEX_POSITIONS[index]
+            # Map pattern slot to index position
+            slot_name = _SLOT_NAMES[slot_idx]
+            var_pos_in_index = slot_name  # "e", "a", or "v"
+
+            # Collect constant pushes for index positions before the variable
+            const_pushes = []
+            var_pushes = []
+            vp = pos_order.index(var_pos_in_index)
+            for ip in range(vp):
+                pn = pos_order[ip]
+                if pn in ("t", "added"):
+                    continue
+                slot_for_pos = _SLOT_NAMES.index(pn)
+                s = p.slots[slot_for_pos]
+                if _is_const(s):
+                    val = s
+                    if pn == "a" and isinstance(val, str):
+                        aid = resolver.lookup_attr(val)
+                        if aid is None:
+                            raise ValueError(
+                                f"clause {p.clause_idx}: attribute '{val}' not declared"
+                            )
+                        val = aid
+                    const_pushes.append((pn, val))
+                elif _is_var(s):
+                    var_pushes.append((pn, s.name))
+
+            clause_plans.append(ClausePlan(
+                clause_idx=p.clause_idx,
+                index=index,
+                cf=cf,
+                const_pushes=const_pushes,
+                var_pushes=var_pushes,
+                var_position=var_pos_in_index or "v",
+            ))
+
+        bound_vars.add(var_name)
+        depths.append(DepthPlan(
+            var=var_name,
+            clauses=clause_plans,
+            ranges=ranges.get(var_name),
+        ))
+
+    return depths
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# prepare / explain
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def prepare(
+    session,
+    find: list[str],
+    where: list[tuple],
+    ranges: dict[str, tuple | list] | None = None,
+    given: dict[str, Any] | None = None,
+) -> QueryPlan:
+    """Prepare a datalog query plan.
+
+    Args:
+        session: QuerySession instance.
+        find: Output variables in binding order, e.g. ["?eid", "?name"].
+        where: Clauses as tuples of 3-5 elements: (e, a, v[, t[, added]]).
+        ranges: Range filters per variable, e.g. {"?age": (">=", 18, "<=", 65)}.
+        given: Bind variables to constants (for ambiguous string constants).
+
+    Returns:
+        QueryPlan ready for execution via plan.execute().
+    """
+    if ranges is None:
+        ranges = {}
+    if given is None:
+        given = {}
+
+    find_vars = []
+    for f in find:
+        if not isinstance(f, str) or not f.startswith("?"):
+            raise ValueError(f"find entries must start with '?', got: {f!r}")
+        find_vars.append(f[1:])
+
+    patterns = [_parse_clause(c, i) for i, c in enumerate(where)]
+
+    # Apply given
+    if given:
+        given_parsed = {}
+        for k, v in given.items():
+            key = k[1:] if isinstance(k, str) and k.startswith("?") else k
+            given_parsed[key] = v
+
+        new_patterns = []
+        for p in patterns:
+            new_slots = tuple(
+                given_parsed[s.name] if isinstance(s, Var) and s.name in given_parsed else s
+                for s in p.slots
+            )
+            new_patterns.append(Pattern(slots=new_slots, clause_idx=p.clause_idx))
+        patterns = new_patterns
+
+    # Parse ranges — convert to ranges_create expression tree format
+    # Input: {"?price": (">=", 10, "<=", 20)} or {"?price": ['and', ['>=', 10], ['<=', 20]]}
+    # Output: {"price": [['and', ['>=', 10], ['<=', 20]]]}
+    parsed_ranges = {}
+    op_set = {"=", "!=", ">", ">=", "<", "<=", "in"}
+    for k, v in ranges.items():
+        var_name = k[1:] if k.startswith("?") else k
+        if isinstance(v, tuple) and len(v) >= 2:
+            # Flat tuple: (">=", 10, "<=", 20) → ['and', ['>=', 10], ['<=', 20]]
+            if isinstance(v[0], str) and v[0] in op_set:
+                if len(v) == 2:
+                    # Single op: (">=", 10) → ['>=', 10]
+                    parsed_ranges[var_name] = [list(v)]
+                else:
+                    # Multiple ops: (">=", 10, "<=", 20) → ['and', ['>=', 10], ['<=', 20]]
+                    branches = []
+                    for i in range(0, len(v), 2):
+                        branches.append([v[i], v[i + 1]])
+                    expr = ["and"] + branches
+                    parsed_ranges[var_name] = [expr]
+            else:
+                parsed_ranges[var_name] = [list(v)]
+        elif isinstance(v, list):
+            parsed_ranges[var_name] = v
+        else:
+            parsed_ranges[var_name] = [[v]]
+
+    depths = _validate_plan(find_vars, patterns, parsed_ranges, session)
+
+    return QueryPlan(
+        depths=depths,
+        find_vars=find_vars,
+        patterns=patterns,
+        session=session,
+    )
+
+
+def explain(plan: QueryPlan) -> str:
+    """Return a human-readable description of the query plan."""
+    lines = []
+    lines.append("=== Query Plan ===")
+    lines.append(f"find: {' '.join('?' + v for v in plan.find_vars)}")
+    lines.append("")
+
+    for i, p in enumerate(plan.patterns):
+        e, a, v, t, added = p.slots
+        def _fmt(s):
+            if isinstance(s, Var): return f"?{s.name}"
+            if isinstance(s, Wildcard): return "_"
+            return repr(s)
+        lines.append(f"  [{i}] ({_fmt(e)}, {_fmt(a)}, {_fmt(v)}, {_fmt(t)}, {_fmt(added)})")
+
+    lines.append("")
+    lines.append("binding order:")
+    for depth in plan.depths:
+        idxs = [f"{cp.index}[{cp.cf}]" for cp in depth.clauses]
+        ranges_str = f"  ranges={depth.ranges}" if depth.ranges else ""
+        lines.append(f"  ?{depth.var}: {', '.join(idxs)}{ranges_str}")
+
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# execute
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _open_and_push(depth_plan: DepthPlan, session, bindings: dict) -> list[int]:
+    """Open scanners for a depth, push constants and bound vars, set ranges."""
+    handles = []
+    for cp in depth_plan.clauses:
+        h = session.scanner_open(cp.index)
+        pos_order = _INDEX_POSITIONS[cp.index]
+
+        # Merge const_pushes and var_pushes, sort by index position
+        all_pushes = []
+        for pn, val in cp.const_pushes:
+            all_pushes.append((pos_order.index(pn), val))
+        for pn, var_name in cp.var_pushes:
+            if var_name in bindings:
+                all_pushes.append((pos_order.index(pn), bindings[var_name]))
+        all_pushes.sort(key=lambda x: x[0])
+
+        # Push in index order
+        for _, val in all_pushes:
+            session.scanner_push(h, val)
+
+        # Set value attr type for "v" position
+        if cp.var_position == "v":
+            for pn, val in cp.const_pushes:
+                if pn == "a":
+                    aid = val if isinstance(val, int) else session.intern_a(str(val))
+                    if aid is not None:
+                        sc = session._find_scanner(h)
+                        sc.set_value_attr_type(session.engine.value_type_for(aid))
+                    break
+
+        # Set ranges
+        if depth_plan.ranges:
+            for range_expr in depth_plan.ranges:
+                flat = session.ranges_create(range_expr)
+                if flat:
+                    session.scanner_set_ranges(h, flat)
+
+        handles.append(h)
+    return handles
+
+
+def execute(plan: QueryPlan):
+    """Execute the query plan, yielding tuples of find_vars values."""
+    if not plan.depths:
+        return
+    yield from _exec_recurse(0, plan, plan.session, {})
+
+
+def _exec_recurse(depth_idx: int, plan: QueryPlan, session, bindings: dict):
+    if depth_idx >= len(plan.depths):
+        yield tuple(bindings[v] for v in plan.find_vars)
+        return
+
+    depth = plan.depths[depth_idx]
+    handles = _open_and_push(depth, session, bindings)
+
+    if len(handles) == 1:
+        iter_h = session.scanner_iterate_init(handles[0])
+    else:
+        iter_h = session.scanner_iterate_init(*handles)
+
+    while True:
+        val = session.scanner_iterate_next(iter_h)
+        if val is None:
+            break
+
+        bindings[depth.var] = val
+        for h in handles:
+            session.scanner_push(h, val)
+
+        yield from _exec_recurse(depth_idx + 1, plan, session, bindings)
+
+        for h in handles:
+            session.scanner_pop(h)
