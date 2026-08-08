@@ -66,9 +66,11 @@ class ClausePlan:
 
 @dataclass
 class DepthPlan:
-    var: str
+    kind: str  # "bind" | "validate"
+    var: str | None  # variable name for "bind", None for "validate"
     clauses: list[ClausePlan]
     ranges: list | None = None
+    label: str | None = None  # explain label for "validate" depths
 
 
 @dataclass
@@ -239,6 +241,83 @@ def _find_feasible_index(
 # Validation
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _find_feasible_index_for_slot(
+    pattern: Pattern,
+    slot_idx: int,
+    bound_vars: set[str],
+    resolver,
+) -> str | None:
+    """Find the best index for a specific slot in the pattern.
+
+    Like _find_feasible_index but takes a slot index instead of a variable name.
+    Used for trailing slots where we need the best index for that specific position.
+    """
+    slot_name = _SLOT_NAMES[slot_idx]
+    if slot_name not in ("e", "a", "v", "t", "added"):
+        return None
+
+    best_index = None
+    best_prefix_len = -1
+
+    for idx_name in _INDEXES:
+        positions = _INDEX_POSITIONS[idx_name]
+        try:
+            vp = positions.index(slot_name)
+        except ValueError:
+            continue
+
+        # VAET requires REF attr (only for e/a/v positions)
+        if idx_name == "VAET" and slot_name in ("e", "a", "v"):
+            a_slot = pattern.slots[1]
+            if _is_const(a_slot):
+                aid = resolver.lookup_attr(str(a_slot))
+                if aid is None:
+                    continue
+                vt = resolver.value_type_for(aid)
+                if vt != DB_TYPE_REF:
+                    continue
+            else:
+                continue
+
+        # AVET requires indexed attr (only for e/a/v positions)
+        if idx_name == "AVET" and slot_name in ("e", "a", "v"):
+            a_slot = pattern.slots[1]
+            if _is_const(a_slot):
+                aid = resolver.lookup_attr(str(a_slot))
+                if aid is None:
+                    continue
+                if not resolver.is_indexed(aid):
+                    continue
+            else:
+                continue
+
+        # Check all positions before vp are bound
+        all_before_bound = True
+        for ip in range(vp):
+            pos_name = positions[ip]
+            if pos_name in ("t", "added"):
+                continue
+            slot_for_pos = _SLOT_NAMES.index(pos_name)
+            if not _slot_bound_at(pattern.slots[slot_for_pos], bound_vars):
+                all_before_bound = False
+                break
+
+        if not all_before_bound:
+            continue
+
+        prefix_len = sum(
+            1 for ip in range(vp)
+            if positions[ip] in ("e", "a", "v")
+            and _slot_bound_at(pattern.slots[_SLOT_NAMES.index(positions[ip])], bound_vars)
+        )
+
+        if prefix_len > best_prefix_len:
+            best_prefix_len = prefix_len
+            best_index = idx_name
+
+    return best_index
+
+
 def _validate_plan(
     find_vars: list[str],
     patterns: list[Pattern],
@@ -348,10 +427,111 @@ def _validate_plan(
 
         bound_vars.add(var_name)
         depths.append(DepthPlan(
+            kind="bind",
             var=var_name,
             clauses=clause_plans,
             ranges=ranges.get(var_name),
         ))
+
+        # Detect trailing constants/variables in each clause → validation depths
+        # Constants: only at positions AFTER the variable in the index
+        # Repeated variables: ALWAYS trailing (regardless of index position)
+        for p, slot_idx in var_clauses:
+            # Count occurrences of each variable in this clause
+            var_occurrences: dict[str, list[int]] = {}
+            for i, s in enumerate(p.slots):
+                if _is_var(s):
+                    var_occurrences.setdefault(s.name, []).append(i)
+
+            # Check ALL slots in the clause (except the main variable's slot)
+            for i, s in enumerate(p.slots):
+                if i == slot_idx:
+                    continue
+
+                pn = _SLOT_NAMES[i]
+                range_val = None
+                is_trailing = False
+
+                if _is_const(s):
+                    # Only trailing if there's an index where this position comes AFTER the main var
+                    # Check using the main var's index: is this position after vp?
+                    main_index = _find_feasible_index(p, var_name, bound_vars, resolver)
+                    if main_index is None:
+                        continue
+                    main_pos_order = _INDEX_POSITIONS[main_index]
+                    main_vp = main_pos_order.index(_SLOT_NAMES[slot_idx])
+                    try:
+                        ip = main_pos_order.index(pn)
+                    except ValueError:
+                        continue
+                    if ip <= main_vp:
+                        continue
+                    range_val = s
+                    if pn == "a" and isinstance(range_val, str):
+                        aid = resolver.lookup_attr(range_val)
+                        if aid is not None:
+                            range_val = aid
+                    is_trailing = True
+                elif _is_var(s):
+                    # Trailing if this variable appears MORE than once in the clause
+                    if len(var_occurrences.get(s.name, [])) > 1:
+                        range_val = Var(s.name)
+                        is_trailing = True
+
+                if not is_trailing:
+                    continue
+
+                # Find the best index for THIS trailing slot (not the main var's index)
+                val_index = _find_feasible_index_for_slot(p, i, bound_vars, resolver)
+                if val_index is None:
+                    continue
+
+                val_cf = _INDEX_CF[val_index]
+                val_pos_order = _INDEX_POSITIONS[val_index]
+                val_ip = val_pos_order.index(pn)
+
+                # Build pushes for positions before val_ip in the index
+                val_pushes = []
+                for jp in range(val_ip):
+                    jpn = val_pos_order[jp]
+                    if jpn in ("t", "added"):
+                        continue
+                    jslot_for_pos = _SLOT_NAMES.index(jpn)
+                    js = p.slots[jslot_for_pos]
+                    if _is_const(js):
+                        jval = js
+                        if jpn == "a" and isinstance(jval, str):
+                            jaid = resolver.lookup_attr(jval)
+                            if jaid is not None:
+                                jval = jaid
+                        val_pushes.append(("const", jval))
+                    elif _is_var(js):
+                        val_pushes.append(("var", js.name))
+
+                label = f"[clause {p.clause_idx}, validate {pn}="
+                if isinstance(range_val, Var):
+                    label += f"?{range_val.name}"
+                else:
+                    label += repr(range_val)
+                label += "]"
+
+                val_clause = ClausePlan(
+                    clause_idx=p.clause_idx,
+                    index=val_index,
+                    cf=val_cf,
+                    pushes=val_pushes,
+                    var_position=pn,
+                )
+
+                val_range = [["=", range_val]]
+
+                depths.append(DepthPlan(
+                    kind="validate",
+                    var=None,
+                    clauses=[val_clause],
+                    ranges=val_range,
+                    label=label,
+                ))
 
     return depths
 
@@ -471,7 +651,10 @@ def explain(plan: QueryPlan) -> str:
             push_desc = " ".join(push_strs) if push_strs else "(no pushes)"
             parts.append(f"{cp.index}[{cp.cf}] {push_desc}")
         ranges_str = f"  ranges={depth.ranges}" if depth.ranges else ""
-        lines.append(f"  ?{depth.var}: {'; '.join(parts)}{ranges_str}")
+        if depth.kind == "validate":
+            lines.append(f"  {depth.label}: {'; '.join(parts)}{ranges_str}")
+        else:
+            lines.append(f"  ?{depth.var}: {'; '.join(parts)}{ranges_str}")
 
     return "\n".join(lines)
 
@@ -479,6 +662,15 @@ def explain(plan: QueryPlan) -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 # execute
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def _resolve_range(expr, bindings: dict):
+    """Resolve Var references in range expressions via bindings."""
+    if isinstance(expr, list):
+        return [_resolve_range(e, bindings) for e in expr]
+    if isinstance(expr, Var):
+        return bindings[expr.name]
+    return expr
+
 
 def _open_and_push(depth_plan: DepthPlan, session, bindings: dict) -> list[int]:
     """Open scanners for a depth, push constants and bound vars, set ranges."""
@@ -496,17 +688,17 @@ def _open_and_push(depth_plan: DepthPlan, session, bindings: dict) -> list[int]:
         if cp.var_position == "v":
             for kind, val in cp.pushes:
                 if kind == "const":
-                    # The constant at the "a" position is the attr ID
                     aid = val if isinstance(val, int) else session.intern_a(str(val))
                     if aid is not None:
                         sc = session._find_scanner(h)
                         sc.set_value_attr_type(session.engine.value_type_for(aid))
                     break
 
-        # Set ranges
+        # Set ranges (resolve Var references via bindings)
         if depth_plan.ranges:
             for range_expr in depth_plan.ranges:
-                flat = session.ranges_create(range_expr)
+                resolved = _resolve_range(range_expr, bindings)
+                flat = session.ranges_create(resolved)
                 if flat:
                     session.scanner_set_ranges(h, flat)
 
@@ -539,11 +731,13 @@ def _exec_recurse(depth_idx: int, plan: QueryPlan, session, bindings: dict):
         if val is None:
             break
 
-        bindings[depth.var] = val
-        for h in handles:
-            session.scanner_push(h, val)
+        if depth.kind == "bind":
+            bindings[depth.var] = val
+            for h in handles:
+                session.scanner_push(h, val)
 
         yield from _exec_recurse(depth_idx + 1, plan, session, bindings)
 
-        for h in handles:
-            session.scanner_pop(h)
+        if depth.kind == "bind":
+            for h in handles:
+                session.scanner_pop(h)

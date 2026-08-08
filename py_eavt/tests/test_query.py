@@ -274,3 +274,82 @@ class TestExecute:
             given={"?eid": 1},
         )
         assert q.patterns[0].slots[0] == 1  # eid resolved to constant
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Trailing constants and repeated variables
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestTrailing:
+    def test_trailing_constant(self, eng, sess):
+        eng.declare_attr("item.price", "long")
+        eid1 = sess.alloc_entity()
+        eid2 = sess.alloc_entity()
+        sess.save(eid1, "item.price", 10)
+        sess.save(eid2, "item.price", 20)
+        sess.commit()
+        q = prepare(sess, ["?eid"], [("?eid", "item.price", 20)])
+        rows = list(q.execute())
+        assert rows == [(eid2,)]
+
+    def test_trailing_constant_explain(self, sess):
+        # Non-indexed attr → AVET not available → trailing at v position
+        sess.declare_attr("item.price", "long", indexed=False)
+        q = prepare(sess, ["?eid"], [("?eid", "item.price", 42)])
+        txt = q.explain()
+        assert "validate" in txt
+        assert "42" in txt
+
+    def test_trailing_constant_non_indexed(self, eng, sess):
+        eng.declare_attr("item.price", "long", indexed=False)
+        eid1 = sess.alloc_entity()
+        eid2 = sess.alloc_entity()
+        sess.save(eid1, "item.price", 10)
+        sess.save(eid2, "item.price", 20)
+        sess.commit()
+        q = prepare(sess, ["?eid"], [("?eid", "item.price", 20)])
+        rows = list(q.execute())
+        assert rows == [(eid2,)]
+
+    def test_trailing_constant_no_match(self, eng, sess):
+        eng.declare_attr("item.price", "long")
+        eid1 = sess.alloc_entity()
+        sess.save(eid1, "item.price", 10)
+        sess.commit()
+        q = prepare(sess, ["?eid"], [("?eid", "item.price", 99)])
+        rows = list(q.execute())
+        assert rows == []
+
+    def test_repeated_variable_self_ref(self, eng, sess):
+        eng.declare_attr("company.partner", "ref")
+        eid1 = sess.alloc_entity()
+        eid2 = sess.alloc_entity()
+        sess.save(eid1, "company.partner", eid1)  # self-ref
+        sess.save(eid2, "company.partner", eid1)  # external ref
+        sess.commit()
+        q = prepare(sess, ["?eid"], [("?eid", "company.partner", "?eid")])
+        rows = list(q.execute())
+        assert rows == [(eid1,)]
+
+    def test_repeated_variable_explain(self, sess):
+        sess.declare_attr("company.partner", "ref")
+        q = prepare(sess, ["?eid"], [("?eid", "company.partner", "?eid")])
+        txt = q.explain()
+        assert "validate" in txt
+
+    def test_repeated_variable_no_match(self, eng, sess):
+        eng.declare_attr("company.partner", "ref")
+        eid1 = sess.alloc_entity()
+        eid2 = sess.alloc_entity()
+        sess.save(eid1, "company.partner", eid2)
+        sess.save(eid2, "company.partner", eid1)
+        sess.commit()
+        # Neither points to itself
+        q = prepare(sess, ["?eid"], [("?eid", "company.partner", "?eid")])
+        rows = list(q.execute())
+        assert rows == []
+
+    def test_trailing_unbound_error(self, sess):
+        sess.declare_attr("person.name", "string")
+        with pytest.raises(ValueError, match="not in find"):
+            prepare(sess, ["?eid"], [("?eid", "person.name", "?missing")])
