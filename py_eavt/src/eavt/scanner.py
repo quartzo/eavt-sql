@@ -280,42 +280,6 @@ class V2Scanner:
             return KVP_BEFORE
         return KVP_MATCH
 
-    # ── value_start / value_end ──
-
-    def value_start(self, key: bytes) -> int:
-        ci = self.pos.current_position()
-        pn = self.pos.pos_name()
-        if ci >= len(self.pos.idx_order) or pn in ("t", "added"):
-            return len(key) - keys._SUFFIX_SIZE
-        if self.index_name == "EAVT":
-            return [0, 8, 12][min(ci, 2)]
-        if self.index_name == "AEVT":
-            return [0, 4, 12][min(ci, 2)]
-        if self.index_name == "AVET":
-            if ci <= 1:
-                return [0, 4][ci]
-            # ci=2: need to skip past variable-length value to find eid
-            _, end = keys.decode_value_at(key, 4, self.value_attr_type or DB_TYPE_STRING)
-            return end
-        if self.index_name == "VAET":
-            return [0, 8, 12][min(ci, 2)]
-        return 12
-
-    def value_end(self, key: bytes) -> int:
-        ci = self.pos.current_position()
-        if ci >= len(self.pos.idx_order):
-            return len(key)
-        pn = self.pos.pos_name()
-        vs = self.value_start(key)
-        if pn == "e":
-            return vs + 8
-        if pn == "a":
-            return vs + 4
-        if pn == "v":
-            _, end = keys.decode_value_at(key, vs, self.value_attr_type or DB_TYPE_STRING)
-            return end
-        return len(key)
-
     # ── extract_current ──
 
     def extract_current(self):
@@ -336,15 +300,14 @@ class V2Scanner:
                 return (bool, not retracted)
             return (int, t)
 
-        vs = self.value_start(key)
-        ve = self.value_end(key)
+        vs = len(self.prefix_cache)
 
         if pn == "a":
             return (int, keys.be_uint32(key, vs))
         if pn == "e":
             return (int, keys.decode_eid(keys.be_uint64(key, vs)))
         if pn == "v":
-            value, _ = keys.decode_value_at(key, vs, self.value_attr_type or DB_TYPE_STRING)
+            value, _ = keys.read_next(key, vs, self.value_attr_type or DB_TYPE_STRING)
             return (type(value), value)
         return None
 
@@ -458,7 +421,7 @@ class V2Scanner:
         if key is None:
             self.pos.cursor.invalidate()
             return
-        vs = self.value_start(key)
+        vs = len(self.prefix_cache)
         target = bytearray(key[:vs])
 
         if pn == "t":
@@ -490,7 +453,7 @@ class V2Scanner:
                 self.pos.cursor.seek(bytes(target))
         elif self.value_attr_type in (DB_TYPE_STRING, DB_TYPE_BYTES, DB_TYPE_BLOB):
             # Variable-length value: increment raw bytes
-            _, ve = keys.decode_value_at(key, vs, self.value_attr_type or DB_TYPE_STRING)
+            _, ve = keys.read_next(key, vs, self.value_attr_type or DB_TYPE_STRING)
             raw = bytearray(key[vs:ve])
             carry = True
             i = len(raw) - 1
@@ -535,7 +498,7 @@ class V2Scanner:
         if key is None:
             self.pos.cursor.invalidate()
             return
-        vs = self.value_start(key)
+        vs = len(self.prefix_cache)
         target = bytearray(key[:vs])
 
         vtype, vraw = value

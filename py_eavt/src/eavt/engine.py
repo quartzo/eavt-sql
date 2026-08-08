@@ -483,7 +483,7 @@ class EavtEngine:
             e = keys.decode_eid(keys.be_uint64(k, 4))
             if e < 100:  # BOOTSTRAP_FIRST_USER_ID
                 continue
-            name, _ = keys.decode_value_at(k, 12, DB_TYPE_STRING)
+            name, _ = keys.read_next(k, 12, DB_TYPE_STRING)
             if name:
                 ident_map[e] = name
 
@@ -750,7 +750,7 @@ class EavtEngine:
             if group == retracted_group:
                 continue
             vt = self.value_type_for(aid) or 20
-            val, _ = keys.decode_value_at(k, 12, vt)
+            val, _ = keys.read_next(k, 12, vt)
             return val
         return None
 
@@ -797,7 +797,7 @@ class EavtEngine:
                 continue
 
             vt = self.value_type_for(aid) or 20
-            val, _ = keys.decode_value_at(key, v_start, vt)
+            val, _ = keys.read_next(key, v_start, vt)
             aname = self.attr_name(aid)
 
             yield Datom(e=eid, a=aid, attr_name=aname, value=val, t=t, retracted=retracted)

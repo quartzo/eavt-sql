@@ -200,13 +200,15 @@ def encode_value(v, mode: EncodeMode, ref_eid: int = 0) -> bytes:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def decode_value_at(key: bytes, start: int, vt: int) -> tuple:
-    """Decode a value at position `start` in a key.
+def read_next(key: bytes, start: int, vt: int) -> tuple:
+    """Read the element at position `start` in the key.
 
-    Returns (python_value, end_position). The end_position is the byte
-    offset past the value — the start of the next field (eid or suffix).
+    The encoding is determined by `vt` (DB_TYPE_* constant).
+    Returns (decoded_value, bytes_consumed).
 
-    vt is one of the DB_TYPE_* constants.
+    This is the ONLY place that decodes values from keys.
+    The scanner calls this with start = len(prefix_cache).
+    The engine calls this with start = known offset per CF layout.
     """
     from .types import (
         DB_TYPE_REF, DB_TYPE_BOOLEAN, DB_TYPE_LONG, DB_TYPE_INSTANT,

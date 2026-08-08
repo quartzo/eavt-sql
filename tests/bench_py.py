@@ -11,7 +11,7 @@ _root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_root / "py_eavt" / "src"))
 from eavt.engine import EavtEngine
 from eavt import keys
-from eavt.keys import encode_int, encode_string, _U64
+from eavt.keys import encode_int, encode_string, read_next, _U64
 from eavt.types import DB_TYPE_LONG
 
 
@@ -49,8 +49,8 @@ def scan_aevt_values(eng, attr_name):
     for key in eng.scan_prefix(1, _aid_prefix(aid)):
         if len(key) < 20 or _is_retracted(key):
             continue
-        eid, _ = keys.decode_value_at(key, 4, DB_TYPE_LONG)
-        val, _ = keys.decode_value_at(key, 12, vt or 20)
+        eid, _ = keys.read_next(key, 4, DB_TYPE_LONG)
+        val, _ = keys.read_next(key, 12, vt or 20)
         results.append((eid, val))
     return results
 
@@ -68,7 +68,7 @@ def scan_avet_lookup(eng, attr_name, value):
     for key in eng.scan_prefix(2, prefix):
         if len(key) < 16 or _is_retracted(key):
             continue
-        eid, _ = keys.decode_value_at(key, len(key) - keys._SUFFIX_SIZE - 8, DB_TYPE_LONG)
+        eid, _ = keys.read_next(key, len(key) - keys._SUFFIX_SIZE - 8, DB_TYPE_LONG)
         results.append(eid)
     return results
 
@@ -81,7 +81,7 @@ def scan_eavt_by_eid(eng, eid, attr_name):
     for key in eng.scan_prefix(0, prefix):
         if len(key) < 20 or _is_retracted(key):
             continue
-        val, _ = keys.decode_value_at(key, 12, vt or 20)
+        val, _ = keys.read_next(key, 12, vt or 20)
         return val
     return None
 
