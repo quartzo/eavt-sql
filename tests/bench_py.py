@@ -11,6 +11,10 @@ _root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_root / "py_eavt" / "src"))
 from eavt import EavtEngine, QuerySession, prepare
 
+# perf_counter is local to benchmarks — not in production code
+sys.path.insert(0, str(_root / "tests"))
+import perf_counter as pc
+
 
 def bench(label, fn, iterations=1):
     times = []
