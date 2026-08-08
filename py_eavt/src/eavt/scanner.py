@@ -8,7 +8,6 @@ from __future__ import annotations
 from typing import Any
 
 from . import keys
-from .perf_counter import Timer
 from .types import (
     DB_TYPE_BOOLEAN,
     DB_TYPE_BLOB,
@@ -155,7 +154,6 @@ class V2Scanner:
         "prefix_cache",
         "t_in_prefix",
         "raw_ops",
-        "_prefix_stack",
     )
 
     def __init__(
@@ -173,7 +171,6 @@ class V2Scanner:
         self.prefix_cache: bytes = b""
         self.t_in_prefix = False
         self.raw_ops: list = []
-        self._prefix_stack: list[tuple[bytes, bool]] = []  # (prefix, t_in_prefix)
 
     def set_cursor(self, cursor: RocksCursor):
         self.pos.cursor = cursor
@@ -184,61 +181,59 @@ class V2Scanner:
 
     # ── prefix_cache ──
 
-    def _encode_position(self, pn: str, val) -> bytes:
-        """Encode a value at a given position for the prefix."""
-        if pn == "a":
-            return keys._ATTR.pack(val & 0xFFFFFFFF)
-        if pn == "e":
-            return keys.encode_eid(val)
-        if pn == "v":
-            if self.value_attr_type == DB_TYPE_BLOB:
-                if isinstance(val, (bytes, bytearray)):
-                    return keys.encode_blob(bytes(val))
-                return keys.encode_string(str(val))
-            if self.value_attr_type == DB_TYPE_BYTES:
-                if isinstance(val, (bytes, bytearray)):
-                    return keys.encode_bytes(bytes(val))
-                return keys.encode_bytes(str(val).encode("utf-8"))
-            if isinstance(val, str):
-                return keys.encode_string(val)
-            if isinstance(val, bool):
-                return keys.encode_bool(val)
-            if isinstance(val, (bytes, bytearray)):
-                return keys.encode_blob(bytes(val))
-            if isinstance(val, float):
-                return keys.encode_float(val)
-            if isinstance(val, int):
-                return keys.encode_int(val)
-            return keys.encode_int(0)
-        if pn == "t":
-            tx_bytes, _ = keys.encode_suffix(val, False)
-            return tx_bytes
-        # generic
-        if isinstance(val, str):
-            return keys.encode_string(val)
-        if isinstance(val, (bytes, bytearray)):
-            return keys.encode_blob(bytes(val))
-        if isinstance(val, float):
-            return keys.encode_float(val)
-        if isinstance(val, bool):
-            return keys.encode_bool(val)
-        if isinstance(val, int):
-            return keys.encode_int(val)
-        return b""
-
     def recompute_prefix(self):
-        with Timer("scanner.recompute_prefix"):
-          buf = bytearray()
-          t_in_prefix = False
-          fixed = self.pos.fixed_entries()
+        buf = bytearray()
+        t_in_prefix = False
+        fixed = self.pos.fixed_entries()
         for pi, pn in enumerate(self.pos.idx_order):
             found = False
             for idx, v in fixed:
                 if idx == pi:
                     found = True
-                    buf.extend(self._encode_position(pn, v))
-                    if pn == "t":
+                    if pn == "a":
+                        v32 = v & 0xFFFFFFFF
+                        buf.extend(keys._ATTR.pack(v32))
+                    elif pn == "e":
+                        buf.extend(keys.encode_eid(v))
+                    elif pn == "v":
+                        if self.value_attr_type == DB_TYPE_BLOB:
+                            if isinstance(v, (bytes, bytearray)):
+                                buf.extend(keys.encode_blob(bytes(v)))
+                            else:
+                                buf.extend(keys.encode_string(str(v)))
+                        elif self.value_attr_type == DB_TYPE_BYTES:
+                            if isinstance(v, (bytes, bytearray)):
+                                buf.extend(keys.encode_bytes(bytes(v)))
+                            else:
+                                buf.extend(keys.encode_bytes(str(v).encode("utf-8")))
+                        elif isinstance(v, str):
+                            buf.extend(keys.encode_string(v))
+                        elif isinstance(v, bool):
+                            buf.extend(keys.encode_bool(v))
+                        elif isinstance(v, (bytes, bytearray)):
+                            buf.extend(keys.encode_blob(bytes(v)))
+                        elif isinstance(v, float):
+                            buf.extend(keys.encode_float(v))
+                        elif isinstance(v, int):
+                            buf.extend(keys.encode_int(v))
+                        else:
+                            buf.extend(keys.encode_int(0))
+                    elif pn == "t":
+                        tx_bytes, _ = keys.encode_suffix(v, False)
+                        buf.extend(tx_bytes)
                         t_in_prefix = True
+                    else:
+                        # Generic bound value
+                        if isinstance(v, str):
+                            buf.extend(keys.encode_string(v))
+                        elif isinstance(v, (bytes, bytearray)):
+                            buf.extend(keys.encode_blob(bytes(v)))
+                        elif isinstance(v, float):
+                            buf.extend(keys.encode_float(v))
+                        elif isinstance(v, bool):
+                            buf.extend(keys.encode_bool(v))
+                        elif isinstance(v, int):
+                            buf.extend(keys.encode_int(v))
                     break
             if not found:
                 break
@@ -247,22 +242,13 @@ class V2Scanner:
 
     def save_value(self, val):
         self.pos.push_fixed(val)
-        pn = self.pos.idx_order[len(self.pos.stack) - 1]
-        encoded = self._encode_position(pn, val)
-        self._prefix_stack.append((self.prefix_cache, self.t_in_prefix))
-        self.prefix_cache = self.prefix_cache + encoded
-        if pn == "t":
-            self.t_in_prefix = True
-        self.pos.cursor.reset_fell()
-        self.raw_ops = []
+        self.recompute_prefix()
+        self.pos.cursor.reset_fell()  # push descends to a never-scanned position; re-seek is safe
+        self.raw_ops = []  # ranges are position-scoped; descending clears them
 
     def pop_saved_value(self):
         self.pos.pop_fixed()
-        if self._prefix_stack:
-            self.prefix_cache, self.t_in_prefix = self._prefix_stack.pop()
-        else:
-            self.prefix_cache = b""
-            self.t_in_prefix = False
+        self.recompute_prefix()
 
     def set_value_attr_type(self, vt: int | None):
         self.value_attr_type = vt
@@ -298,44 +284,38 @@ class V2Scanner:
 
     def extract_current(self):
         """Extract the current value at the scanner's position. Returns None if exhausted."""
-        with Timer("scanner.extract_current"):
-            key = self.pos.current_active_key
-            if key is None:
-                return None
-            if self.classify_key(key) not in (KVP_MATCH, KVP_NO_PREFIX):
-                return None
-            pn = self.pos.pos_name()
-            ci = self.pos.current_position()
-
-            if ci >= len(self.pos.idx_order) or pn in ("t", "added"):
-                tx_raw = keys.be_uint64(key, len(key) - keys._SUFFIX_SIZE)
-                t = keys.decode_int64(tx_raw)
-                retracted = (key[-1] & 1) != 0
-                if pn == "added":
-                    return (bool, not retracted)
-                return (int, t)
-
-            vs = len(self.prefix_cache)
-
-            if pn == "a":
-                return (int, keys.be_uint32(key, vs))
-            if pn == "e":
-                return (int, keys.decode_eid(keys.be_uint64(key, vs)))
-            if pn == "v":
-                vt = self.value_attr_type
-                if vt == DB_TYPE_LONG:
-                    raw = keys.be_uint64(key, vs)
-                    return (int, keys.decode_int64(raw))
-                value, _ = keys.read_next(key, vs, vt or DB_TYPE_STRING)
-                return (type(value), value)
+        key = self.pos.current_active_key
+        if key is None:
             return None
+        if self.classify_key(key) not in (KVP_MATCH, KVP_NO_PREFIX):
+            return None
+        pn = self.pos.pos_name()
+        ci = self.pos.current_position()
+
+        if ci >= len(self.pos.idx_order) or pn in ("t", "added"):
+            tx_raw = keys.be_uint64(key, len(key) - keys._SUFFIX_SIZE)
+            t = keys.decode_int64(tx_raw)
+            retracted = (key[-1] & 1) != 0
+            if pn == "added":
+                return (bool, not retracted)
+            return (int, t)
+
+        vs = len(self.prefix_cache)
+
+        if pn == "a":
+            return (int, keys.be_uint32(key, vs))
+        if pn == "e":
+            return (int, keys.decode_eid(keys.be_uint64(key, vs)))
+        if pn == "v":
+            value, _ = keys.read_next(key, vs, self.value_attr_type or DB_TYPE_STRING)
+            return (type(value), value)
+        return None
 
     # ── advance_to_active_at ──
 
     def advance_to_active_at(self):
         """Find the latest active (non-retracted) datom at current prefix."""
-        with Timer("scanner.advance_to_active"):
-          pn = self.pos.pos_name()
+        pn = self.pos.pos_name()
 
         if pn == "added":
             self.pos.at_end = self.pos.current_active_key is None
@@ -417,14 +397,13 @@ class V2Scanner:
     # ── leap_next_at ──
 
     def leap_next_at(self):
-        with Timer("scanner.leap_next_at"):
-          pn = self.pos.pos_name()
-          if pn == "added":
-              self.pos.at_end = True
-              return
-          if self.pos.current_active_key is not None:
-              self.pos.cursor.step()
-          self.advance_to_active_at()
+        pn = self.pos.pos_name()
+        if pn == "added":
+            self.pos.at_end = True
+            return
+        if self.pos.current_active_key is not None:
+            self.pos.cursor.step()
+        self.advance_to_active_at()
 
     # ── seek_to_value ──
 
