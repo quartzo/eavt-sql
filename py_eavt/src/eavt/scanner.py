@@ -323,7 +323,15 @@ class V2Scanner:
             if vt == DB_TYPE_LONG:
                 raw = keys.be_uint64(key, vs)
                 return (int, keys.decode_int64(raw))
-            value, _ = keys.read_next(key, vs, vt or DB_TYPE_STRING)
+            if vt == DB_TYPE_STRING or vt is None:
+                end = vs
+                keylen = len(key)
+                while end < keylen:
+                    if key[end] == 0:
+                        return (str, key[vs:end].decode("utf-8"))
+                    end += 1
+                return (str, key[vs:].decode("utf-8"))
+            value, _ = keys.read_next(key, vs, vt)
             return (type(value), value)
         return None
 
