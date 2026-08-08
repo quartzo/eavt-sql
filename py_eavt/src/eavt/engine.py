@@ -27,6 +27,7 @@ from .types import (
     DB_CARDINALITY_MANY,
     DB_IDENT_AID,
     DB_TX_INSTANT_AID,
+    DB_TYPE_STRING,
     DB_UNIQUE_AID,
     DB_UNIQUE_IDENTITY,
     DB_VALUE_TYPE_AID,
@@ -482,7 +483,7 @@ class EavtEngine:
             e = keys.decode_eid(keys.be_uint64(k, 4))
             if e < 100:  # BOOTSTRAP_FIRST_USER_ID
                 continue
-            name = keys.decode_variable_str(k, 12)
+            name, _ = keys.decode_value_at(k, 12, DB_TYPE_STRING)
             if name:
                 ident_map[e] = name
 
@@ -560,12 +561,12 @@ class EavtEngine:
         mode = value_type_to_encode_mode(vt)
         indexed = self.resolver.is_indexed(attr_id)
 
-        val_str = self._value_to_str(value)
+        encodable = self._to_encodable(value, mode)
         if mode == EncodeMode.REF:
-            ref_eid = int(value) if isinstance(value, (int, float)) else int(val_str)
-            encoded = keys.encode_value(val_str, mode, ref_eid)
+            ref_eid = int(value) if isinstance(value, (int, float)) else int(str(value))
+            encoded = keys.encode_value(encodable, mode, ref_eid)
         else:
-            encoded = keys.encode_value(val_str, mode, 0)
+            encoded = keys.encode_value(encodable, mode, 0)
 
         if not many:
             fresh_attrs = self._fresh.get(eid)
@@ -597,22 +598,25 @@ class EavtEngine:
         mode = value_type_to_encode_mode(vt)
         indexed = self.resolver.is_indexed(attr_id)
 
-        val_str = self._value_to_str(value)
+        encodable = self._to_encodable(value, mode)
         if mode == EncodeMode.REF:
-            ref_eid = int(value) if isinstance(value, (int, float)) else int(val_str)
-            encoded = keys.encode_value(val_str, mode, ref_eid)
+            ref_eid = int(value) if isinstance(value, (int, float)) else int(str(value))
+            encoded = keys.encode_value(encodable, mode, ref_eid)
         else:
-            encoded = keys.encode_value(val_str, mode, 0)
+            encoded = keys.encode_value(encodable, mode, 0)
         entries = keys.build_eavt_entries(eid, attr_id, encoded, tx, True, mode, indexed)
         self._batch_write(entries)
 
     @staticmethod
-    def _value_to_str(value) -> str:
+    def _to_encodable(value, mode: EncodeMode):
+        """Convert a Python value to the type expected by encode_value."""
+        if mode in (EncodeMode.BLOCK, EncodeMode.BLOB):
+            if isinstance(value, bytes):
+                return value
+            return str(value).encode("utf-8")
         if isinstance(value, bool):
-            return "1" if value else "0"
-        if isinstance(value, bytes):
-            return value.decode("utf-8", errors="replace")
-        return str(value)
+            return value  # encode_value handles bool directly
+        return value
 
     # ── Tx allocation ──
 
@@ -713,8 +717,8 @@ class EavtEngine:
         aid = aid_opt
         vt = self.value_type_for(aid) or 20
         mode = value_type_to_encode_mode(vt)
-        val_str = self._value_to_str(value)
-        encoded = keys.encode_value(val_str, mode, 0)
+        encodable = self._to_encodable(value, mode)
+        encoded = keys.encode_value(encodable, mode, 0)
         prefix = keys._attr_bytes(aid) + encoded
         scan_res = self.scan_prefix(2, prefix)  # AVET
         if not scan_res:
@@ -746,7 +750,8 @@ class EavtEngine:
             if group == retracted_group:
                 continue
             vt = self.value_type_for(aid) or 20
-            return keys.decode_stored_value(k[12 : len(k) - keys._SUFFIX_SIZE], vt)
+            val, _ = keys.decode_value_at(k, 12, vt)
+            return val
         return None
 
     # ── Scan datoms ──
@@ -791,9 +796,8 @@ class EavtEngine:
                 it.next()
                 continue
 
-            raw_value = key[v_start:v_end]
             vt = self.value_type_for(aid) or 20
-            val = keys.decode_stored_value(raw_value, vt)
+            val, _ = keys.decode_value_at(key, v_start, vt)
             aname = self.attr_name(aid)
 
             yield Datom(e=eid, a=aid, attr_name=aname, value=val, t=t, retracted=retracted)

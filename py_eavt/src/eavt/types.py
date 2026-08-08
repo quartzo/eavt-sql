@@ -9,9 +9,10 @@ from enum import IntEnum
 
 class EncodeMode(IntEnum):
     REF = 0
-    VARIABLE = 1  # text, keyword
-    BLOB = 2  # bytes, blob
-    FIXED = 3  # int, float, bool, instant
+    VARIABLE = 1    # null-terminated (STRING, KEYWORD)
+    BLOCK = 2       # 8+1 block encoding (BYTES)
+    BLOB = 3        # 4B length + raw
+    FIXED = 4       # 8-byte fixed (LONG, FLOAT, BOOLEAN, INSTANT)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -110,13 +111,11 @@ def value_type_to_encode_mode(vt: int) -> EncodeMode:
         return EncodeMode.REF
     if vt in (DB_TYPE_STRING, DB_TYPE_KEYWORD):
         return EncodeMode.VARIABLE
-    if vt in (DB_TYPE_BOOLEAN, DB_TYPE_LONG, DB_TYPE_INSTANT):
-        return EncodeMode.FIXED
-    if vt in (DB_TYPE_FLOAT,):
-        return EncodeMode.FIXED
-    if vt in (DB_TYPE_BYTES, DB_TYPE_BLOB):
+    if vt == DB_TYPE_BYTES:
+        return EncodeMode.BLOCK
+    if vt == DB_TYPE_BLOB:
         return EncodeMode.BLOB
-    return EncodeMode.VARIABLE
+    return EncodeMode.FIXED
 
 
 def value_type_from_name(name: str) -> int:

@@ -107,29 +107,9 @@ class RocksCursor:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def _is_unordered_attr(vt: int | None) -> bool:
-    return vt is not None and vt == DB_TYPE_BLOB
-
-
-def _is_variable_value(vt: int | None, key_len: int) -> bool:
-    if vt is not None and vt in (DB_TYPE_STRING, DB_TYPE_BYTES, DB_TYPE_BLOB):
-        return True
-    return key_len != (20 + keys._SUFFIX_SIZE)  # not the fixed-size key
-
-
-def _find_v_end(key: bytes, start: int, is_unordered: bool) -> int:
-    if is_unordered:
-        if start + 4 > len(key):
-            return len(key)
-        length = keys.be_uint32(key, start)
-        return start + 4 + length
-    pos = start
-    while pos + 9 <= len(key):
-        if key[pos + 8] == 0xFF:
-            pos += 9
-        else:
-            return pos + 9
-    return len(key)
+# ═══════════════════════════════════════════════════════════════════════════════
+# V2Scanner
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 class PositionStack:
@@ -218,17 +198,22 @@ class V2Scanner:
                     elif pn == "v":
                         if self.value_attr_type == DB_TYPE_BLOB:
                             if isinstance(v, (bytes, bytearray)):
-                                buf.extend(keys.encode_variable_unordered(bytes(v)))
+                                buf.extend(keys.encode_blob(bytes(v)))
                             else:
-                                buf.extend(keys.encode_variable(str(v)))
+                                buf.extend(keys.encode_string(str(v)))
+                        elif self.value_attr_type == DB_TYPE_BYTES:
+                            if isinstance(v, (bytes, bytearray)):
+                                buf.extend(keys.encode_bytes(bytes(v)))
+                            else:
+                                buf.extend(keys.encode_bytes(str(v).encode("utf-8")))
                         elif isinstance(v, str):
-                            buf.extend(keys.encode_variable(v))
+                            buf.extend(keys.encode_string(v))
+                        elif isinstance(v, bool):
+                            buf.extend(keys.encode_bool(v))
                         elif isinstance(v, (bytes, bytearray)):
-                            buf.extend(keys.encode_variable_unordered(bytes(v)))
+                            buf.extend(keys.encode_blob(bytes(v)))
                         elif isinstance(v, float):
                             buf.extend(keys.encode_float(v))
-                        elif isinstance(v, bool):
-                            buf.extend(keys.encode_fixed_bool(v))
                         elif isinstance(v, int):
                             buf.extend(keys.encode_int(v))
                         else:
@@ -240,13 +225,13 @@ class V2Scanner:
                     else:
                         # Generic bound value
                         if isinstance(v, str):
-                            buf.extend(keys.encode_variable(v))
+                            buf.extend(keys.encode_string(v))
                         elif isinstance(v, (bytes, bytearray)):
-                            buf.extend(keys.encode_variable_unordered(bytes(v)))
+                            buf.extend(keys.encode_blob(bytes(v)))
                         elif isinstance(v, float):
                             buf.extend(keys.encode_float(v))
                         elif isinstance(v, bool):
-                            buf.extend(keys.encode_fixed_bool(v))
+                            buf.extend(keys.encode_bool(v))
                         elif isinstance(v, int):
                             buf.extend(keys.encode_int(v))
                     break
@@ -309,10 +294,9 @@ class V2Scanner:
         if self.index_name == "AVET":
             if ci <= 1:
                 return [0, 4][ci]
-            vs = 4
-            if _is_variable_value(self.value_attr_type, len(key)):
-                return _find_v_end(key, vs, _is_unordered_attr(self.value_attr_type))
-            return vs + 8
+            # ci=2: need to skip past variable-length value to find eid
+            _, end = keys.decode_value_at(key, 4, self.value_attr_type or DB_TYPE_STRING)
+            return end
         if self.index_name == "VAET":
             return [0, 8, 12][min(ci, 2)]
         return 12
@@ -328,9 +312,8 @@ class V2Scanner:
         if pn == "a":
             return vs + 4
         if pn == "v":
-            if _is_variable_value(self.value_attr_type, len(key)):
-                return _find_v_end(key, vs, _is_unordered_attr(self.value_attr_type))
-            return vs + 8
+            _, end = keys.decode_value_at(key, vs, self.value_attr_type or DB_TYPE_STRING)
+            return end
         return len(key)
 
     # ── extract_current ──
@@ -361,22 +344,8 @@ class V2Scanner:
         if pn == "e":
             return (int, keys.decode_eid(keys.be_uint64(key, vs)))
         if pn == "v":
-            if _is_variable_value(self.value_attr_type, len(key)):
-                data = key[vs:ve]
-                if self.value_attr_type == DB_TYPE_STRING:
-                    return (str, keys.decode_variable_str(data, 0))
-                if self.value_attr_type in (DB_TYPE_BYTES, DB_TYPE_BLOB):
-                    return (bytes, data)
-                return (str, keys.decode_variable_str(data, 0))
-            else:
-                raw = keys.be_uint64(key, vs)
-                if self.value_attr_type == DB_TYPE_FLOAT:
-                    return (float, keys.decode_float64(raw))
-                if self.value_attr_type == DB_TYPE_BOOLEAN:
-                    return (bool, raw != 0)
-                if self.value_attr_type in (DB_TYPE_INSTANT, DB_TYPE_REF, DB_TYPE_LONG):
-                    return (int, keys.decode_int64(raw))
-                return (int, raw)
+            value, _ = keys.decode_value_at(key, vs, self.value_attr_type or DB_TYPE_STRING)
+            return (type(value), value)
         return None
 
     # ── advance_to_active_at ──
@@ -510,8 +479,19 @@ class V2Scanner:
                 next_val = cur + 1
                 target.extend(keys._ATTR.pack(next_val))
                 self.pos.cursor.seek(bytes(target))
-        elif _is_variable_value(self.value_attr_type, len(key)):
-            raw = bytearray(key[vs : self.value_end(key)])
+        elif pn == "e":
+            # Entity ID: always 8-byte sign-flipped int
+            cur = keys.be_uint64(key, vs)
+            if cur == 0xFFFFFFFFFFFFFFFF:
+                self.pos.cursor.invalidate()
+            else:
+                next_val = cur + 1
+                target.extend(keys._U64.pack(next_val))
+                self.pos.cursor.seek(bytes(target))
+        elif self.value_attr_type in (DB_TYPE_STRING, DB_TYPE_BYTES, DB_TYPE_BLOB):
+            # Variable-length value: increment raw bytes
+            _, ve = keys.decode_value_at(key, vs, self.value_attr_type or DB_TYPE_STRING)
+            raw = bytearray(key[vs:ve])
             carry = True
             i = len(raw) - 1
             while carry and i >= 0:
@@ -565,19 +545,25 @@ class V2Scanner:
             v32 = vraw & 0xFFFFFFFF
             target.extend(keys._ATTR.pack(v32))
         elif pn == "v":
-            if _is_unordered_attr(self.value_attr_type):
+            vt = self.value_attr_type or DB_TYPE_STRING
+            if vt == DB_TYPE_BLOB:
                 if isinstance(vraw, (bytes, bytearray)):
-                    target.extend(keys.encode_variable_unordered(bytes(vraw)))
+                    target.extend(keys.encode_blob(bytes(vraw)))
                 else:
-                    target.extend(keys.encode_variable(str(vraw)))
+                    target.extend(keys.encode_string(str(vraw)))
+            elif vt == DB_TYPE_BYTES:
+                if isinstance(vraw, (bytes, bytearray)):
+                    target.extend(keys.encode_bytes(bytes(vraw)))
+                else:
+                    target.extend(keys.encode_bytes(str(vraw).encode("utf-8")))
             elif vtype == str:
-                target.extend(keys.encode_variable(str(vraw)))
+                target.extend(keys.encode_string(str(vraw)))
             elif vtype == bytes:
-                target.extend(keys.encode_variable_unordered(bytes(vraw)))
+                target.extend(keys.encode_blob(bytes(vraw)))
             elif vtype == float:
                 target.extend(keys.encode_float(vraw))
             elif vtype == bool:
-                target.extend(keys.encode_fixed_bool(vraw))
+                target.extend(keys.encode_bool(vraw))
             elif vtype == int:
                 target.extend(keys.encode_int(vraw))
             else:

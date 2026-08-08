@@ -117,6 +117,42 @@ def test_save_ref(engine):
     assert engine.lookup_value(eid1, "person.friend") == eid2
 
 
+def test_save_bytes(engine):
+    engine.declare_attr("person.data", "bytes")
+    eid = engine.alloc_entity()
+    data = b"\x01\x02\x03\x04\x05"
+    engine.save(eid, "person.data", data)
+    val = engine.lookup_value(eid, "person.data")
+    assert val == data
+
+
+def test_save_bytes_utf8(engine):
+    engine.declare_attr("person.data", "bytes")
+    eid = engine.alloc_entity()
+    data = "hello".encode("utf-8")
+    engine.save(eid, "person.data", data)
+    val = engine.lookup_value(eid, "person.data")
+    assert val == data
+
+
+def test_save_blob(engine):
+    engine.declare_attr("person.blob", "blob")
+    eid = engine.alloc_entity()
+    data = b"\xff\xfe\xfd\x00\x01"
+    engine.save(eid, "person.blob", data)
+    val = engine.lookup_value(eid, "person.blob")
+    assert val == data
+
+
+def test_save_instant(engine):
+    engine.declare_attr("event.timestamp", "instant")
+    eid = engine.alloc_entity()
+    ts = 1700000000000000  # microseconds
+    engine.save(eid, "event.timestamp", ts)
+    val = engine.lookup_value(eid, "event.timestamp")
+    assert val == ts
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Retract
 # ═══════════════════════════════════════════════════════════════════════════════

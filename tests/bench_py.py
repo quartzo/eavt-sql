@@ -12,7 +12,7 @@ _root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_root / "py_eavt" / "src"))
 from eavt.engine import EavtEngine
 from eavt import keys
-from eavt.keys import encode_int, encode_variable, decode_int64, decode_variable_str, decode_suffix
+from eavt.keys import encode_int, encode_string, decode_int64, decode_suffix, decode_value_at
 
 _U64 = struct.Struct(">Q")
 
@@ -51,15 +51,7 @@ def scan_aevt_values(eng, attr_name):
             continue
         eid_raw = _U64.unpack_from(key, 4)[0]
         eid = eid_raw ^ (1 << 63)
-        v_start = 12
-        v_end = len(key) - keys._SUFFIX_SIZE
-        raw = key[v_start:v_end]
-        if vt == 20:  # STRING
-            val = decode_variable_str(raw, 0)
-        elif vt == 22:  # LONG
-            val = decode_int64(_U64.unpack_from(raw, 0)[0]) if len(raw) >= 8 else 0
-        else:
-            val = raw
+        val, _ = keys.decode_value_at(key, 12, vt or 20)
         results.append((eid, val))
     return results
 
@@ -69,7 +61,7 @@ def scan_avet_lookup(eng, attr_name, value):
     aid = eng.lookup_attr(attr_name)
     vt = eng.value_type_for(aid)
     if vt == 20:
-        val_enc = encode_variable(str(value))
+        val_enc = encode_string(str(value))
     else:
         val_enc = encode_int(int(value))
     prefix = _aid_prefix(aid) + val_enc
@@ -95,12 +87,8 @@ def scan_eavt_by_eid(eng, eid, attr_name):
             continue
         if (key[-1] & 1) != 0:
             continue
-        raw = key[12 : len(key) - keys._SUFFIX_SIZE]
-        if vt == 20:
-            return decode_variable_str(raw, 0)
-        elif vt == 22:
-            return decode_int64(_U64.unpack_from(raw, 0)[0]) if len(raw) >= 8 else 0
-        return raw
+        val, _ = keys.decode_value_at(key, 12, vt or 20)
+        return val
     return None
 
 

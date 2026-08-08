@@ -1,7 +1,11 @@
 """keys.py — EAVT key encoding for 4 column families.
 
-Port of nim_eavt/keys.nim. All encodings must be byte-identical to the Nim
-implementation for data compatibility.
+Value encoding:
+  STRING/KEYWORD — null-terminated (lexicographic order)
+  BYTES          — 8+1 block encoding (lexicographic order)
+  BLOB           — 4B length prefix + raw (no order)
+  LONG/INT/etc   — sign-flipped 8-byte big-endian
+  REF            — same as LONG (entity reference)
 """
 from __future__ import annotations
 
@@ -96,55 +100,58 @@ def decode_float64(raw: int) -> float:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Variable-length encoding: 8+1 block encoding for strings
+# Boolean encoding (matches encode_int for scanner seek compatibility)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def encode_variable(s: str) -> bytes:
-    """Encode a string for lexicographic ordering: 8-byte blocks + control byte.
+def encode_bool(b: bool) -> bytes:
+    """Encode boolean as sign-flipped int (True=1, False=0)."""
+    return encode_int(1 if b else 0)
 
-    Control: 0xFF = more blocks follow; 0..7 = last block valid bytes.
-    """
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# String encoding: null-terminated (lexicographic order)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def encode_string(s: str) -> bytes:
+    """Null-terminated UTF-8 encoding. Truncates at embedded null bytes."""
     raw = s.encode("utf-8")
-    length = len(raw)
+    idx = raw.find(b"\x00")
+    if idx >= 0:
+        raw = raw[:idx]
+    return raw + b"\x00"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Bytes encoding: 8+1 block encoding (lexicographic order)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def encode_bytes(data: bytes) -> bytes:
+    """8+1 block encoding for lexicographic ordering of binary data."""
+    length = len(data)
     out = bytearray()
     pos = 0
     while pos < length:
         remaining = length - pos
         block_len = min(remaining, 8)
-        out.extend(raw[pos : pos + block_len])
-        # Pad to 8 bytes
+        out.extend(data[pos : pos + block_len])
         out.extend(b"\x00" * (8 - block_len))
         if remaining <= 8:
-            out.append(block_len)  # last block
+            out.append(block_len)
         else:
-            out.append(0xFF)  # more blocks follow
+            out.append(0xFF)
         pos += block_len
     return bytes(out)
 
 
-def decode_variable_str(data: bytes, start: int = 0) -> str:
-    """Decode an 8+1-block encoded string."""
-    result = bytearray()
-    pos = start
-    while pos + 9 <= len(data):
-        control = data[pos + 8]
-        result.extend(data[pos : pos + 8])
-        if control != 0xFF:
-            valid_bytes = control
-            if valid_bytes < 8:
-                del result[len(result) - (8 - valid_bytes) :]
-            return result.decode("utf-8", errors="replace")
-        pos += 9
-    return result.decode("utf-8", errors="replace")
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
-# Unordered encoding: 4-byte length prefix + raw bytes
+# Blob encoding: 4-byte length prefix + raw bytes (no lexicographic order)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def encode_variable_unordered(data: bytes) -> bytes:
+def encode_blob(data: bytes) -> bytes:
     """4-byte big-endian length prefix + raw bytes."""
     return _U32.pack(len(data)) + data
 
@@ -154,15 +161,31 @@ def encode_variable_unordered(data: bytes) -> bytes:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def encode_value(v: str, mode: EncodeMode, ref_eid: int = 0) -> bytes:
-    """Encode a value string according to the given mode."""
+def encode_value(v, mode: EncodeMode, ref_eid: int = 0) -> bytes:
+    """Encode a value according to the given mode.
+
+    For VARIABLE (STRING/KEYWORD): v should be str.
+    For BLOCK (BYTES): v should be bytes.
+    For BLOB: v should be bytes.
+    For FIXED: v can be str (parsed), int, float, or bool.
+    For REF: v is ignored; ref_eid is used.
+    """
     if mode == EncodeMode.REF:
         return encode_eid(ref_eid)
     if mode == EncodeMode.VARIABLE:
-        return encode_variable(v)
+        return encode_string(str(v))
+    if mode == EncodeMode.BLOCK:
+        return encode_bytes(v if isinstance(v, bytes) else str(v).encode("utf-8"))
     if mode == EncodeMode.BLOB:
-        return encode_variable_unordered(v.encode("utf-8") if isinstance(v, str) else v)
-    # FIXED: try int, then float, fallback 0
+        return encode_blob(v if isinstance(v, bytes) else str(v).encode("utf-8"))
+    # FIXED: bool → encode_bool, int → encode_int, float → encode_float
+    if isinstance(v, bool):
+        return encode_bool(v)
+    if isinstance(v, float):
+        return encode_float(v)
+    if isinstance(v, int):
+        return encode_int(v)
+    # String: try int, then float, fallback 0
     try:
         return encode_int(int(v))
     except (ValueError, TypeError):
@@ -173,22 +196,71 @@ def encode_value(v: str, mode: EncodeMode, ref_eid: int = 0) -> bytes:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Fixed-size encoding (for query engine scanner)
+# Unified value decoder — single source of truth for decoding
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def encode_fixed_int(n: int) -> bytes:
-    return encode_int(n)
+def decode_value_at(key: bytes, start: int, vt: int) -> tuple:
+    """Decode a value at position `start` in a key.
 
+    Returns (python_value, end_position). The end_position is the byte
+    offset past the value — the start of the next field (eid or suffix).
 
-def encode_fixed_float(f: float) -> bytes:
-    return encode_float(f)
+    vt is one of the DB_TYPE_* constants.
+    """
+    from .types import (
+        DB_TYPE_REF, DB_TYPE_BOOLEAN, DB_TYPE_LONG, DB_TYPE_INSTANT,
+        DB_TYPE_FLOAT, DB_TYPE_BYTES, DB_TYPE_BLOB, DB_TYPE_STRING,
+        DB_TYPE_KEYWORD,
+    )
 
+    if vt in (DB_TYPE_STRING, DB_TYPE_KEYWORD):
+        # Null-terminated
+        end = start
+        keylen = len(key)
+        while end < keylen:
+            if key[end] == 0:
+                return key[start:end].decode("utf-8", errors="replace"), end + 1
+            end += 1
+        return key[start:keylen].decode("utf-8", errors="replace"), keylen
 
-def encode_fixed_bool(b: bool) -> bytes:
-    out = bytearray(8)
-    out[0] = 0x80 if b else 0x00
-    return bytes(out)
+    if vt == DB_TYPE_BYTES:
+        # 8+1 block encoding
+        result = bytearray()
+        pos = start
+        keylen = len(key)
+        while pos + 9 <= keylen:
+            control = key[pos + 8]
+            result.extend(key[pos : pos + 8])
+            if control != 0xFF:
+                valid_bytes = control
+                if valid_bytes < 8:
+                    del result[len(result) - (8 - valid_bytes) :]
+                return bytes(result), pos + 9
+            pos += 9
+        return bytes(result), keylen
+
+    if vt == DB_TYPE_BLOB:
+        # 4B length prefix + raw
+        if start + 4 > len(key):
+            return b"", len(key)
+        n = be_uint32(key, start)
+        end = start + 4 + n
+        if end > len(key):
+            end = len(key)
+        return key[start + 4 : end], end
+
+    # Fixed-size (8 bytes): LONG, REF, BOOLEAN, INSTANT, FLOAT
+    if start + 8 > len(key):
+        return 0, len(key)
+    raw = be_uint64(key, start)
+    if vt == DB_TYPE_FLOAT:
+        return decode_float64(raw), start + 8
+    if vt == DB_TYPE_BOOLEAN:
+        return decode_int64(raw) != 0, start + 8
+    if vt in (DB_TYPE_LONG, DB_TYPE_INSTANT, DB_TYPE_REF):
+        return decode_int64(raw), start + 8
+    return raw, start + 8
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -214,28 +286,28 @@ def _eid_bytes(eid: int) -> bytes:
 def build_eavt_key(
     eid: int, attr: int, value_encoded: bytes, t: int, retracted: bool
 ) -> bytes:
-    """CF 0: [eid 8B][attr 4B][value][suffix 8B]."""
+    """CF 0: [eid 8B][attr 4B][value][suffix 9B]."""
     return _eid_bytes(eid) + _attr_bytes(attr) + value_encoded + _sf_bytes(t, retracted)
 
 
 def build_aevt_key(
     attr: int, eid: int, value_encoded: bytes, t: int, retracted: bool
 ) -> bytes:
-    """CF 1: [attr 4B][eid 8B][value][suffix 8B]."""
+    """CF 1: [attr 4B][eid 8B][value][suffix 9B]."""
     return _attr_bytes(attr) + _eid_bytes(eid) + value_encoded + _sf_bytes(t, retracted)
 
 
 def build_avet_key(
     attr: int, value_encoded: bytes, eid: int, t: int, retracted: bool
 ) -> bytes:
-    """CF 2: [attr 4B][value][eid 8B][suffix 8B]."""
+    """CF 2: [attr 4B][value][eid 8B][suffix 9B]."""
     return _attr_bytes(attr) + value_encoded + _eid_bytes(eid) + _sf_bytes(t, retracted)
 
 
 def build_vaet_key(
     value_encoded: bytes, attr: int, eid: int, t: int, retracted: bool
 ) -> bytes:
-    """CF 3: [value][attr 4B][eid 8B][suffix 8B]."""
+    """CF 3: [value][attr 4B][eid 8B][suffix 9B]."""
     return value_encoded + _attr_bytes(attr) + _eid_bytes(eid) + _sf_bytes(t, retracted)
 
 
@@ -295,41 +367,3 @@ def build_eavt_entries(
             entries.append(EavtEntry(2, _make_key((a_bytes, encoded_value, e_bytes, sf_bytes))))
 
     return entries
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Stored value decoding (query engine)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-def decode_stored_value(data: bytes, vt: int):
-    """Decode a stored EAVT value given its db valueType. Returns Python native."""
-    from .types import (
-        DB_TYPE_REF, DB_TYPE_BOOLEAN, DB_TYPE_LONG, DB_TYPE_INSTANT,
-        DB_TYPE_FLOAT, DB_TYPE_BYTES, DB_TYPE_BLOB,
-    )
-
-    if vt == DB_TYPE_REF:
-        if len(data) >= 8:
-            return decode_int64(be_uint64(data, 0))
-        return 0
-    if vt == DB_TYPE_BOOLEAN:
-        if len(data) >= 8:
-            return decode_int64(be_uint64(data, 0)) != 0
-        return False
-    if vt in (DB_TYPE_LONG, DB_TYPE_INSTANT):
-        if len(data) >= 8:
-            return decode_int64(be_uint64(data, 0))
-        return 0
-    if vt == DB_TYPE_FLOAT:
-        if len(data) >= 8:
-            return decode_float64(be_uint64(data, 0))
-        return 0.0
-    if vt in (DB_TYPE_BYTES, DB_TYPE_BLOB):
-        if len(data) >= 4:
-            n = be_uint32(data, 0)
-            m = min(n, len(data) - 4)
-            return data[4 : 4 + m]
-        return b""
-    # Default: string
-    return decode_variable_str(data, 0)
