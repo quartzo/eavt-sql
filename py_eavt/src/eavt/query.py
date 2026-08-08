@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .types import DB_TYPE_REF
+from .perf_counter import Timer
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -702,14 +703,15 @@ def _exec_recurse(depth_idx: int, plan: QueryPlan, session, bindings: dict,
     participating = [handles[i] for i in depth.clause_indices]
 
     # Push values onto participating scanners
-    push_counts = []
-    for h, pushes, start_ip in zip(participating, depth.pushes, depth.start_ips):
-        cc = plan.clauses[depth.clause_indices[participating.index(h)]]
-        pos_order = _INDEX_POSITIONS[cc.index]
-        for pi, (kind, val) in enumerate(pushes):
-            pos_name = pos_order[start_ip + pi]
-            _push_scanner(session, h, kind, val, bindings, pos_name)
-        push_counts.append(len(pushes))
+    with Timer("query.push"):
+        push_counts = []
+        for h, pushes, start_ip in zip(participating, depth.pushes, depth.start_ips):
+            cc = plan.clauses[depth.clause_indices[participating.index(h)]]
+            pos_order = _INDEX_POSITIONS[cc.index]
+            for pi, (kind, val) in enumerate(pushes):
+                pos_name = pos_order[start_ip + pi]
+                _push_scanner(session, h, kind, val, bindings, pos_name)
+            push_counts.append(len(pushes))
 
     # Set ranges (resolved via bindings)
     if depth.ranges:
@@ -720,13 +722,15 @@ def _exec_recurse(depth_idx: int, plan: QueryPlan, session, bindings: dict,
                 session.scanner_set_ranges(h, flat)
 
     # Iterate
-    if len(participating) == 1:
-        iter_h = session.scanner_iterate_init(participating[0])
-    else:
-        iter_h = session.scanner_iterate_init(*participating)
+    with Timer("query.iterate_init"):
+        if len(participating) == 1:
+            iter_h = session.scanner_iterate_init(participating[0])
+        else:
+            iter_h = session.scanner_iterate_init(*participating)
 
     while True:
-        val = session.scanner_iterate_next(iter_h)
+        with Timer("query.iterate_next"):
+            val = session.scanner_iterate_next(iter_h)
         if val is None:
             break
 

@@ -326,15 +326,11 @@ class EavtEntry:
         self.key = key
 
 
-def _make_key(parts: tuple[bytes, ...]) -> bytes:
-    """Build a key from parts using a single bytearray allocation."""
-    total = sum(len(p) for p in parts)
-    buf = bytearray(total)
-    pos = 0
+def _build_key(buf: bytearray, off: int, *parts: bytes) -> None:
+    """Write pre-encoded parts into buf starting at off."""
     for p in parts:
-        buf[pos : pos + len(p)] = p
-        pos += len(p)
-    return bytes(buf)
+        buf[off:off + len(p)] = p
+        off += len(p)
 
 
 def build_eavt_entries(
@@ -346,26 +342,67 @@ def build_eavt_entries(
     mode: EncodeMode,
     indexed: bool,
 ) -> list[EavtEntry]:
-    """Generate entries for all relevant column families."""
-    a_bytes = _attr_bytes(attr)
-    e_bytes = _eid_bytes(eid)
-    sf_bytes = _sf_bytes(t, retracted)
+    """Generate entries for all relevant column families.
+
+    Uses struct.pack_into for fixed-size fields to avoid intermediate
+    bytes objects. Variable-size value is copied from encoded_value.
+    """
+    val_len = len(encoded_value)
+    sf_size = _SUFFIX_SIZE  # 9
+    key_size = 21 + val_len  # 8 (eid) + 4 (attr) + val_len + 9 (suffix)
+
+    # Pre-encode fixed parts once
+    e_buf = bytearray(8)
+    _U64.pack_into(e_buf, 0, (eid ^ (1 << 63)) & 0xFFFFFFFFFFFFFFFF)
+    a_buf = bytearray(4)
+    _ATTR.pack_into(a_buf, 0, attr)
+    sf_buf = bytearray(sf_size)
+    tx_bytes, ret_byte = encode_suffix(t, retracted)
+    sf_buf[0:8] = tx_bytes
+    sf_buf[8] = ret_byte
 
     entries: list[EavtEntry] = []
 
-    # CF 0: eavt [eid][attr][val][sf]
-    entries.append(EavtEntry(0, _make_key((e_bytes, a_bytes, encoded_value, sf_bytes))))
-    # CF 1: aevt [attr][eid][val][sf]
-    entries.append(EavtEntry(1, _make_key((a_bytes, e_bytes, encoded_value, sf_bytes))))
+    # CF 0: eavt [eid 8B][attr 4B][val][suffix 9B]
+    k0 = bytearray(key_size)
+    k0[0:8] = e_buf
+    k0[8:12] = a_buf
+    k0[12:12 + val_len] = encoded_value
+    k0[12 + val_len:] = sf_buf
+    entries.append(EavtEntry(0, bytes(k0)))
+
+    # CF 1: aevt [attr 4B][eid 8B][val][suffix 9B]
+    k1 = bytearray(key_size)
+    k1[0:4] = a_buf
+    k1[4:12] = e_buf
+    k1[12:12 + val_len] = encoded_value
+    k1[12 + val_len:] = sf_buf
+    entries.append(EavtEntry(1, bytes(k1)))
 
     if mode == EncodeMode.REF:
-        # CF 3: vaet [val][attr][eid][sf]
-        entries.append(EavtEntry(3, _make_key((encoded_value, a_bytes, e_bytes, sf_bytes))))
+        # CF 3: vaet [val][attr 4B][eid 8B][suffix 9B]
+        k3 = bytearray(key_size)
+        k3[0:val_len] = encoded_value
+        k3[val_len:val_len + 4] = a_buf
+        k3[val_len + 4:val_len + 12] = e_buf
+        k3[val_len + 12:] = sf_buf
+        entries.append(EavtEntry(3, bytes(k3)))
         if indexed:
-            # CF 2: avet [attr][val][eid][sf]
-            entries.append(EavtEntry(2, _make_key((a_bytes, encoded_value, e_bytes, sf_bytes))))
+            # CF 2: avet [attr 4B][val][eid 8B][suffix 9B]
+            k2 = bytearray(key_size)
+            k2[0:4] = a_buf
+            k2[4:4 + val_len] = encoded_value
+            k2[4 + val_len:4 + val_len + 8] = e_buf
+            k2[4 + val_len + 8:] = sf_buf
+            entries.append(EavtEntry(2, bytes(k2)))
     else:
         if indexed:
-            entries.append(EavtEntry(2, _make_key((a_bytes, encoded_value, e_bytes, sf_bytes))))
+            # CF 2: avet [attr 4B][val][eid 8B][suffix 9B]
+            k2 = bytearray(key_size)
+            k2[0:4] = a_buf
+            k2[4:4 + val_len] = encoded_value
+            k2[4 + val_len:4 + val_len + 8] = e_buf
+            k2[4 + val_len + 8:] = sf_buf
+            entries.append(EavtEntry(2, bytes(k2)))
 
     return entries

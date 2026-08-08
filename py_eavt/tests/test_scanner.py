@@ -378,3 +378,90 @@ def test_two_scanners_different_attrs(populated_engine):
 
     # All 3 user entities have both name and age
     assert len(entities) >= 3
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Prefix stack (push/pop must preserve prefix, set_value_attr_type must not clear)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def test_prefix_stack_push_pop(populated_engine):
+    """Push builds prefix incrementally, pop restores it."""
+    aid = populated_engine.lookup_attr("person.name")
+    sc = _open_scanner(populated_engine, "AEVT")
+
+    # After open, prefix is empty (scanner opened with no pushes)
+    assert sc.prefix_cache == b""
+
+    # Push attr at position 0 ("a")
+    sc.save_value(aid)
+    assert len(sc.prefix_cache) == 4  # 4 bytes for attr ID
+    assert sc._prefix_stack == [(b"", False)]
+
+    # Pop restores empty prefix
+    sc.pop_saved_value()
+    assert sc.prefix_cache == b""
+    assert sc._prefix_stack == []
+
+
+def test_prefix_stack_survives_iterate_init(populated_engine):
+    """scanner_iterate_init calls set_value_attr_type which must NOT clear _prefix_stack."""
+    from eavt.session import QuerySession
+
+    sess = QuerySession(populated_engine)
+    aid = populated_engine.lookup_attr("person.name")
+
+    h = sess.scanner_open("AEVT")
+    sc = sess._find_scanner(h)
+
+    # Push aid at position 0
+    sess.scanner_push(h, aid)
+    prefix_after_push = sc.prefix_cache
+    assert len(prefix_after_push) == 4
+    assert len(sc._prefix_stack) == 1
+
+    # iterate_init calls set_value_attr_type internally
+    # _prefix_stack must survive so pop works correctly after
+    it = sess.scanner_iterate_init(h)
+    assert len(sc._prefix_stack) == 1, "set_value_attr_type must not clear _prefix_stack"
+
+    # Pop must restore prefix to empty
+    sess.scanner_pop(h)
+    assert sc.prefix_cache == b""
+    assert sc._prefix_stack == []
+
+
+def test_prefix_stack_two_pushes(populated_engine):
+    """Two pushes build prefix incrementally, two pops restore correctly."""
+    from eavt.session import QuerySession
+
+    sess = QuerySession(populated_engine)
+    aid = populated_engine.lookup_attr("person.name")
+    eid = populated_engine.alloc_entity()
+    populated_engine.save(eid, "person.name", "Test")
+    populated_engine.commit()
+
+    h = sess.scanner_open("EAVT")
+    sc = sess._find_scanner(h)
+
+    # Push eid at position 0 ("e")
+    sess.scanner_push(h, eid)
+    prefix_after_eid = sc.prefix_cache
+    assert len(prefix_after_eid) == 8  # 8 bytes for eid
+    assert len(sc._prefix_stack) == 1
+
+    # Push aid at position 1 ("a")
+    sess.scanner_push(h, aid)
+    prefix_after_aid = sc.prefix_cache
+    assert len(prefix_after_aid) == 12  # 8 + 4
+    assert len(sc._prefix_stack) == 2
+
+    # Pop aid → prefix back to eid only
+    sess.scanner_pop(h)
+    assert sc.prefix_cache == prefix_after_eid
+    assert len(sc._prefix_stack) == 1
+
+    # Pop eid → prefix empty
+    sess.scanner_pop(h)
+    assert sc.prefix_cache == b""
+    assert len(sc._prefix_stack) == 0

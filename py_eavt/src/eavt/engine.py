@@ -20,6 +20,7 @@ import rocksdict as rdb
 from sortedcontainers import SortedSet
 
 from . import keys
+from .perf_counter import Timer
 from .resolver import Resolver, partition_of, seq_of
 from .types import (
     BOOTSTRAP_SCHEMA,
@@ -553,41 +554,47 @@ class EavtEngine:
 
     def save(self, eid: int, attr_name: str, value, tx: int | None = None) -> int:
         """Save a datom. For not-many attrs, retracts existing active datoms first."""
-        if tx is None:
-            tx = self.allocate_tx()
-        attr_id = self.resolver.intern_attr(attr_name)
-        vt = self.resolver.value_type_for(attr_id) or 20
-        many = self.resolver.is_many(attr_id)
-        mode = value_type_to_encode_mode(vt)
-        indexed = self.resolver.is_indexed(attr_id)
+        with Timer("save.total"):
+            if tx is None:
+                with Timer("save.allocate_tx"):
+                    tx = self.allocate_tx()
+            attr_id = self.resolver.intern_attr(attr_name)
+            vt = self.resolver.value_type_for(attr_id) or 20
+            many = self.resolver.is_many(attr_id)
+            mode = value_type_to_encode_mode(vt)
+            indexed = self.resolver.is_indexed(attr_id)
 
-        encodable = self._to_encodable(value, mode)
-        if mode == EncodeMode.REF:
-            ref_eid = int(value) if isinstance(value, (int, float)) else int(str(value))
-            encoded = keys.encode_value(encodable, mode, ref_eid)
-        else:
-            encoded = keys.encode_value(encodable, mode, 0)
+            with Timer("save.encode"):
+                encodable = self._to_encodable(value, mode)
+                if mode == EncodeMode.REF:
+                    ref_eid = int(value) if isinstance(value, (int, float)) else int(str(value))
+                    encoded = keys.encode_value(encodable, mode, ref_eid)
+                else:
+                    encoded = keys.encode_value(encodable, mode, 0)
 
-        if not many:
-            fresh_attrs = self._fresh.get(eid)
-            if fresh_attrs is not None and attr_id not in fresh_attrs:
-                fresh_attrs.add(attr_id)
-            else:
-                e_prefix = keys.encode_eid(eid) + keys._attr_bytes(attr_id)
-                bound = keys.encode_eid(eid) + keys._attr_bytes(attr_id + 1)
-                active_key = self._merged_active_key(0, e_prefix, bound)
-                if active_key is not None and active_key[12 : len(active_key) - keys._SUFFIX_SIZE] != encoded:
-                    ret_entries = keys.build_eavt_entries(
-                        eid, attr_id, active_key[12 : len(active_key) - keys._SUFFIX_SIZE], tx, True, mode, indexed
-                    )
-                    self._batch_write(ret_entries)
-                # Re-asserting a value that has a pending retract at the same tx
-                for re in keys.build_eavt_entries(eid, attr_id, encoded, tx, True, mode, indexed):
-                    self._pending_remove(re.cf, re.key)
+            if not many:
+                fresh_attrs = self._fresh.get(eid)
+                if fresh_attrs is not None and attr_id not in fresh_attrs:
+                    fresh_attrs.add(attr_id)
+                else:
+                    e_prefix = keys.encode_eid(eid) + keys._attr_bytes(attr_id)
+                    bound = keys.encode_eid(eid) + keys._attr_bytes(attr_id + 1)
+                    with Timer("save.retract_scan"):
+                        active_key = self._merged_active_key(0, e_prefix, bound)
+                    if active_key is not None and active_key[12 : len(active_key) - keys._SUFFIX_SIZE] != encoded:
+                        ret_entries = keys.build_eavt_entries(
+                            eid, attr_id, active_key[12 : len(active_key) - keys._SUFFIX_SIZE], tx, True, mode, indexed
+                        )
+                        self._batch_write(ret_entries)
+                    # Re-asserting a value that has a pending retract at the same tx
+                    for re in keys.build_eavt_entries(eid, attr_id, encoded, tx, True, mode, indexed):
+                        self._pending_remove(re.cf, re.key)
 
-        entries = keys.build_eavt_entries(eid, attr_id, encoded, tx, False, mode, indexed)
-        self._batch_write(entries)
-        return eid
+            with Timer("save.build_entries"):
+                entries = keys.build_eavt_entries(eid, attr_id, encoded, tx, False, mode, indexed)
+            with Timer("save.batch_write"):
+                self._batch_write(entries)
+            return eid
 
     def retract(self, eid: int, attr_name: str, value, tx: int | None = None):
         """Write retraction entries for a datom."""

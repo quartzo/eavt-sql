@@ -10,6 +10,7 @@ from pathlib import Path
 _root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_root / "py_eavt" / "src"))
 from eavt import EavtEngine, QuerySession, prepare
+from eavt import perf_counter as pc
 
 
 def bench(label, fn, iterations=1):
@@ -32,6 +33,7 @@ def bench(label, fn, iterations=1):
 
 def main():
     print("=== EAVT In-Process Performance Benchmark (public API) ===\n")
+    pc.reset()
 
     for n in [100, 1000, 5000]:
         print(f"--- {n} entities ---")
@@ -104,6 +106,7 @@ def main():
         print()
 
     print("=== Done ===")
+    pc.report()
 
 
 if __name__ == "__main__":
