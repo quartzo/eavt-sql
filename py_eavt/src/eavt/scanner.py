@@ -425,8 +425,13 @@ class V2Scanner:
         target = bytearray(key[:vs])
 
         if pn == "t":
-            target.extend(b"\xff" * keys._SUFFIX_SIZE)
-            self.pos.cursor.seek(bytes(target))
+            tx_raw = keys.be_uint64(key, len(key) - keys._SUFFIX_SIZE)
+            t = keys.decode_int64(tx_raw)
+            if t == 0 and key[-1] & 1:
+                self.pos.cursor.invalidate()
+            else:
+                target.extend(b"\xff" * keys._SUFFIX_SIZE)
+                self.pos.cursor.seek(bytes(target))
             return
 
         if pn == "a":
@@ -438,6 +443,7 @@ class V2Scanner:
                 target.extend(keys._ATTR.pack(next_val))
                 self.pos.cursor.seek(bytes(target))
         elif pn == "e":
+            # Entity ID: always 8-byte sign-flipped int
             cur = keys.be_uint64(key, vs)
             if cur == 0xFFFFFFFFFFFFFFFF:
                 self.pos.cursor.invalidate()
@@ -445,11 +451,32 @@ class V2Scanner:
                 next_val = cur + 1
                 target.extend(keys._U64.pack(next_val))
                 self.pos.cursor.seek(bytes(target))
+        elif self.value_attr_type in (DB_TYPE_STRING, DB_TYPE_BYTES, DB_TYPE_BLOB):
+            # Variable-length value: increment raw bytes
+            _, ve = keys.read_next(key, vs, self.value_attr_type or DB_TYPE_STRING)
+            raw = bytearray(key[vs:ve])
+            carry = True
+            i = len(raw) - 1
+            while carry and i >= 0:
+                if raw[i] < 0xFF:
+                    raw[i] += 1
+                    carry = False
+                else:
+                    raw[i] = 0
+                    i -= 1
+            if carry:
+                self.pos.cursor.invalidate()
+            else:
+                target.extend(raw)
+                self.pos.cursor.seek(bytes(target))
         else:
-            # "v" position: seek past current value using suffix
-            target.extend(key[vs:])
-            target.extend(b"\x01")  # bump suffix past current
-            self.pos.cursor.seek(bytes(target))
+            cur = keys.be_uint64(key, vs)
+            if cur == 0xFFFFFFFFFFFFFFFF:
+                self.pos.cursor.invalidate()
+            else:
+                next_val = cur + 1
+                target.extend(keys._U64.pack(next_val))
+                self.pos.cursor.seek(bytes(target))
 
     # ── leap_next_at ──
 
