@@ -335,6 +335,31 @@ class V2Scanner:
             return (type(value), value)
         return None
 
+    def peek_raw(self) -> bytes | None:
+        """Return raw value bytes at the current position (without suffix).
+
+        The value end is determined by the next element in the key layout:
+        - EAVT/AEVT: value before suffix → ve = len(key) - SUFFIX_SIZE
+        - AVET: value before eid+suffix → ve = len(key) - SUFFIX_SIZE - 8
+        - VAET: value before attr+eid+suffix → ve = len(key) - SUFFIX_SIZE - 12
+        """
+        key = self.pos.current_active_key
+        if key is None:
+            return None
+        if self.classify_key(key) not in (KVP_MATCH, KVP_NO_PREFIX):
+            return None
+        vs = len(self.prefix_cache)
+        suffix_size = keys._SUFFIX_SIZE
+        if self.index_name in ("EAVT", "AEVT"):
+            ve = len(key) - suffix_size
+        elif self.index_name == "AVET":
+            ve = len(key) - suffix_size - 8  # eid(8B) before suffix
+        elif self.index_name == "VAET":
+            ve = len(key) - suffix_size - 12  # attr(4B)+eid(8B) before suffix
+        else:
+            ve = len(key) - suffix_size
+        return key[vs:ve]
+
     # ── advance_to_active_at ──
 
     def advance_to_active_at(self):
@@ -432,46 +457,25 @@ class V2Scanner:
     # ── seek_to_value ──
 
     def seek_to_value(self, value):
-        """Seek scanner to a specific value. value is a (type, raw) tuple."""
-        pn = self.pos.pos_name()
+        """Seek scanner to a specific value. value is raw bytes (already encoded)."""
         key = self.pos.current_active_key
         if key is None:
             self.pos.cursor.invalidate()
             return
         vs = len(self.prefix_cache)
         target = bytearray(key[:vs])
-
-        vtype, vraw = value
-        if pn == "e":
-            target.extend(keys.encode_eid(vraw))
-        elif pn == "a":
-            v32 = vraw & 0xFFFFFFFF
-            target.extend(keys._ATTR.pack(v32))
-        elif pn == "v":
-            vt = self.value_attr_type or DB_TYPE_STRING
-            if vt == DB_TYPE_BLOB:
-                if isinstance(vraw, (bytes, bytearray)):
-                    target.extend(keys.encode_blob(bytes(vraw)))
-                else:
-                    target.extend(keys.encode_string(str(vraw)))
-            elif vt == DB_TYPE_BYTES:
-                if isinstance(vraw, (bytes, bytearray)):
-                    target.extend(keys.encode_bytes(bytes(vraw)))
-                else:
-                    target.extend(keys.encode_bytes(str(vraw).encode("utf-8")))
-            elif vtype == str:
-                target.extend(keys.encode_string(str(vraw)))
-            elif vtype == bytes:
-                target.extend(keys.encode_blob(bytes(vraw)))
-            elif vtype == float:
-                target.extend(keys.encode_float(vraw))
-            elif vtype == bool:
-                target.extend(keys.encode_bool(vraw))
-            elif vtype == int:
-                target.extend(keys.encode_int(vraw))
+        if isinstance(value, (bytes, bytearray)):
+            target.extend(value)
+        else:
+            # Legacy: (type, raw) tuple — encode to bytes
+            vtype, vraw = value
+            pn = self.pos.pos_name()
+            if pn == "e":
+                target.extend(keys.encode_eid(vraw))
+            elif pn == "a":
+                target.extend(keys._ATTR.pack(vraw & 0xFFFFFFFF))
             else:
-                target.extend(keys.encode_int(0))
-
+                target.extend(keys.encode_int(vraw))
         target.extend(b"\x00" * keys._SUFFIX_SIZE)
         self.pos.cursor.seek(bytes(target))
         self.advance_to_active_at()
@@ -708,8 +712,20 @@ def _merge_intervals(intervals: list[tuple]) -> list[tuple]:
     return result
 
 
-def apply_ranges(scanners: list[V2Scanner], raw_ops: list[list[tuple[int, Any]]]) -> bool:
-    """After convergence, check if current value falls within merged range intervals."""
+def _cmp_bytes(a: bytes, b: bytes) -> int:
+    """Lexicographic comparison of raw bytes."""
+    if a < b:
+        return -1
+    if a > b:
+        return 1
+    return 0
+
+
+def apply_ranges(scanners: list[V2Scanner], raw_ops: list[list[tuple[int, bytes]]]) -> bool:
+    """After convergence, check if current value falls within merged range intervals.
+
+    Bounds are raw bytes for lexicographic comparison without decoding.
+    """
     if not raw_ops:
         return True
 
@@ -724,7 +740,7 @@ def apply_ranges(scanners: list[V2Scanner], raw_ops: list[list[tuple[int, Any]]]
 
     max_iter = len(range_specs) + 2
     for _ in range(max_iter):
-        cur = scanners[0].extract_current()
+        cur = scanners[0].peek_raw()
         if cur is None:
             return False
 
@@ -734,9 +750,9 @@ def apply_ranges(scanners: list[V2Scanner], raw_ops: list[list[tuple[int, Any]]]
             if spec.hi is not None:
                 hi_open = (spec.flags & RANGE_HI_OPEN) != 0
                 if hi_open:
-                    past_hi = _cmp_value(cur, (type(spec.hi), spec.hi)) >= 0
+                    past_hi = _cmp_bytes(cur, spec.hi) >= 0
                 else:
-                    past_hi = _cmp_value(cur, (type(spec.hi), spec.hi)) > 0
+                    past_hi = _cmp_bytes(cur, spec.hi) > 0
             if past_hi:
                 continue
 
@@ -744,20 +760,17 @@ def apply_ranges(scanners: list[V2Scanner], raw_ops: list[list[tuple[int, Any]]]
             if spec.lo is not None:
                 lo_open = (spec.flags & RANGE_LO_OPEN) != 0
                 if lo_open:
-                    before_lo = _cmp_value(cur, (type(spec.lo), spec.lo)) <= 0
+                    before_lo = _cmp_bytes(cur, spec.lo) <= 0
                 else:
-                    before_lo = _cmp_value(cur, (type(spec.lo), spec.lo)) < 0
+                    before_lo = _cmp_bytes(cur, spec.lo) < 0
             if before_lo:
-                if type(cur[1]) != type(spec.lo):
-                    return False
-                lo = (type(spec.lo), spec.lo)
                 for sc in scanners:
-                    sc.seek_to_value(lo)
+                    sc.seek_to_value(spec.lo)
                 if not leap_converge(scanners):
                     return False
                 if lo_open:
-                    cv = scanners[0].extract_current()
-                    if cv is not None and _cmp_value(cv, lo) == 0:
+                    cv = scanners[0].peek_raw()
+                    if cv is not None and _cmp_bytes(cv, spec.lo) == 0:
                         for sc in scanners:
                             sc.leap_next_at()
                         if not leap_converge(scanners):

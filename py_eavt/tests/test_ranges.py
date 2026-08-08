@@ -46,13 +46,20 @@ def iterate(sess, eid, aid, ranges):
 def test_ranges_create_and(tag_engine):
     _, sess = tag_engine
     r = sess.ranges_create(["and", [">=", 10], ["<=", 20]])
-    assert r == [[3, 10], [5, 20]]
+    assert len(r) == 2
+    assert r[0][0] == 3   # >= op code
+    assert r[1][0] == 5   # <= op code
+    assert isinstance(r[0][1], bytes) and len(r[0][1]) == 8  # encoded int
+    assert isinstance(r[1][1], bytes) and len(r[1][1]) == 8
 
 
 def test_ranges_create_or_branches(tag_engine):
     _, sess = tag_engine
     r = sess.ranges_create(["or", ["=", 1], ["=", 20]])
-    assert r == [["branch"], [0, 1], ["branch"], [0, 20]]
+    assert r[0] == ["branch"]
+    assert r[1][0] == 0  # = op code
+    assert r[2] == ["branch"]
+    assert r[3][0] == 0
 
 
 def test_ranges_filters_values(tag_engine):

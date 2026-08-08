@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from .engine import EavtEngine
+from . import keys
 from .scanner import (
     V2Scanner,
     RocksCursor,
@@ -131,20 +132,35 @@ class QuerySession:
     # ──────────────────────────────────────────────────────────────────────
 
     def ranges_create(self, expr) -> list:
-        """(ranges-create expr) → flat list of (op val) pairs.
+        """(ranges-create expr) → flat list of (op, encoded_bytes) pairs.
 
-        Mirrors nim_scheme/scheme.nim ranges-create. Converts a comparison
-        expression tree into the flat ranges list consumed by scanner_set_ranges:
+        Converts a comparison expression tree into the flat ranges list
+        consumed by scanner_set_ranges. Bounds are encoded as raw bytes
+        for lexicographic comparison without decoding.
 
-            ['>', 28]              → [[2, 28]]
-            ['and', ['>', 28], ['=', "SP"]]  → [[2, 28], [0, "SP"]]
-            ['or', ['>', 28], ['<', 5]]      → [[2, 28], ['branch'], [4, 5]]
+            ['>', 28]              → [[2, encode_int(28)]]
+            ['and', ['>', 28], ['=', "SP"]]  → [[2, encode_int(28)], [0, encode_string("SP")]]
+            ['or', ['>', 28], ['<', 5]]      → [[2, encode_int(28)], ['branch'], [4, encode_int(5)]]
 
         Op codes: =:0 !=:1 >:2 >=:3 <:4 <=:5 in:6. Each `or` branch is
         separated by a ['branch'] marker.
         """
         op_map = {"=": 0, "!=": 1, ">": 2, ">=": 3, "<": 4, "<=": 5, "in": 6}
         out: list = []
+
+        def encode_bound(val) -> bytes:
+            """Encode a Python value to raw bytes for range comparison."""
+            if isinstance(val, bool):
+                return keys.encode_bool(val)
+            if isinstance(val, float):
+                return keys.encode_float(val)
+            if isinstance(val, int):
+                return keys.encode_int(val)
+            if isinstance(val, str):
+                return keys.encode_string(val)
+            if isinstance(val, (bytes, bytearray)):
+                return keys.encode_bytes(val)
+            return keys.encode_int(int(val))
 
         def walk(node) -> None:
             if not isinstance(node, list) or not node:
@@ -160,7 +176,7 @@ class QuerySession:
                         walk(child)
             elif isinstance(head, str) and head in op_map:
                 if len(node) >= 2:
-                    out.append([op_map[head], node[1]])
+                    out.append([op_map[head], encode_bound(node[1])])
             elif isinstance(head, list):
                 for child in node:
                     walk(child)
