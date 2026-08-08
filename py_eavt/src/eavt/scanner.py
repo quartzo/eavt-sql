@@ -346,11 +346,7 @@ class V2Scanner:
             self.pos.at_end = True
             return
 
-        # Normal advance
-        # If the cursor is invalid because a forward seek ran past the end of
-        # the key range, the scanner is exhausted — do NOT re-seek to the
-        # prefix (that would loop forever). Only re-position when the cursor
-        # was explicitly reset for a fresh scan (new prefix from push/pop).
+        # Normal advance — read current key, no stepping
         if not self.pos.cursor.is_valid():
             if self.pos.cursor.fell_past_end():
                 self.pos.current_active_key = None
@@ -359,124 +355,44 @@ class V2Scanner:
             if self.prefix_cache:
                 self.pos.cursor.seek(self.prefix_cache)
 
-        while self.pos.cursor.is_valid():
-            first_key = self.pos.cursor.current_key()
-            if first_key is None or len(first_key) < 8:
-                self.pos.cursor.step()
-                continue
-            cls = self.classify_key(first_key)
-            if cls == KVP_BEFORE:
-                self.pos.cursor.seek(self.prefix_cache)
-                continue
-            if cls == KVP_AFTER:
+        if not self.pos.cursor.is_valid():
+            self.pos.current_active_key = None
+            self.pos.at_end = True
+            return
+
+        key = self.pos.cursor.current_key()
+        if key is None or len(key) < 8:
+            self.pos.current_active_key = None
+            self.pos.at_end = True
+            return
+
+        cls = self.classify_key(key)
+        if cls == KVP_BEFORE:
+            self.pos.cursor.seek(self.prefix_cache)
+            if not self.pos.cursor.is_valid():
                 self.pos.current_active_key = None
                 self.pos.at_end = True
                 return
-
-            best_key: bytes | None = None
-            best_t = 0
-            best_retracted = False
-            group_end = len(first_key) - keys._SUFFIX_SIZE
-            cur_group = first_key[:group_end]
-
-            while self.pos.cursor.is_valid():
-                key = self.pos.cursor.current_key()
-                if key is None or len(key) < 8:
-                    self.pos.cursor.step()
-                    continue
-                ge = len(key) - keys._SUFFIX_SIZE
-                if key[:ge] != cur_group:
-                    if best_key is not None:
-                        break
-                    cur_group = key[:ge]
-
-                tx_raw = keys.be_uint64(key, len(key) - keys._SUFFIX_SIZE)
-                t = keys.decode_int64(tx_raw)
-                retracted = (key[-1] & 1) != 0
-
-                if as_of_tx is not None and t > as_of_tx:
-                    self.pos.cursor.step()
-                    continue
-
-                if t >= best_t:
-                    best_key = key
-                    best_t = t
-                    best_retracted = retracted
-
-                self.pos.cursor.step()
-
-            if best_key is not None and not best_retracted:
-                self.pos.current_active_key = best_key
-                self.pos.at_end = False
+            key = self.pos.cursor.current_key()
+            if key is None:
+                self.pos.current_active_key = None
+                self.pos.at_end = True
                 return
+            cls = self.classify_key(key)
 
-        self.pos.current_active_key = None
-        self.pos.at_end = True
-
-    # ── seek_past_value_at ──
-
-    def _seek_past_value_at(self):
-        pn = self.pos.pos_name()
-        key = self.pos.current_active_key
-        if key is None:
-            self.pos.cursor.invalidate()
-            return
-        vs = len(self.prefix_cache)
-        target = bytearray(key[:vs])
-
-        if pn == "t":
-            tx_raw = keys.be_uint64(key, len(key) - keys._SUFFIX_SIZE)
-            t = keys.decode_int64(tx_raw)
-            if t == 0 and key[-1] & 1:
-                self.pos.cursor.invalidate()
-            else:
-                target.extend(b"\xff" * keys._SUFFIX_SIZE)
-                self.pos.cursor.seek(bytes(target))
+        if cls == KVP_AFTER:
+            self.pos.current_active_key = None
+            self.pos.at_end = True
             return
 
-        if pn == "a":
-            cur = keys.be_uint32(key, vs)
-            if cur == 0xFFFFFFFF:
-                self.pos.cursor.invalidate()
-            else:
-                next_val = cur + 1
-                target.extend(keys._ATTR.pack(next_val))
-                self.pos.cursor.seek(bytes(target))
-        elif pn == "e":
-            # Entity ID: always 8-byte sign-flipped int
-            cur = keys.be_uint64(key, vs)
-            if cur == 0xFFFFFFFFFFFFFFFF:
-                self.pos.cursor.invalidate()
-            else:
-                next_val = cur + 1
-                target.extend(keys._U64.pack(next_val))
-                self.pos.cursor.seek(bytes(target))
-        elif self.value_attr_type in (DB_TYPE_STRING, DB_TYPE_BYTES, DB_TYPE_BLOB):
-            # Variable-length value: increment raw bytes
-            _, ve = keys.read_next(key, vs, self.value_attr_type or DB_TYPE_STRING)
-            raw = bytearray(key[vs:ve])
-            carry = True
-            i = len(raw) - 1
-            while carry and i >= 0:
-                if raw[i] < 0xFF:
-                    raw[i] += 1
-                    carry = False
-                else:
-                    raw[i] = 0
-                    i -= 1
-            if carry:
-                self.pos.cursor.invalidate()
-            else:
-                target.extend(raw)
-                self.pos.cursor.seek(bytes(target))
-        else:
-            cur = keys.be_uint64(key, vs)
-            if cur == 0xFFFFFFFFFFFFFFFF:
-                self.pos.cursor.invalidate()
-            else:
-                next_val = cur + 1
-                target.extend(keys._U64.pack(next_val))
-                self.pos.cursor.seek(bytes(target))
+        retracted = (key[-1] & 1) != 0
+        if retracted:
+            self.pos.current_active_key = None
+            self.pos.at_end = True
+            return
+
+        self.pos.current_active_key = key
+        self.pos.at_end = False
 
     # ── leap_next_at ──
 
@@ -486,7 +402,7 @@ class V2Scanner:
             self.pos.at_end = True
             return
         if self.pos.current_active_key is not None:
-            self._seek_past_value_at()
+            self.pos.cursor.step()
         self.advance_to_active_at()
 
     # ── seek_to_value ──
