@@ -86,7 +86,8 @@ class TestValidation:
         p = prepare(sess, ["?name"], [(42, "person.name", "?name")])
         assert len(p.depths) == 1
         assert p.depths[0].var == "name"
-        assert p.depths[0].clauses[0].index == "EAVT"  # e=const, a=const, v=var
+        ci = p.depths[0].clause_indices[0]
+        assert p.clauses[ci].index == "EAVT"  # e=const, a=const, v=var
 
     def test_two_attrs_same_entity(self, sess):
         sess.declare_attr("person.name", "string")
@@ -120,7 +121,7 @@ class TestValidation:
 
     def test_no_feasible_index(self, sess):
         sess.declare_attr("person.name", "string")
-        with pytest.raises(ValueError, match="no feasible index"):
+        with pytest.raises(ValueError, match="not bound"):
             prepare(
                 sess,
                 ["?attr", "?name", "?eid"],
