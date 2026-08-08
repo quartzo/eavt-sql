@@ -24,10 +24,11 @@ def sess(eng):
 class TestParse:
     def test_3_element_clause(self, sess):
         sess.declare_attr("person.name", "string")
+        aid = sess.intern_a("person.name")
         p = prepare(sess, ["?name"], [(42, "person.name", "?name")])
         pat = p.patterns[0]
         assert pat.slots[0] == 42          # e = const
-        assert pat.slots[1] == "person.name"  # a = const
+        assert pat.slots[1] == aid         # a = EID (resolved from string)
         from eavt.query import Var
         assert isinstance(pat.slots[2], Var) and pat.slots[2].name == "name"
         from eavt.query import Wildcard
@@ -63,8 +64,9 @@ class TestParse:
             prepare(sess, ["name"], [(42, "attr", "?v")])
 
     def test_variable_not_in_clauses(self, sess):
+        sess.declare_attr("person.name", "string")
         with pytest.raises(ValueError, match="does not appear"):
-            prepare(sess, ["?missing"], [(42, "attr", "?v"), ("?v", "attr2", "?w")])
+            prepare(sess, ["?missing"], [(42, "person.name", "?v"), ("?v", "person.name", "?w")])
 
     def test_variable_in_clause_but_not_find(self, sess):
         sess.declare_attr("person.name", "string")

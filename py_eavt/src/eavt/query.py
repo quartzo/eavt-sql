@@ -111,13 +111,20 @@ def _is_const(s: Slot) -> bool:
     return not isinstance(s, (Var, Wildcard))
 
 
-def _parse_clause(clause: tuple, idx: int) -> Pattern:
+def _parse_clause(session, clause: tuple, idx: int) -> Pattern:
+    resolver = session.engine.resolver
     if len(clause) < 3 or len(clause) > 5:
         raise ValueError(
             f"clause {idx}: expected 3-5 elements (e, a, v[, t[, added]]), "
             f"got {len(clause)}"
         )
     e, a, v = _parse_slot(clause[0]), _parse_slot(clause[1]), _parse_slot(clause[2])
+    # Resolve attr string → int EID
+    if isinstance(a, str):
+        aid = resolver.lookup_attr(a)
+        if aid is None:
+            raise ValueError(f"clause {idx}: attribute '{a}' not declared")
+        a = aid
     t = _parse_slot(clause[3]) if len(clause) >= 4 else _WILD
     added = _parse_slot(clause[4]) if len(clause) >= 5 else _WILD
     return Pattern(slots=(e, a, v, t, added), clause_idx=idx)
@@ -175,11 +182,8 @@ def _find_feasible_index(
         if idx_name == "VAET" and slot_name in ("e", "a", "v"):
             a_slot = pattern.slots[1]
             if _is_const(a_slot):
-                aid = resolver.lookup_attr(str(a_slot))
-                if aid is None:
-                    continue
-                vt = resolver.value_type_for(aid)
-                if vt != DB_TYPE_REF:
+                vt = resolver.value_type_for(a_slot)
+                if vt is None or vt != DB_TYPE_REF:
                     continue
             else:
                 continue
@@ -187,10 +191,7 @@ def _find_feasible_index(
         if idx_name == "AVET" and slot_name in ("e", "a", "v"):
             a_slot = pattern.slots[1]
             if _is_const(a_slot):
-                aid = resolver.lookup_attr(str(a_slot))
-                if aid is None:
-                    continue
-                if not resolver.is_indexed(aid):
+                if not resolver.is_indexed(a_slot):
                     continue
             else:
                 continue
@@ -244,11 +245,8 @@ def _find_feasible_index_for_slot(
         if idx_name == "VAET" and slot_name in ("e", "a", "v"):
             a_slot = pattern.slots[1]
             if _is_const(a_slot):
-                aid = resolver.lookup_attr(str(a_slot))
-                if aid is None:
-                    continue
-                vt = resolver.value_type_for(aid)
-                if vt != DB_TYPE_REF:
+                vt = resolver.value_type_for(a_slot)
+                if vt is None or vt != DB_TYPE_REF:
                     continue
             else:
                 continue
@@ -256,10 +254,7 @@ def _find_feasible_index_for_slot(
         if idx_name == "AVET" and slot_name in ("e", "a", "v"):
             a_slot = pattern.slots[1]
             if _is_const(a_slot):
-                aid = resolver.lookup_attr(str(a_slot))
-                if aid is None:
-                    continue
-                if not resolver.is_indexed(aid):
+                if not resolver.is_indexed(a_slot):
                     continue
             else:
                 continue
@@ -294,7 +289,7 @@ def _find_feasible_index_for_slot(
 # Validation
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _build_pushes(pattern, vp, pos_order, resolver, start_ip=0):
+def _build_pushes(pattern, vp, pos_order, start_ip=0):
     """Build pushes for positions start_ip to vp (exclusive) in index order."""
     pushes = []
     for ip in range(start_ip, vp):
@@ -304,15 +299,7 @@ def _build_pushes(pattern, vp, pos_order, resolver, start_ip=0):
         slot_for_pos = _SLOT_NAMES.index(pn)
         s = pattern.slots[slot_for_pos]
         if _is_const(s):
-            val = s
-            if pn == "a" and isinstance(val, str):
-                aid = resolver.lookup_attr(val)
-                if aid is None:
-                    raise ValueError(
-                        f"clause {pattern.clause_idx}: attribute '{val}' not declared"
-                    )
-                val = aid
-            pushes.append(("const", val))
+            pushes.append(("const", s))
         elif _is_var(s):
             pushes.append(("var", s.name))
     return pushes
@@ -354,11 +341,8 @@ def _find_best_index_for_clause(
             if idx_name == "VAET" and slot_name in ("e", "a", "v"):
                 a_slot = pattern.slots[1]
                 if _is_const(a_slot):
-                    aid = resolver.lookup_attr(str(a_slot))
-                    if aid is None:
-                        feasible = False; break
-                    vt = resolver.value_type_for(aid)
-                    if vt != DB_TYPE_REF:
+                    vt = resolver.value_type_for(a_slot)
+                    if vt is None or vt != DB_TYPE_REF:
                         feasible = False; break
                 else:
                     feasible = False; break
@@ -367,10 +351,7 @@ def _find_best_index_for_clause(
             if idx_name == "AVET" and slot_name in ("e", "a", "v"):
                 a_slot = pattern.slots[1]
                 if _is_const(a_slot):
-                    aid = resolver.lookup_attr(str(a_slot))
-                    if aid is None:
-                        feasible = False; break
-                    if not resolver.is_indexed(aid):
+                    if not resolver.is_indexed(a_slot):
                         feasible = False; break
                 else:
                     feasible = False; break
@@ -483,7 +464,7 @@ def _validate_plan(
 
             prev_vp = last_vp.get(p.clause_idx, -1)
             start_ip = prev_vp + 1 if prev_vp >= 0 else 0
-            pushes = _build_pushes(p, vp, pos_order, resolver, start_ip)
+            pushes = _build_pushes(p, vp, pos_order, start_ip)
 
             clause_indices.append(ci)
             pushes_per_clause.append(pushes)
@@ -530,10 +511,6 @@ def _validate_plan(
                     if ip <= main_vp:
                         continue
                     range_val = s
-                    if pn == "a" and isinstance(range_val, str):
-                        aid = resolver.lookup_attr(range_val)
-                        if aid is not None:
-                            range_val = aid
                     is_trailing = True
                 elif _is_var(s):
                     if len(var_occurrences.get(s.name, [])) > 1:
@@ -548,7 +525,7 @@ def _validate_plan(
                 clause_configs.append(ClauseConfig(index=cc.index, cf=cc.cf))
 
                 val_ip = main_pos_order.index(pn)
-                val_pushes = _build_pushes(p, val_ip, main_pos_order, resolver, 0)
+                val_pushes = _build_pushes(p, val_ip, main_pos_order, 0)
 
                 label = f"[clause {p.clause_idx}, validate {pn}="
                 if isinstance(range_val, Var):
@@ -592,7 +569,7 @@ def prepare(
             raise ValueError(f"find entries must start with '?', got: {f!r}")
         find_vars.append(f[1:])
 
-    patterns = [_parse_clause(c, i) for i, c in enumerate(where)]
+    patterns = [_parse_clause(session, c, i) for i, c in enumerate(where)]
 
     if given:
         given_parsed = {}
@@ -640,6 +617,7 @@ def prepare(
 
 
 def explain(plan: QueryPlan) -> str:
+    resolver = plan.session.engine.resolver
     lines = []
     lines.append("=== Query Plan ===")
     lines.append(f"find: {' '.join('?' + v for v in plan.find_vars)}")
@@ -650,6 +628,9 @@ def explain(plan: QueryPlan) -> str:
         def _fmt(s):
             if isinstance(s, Var): return f"?{s.name}"
             if isinstance(s, Wildcard): return "_"
+            if isinstance(s, int):
+                name = resolver.attr_name(s)
+                return name if name != str(s) else str(s)
             return repr(s)
         lines.append(f"  [{i}] ({_fmt(e)}, {_fmt(a)}, {_fmt(v)}, {_fmt(t)}, {_fmt(added)})")
 
