@@ -4,7 +4,6 @@ Run:  uv run python tests/bench_py.py
 """
 import time
 import sys
-import struct
 import tempfile
 from pathlib import Path
 
@@ -12,9 +11,8 @@ _root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_root / "py_eavt" / "src"))
 from eavt.engine import EavtEngine
 from eavt import keys
-from eavt.keys import encode_int, encode_string, decode_int64, decode_suffix, decode_value_at
-
-_U64 = struct.Struct(">Q")
+from eavt.keys import encode_int, encode_string, _U64
+from eavt.types import DB_TYPE_LONG
 
 
 def bench(label, fn, iterations=1):
@@ -39,18 +37,19 @@ def _aid_prefix(aid: int) -> bytes:
     return aid.to_bytes(4, "big")
 
 
+def _is_retracted(key: bytes) -> bool:
+    return (key[-1] & 1) != 0
+
+
 def scan_aevt_values(eng, attr_name):
     """Return list of (eid, value) for all active datoms of attr (AEVT scan)."""
     aid = eng.lookup_attr(attr_name)
     vt = eng.value_type_for(aid)
     results = []
     for key in eng.scan_prefix(1, _aid_prefix(aid)):
-        if len(key) < 20:
+        if len(key) < 20 or _is_retracted(key):
             continue
-        if (key[-1] & 1) != 0:
-            continue
-        eid_raw = _U64.unpack_from(key, 4)[0]
-        eid = eid_raw ^ (1 << 63)
+        eid, _ = keys.decode_value_at(key, 4, DB_TYPE_LONG)
         val, _ = keys.decode_value_at(key, 12, vt or 20)
         results.append((eid, val))
     return results
@@ -67,12 +66,9 @@ def scan_avet_lookup(eng, attr_name, value):
     prefix = _aid_prefix(aid) + val_enc
     results = []
     for key in eng.scan_prefix(2, prefix):
-        if len(key) < 16:
+        if len(key) < 16 or _is_retracted(key):
             continue
-        if (key[-1] & 1) != 0:
-            continue
-        eid_raw = _U64.unpack_from(key, len(key) - keys._SUFFIX_SIZE - 8)[0]
-        eid = eid_raw ^ (1 << 63)
+        eid, _ = keys.decode_value_at(key, len(key) - keys._SUFFIX_SIZE - 8, DB_TYPE_LONG)
         results.append(eid)
     return results
 
@@ -83,9 +79,7 @@ def scan_eavt_by_eid(eng, eid, attr_name):
     vt = eng.value_type_for(aid)
     prefix = encode_int(eid) + _aid_prefix(aid)
     for key in eng.scan_prefix(0, prefix):
-        if len(key) < 20:
-            continue
-        if (key[-1] & 1) != 0:
+        if len(key) < 20 or _is_retracted(key):
             continue
         val, _ = keys.decode_value_at(key, 12, vt or 20)
         return val
