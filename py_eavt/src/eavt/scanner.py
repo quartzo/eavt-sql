@@ -738,8 +738,7 @@ def apply_ranges(scanners: list[V2Scanner], raw_ops: list[list[tuple[int, bytes]
     if not range_specs:
         return False
 
-    max_iter = len(range_specs) + 2
-    for _ in range(max_iter):
+    while True:
         cur = scanners[0].peek_raw()
         if cur is None:
             return False
