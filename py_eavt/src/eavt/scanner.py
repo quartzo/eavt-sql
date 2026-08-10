@@ -131,9 +131,6 @@ class PositionStack:
             return self.stack.pop()
         return None
 
-    def fixed_entries(self) -> list[tuple[int, Any]]:
-        return list(self.stack)
-
     def current_position(self) -> int:
         return len(self.stack)
 
@@ -228,7 +225,7 @@ class V2Scanner:
     def recompute_prefix(self):
         buf = bytearray()
         t_in_prefix = False
-        fixed = self.pos.fixed_entries()
+        fixed = self.pos.stack
         for pi, pn in enumerate(self.pos.idx_order):
             found = False
             for idx, v in fixed:
