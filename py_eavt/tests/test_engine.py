@@ -334,7 +334,7 @@ def test_save_same_value_is_noop(engine):
 
 
 def test_not_many_retract_then_save(engine):
-    """Standalone retract then save: `_merged_active_key` must walk back past
+    """Standalone retract then save: scan_prefix must walk back past
     the trailing retract to find the still-active value."""
     engine.declare_attr("person.name", "string")
     eid = engine.alloc_entity()
@@ -448,3 +448,45 @@ def test_multiple_entities(engine):
 
     for eid, name in zip(eids, ["Alice", "Bob", "Charlie"]):
         assert engine.lookup_value(eid, "person.name") == name
+
+
+def test_not_many_triple_save_no_commit(engine):
+    """Three saves without commit: only the last value should be active.
+
+    Before the fix, _merged_active_key returned only the highest non-retracted
+    key, leaving orphaned active datoms for intermediate values.  The Nim
+    version scans all keys and retracts every non-retracted one.
+    """
+    engine.declare_attr("person.name", "string")
+    eid = engine.alloc_entity()
+    engine.save(eid, "person.name", "Carol")
+    engine.save(eid, "person.name", "Bob")
+    engine.save(eid, "person.name", "Alice")
+    assert engine.lookup_value(eid, "person.name") == "Alice"
+    assert engine.lookup_value(eid, "person.name") == "Alice"
+
+
+def test_not_many_save_commit_double_save(engine):
+    """save(V1), commit, save(V2), save(V2): retract of V1 must be emitted."""
+    engine.declare_attr("person.name", "string")
+    eid = engine.alloc_entity()
+    engine.save(eid, "person.name", "Bob")
+    engine.commit()
+    engine.save(eid, "person.name", "Alice")
+    engine.save(eid, "person.name", "Alice")
+    assert engine.lookup_value(eid, "person.name") == "Alice"
+    engine.commit()
+    assert engine.lookup_value(eid, "person.name") == "Alice"
+
+
+def test_not_many_save_commit_triple_save(engine):
+    """save(V1), commit, save(V2), save(V3): both V1 and V2 must be retracted."""
+    engine.declare_attr("person.name", "string")
+    eid = engine.alloc_entity()
+    engine.save(eid, "person.name", "Carol")
+    engine.commit()
+    engine.save(eid, "person.name", "Bob")
+    engine.save(eid, "person.name", "Alice")
+    assert engine.lookup_value(eid, "person.name") == "Alice"
+    engine.commit()
+    assert engine.lookup_value(eid, "person.name") == "Alice"

@@ -277,50 +277,6 @@ class EavtEngine:
 
     # ── Scan prefix ──
 
-    def _merged_active_key(self, cf: int, prefix: bytes, bound: bytes) -> bytes | None:
-        """Return the last active (non-retracted) key matching `prefix`.
-
-        Walks the merged committed+pending stream backward from the range's
-        last key, skipping trailing retracts. The active value of a not-many
-        attribute is the highest non-retracted key, and a save() always ends
-        with an assert, so it is found in O(log K) with no backward walk.
-        `bound` must be a key greater than every key matching `prefix` (e.g.
-        the same eid with attr+1).
-        """
-        ss = self._pending_keys(cf)
-        pid: int | None = None
-        if ss:
-            j = bisect.bisect_left(ss, bound)
-            if j > 0 and ss[j - 1].startswith(prefix):
-                pid = j - 1
-
-        it = self.cf[CF_NAMES[cf]].iter()
-        it.seek_for_prev(bound)
-        ckey: bytes | None = it.key() if it.valid() and it.key().startswith(prefix) else None
-
-        while ckey is not None or pid is not None:
-            if ckey is not None and pid is not None and ckey == ss[pid]:
-                pick = ckey
-                it.prev()
-                ckey = it.key() if it.valid() and it.key().startswith(prefix) else None
-                pid -= 1
-                if pid < 0:
-                    pid = None
-            elif pid is None or (ckey is not None and ckey > ss[pid]):
-                pick = ckey
-                it.prev()
-                ckey = it.key() if it.valid() and it.key().startswith(prefix) else None
-            else:
-                pick = ss[pid]
-                pid -= 1
-                if pid < 0:
-                    pid = None
-            if len(pick) < 20:
-                continue
-            if (pick[-1] & 1) == 0:
-                return pick
-        return None
-
     def scan_prefix(self, cf: int, prefix: bytes) -> list[bytes]:
         """Scan all keys in CF with given prefix (committed + pending)."""
         cf_db = self.cf[CF_NAMES[cf]]
@@ -574,19 +530,20 @@ class EavtEngine:
                 fresh_attrs.add(attr_id)
             else:
                 e_prefix = keys.encode_eid(eid) + keys._attr_bytes(attr_id)
-                bound = keys.encode_eid(eid) + keys._attr_bytes(attr_id + 1)
-                active_key = self._merged_active_key(0, e_prefix, bound)
-                if active_key is not None and active_key[12 : len(active_key) - keys._SUFFIX_SIZE] != encoded:
-                    ret_entries = keys.build_eavt_entries(
-                        eid, attr_id, active_key[12 : len(active_key) - keys._SUFFIX_SIZE], tx, True, mode, indexed
-                    )
+                for ek in self.scan_prefix(0, e_prefix):
+                    if len(ek) < 20:
+                        continue
+                    if (ek[-1] & 1) != 0:
+                        continue
+                    old_val = ek[12 : len(ek) - keys._SUFFIX_SIZE]
+                    ret_entries = keys.build_eavt_entries(eid, attr_id, old_val, tx, True, mode, indexed)
                     self._batch_write(ret_entries)
-                # Re-asserting a value that has a pending retract at the same tx
-                for re in keys.build_eavt_entries(eid, attr_id, encoded, tx, True, mode, indexed):
-                    self._pending_remove(re.cf, re.key)
 
         entries = keys.build_eavt_entries(eid, attr_id, encoded, tx, False, mode, indexed)
         self._batch_write(entries)
+        if not many:
+            for re in keys.build_eavt_entries(eid, attr_id, encoded, tx, True, mode, indexed):
+                self._pending_remove(re.cf, re.key)
         return eid
 
     def retract(self, eid: int, attr_name: str, value, tx: int | None = None):
