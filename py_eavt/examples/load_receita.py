@@ -189,11 +189,11 @@ def load_lookups(sess, ld, data_dir):
 
 
 def load_empresas(sess, ld, data_dir, maps, n):
-    """Load first n empresas from Empresas0. Returns {cnpj_base: eid}."""
+    """Load first n empresas from Empresas0. Returns count loaded."""
     zpath = find_zip(data_dir, "Empresas0")
     nat = maps["natureza"]
     qual = maps["qualificacao"]
-    by_cnpj = {}
+    count = 0
     for row in rows_from_zip(zpath):
         if len(row) < 6:
             continue
@@ -216,24 +216,35 @@ def load_empresas(sess, ld, data_dir, maps, n):
             ld.save(eid, "empresa.capital_social", float(row[4].replace(",", ".")))
         if row[5]:
             ld.save(eid, "empresa.porte", row[5])
-        by_cnpj[cnpj] = eid
-        if len(by_cnpj) >= n:
+        count += 1
+        if count >= n:
             break
     ld.finish()
-    print(f"  empresas: {len(by_cnpj):,}", flush=True)
-    return by_cnpj
+    print(f"  empresas: {count:,}", flush=True)
+    return count
 
 
-def merge_simples(sess, ld, data_dir, by_cnpj):
+def _resolve_empresa(sess, cnpj: str) -> int:
+    """Look up empresa by CNPJ, creating it if missing."""
+    eid = sess.lookup_entity("empresa.cnpj_base", cnpj)
+    if eid is None:
+        eid = sess.alloc_entity()
+        sess.save(eid, "empresa.cnpj_base", cnpj)
+    return eid
+
+
+def merge_simples(sess, ld, data_dir):
     """Stream Simples, merge optação into already-loaded empresas."""
     zpath = data_dir / "Simples__20260809T1834.zip"
     matched = 0
+    scanned = 0
     for row in rows_from_zip(zpath):
+        scanned += 1
+        if scanned % 5_000_000 == 0:
+            print(f"    scanned {scanned:,} rows, matched {matched:,}", flush=True)
         if len(row) < 7:
             continue
-        eid = by_cnpj.get(row[0])
-        if eid is None:
-            continue
+        eid = _resolve_empresa(sess, row[0])
         if row[1]:
             ld.save(eid, "empresa.optante_simples", row[1])
         if row[2] and row[2] != ZERO_DATE:
@@ -248,10 +259,10 @@ def merge_simples(sess, ld, data_dir, by_cnpj):
             ld.save(eid, "empresa.data_exclusao_mei", row[6])
         matched += 1
     ld.finish()
-    print(f"  simples matched: {matched:,}", flush=True)
+    print(f"  simples matched: {matched:,} (scanned {scanned:,})", flush=True)
 
 
-def load_estabs(sess, ld, data_dir, by_cnpj, maps):
+def load_estabs(sess, ld, data_dir, maps):
     """Stream Estabelecimentos0, save only estabs of loaded empresas."""
     zpath = find_zip(data_dir, "Estabelecimentos0")
     mot = maps["motivo"]
@@ -267,7 +278,7 @@ def load_estabs(sess, ld, data_dir, by_cnpj, maps):
             print(f"    scanned {scanned:,} rows, saved {count:,} estabs", flush=True)
         if len(row) < 30:
             continue
-        emp_eid = by_cnpj.get(row[0])
+        emp_eid = _resolve_empresa(sess, row[0])
         if emp_eid is None:
             continue
         cnpj_full = row[0] + row[1].zfill(4) + row[2].zfill(2)
@@ -336,7 +347,7 @@ def load_estabs(sess, ld, data_dir, by_cnpj, maps):
     print(f"  estabelecimentos: {count:,} (scanned {scanned:,})", flush=True)
 
 
-def load_socios(sess, ld, data_dir, by_cnpj, maps):
+def load_socios(sess, ld, data_dir, maps):
     """Stream Socios0, save only socios of loaded empresas."""
     zpath = find_zip(data_dir, "Socios0")
     qual = maps["qualificacao"]
@@ -345,7 +356,7 @@ def load_socios(sess, ld, data_dir, by_cnpj, maps):
     for row in rows_from_zip(zpath):
         if len(row) < 11:
             continue
-        emp_eid = by_cnpj.get(row[0])
+        emp_eid = _resolve_empresa(sess, row[0])
         if emp_eid is None:
             continue
         eid = sess.alloc_entity()
@@ -485,19 +496,19 @@ def main():
 
     ld.mark()
     print(f"== Empresas0 (first {args.n:,}) ==", flush=True)
-    by_cnpj = load_empresas(sess, ld, args.data_dir, maps, args.n)
+    load_empresas(sess, ld, args.data_dir, maps, args.n)
 
     ld.mark()
     print("== Simples (merge into empresas) ==", flush=True)
-    merge_simples(sess, ld, args.data_dir, by_cnpj)
+    merge_simples(sess, ld, args.data_dir)
 
     ld.mark()
     print("== Estabelecimentos0 (filtered) ==", flush=True)
-    load_estabs(sess, ld, args.data_dir, by_cnpj, maps)
+    load_estabs(sess, ld, args.data_dir, maps)
 
     ld.mark()
     print("== Socios0 (filtered) ==", flush=True)
-    load_socios(sess, ld, args.data_dir, by_cnpj, maps)
+    load_socios(sess, ld, args.data_dir, maps)
 
     print(f"\nTotal datoms saved: {ld.saves:,}")
     demo(eng, sess)
