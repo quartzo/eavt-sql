@@ -282,17 +282,34 @@ class EavtEngine:
         cf_db = self.cf[CF_NAMES[cf]]
         it = cf_db.iter()
         it.seek(prefix)
-        result = []
+
+        # Early exit: committed has nothing for this prefix — skip collection
+        if not (it.valid() and it.key().startswith(prefix)):
+            pending = self._pending_keys(cf)
+            if not pending:
+                return []
+            j = bisect.bisect_left(pending, prefix)
+            if j >= len(pending) or not pending[j].startswith(prefix):
+                return []
+            out: list[bytes] = []
+            while j < len(pending) and pending[j].startswith(prefix):
+                out.append(pending[j])
+                j += 1
+            return out
+
+        # Committed has data — collect it
+        committed: list[bytes] = []
         while it.valid():
             key = it.key()
             if not key.startswith(prefix):
                 break
-            result.append(key)
+            committed.append(key)
             it.next()
+
         pending = self._pending_keys(cf)
         if not pending:
-            return result
-        return self._merge_sorted_with_pending(result, pending, prefix)
+            return committed
+        return self._merge_sorted_with_pending(committed, pending, prefix)
 
     @staticmethod
     def _merge_sorted_with_pending(
