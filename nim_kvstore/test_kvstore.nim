@@ -478,7 +478,9 @@ proc putRangeAt(kvAddr: ptr KVStore; cf, startKey, count: int) {.gcsafe.} =
 proc putThreadTaggedAt(kvAddr: ptr KVStore; cf, tag, count: int) {.gcsafe.} =
   let kv = kvAddr[]
   for i in 0..<count:
-    kv.put(cf, @[byte((tag shl 8) or i)])
+    # 2-byte keys: byte((tag shl 8) or i) truncated to byte(i), which made
+    # distinct threads write the same keys (last-writer-wins).
+    kv.put(cf, @[byte(tag), byte(i)])
 
 proc putTwoByteAt(kvAddr: ptr KVStore; cf, count: int) {.gcsafe.} =
   let kv = kvAddr[]
@@ -498,15 +500,20 @@ suite "kvstore: concurrency — puts":
     for t in 0..<N:
       threadKeys[t] = newSeq[seq[byte]](M)
       for i in 0..<M:
-        let b = byte((t shl 8) or i)
-        threadKeys[t][i] = @[b]
+        threadKeys[t][i] = @[byte(t), byte(i)]
 
     var done: Atomic[int]
     done.store(0, moRelaxed)
+
+    # Factory: see runConcurrentPutKv — direct loop-var capture duplicates
+    # the value across spawned threads.
+    proc makePutter(kvAddr: ptr KVStore; t: int): proc() {.gcsafe.} =
+      result = proc() {.gcsafe.} =
+        putThreadTaggedAt(kvAddr, 0, t, M)
+        discard done.fetchAdd(1, moRelaxed)
+
     for t in 0..<N:
-      spawn(proc() {.gcsafe.} =
-        putThreadTaggedAt(addr kv, 0, t, M)
-        discard done.fetchAdd(1, moRelaxed))
+      spawn(makePutter(addr kv, t))
     waitForCount(done, N)
 
     var count = 0
@@ -886,20 +893,29 @@ suite "kvstore: key-value concurrency":
 
     var done: Atomic[int]
     done.store(0, moRelaxed)
-    for t in 0..<N:
-      spawn(proc() {.gcsafe.} =
-        # Use same pattern as putThreadTaggedAt but with putKv
-        let kvRef = (addr kv)[]
+
+    # Closure factory: parameters captured by a returned closure are
+    # heap-allocated per call. Capturing the loop variable `t` directly makes
+    # every spawned thread read the same stack slot late — values get
+    # duplicated (t=1,2,3,3) and one thread's writes vanish.
+    proc makePutter(kv: ptr KVStore; t: int): proc() {.gcsafe.} =
+      result = proc() {.gcsafe.} =
+        # Use same pattern as putThreadTaggedAt but with putKv.
+        # 2-byte keys: byte((t shl 8) or i) truncates to byte(i), which
+        # made all threads write the same 30 keys (last-writer-wins).
         for i in 0..<M:
-          let key = @[byte((t shl 8) or i)]
+          let key = @[byte(t), byte(i)]
           let val = @[byte(t), byte(i)]
-          kvRef.putKv(10, key, val)
-        discard done.fetchAdd(1, moRelaxed))
+          kv[].putKv(10, key, val)
+        discard done.fetchAdd(1, moRelaxed)
+
+    for t in 0..<N:
+      spawn(makePutter(addr kv, t))
     waitForCount(done, N)
 
     for t in 0..<N:
       for i in 0..<M:
-        let key = @[byte((t shl 8) or i)]
+        let key = @[byte(t), byte(i)]
         let val = kv.getKv(10, key)
         check val.isSome
         check val.get == @[byte(t), byte(i)]

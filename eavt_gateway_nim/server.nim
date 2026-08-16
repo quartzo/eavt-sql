@@ -7,6 +7,12 @@ proc serveClient(gw: ptr SharedGateway; fd: SocketHandle) {.gcsafe.} =
   handleGatewayConnection(gw, fd)
   discard posix.close(cint(fd))
 
+# Factory: see eavt_server_nim/server.nim — heap-allocated capture avoids
+# the accept-loop fd duplication race.
+proc makeClientHandler(gw: ptr SharedGateway; fd: SocketHandle): proc() {.gcsafe.} =
+  result = proc() {.gcsafe.} =
+    serveClient(gw, fd)
+
 proc getSocketPath(): string =
   let xdg = getEnv("XDG_RUNTIME_DIR")
   if xdg.len > 0:
@@ -74,5 +80,5 @@ proc main() =
   echo "Listening..."
   while true:
     let clientFd = acceptClient(serverFd)
-    spawn(proc() {.gcsafe.} = serveClient(addr gw, clientFd))
+    spawn(makeClientHandler(addr gw, clientFd))
 when isMainModule: main()

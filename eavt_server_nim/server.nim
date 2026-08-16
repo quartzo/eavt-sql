@@ -6,6 +6,14 @@ proc serveClient(eng: ptr SharedEngine; fd: SocketHandle) {.gcsafe.} =
   handleConnection(eng[], fd)
   discard posix.close(cint(fd))
 
+# Factory: parameters captured by a returned closure are heap-allocated per
+# call. Capturing the accept-loop's `clientFd` local directly makes the
+# spawned thread read the loop slot late — under near-simultaneous
+# connections one fd could be served twice while another is dropped.
+proc makeClientHandler(eng: ptr SharedEngine; fd: SocketHandle): proc() {.gcsafe.} =
+  result = proc() {.gcsafe.} =
+    serveClient(eng, fd)
+
 proc getSocketPath(): string =
   let xdg = getEnv("XDG_RUNTIME_DIR")
   if xdg.len > 0:
@@ -69,5 +77,5 @@ proc main() =
   echo "Listening..."
   while true:
     let clientFd = acceptClient(serverFd)
-    spawn(proc() {.gcsafe.} = serveClient(addr eng, clientFd))
+    spawn(makeClientHandler(addr eng, clientFd))
 when isMainModule: main()
