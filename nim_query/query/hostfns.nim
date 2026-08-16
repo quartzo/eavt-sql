@@ -318,7 +318,7 @@ method scannerLeapInit(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} 
       if vtOpt.isSome:
         vt = h.engine.valueTypeFor(vtOpt.get)
       sc.setValueAttrType(vt)
-      sc.advanceToActiveAt()
+      sc.advanceToActiveAtPreserving()
       if sc.valueAttrType.isNone:
         let aid = sc.attrIdFromKey()
         if aid.isSome:
@@ -373,7 +373,7 @@ method scannerIterateInit(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe
       if vtOpt.isSome:
         vt = h.engine.valueTypeFor(vtOpt.get)
       sc.setValueAttrType(vt)
-      sc.advanceToActiveAt()
+      sc.advanceToActiveAtPreserving()
       if sc.valueAttrType.isNone:
         let aid = sc.attrIdFromKey()
         if aid.isSome:
@@ -428,7 +428,7 @@ method internA(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     let name = expectStr(args[0])
     let aid = h.engine.lookupAttr(name)
     if aid.isNone:
-      return done(newVoid())
+      raise newException(EvalError, "intern-a: unknown attribute: " & name)
     return done(SExpr(kind: sInt, ival: int64(aid.get)))
 
 method attrName(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =

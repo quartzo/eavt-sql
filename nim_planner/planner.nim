@@ -558,7 +558,7 @@ proc buildQueryPlan*(
       else: discard
     if pattern.a.kind == dsConst:
       case pattern.a.constVal.kind
-      of bvResolvedAttr: boundInts["a"] = PlanValue(kind: pvValue, pvInt: pattern.a.constVal.raId.int64)
+      of bvResolvedAttr: boundInts["a"] = PlanValue(kind: pvValue, pvStr: pattern.a.constVal.raName)
       of bvStr, bvAttr: boundInts["a"] = PlanValue(kind: pvValue, pvStr: pattern.a.constVal.sval)
       of bvParam: boundInts["a"] = PlanValue(kind: pvParam, pvParamIdx: pattern.a.constVal.paramIdx)
       of bvExpr: boundInts["a"] = PlanValue(kind: pvExpr, exprValue: pattern.a.constVal.exprValue)

@@ -482,6 +482,13 @@ engine.sql("ATTRIBUTE company.tags STRING MANY")
 - `MANY`: multiple values per entity (accumulates on `UPSERT`)
 - `UNIQUE`: enforces that no two entities share the same value for this attribute
 
+> **Performance — value filters and `UNIQUE`:** the AVET index (value-lookup)
+> is only written for `UNIQUE` attributes. Value filters (`WHERE attr = %1`,
+> `> %1`, `IN (...)`) on non-unique attributes still work — the planner falls
+> back to an AEVT scan with a trailing range filter — but scan the attribute's
+> entities instead of seeking the value directly. Declare lookup-style
+> attributes `UNIQUE` when you filter by them frequently.
+
 > **Value size limit:** `STRING` and `BYTES` values are capped at **1 MB** (raw payload). Larger values are rejected at write time.
 
 #### Idempotency

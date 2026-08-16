@@ -127,7 +127,7 @@ proc boundToSexpr(bv: BoundValue): SExpr =
   of bvInt: newInt(bv.ival)
   of bvFloat: newFloat(bv.fval)
   of bvStr, bvAttr: newStr(if bv.kind == bvStr: bv.sval else: bv.attrName)
-  of bvResolvedAttr: newInt(bv.raId.int64)
+  of bvResolvedAttr: list(newSymbol("intern-a"), newStr(bv.raName))
   of bvParam: list(newSymbol("param"), newInt(bv.paramIdx.int64))
   of bvVar: newSymbol("?" & bv.varName)
   of bvBool: newBool(bv.bval)
@@ -143,8 +143,15 @@ proc buildRangeTree(branches: seq[seq[(string, PlanValue)]]): SExpr =
         inVals.add(planValueToSexpr(pv))
       else:
         otherConds.add(list(newSymbol(op), planValueToSexpr(pv)))
-    if inVals.len > 0:
-      otherConds.add(list(@[newSymbol("=")] & inVals))
+    if inVals.len == 1:
+      otherConds.add(list(newSymbol("="), inVals[0]))
+    elif inVals.len > 1:
+      # IN (a, b, c) is the disjunction (= a) OR (= b) OR (= c) — emitting a
+      # single (= a b c) would drop all but the first value.
+      var eqs: seq[SExpr] = @[newSymbol("or")]
+      for v in inVals:
+        eqs.add(list(newSymbol("="), v))
+      otherConds.add(list(eqs))
     if otherConds.len == 1: otherConds[0]
     else: list(@[newSymbol("and")] & otherConds)
 
@@ -348,7 +355,14 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
       mainWhile)
     ops.add(mainExpr)
 
-  # Trailing bound values
+  # Trailing bound values and trailing range vars.
+  # A range var (?v of "attr > x") that is not a depth var — e.g. position v
+  # in AEVT after the e depth var — still needs its range applied as a
+  # trailing filter, or rows that should be excluded would pass through.
+  var rangeTrees: Table[string, SExpr]
+  for varName, branches in pairs(plan.rangeBounds):
+    rangeTrees[varName] = buildRangeTree(branches)
+
   for ipIdx, ip in plan.iterPlans:
     var trailing: seq[(string, SExpr)]
     for (posName, _) in ip.allBoundPositions():
@@ -357,14 +371,44 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
         trailing.add((posName, bindVals[ipIdx][posName]))
 
     if trailing.len == 0: continue
+
+    # Map position -> var symbol for this iter plan (e.g. "e" -> "?_e_d1"
+    # in AEVT when e is an iteration variable). Trailing pushes must first
+    # occupy any intermediate variable positions, or scanner-iterate-init
+    # would iterate the wrong position.
+    var posToVar: Table[string, SExpr]
+    for (d, p) in ip.varDepths:
+      if d < orderedVars.len:
+        posToVar[p] = newSymbol(orderedVars[d])
+
+    var prePushes: seq[string] = @[]
+    for pos in ip.idxOrder:
+      block checkPos:
+        for (posName, _) in trailing:
+          if pos == posName: break checkPos
+        if pos in boundEmitted[ipIdx]: continue
+        if pos in posToVar: prePushes.add(pos)
+
     let lastIdx = trailing.len - 1
     for i, (posName, valExpr) in trailing:
       boundEmitted[ipIdx].incl(posName)
       let scannerSym = newSymbol("s" & $ipIdx)
       if i == lastIdx:
+        # The last trailing binding may hide further range vars behind it
+        # (e.g. AEVT: a bound, e depth var, v const + range var): prefer the
+        # range var's ranges over a plain equality when both target v.
+        var lastRanges = list(newSymbol("="), valExpr)
+        for posIdx, pos in ip.idxOrder:
+          if pos == posName or posIdx >= ip.idxOrder.len: continue
+          let spec = ip.specs[posIdx]
+          if spec.kind == skVar and spec.varName in rangeTrees and
+             pos notin boundEmitted[ipIdx] and pos notin posToVar:
+            lastRanges = rangeTrees[spec.varName]
+            boundEmitted[ipIdx].incl(pos)
+            break
         let trailVar = "_" & posName & "_trail"
         let trailIterVar = newSymbol("_it_" & trailVar)
-        let trailRanges = list(newSymbol("ranges-create"), list(newSymbol("="), valExpr))
+        let trailRanges = list(newSymbol("ranges-create"), lastRanges)
         let trailBody = list(
           newSymbol("begin"),
           list(newSymbol("scanner-push"), scannerSym, newSymbol(trailVar)),
@@ -375,19 +419,88 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
           list(newSymbol("set!"), newSymbol(trailVar),
             list(newSymbol("scanner-iterate-next"), trailIterVar)),
           trailBody)
-        let trailExpr = list(
-          newSymbol("begin"),
-          list(newSymbol("set!"), trailIterVar,
-            list(newSymbol("scanner-iterate-init"), scannerSym, trailRanges)),
-          trailWhile)
-        ops.add(trailExpr)
+        var trailItems = @[newSymbol("begin")]
+        for p in prePushes:
+          trailItems.add(list(newSymbol("scanner-push"), scannerSym, posToVar[p]))
+        trailItems.add(list(
+          newSymbol("set!"), trailIterVar,
+          list(newSymbol("scanner-iterate-init"), scannerSym, trailRanges)))
+        trailItems.add(trailWhile)
+        for p in countdown(prePushes.len - 1, 0):
+          trailItems.add(list(newSymbol("scanner-pop"), scannerSym))
+        ops.add(list(trailItems))
       else:
-        ops.add(list(
-          newSymbol("begin"),
-          list(newSymbol("scanner-push"), scannerSym, valExpr),
-          newSymbol("__BODY__"),
-          list(newSymbol("scanner-pop"), scannerSym),
-        ))
+        var pushItems = @[newSymbol("begin")]
+        for p in prePushes:
+          pushItems.add(list(newSymbol("scanner-push"), scannerSym, posToVar[p]))
+        pushItems.add(list(newSymbol("scanner-push"), scannerSym, valExpr))
+        pushItems.add(newSymbol("__BODY__"))
+        pushItems.add(list(newSymbol("scanner-pop"), scannerSym))
+        for p in countdown(prePushes.len - 1, 0):
+          pushItems.add(list(newSymbol("scanner-pop"), scannerSym))
+        ops.add(list(pushItems))
+
+  # Trailing range vars (no const binding): positions whose spec is a var
+  # with ranges that never became an iterated depth var — the planner's
+  # reachability filter (buildIterPlan) can drop a range var from varDepths
+  # (e.g. v behind e in AEVT); its range must still be applied as a
+  # trailing filter or matching rows would pass through unfiltered.
+  var iteratedVars: HashSet[string]
+  for ip in plan.iterPlans:
+    for (d, p) in ip.varDepths:
+      if d < orderedVars.len:
+        iteratedVars.incl(orderedVars[d])
+
+  for ipIdx, ip in plan.iterPlans:
+    var posToVar: Table[string, SExpr]
+    for (d, p) in ip.varDepths:
+      if d < orderedVars.len:
+        posToVar[p] = newSymbol(orderedVars[d])
+
+    var emittedPos: HashSet[string]
+    for posName in bindVals[ipIdx].keys: emittedPos.incl(posName)
+
+    for posIdx, pos in ip.idxOrder:
+      let spec = ip.specs[posIdx]
+      if spec.kind != skVar: continue
+      if spec.varName notin rangeTrees: continue
+      if spec.varName in iteratedVars: continue  # depth var already ranged
+      if pos in posToVar: continue
+      if pos in emittedPos: continue
+      emittedPos.incl(pos)
+
+      let scannerSym = newSymbol("s" & $ipIdx)
+      let varSym = newSymbol(spec.varName)
+      let iterVar = newSymbol("_it_" & spec.varName)
+      let rangesExpr = list(newSymbol("ranges-create"), rangeTrees[spec.varName])
+
+      # Occupy intermediate variable positions before filtering this one.
+      var prePushes: seq[string] = @[]
+      for checkIdx, checkPos in ip.idxOrder:
+        if checkIdx >= posIdx: break
+        if checkPos in emittedPos: continue
+        if checkPos in posToVar: prePushes.add(checkPos)
+
+      let innerBody = list(
+        newSymbol("begin"),
+        list(newSymbol("scanner-push"), scannerSym, varSym),
+        newSymbol("__BODY__"),
+        list(newSymbol("scanner-pop"), scannerSym))
+      let innerWhile = list(
+        newSymbol("while"),
+        list(newSymbol("set!"), varSym,
+          list(newSymbol("scanner-iterate-next"), iterVar)),
+        innerBody)
+      var items = @[newSymbol("begin")]
+      for p in prePushes:
+        items.add(list(newSymbol("scanner-push"), scannerSym, posToVar[p]))
+      items.add(list(
+        newSymbol("set!"), iterVar,
+        list(newSymbol("scanner-iterate-init"), scannerSym, rangesExpr)))
+      items.add(innerWhile)
+      for p in countdown(prePushes.len - 1, 0):
+        items.add(list(newSymbol("scanner-pop"), scannerSym))
+      ops.add(list(items))
 
   # Build nested: start from leaf_body, apply ops in reverse
   var body = leafBody

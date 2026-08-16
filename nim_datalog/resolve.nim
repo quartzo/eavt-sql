@@ -12,7 +12,7 @@ proc resolveIr*(ir: var DatalogIR, s: CompileStats): bool =
         let id = s.attrIds.getOrDefault(name, 0)
         if id == 0: return false
         let isRef = s.refAttrs.contains(name)
-        let isIndexed = true
+        let isIndexed = s.indexedAttrs.contains(name)
         pattern.a = slotConst(newBoundResolvedAttr(id, name, isRef, isIndexed))
 
   for branches in ir.rangeBounds.mvalues:
@@ -26,7 +26,7 @@ proc resolveIr*(ir: var DatalogIR, s: CompileStats): bool =
           let id = s.attrIds.getOrDefault(name, 0)
           if id == 0: continue
           let isRef = s.refAttrs.contains(name)
-          let isIndexed = true
+          let isIndexed = s.indexedAttrs.contains(name)
           pair[1] = newBoundResolvedAttr(id, name, isRef, isIndexed)
 
   true

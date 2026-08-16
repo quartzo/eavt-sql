@@ -1,16 +1,17 @@
 import std/[os, nativesockets, posix]
 import spawn
-import shared_engine, connection
+import eavt_server_nim/client
+import shared, connection
 
-proc serveClient(eng: ptr SharedEngine; fd: SocketHandle) {.gcsafe.} =
-  handleConnection(eng[], fd)
+proc serveClient(gw: ptr SharedGateway; fd: SocketHandle) {.gcsafe.} =
+  handleGatewayConnection(gw, fd)
   discard posix.close(cint(fd))
 
 proc getSocketPath(): string =
   let xdg = getEnv("XDG_RUNTIME_DIR")
   if xdg.len > 0:
-    return xdg / "eavt" / "eavt-data.sock"
-  return getHomeDir() / ".local" / "state" / "eavt" / "eavt-data.sock"
+    return xdg / "eavt" / "eavt.sock"
+  return getHomeDir() / ".local" / "state" / "eavt" / "eavt.sock"
 
 proc createUnixSocket(sockPath: string): SocketHandle =
   result = nativesockets.createNativeSocket(posix.AF_UNIX, posix.SOCK_STREAM, 0)
@@ -28,7 +29,7 @@ proc createUnixSocket(sockPath: string): SocketHandle =
     let rc = posix.connect(testFd, cast[ptr SockAddr](addr addr_un), sizeof(Sockaddr_un).SockLen)
     discard posix.close(cint(testFd))
     if rc >= 0:
-      stderr.writeLine "Server already running on ", sockPath
+      stderr.writeLine "Gateway already running on ", sockPath
       quit(1)
     # Stale socket from crashed server — clean it up
     try: removeFile(sockPath) except: discard
@@ -50,24 +51,28 @@ proc acceptClient(serverFd: SocketHandle): SocketHandle =
 
 proc main() =
   var sockPath = getSocketPath()
+  var downstream = downstreamSocketPath()
   var args = commandLineParams()
   var i = 0
   while i < args.len:
     if args[i] == "--socket-path" and i + 1 < args.len:
       sockPath = args[i + 1]
       inc i
+    elif args[i] == "--downstream-path" and i + 1 < args.len:
+      downstream = args[i + 1]
+      inc i
     elif args[i] == "--print-socket-path":
       echo sockPath
       return
     inc i
-  echo "EAVT data server starting on ", sockPath
+  echo "EAVT gateway starting on ", sockPath, " → ", downstream
   initSpawn()
-  var eng = initSharedEngine()
-  echo "Engine initialized"
+  var gw = initSharedGateway(downstream)
+  echo "Gateway initialized"
   let serverFd = createUnixSocket(sockPath)
   defer: discard posix.close(cint(serverFd))
   echo "Listening..."
   while true:
     let clientFd = acceptClient(serverFd)
-    spawn(proc() {.gcsafe.} = serveClient(addr eng, clientFd))
+    spawn(proc() {.gcsafe.} = serveClient(addr gw, clientFd))
 when isMainModule: main()

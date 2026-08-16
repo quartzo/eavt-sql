@@ -19,6 +19,7 @@ import nim_spawn/test_spawn
 
 # Query engine
 import nim_scheme/test_scheme
+import nim_scheme/test_wire
 import nim_query/query/test_query
 
 # SQL pipeline

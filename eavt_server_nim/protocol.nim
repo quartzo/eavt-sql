@@ -1,15 +1,18 @@
 import std/[json, nativesockets, posix]
 import msgpack4nim/msgpack2json
-import scheme
+import scheme, wire
 
 type
   RequestKind* = enum
-    rkSql, rkAdmin, rkKv
+    rkScheme, rkSchema, rkAdmin, rkKv
   Request* = object
     case kind*: RequestKind
-    of rkSql:
-      sql*: string
-      params*: seq[string]
+    of rkScheme:
+      program*: SExpr      ## decoded tagged-AST program body
+      mode*: string        ## "query" (streaming) | "exec" (batch)
+      params*: seq[SExpr]  ## decoded tagged-AST params, 1-indexed via (param N)
+    of rkSchema:
+      discard
     of rkAdmin:
       command*: string
     of rkKv:
@@ -22,11 +25,15 @@ proc parseRequest*(data: string): Request =
   let node = toJsonNode(data)
   let t = node["type"].getStr
   case t
-  of "sql":
-    result = Request(kind: rkSql, sql: node["sql"].getStr)
+  of "scheme":
+    result = Request(kind: rkScheme,
+                     program: wireToSexpr(node["program"]),
+                     mode: node["mode"].getStr)
     if node.hasKey("params"):
       for p in node["params"]:
-        result.params.add(p.getStr)
+        result.params.add(wireToSexpr(p))
+  of "schema":
+    result = Request(kind: rkSchema)
   of "admin":
     result = Request(kind: rkAdmin, command: node["command"].getStr)
   of "kv":

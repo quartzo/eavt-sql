@@ -7,7 +7,8 @@
 - **Check which tests failed:** `./build/all_tests 2>&1 | grep FAILED`
 - **Count failures:** `./build/all_tests 2>&1 | grep -c FAILED`
 - **Module-level tests:** `nim c --mm:atomicArc --threads:on -d:release -d:useMalloc -r nim_eavt/test_eavt.nim` (replace module as needed)
-- **Build server + REPL:** `nimble dist` → `build/eavt-sql-server`, `build/eavt-sql-cli`
+- **Build data server + gateway + REPL:** `nimble dist` → `build/eavt-sql-server`, `build/eavt-sql-gateway`, `build/eavt-sql-cli`
+- **Run the stack (data server + gateway):** `nimble dev` (or `scripts/dev.sh`) — Ctrl-C stops both
 - **Python benchmarks:** `uv run python tests/bench.py` (requires msgpack)
 - **Python deps:** `uv sync --group dev`
 
@@ -39,9 +40,10 @@ unnecessary recompilation.
 ## Project Structure
 
 ```
-eavt_server_nim/           # UDS server (msgpack, thread-per-connection)
+eavt_server_nim/           # Data server: scheme/schema/admin/kv over UDS (msgpack, thread-per-connection)
+eavt_gateway_nim/           # Gateway: compiles SQL→Scheme (nim_sql_frontend), forwards to data server
 eavt-repl-nim/              # REPL client (linenoise, tab-separated output)
-py_eavt_client/             # Python UDS client (msgpack)
+py_eavt_client/             # Python UDS client (msgpack; sql/scheme/schema/admin)
 nim_sql_parse/              # D.1 — SQL lexer + recursive-descent parser
 nim_datalog/                # D.2 — SQL AST → Datalog IR (EAVT patterns)
 nim_planner/                # D.3 — Cost-based join ordering (EAVT/AEVT/AVET/VAET)
@@ -87,7 +89,16 @@ BlobStore (Memory / File / S3)
 
 ### Server Protocol
 
-- **Transport:** Unix Domain Socket (`/run/user/$UID/eavt/eavt.sock`)
+- **Processes:** gateway owns `eavt.sock` (clients connect here); data server
+  listens on `eavt-data.sock`. SQL is compiled to Scheme **at the gateway**
+  (`docs/scheme-transport.md`); the data server is a pure execution engine.
+- **Request types (data server):** `scheme` (tagged-AST program + `mode`
+  query|exec + `params`), `schema` (CompileStats snapshot), `admin`, `kv`.
+  The gateway additionally accepts `sql` (text + params) and passes the rest
+  through verbatim.
+- **Position-independence rule:** compiled programs never embed attribute ids;
+  attributes resolve by name at execution time (`intern-a`).
+- **Transport:** Unix Domain Socket (`$XDG_RUNTIME_DIR/eavt/`)
 - **Framing:** 4 bytes big-endian length prefix + MessagePack payload
 - **Streaming:** Responses chunked with `{"rows": [...], "more": bool}`
 - **Types preserved:** int64, float64, bool, string, bytes via msgpack

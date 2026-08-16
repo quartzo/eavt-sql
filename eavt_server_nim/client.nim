@@ -10,7 +10,7 @@ type
     error*: string
 
   EavtClient* = ref object
-    fd*: SocketHandle
+    fd*: SocketHandle = SocketHandle(-1)
     sockPath*: string
 
 proc getSocketPath*(): string =
@@ -87,6 +87,23 @@ proc recvMsg(c: var EavtClient): string =
     if not recvAll(c.fd, addr result[0], l):
       c.close()
       raise newException(ServerDisconnectedError, "server disconnected (read body)")
+
+proc sendFrame*(c: var EavtClient; body: string) =
+  ## Send a raw msgpack frame body (4-byte length prefix added here).
+  sendMsg(c, body)
+
+proc recvFrame*(c: var EavtClient): string =
+  ## Receive one raw msgpack frame body. Empty string = connection closed.
+  try:
+    recvMsg(c)
+  except ServerDisconnectedError:
+    ""
+
+proc downstreamSocketPath*(): string =
+  let xdg = getEnv("XDG_RUNTIME_DIR")
+  if xdg.len > 0:
+    return xdg / "eavt" / "eavt-data.sock"
+  return getHomeDir() / ".local" / "state" / "eavt" / "eavt-data.sock"
 
 proc exec*(c: var EavtClient; sql: string; params: seq[string] = @[]): seq[SqlResult] =
   var node = newJObject()

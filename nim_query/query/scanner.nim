@@ -329,7 +329,6 @@ proc extractCurrent*(sc: V2Scanner): Option[SExpr] =
 
 proc advanceToActiveAt*(sc: V2Scanner) =
   let pn = sc.pos.posName()
-
   if pn == "added":
     if sc.pos.currentActiveKey.isSome:
       sc.pos.atEnd = false
@@ -420,6 +419,19 @@ proc advanceToActiveAt*(sc: V2Scanner) =
 
   sc.pos.currentActiveKey = none[seq[byte]]()
   sc.pos.atEnd = true
+
+proc advanceToActiveAtPreserving*(sc: V2Scanner) =
+  ## Like advanceToActiveAt, but reuses the saved active key when it already
+  ## matches the current prefix. Starting a nested iteration after pushing a
+  ## value: the outer group scan may have stepped the cursor past the prefix
+  ## while the saved key (which produced the pushed value) is still valid.
+  ## Seeks (seekToValue/seekPastValueAt) must NOT take this shortcut — they
+  ## position the cursor deliberately and need the plain advance.
+  let saved = sc.pos.currentActiveKey
+  if saved.isSome and classifyKey(sc, saved.get) == kvpMatch:
+    sc.pos.atEnd = false
+  else:
+    sc.advanceToActiveAt()
 
 # ── seek_past_value_at ──
 

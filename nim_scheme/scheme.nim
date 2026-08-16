@@ -441,6 +441,8 @@ proc evalSpecialForm(name: string; args: SExpr; env: var Environment;
     state.stack.add Frame(kind: fkIfTest, itThen: @[thenExpr], itElse: elseBody)
     return evalExpr(testExpr, env, host, state)
   of "set!":
+    if args.items.len < 3 or args.items[1].kind != sSymbol:
+      raise newException(EvalError, "set!: expected (set! symbol value)")
     let name = args.items[1].symval
     let valExpr = args.items[2]
     state.stack.add Frame(kind: fkSetFrame, sfName: name)
@@ -456,7 +458,8 @@ proc evalSpecialForm(name: string; args: SExpr; env: var Environment;
     if v.kind == esYield: return v
     if not isTruthy(v.result):
       var msg = "assertion failed"
-      if args.items.len > 2: msg = args.items[2].sval
+      if args.items.len > 2 and args.items[2].kind == sStr:
+        msg = args.items[2].sval
       raise newException(EvalError, msg)
     return done(newVoid())
   of "and":
@@ -545,23 +548,30 @@ proc evalSpecialForm(name: string; args: SExpr; env: var Environment;
     # (ranges-create expr) → flat list of (op val) pairs with (branch) separators
     let inner = if args.items.len >= 2: args.items[1] else: newList(@[])
     let opMap = {"=": 0'i32, "!=": 1, ">": 2, ">=": 3, "<": 4, "<=": 5}.toTable
-    proc walk(sexpr: SExpr; resultList: var seq[SExpr]) =
+    proc walk(sexpr: SExpr; resultList: var seq[SExpr];
+              env: var Environment; host: HostFns; state: var YieldState) =
       case sexpr.kind:
       of sList:
         if sexpr.items.len == 0: return
         let head = sexpr.items[0]
         if head.kind == sSymbol and head.symval == "and":
-          for i in 1..<sexpr.items.len: walk(sexpr.items[i], resultList)
+          for i in 1..<sexpr.items.len: walk(sexpr.items[i], resultList, env, host, state)
         elif head.kind == sSymbol and head.symval == "or":
           for i in 1..<sexpr.items.len:
             resultList.add newList(@[newSymbol("branch")])
-            walk(sexpr.items[i], resultList)
+            walk(sexpr.items[i], resultList, env, host, state)
         elif head.kind == sSymbol and head.symval in opMap:
           if sexpr.items.len >= 2:
-            resultList.add newList(@[newInt(opMap[head.symval]), sexpr.items[1]])
+            # Value may be a literal or an expression like (param N) —
+            # evaluate it so runtime refs resolve to actual values.
+            let step = evalExpr(sexpr.items[1], env, host, state)
+            if step.kind == esYield:
+              raise newException(EvalError,
+                "ranges-create: value expression yielded unexpectedly")
+            resultList.add newList(@[newInt(opMap[head.symval]), step.result])
       else: discard
     var items: seq[SExpr] = @[]
-    walk(inner, items)
+    walk(inner, items, env, host, state)
     return done(newList(items))
   of "while":
     if args.items.len < 2:

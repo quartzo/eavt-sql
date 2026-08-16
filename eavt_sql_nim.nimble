@@ -12,10 +12,14 @@ task test, "Run all Nim unit tests (single binary)":
   exec "nim c --mm:atomicArc --threads:on -d:release -d:useMalloc " &
        "--out:build/all_tests all_tests.nim && build/all_tests"
 
-task dist, "Build server and REPL to build/":
+task dist, "Build data server, gateway and REPL to build/":
   exec "nim c --mm:atomicArc --threads:on -d:release -d:useMalloc " &
        "--out:build/eavt-sql-server eavt_server_nim/server.nim"
+  exec "(cd eavt_gateway_nim && nimble release)"
   exec "(cd eavt-repl-nim && nimble release)"
+
+task dev, "Run data server + gateway in the foreground (Ctrl-C stops both)":
+  exec "scripts/dev.sh"
 
 task test_local, "Run each module's tests separately (for debugging)":
   exec "(cd nim_blobstore/memory  && nimble test)"

@@ -126,6 +126,8 @@ proc buildCompileStats*(eng: EavtEngine): CompileStats =
     let vt = eng.resolver.valueTypeFor(aid).get(otherwise = 0)
     if vt == 21'u32:  # DbTypeRef
       s.refAttrs.incl(name)
+    if eng.resolver.isIndexed(aid):
+      s.indexedAttrs.incl(name)
 
   # Pre-compute index estimates for all 4 indexes (empty prefix = total count)
   for index in ["EAVT", "AEVT", "AVET", "VAET"]:

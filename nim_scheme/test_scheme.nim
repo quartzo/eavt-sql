@@ -1,6 +1,6 @@
 ## test_scheme.nim — Unit tests for nim_scheme (Scheme IR evaluator).
 
-import std/[unittest, options]
+import std/[unittest, options, strutils]
 import scheme
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -41,6 +41,14 @@ suite "scheme.if":
 suite "scheme.set":
   test "with when":  check ses(parse"(begin (set! x 10) (when #t x))") == "10"
   test "overwrite":  check ses(parse"(begin (set! x 1) (set! x 2) x)") == "2"
+  test "non-symbol name raises EvalError not Defect":
+    var exc: ref CatchableError = nil
+    try:
+      discard se(parse"""(begin (set! "x" 10))""")
+    except CatchableError as e:
+      exc = e
+    check exc != nil
+    check "set!" in exc.msg
 
 suite "scheme.not":
   test "true":       check ses(parse"(not #t)") == "#f"

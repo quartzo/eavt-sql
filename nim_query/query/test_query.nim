@@ -19,6 +19,7 @@ import hostfns
 import engine
 import parser as sql_parser
 import frontend
+import explain
 import planner_ast
 import stats
 import resolver
@@ -2050,52 +2051,12 @@ suite "engine: select-path (yield-mode)":
 # runSql helper: full SQL → Scheme → execute pipeline
 # ═══════════════════════════════════════════════════════════════════════════════
 
-proc runSql(q: QueryStore; sql: string; params: seq[SExpr] = @[]): seq[SExpr] =
+proc runSqlWithStats(q: QueryStore; sql: string; cstats: CompileStats;
+                     params: seq[SExpr] = @[]): seq[SExpr] =
   let stmt = sql_parser.parse(sql)
-  let cstats = q.eavt.buildCompileStats()
   let compiled = compileSql(stmt, cstats)
   if compiled.isExplain:
-    var outStr = ""
-    if compiled.iterPlans.len > 0:
-      outStr.add("Plan:\n")
-      let histTag = if compiled.history: " (history)" else: ""
-      let existsTag = if compiled.existsMode: " (exists)" else: ""
-      outStr.add("  Join order: [" & compiled.orderedVars.join(", ") & "]" & histTag & existsTag & "\n")
-      for i, ip in compiled.iterPlans:
-        outStr.add("  p" & $i & " @ " & ip.indexName & "\n")
-        for posIdx, pos in ip.idxOrder:
-          let spec = ip.specs[posIdx]
-          var varLabel = ""
-          for (d, p) in ip.varDepths:
-            if p == pos:
-              varLabel = " [depth " & $d & "]"
-              break
-          case spec.kind
-          of skVar:
-            outStr.add("    " & pos & " = ?" & spec.varName & varLabel & "\n")
-          of skBound:
-            if spec.boundVal != 0:
-              outStr.add("    " & pos & " = #" & $spec.boundVal & varLabel & "\n")
-            else:
-              outStr.add("    " & pos & " = _" & varLabel & "\n")
-          of skBoundAttr:
-            outStr.add("    " & pos & " = attr(id=" & $spec.attrId & ")" & varLabel & "\n")
-          of skBoundValue:
-            if spec.bvStr != "":
-              outStr.add("    " & pos & " = \"" & spec.bvStr & "\"" & varLabel & "\n")
-            elif spec.bvFloat != 0:
-              outStr.add("    " & pos & " = " & $spec.bvFloat & varLabel & "\n")
-            else:
-              outStr.add("    " & pos & " = " & $spec.bvInt & varLabel & "\n")
-          of skBoundParam:
-            outStr.add("    " & pos & " = %" & $spec.paramIdx & varLabel & "\n")
-          of skBoundExpr:
-            outStr.add("    " & pos & " = expr(" & spec.bvExprRepr & ")" & varLabel & "\n")
-      outStr.add("\n")
-    for t in compiled.traces:
-      outStr.add($t & "\n")
-    outStr.add("\n" & writeSchemePretty(compiled.program))
-    result.add SExpr(kind: sStr, sval: outStr)
+    result.add SExpr(kind: sStr, sval: renderExplain(compiled))
     return
   let tx = q.allocateTx()
   if compiled.isSelect:
@@ -2112,6 +2073,9 @@ proc runSql(q: QueryStore; sql: string; params: seq[SExpr] = @[]): seq[SExpr] =
     let session = newQuerySession(q, compiled.program, params, tx, none[int64]())
     let r = executeProgram(session)
     result.add r
+
+proc runSql(q: QueryStore; sql: string; params: seq[SExpr] = @[]): seq[SExpr] =
+  runSqlWithStats(q, sql, q.eavt.buildCompileStats(), params)
 
 proc expectRows(q: QueryStore; sql: string): seq[SExpr] =
   result = runSql(q, sql)
@@ -2522,4 +2486,201 @@ suite "engine: integration (port of test_engine.py)":
     let q2 = newQueryStore(kv)
     let aid2 = q2.eavt.lookupAttr("persist.test").get
     check aid1 == aid2
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Position-independence (scheme transport)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+suite "engine: position-independent programs":
+  test "select with stale aids in cstats returns correct rows":
+    # Programs must resolve attributes by name at runtime (intern-a), never
+    # embed aids: a stale schema snapshot may only degrade the plan, not results.
+    # (attrs declared UNIQUE so value filters hit the AVET index)
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE pos.item STRING ONE UNIQUE")
+    discard runSql(q, "ATTRIBUTE pos.owner STRING ONE")
+    discard runSql(q, "UPSERT SET pos.item = 'alpha', pos.owner = 'red'")
+    discard runSql(q, "UPSERT SET pos.item = 'beta', pos.owner = 'blue'")
+    let good = runSql(q, "SELECT d1.eid WHERE d1.pos.item = %1",
+                      @[SExpr(kind: sStr, sval: "alpha")])
+    check good.len == 1
+    var stale = q.eavt.buildCompileStats()
+    for k in stale.attrIds.keys.toSeq:
+      stale.attrIds[k] = 999_999'u32
+    let bad = runSqlWithStats(q, "SELECT d1.eid WHERE d1.pos.item = %1", stale,
+                              @[SExpr(kind: sStr, sval: "alpha")])
+    check $bad == $good
+
+  test "stale aids still resolve multi-attribute filters":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE pos.item STRING ONE UNIQUE")
+    discard runSql(q, "ATTRIBUTE pos.owner STRING ONE UNIQUE")
+    discard runSql(q, "UPSERT SET pos.item = 'alpha', pos.owner = 'red'")
+    discard runSql(q, "UPSERT SET pos.item = 'beta', pos.owner = 'blue'")
+    let sql = "SELECT d1.eid, d1.pos.owner WHERE d1.pos.item = %1 AND d1.pos.owner = %2"
+    let ps = @[SExpr(kind: sStr, sval: "alpha"), SExpr(kind: sStr, sval: "red")]
+    let good = runSql(q, sql, ps)
+    check good.len == 1
+    var stale = q.eavt.buildCompileStats()
+    for k in stale.attrIds.keys.toSeq:
+      stale.attrIds[k] = 777'u32
+    let bad = runSqlWithStats(q, sql, stale, ps)
+    check $bad == $good
+
+  test "stale aids still resolve eid filters":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE pos.item STRING ONE")
+    let up = runSql(q, "UPSERT SET pos.item = 'alpha'")
+    let eid = up[0].items[1].ival
+    let sql = "SELECT d1.pos.item WHERE d1.eid = %1"
+    let ps = @[SExpr(kind: sInt, ival: eid)]
+    let good = runSql(q, sql, ps)
+    check good.len == 1
+    var stale = q.eavt.buildCompileStats()
+    for k in stale.attrIds.keys.toSeq:
+      stale.attrIds[k] = 555'u32
+    let bad = runSqlWithStats(q, sql, stale, ps)
+    check $bad == $good
+
+  test "compiled program contains intern-a, not baked aid":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE pos.item STRING ONE UNIQUE")
+    discard runSql(q, "UPSERT SET pos.item = 'alpha'")
+    let aid = q.eavt.lookupAttr("pos.item").get
+    let stmt = sql_parser.parse("SELECT d1.eid WHERE d1.pos.item = %1")
+    let compiled = compileSql(stmt, q.eavt.buildCompileStats())
+    let text = writeScheme(compiled.program)
+    check text.contains("(intern-a \"pos.item\")")
+    check not text.contains("(scanner-push s0 " & $aid & ")")
+
+  test "intern-a raises on unknown attribute":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    let tx = q.allocateTx()
+    var exc: ref CatchableError = nil
+    try:
+      let session = newQuerySession(q, SchemeProgram(body: scheme.parse(
+        "(result-row (intern-a \"no.such.attr\"))")), @[], tx, none[int64]())
+      discard executeProgram(session)
+    except CatchableError as e:
+      exc = e
+    check exc != nil
+    check "no.such.attr" in exc.msg
+
+suite "engine: ranges with param references":
+  test "range value resolves (param N) at runtime":
+    # regression: ranges-create used to embed the (param N) expression unevaluated,
+    # making every range/equality filter on a value return 0 rows
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    q.declareAttrFromSql("gen.i", ":db.type/long", false, true, 1)
+    for i in 1..10:
+      let eid = q.allocateInPartition(4'u64)
+      q.saveWithT(eid, "gen.i", SExpr(kind: sInt, ival: i.int64), 1, 0)
+    let aid = q.lookupAttr("gen.i").get
+
+    let gt = runSelect(q,
+      "(begin (set! s0 (scanner-open \"AVET\")) (scanner-push s0 " & $aid.int64 & ") " &
+      "(set! it (scanner-iterate-init s0 (ranges-create (> (param 1))))) " &
+      "(while (set! v (scanner-iterate-next it)) (result-row v)))",
+      @[SExpr(kind: sInt, ival: 7)])
+    check gt.len == 3
+    check gt[0][0].ival == 8
+    check gt[2][0].ival == 10
+
+    let eq = runSelect(q,
+      "(begin (set! s0 (scanner-open \"AVET\")) (scanner-push s0 " & $aid.int64 & ") " &
+      "(set! it (scanner-iterate-init s0 (ranges-create (= (param 1))))) " &
+      "(while (set! v (scanner-iterate-next it)) (result-row v)))",
+      @[SExpr(kind: sInt, ival: 4)])
+    check eq.len == 1
+    check eq[0][0].ival == 4
+
+  test "sql range filter with param returns rows":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE gen.i LONG ONE UNIQUE")
+    for i in 1..10:
+      discard runSql(q, "UPSERT SET gen.i = " & $i)
+    let rows = runSql(q, "SELECT d1.eid WHERE d1.gen.i > %1",
+                      @[SExpr(kind: sInt, ival: 7)])
+    check rows.len == 3
+
+suite "engine: value filters on non-indexed attrs":
+  # Without UNIQUE the AVET index is not written; the planner must fall back
+  # to AEVT and still filter correctly (design: no operational restriction,
+  # only a speed penalty).
+  setup:
+    var kv = newMemoryKVStore()
+    let q = newQueryStore(kv)
+    discard runSql(q, "ATTRIBUTE nb.i LONG ONE")
+    for i in 1..10:
+      discard runSql(q, "UPSERT SET nb.i = " & $i)
+    defer: kv.close()
+
+  template rowsOf(sql: string; ps: seq[SExpr] = @[]): seq[SExpr] = runSql(q, sql, ps)
+
+  test "plan uses AEVT for non-indexed, AVET for unique":
+    let kvU = newMemoryKVStore()
+    defer: kvU.close()
+    let qU = newQueryStore(kvU)
+    discard runSql(qU, "ATTRIBUTE uq.i LONG ONE UNIQUE")
+    let expl = runSql(q, "EXPLAIN SELECT d1.eid WHERE d1.nb.i = %1",
+                      @[SExpr(kind: sInt, ival: 4)])
+    check expl[0].sval.contains("p0 @ AEVT")
+    let explU = runSql(qU, "EXPLAIN SELECT d1.eid WHERE d1.uq.i = %1",
+                       @[SExpr(kind: sInt, ival: 4)])
+    check explU[0].sval.contains("p0 @ AVET")
+
+  test "equality filter":
+    check rowsOf("SELECT d1.eid WHERE d1.nb.i = %1",
+                 @[SExpr(kind: sInt, ival: 4)]).len == 1
+
+  test "open range filter":
+    check rowsOf("SELECT d1.eid WHERE d1.nb.i > %1",
+                 @[SExpr(kind: sInt, ival: 7)]).len == 3
+
+  test "closed range filter":
+    check rowsOf("SELECT d1.eid WHERE d1.nb.i >= %1 AND d1.nb.i <= %2",
+                 @[SExpr(kind: sInt, ival: 3),
+                   SExpr(kind: sInt, ival: 5)]).len == 3
+
+  test "IN filter with params":
+    # regression: IN compiled to (= v1 v2 v3); the range walker only read the
+    # first value, so IN (1,5,9) matched just 1
+    check rowsOf("SELECT d1.eid WHERE d1.nb.i IN (%1, %2, %3)",
+                 @[SExpr(kind: sInt, ival: 1), SExpr(kind: sInt, ival: 5),
+                   SExpr(kind: sInt, ival: 9)]).len == 3
+
+  test "IN filter with literals":
+    check rowsOf("SELECT d1.eid WHERE d1.nb.i IN (1, 5, 9)").len == 3
+
+  test "exclusion filter":
+    check rowsOf("SELECT d1.eid WHERE d1.nb.i != %1",
+                 @[SExpr(kind: sInt, ival: 4)]).len == 9
+
+  test "projection of range-filtered value":
+    check rowsOf("SELECT d1.nb.i WHERE d1.nb.i > %1",
+                 @[SExpr(kind: sInt, ival: 8)]).len == 2
+
+  test "IN on unique attr (depth-var path)":
+    let kvU = newMemoryKVStore()
+    defer: kvU.close()
+    let qU = newQueryStore(kvU)
+    discard runSql(qU, "ATTRIBUTE uq.i LONG ONE UNIQUE")
+    for i in 1..10:
+      discard runSql(qU, "UPSERT SET uq.i = " & $i)
+    check runSql(qU, "SELECT d1.eid WHERE d1.uq.i IN (1, 5, 9)").len == 3
+
 

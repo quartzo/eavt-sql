@@ -4,6 +4,36 @@ from pathlib import Path
 import msgpack
 
 
+class Sym(str):
+    """Marks a string as a Scheme symbol (wire tag 3). Plain `str` values
+    are encoded as Scheme strings (tag 2)."""
+
+
+def to_wire(v):
+    """Convert a Python value to the tagged AST wire form (docs/scheme-transport.md §3.3).
+
+    int → [0, i], float → [1, f], str → [2, s], Sym → [3, s], bool → [4, b],
+    bytes → [5, [...]], None → [6, null], list/tuple → [7, [children]].
+    """
+    if isinstance(v, Sym):
+        return [3, str(v)]
+    if v is None:
+        return [6, None]
+    if isinstance(v, bool):
+        return [4, v]
+    if isinstance(v, int):
+        return [0, v]
+    if isinstance(v, float):
+        return [1, v]
+    if isinstance(v, str):
+        return [2, v]
+    if isinstance(v, (bytes, bytearray)):
+        return [5, list(v)]
+    if isinstance(v, (list, tuple)):
+        return [7, [to_wire(x) for x in v]]
+    raise TypeError(f"cannot encode {type(v).__name__} as scheme AST")
+
+
 class EavtClient:
     """EAVT database client over Unix Domain Socket with msgpack streaming protocol."""
 
@@ -81,6 +111,35 @@ class EavtClient:
         self._send_msg(msgpack.packb(req))
         resp = msgpack.unpackb(self._recv_msg())
         return resp.get("output", "")
+
+    def scheme(self, program, *params, mode: str = "query") -> list[dict]:
+        """Execute a Scheme program (tagged AST, see to_wire) on the server.
+
+        mode="query" streams rows; mode="exec" runs to completion.
+        Returns all result chunks as a list of dicts, like sql().
+        """
+        req = {"type": "scheme", "program": to_wire(program), "mode": mode}
+        if params:
+            req["params"] = [to_wire(p) for p in params]
+        self._send_msg(msgpack.packb(req))
+        results = []
+        while True:
+            resp = msgpack.unpackb(self._recv_msg())
+            if resp.get("error"):
+                raise RuntimeError(resp["error"])
+            results.append(resp)
+            if not resp.get("more", False):
+                break
+        return results
+
+    def schema(self) -> dict:
+        """Fetch the schema snapshot (attrIds, indexEstimates, partitionIds, refAttrs)."""
+        req = {"type": "schema"}
+        self._send_msg(msgpack.packb(req))
+        resp = msgpack.unpackb(self._recv_msg())
+        if resp.get("error"):
+            raise RuntimeError(resp["error"])
+        return resp["schema"]
 
     def flush(self):
         return self.admin("flush")
