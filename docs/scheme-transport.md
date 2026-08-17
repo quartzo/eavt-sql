@@ -51,9 +51,12 @@ eavt-repl-nim (unchanged)        py_eavt_client (SQL API + new scheme API)
   The gateway returns a clear error if the data server is down.
 - **Sockets**: gateway owns `eavt.sock` (clients see no change); data server moves
   to `eavt-data.sock` and honors `--socket-path`.
-- **Connections**: one client thread ↔ one dedicated connection to the data server.
-  Streaming responses never share a downstream connection (interleaved frames would
-  corrupt the protocol).
+- **Connections**: one client handler ↔ one dedicated downstream connection to the
+  data server. Streaming responses never share a downstream connection (interleaved
+  frames would corrupt the protocol).
+- **Threading**: the gateway is a **single-thread chronos event loop** (each client
+  callback is an async proc owning its downstream connection); the data server is
+  thread-per-connection. SQL compilation runs inline on the gateway loop (ms-scale).
 
 ---
 

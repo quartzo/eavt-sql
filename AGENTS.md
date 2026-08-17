@@ -41,8 +41,8 @@ unnecessary recompilation.
 
 ```
 eavt_server_nim/           # Data server: scheme/schema/admin/kv over UDS (msgpack, thread-per-connection)
-eavt_gateway_nim/           # Gateway: compiles SQL→Scheme (nim_sql_frontend), forwards to data server
-eavt-repl-nim/              # REPL client (linenoise, tab-separated output)
+eavt_gateway_nim/           # Gateway: compiles SQL→Scheme (chronos, single-thread async), forwards to data server
+eavt-repl-nim/              # REPL client (linenoise, tab-separated output; orc, no threads)
 py_eavt_client/             # Python UDS client (msgpack; sql/scheme/schema/admin)
 nim_sql_parse/              # D.1 — SQL lexer + recursive-descent parser
 nim_datalog/                # D.2 — SQL AST → Datalog IR (EAVT patterns)
@@ -140,6 +140,14 @@ Re-bootstrap is prevented by scanning for existing `db.ident` datom (aid=1).
 
 ### Threading Rules
 
+**Threading model per process:**
+
+| Process | Model | Flags |
+|---------|-------|-------|
+| data server | thread-per-connection via `nim_spawn` + background flush thread | `--mm:atomicArc --threads:on` |
+| gateway | **single-thread** chronos event loop (no `nim_spawn`, no locks) | `--mm:orc --threads:off` |
+| REPL CLI | single-thread blocking I/O | `--mm:orc --threads:off` |
+
 **NEVER call `createThread` / instantiate raw `Thread[T]`** — this is a low-level
 API that requires manual lifecycle management of the thread handle. If a `Thread[T]`
 local goes out of scope before the spawned thread has read its descriptor, the main
@@ -156,6 +164,16 @@ Thread handles live in a fixed-size global array (stable addresses, dodging the
 createThread-on-stack race above) and are reaped on each `spawn`. Built for
 `--mm:atomicArc` (workers are Nim-native, atomic ref counting — no cycle collector needed)
 collector).
+
+**Closure-capture rule when spawning in a loop:** a closure that reads a loop or
+body-local variable shares the frame slot — spawned threads read it *late* and get
+duplicated values (observed t=1,2,3,3 with t=0 never running). `let` does not help.
+Use the factory pattern: `proc makeWorker(fd: T): proc() {.gcsafe.} = result = proc()
+= serve(fd)` — parameters captured by a *returned* closure are heap-allocated per call.
+
+**Async (chronos) is for the gateway only.** The data server stays thread-per-connection
+(shared engine + flush thread); the gateway is one chronos event loop where each client
+callback owns its downstream connection. Compilations run inline on the loop (ms-scale).
 
 `malebolgia` is **optional** — keep it available only for structured, CPU-bound,
 finite parallelism (where its `awaitAll` barrier and bounded pool are a feature).

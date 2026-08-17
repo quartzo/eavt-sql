@@ -11,5 +11,5 @@ requires "nim >= 2.0.14"
 requires "linenoise"
 
 task release, "Build the REPL":
-  exec "nim c --mm:atomicArc --threads:on -d:release -d:useMalloc " &
+  exec "nim c --mm:orc --threads:off -d:release -d:useMalloc " &
        "--out:../build/eavt-sql-cli src/eavt_repl.nim"
