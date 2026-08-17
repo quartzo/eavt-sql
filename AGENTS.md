@@ -40,10 +40,11 @@ unnecessary recompilation.
 ## Project Structure
 
 ```
-eavt_server_nim/           # Data server: scheme/schema/admin/kv over UDS (msgpack, thread-per-connection)
+eavt_server_nim/           # Data server: scheme/schema/admin/kv over UDS (msgpack, chronos loop + flush thread)
 eavt_gateway_nim/           # Gateway: compiles SQL→Scheme (chronos, single-thread async), forwards to data server
 eavt-repl-nim/              # REPL client (linenoise, tab-separated output; orc, no threads)
 py_eavt_client/             # Python UDS client (msgpack; sql/scheme/schema/admin)
+vendor/chronos_file_pkg/    # Vendored chronos-file (async file I/O; WAL backend — see VENDORED.md)
 nim_sql_parse/              # D.1 — SQL lexer + recursive-descent parser
 nim_datalog/                # D.2 — SQL AST → Datalog IR (EAVT patterns)
 nim_planner/                # D.3 — Cost-based join ordering (EAVT/AEVT/AVET/VAET)
@@ -144,9 +145,16 @@ Re-bootstrap is prevented by scanning for existing `db.ident` datom (aid=1).
 
 | Process | Model | Flags |
 |---------|-------|-------|
-| data server | thread-per-connection via `nim_spawn` + background flush thread | `--mm:atomicArc --threads:on` |
-| gateway | **single-thread** chronos event loop (no `nim_spawn`, no locks) | `--mm:orc --threads:off` |
+| data server | **single chronos event loop** (queries/exec inline, VM yield/resume between batches) + background flush thread via `nim_spawn` | `--mm:orc --threads:on` |
+| gateway | **single chronos event loop** (no `nim_spawn`, no locks) | `--mm:orc --threads:off` |
 | REPL CLI | single-thread blocking I/O | `--mm:orc --threads:off` |
+
+`chronos-file` (vendored at `vendor/chronos_file_pkg/`, see VENDORED.md) provides
+the async file I/O the data server's WAL uses: writes go through its thread-pool
+backend (`writeAt`), fsync on a 100ms timer (interval durability — process crash
+is always safe, machine crash loses at most ~100ms; see `docs/wal.md`). Storage
+modules are MM-agnostic: `atomicArc --threads:on` (test suite) and
+`orc --threads:on` (server) both pass 588/588.
 
 **NEVER call `createThread` / instantiate raw `Thread[T]`** — this is a low-level
 API that requires manual lifecycle management of the thread handle. If a `Thread[T]`

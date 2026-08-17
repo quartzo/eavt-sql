@@ -6,10 +6,11 @@ type
     kv*: KVStore
     store*: QueryStore
 
-proc initSharedEngine*(): SharedEngine =
-  var cfg = initTable[string, string]()
-  cfg["backend"] = "memory"
-  let kv = newKVStore(cfg)
+proc initSharedEngine*(cfg: Table[string, string] = initTable[string, string]()): SharedEngine =
+  var c = cfg
+  if not c.hasKey("backend"):
+    c["backend"] = "memory"
+  let kv = newKVStore(c)
   let store = newQueryStore(kv)
   store.eavt.bootstrapSystemAttrs()
   SharedEngine(kv: kv, store: store)

@@ -13,8 +13,7 @@ task test, "Run all Nim unit tests (single binary)":
        "--out:build/all_tests all_tests.nim && build/all_tests"
 
 task dist, "Build data server, gateway and REPL to build/":
-  exec "nim c --mm:atomicArc --threads:on -d:release -d:useMalloc " &
-       "--out:build/eavt-sql-server eavt_server_nim/server.nim"
+  exec "(cd eavt_server_nim && nimble release)"
   exec "(cd eavt_gateway_nim && nimble release)"
   exec "(cd eavt-repl-nim && nimble release)"
 

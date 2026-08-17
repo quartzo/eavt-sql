@@ -1,18 +1,13 @@
-import std/[os, nativesockets, posix]
-import spawn
+import std/[os, tables]
+import chronos
+import kvstore
 import shared_engine, connection
+import wal
 
-proc serveClient(eng: ptr SharedEngine; fd: SocketHandle) {.gcsafe.} =
-  handleConnection(eng[], fd)
-  discard posix.close(cint(fd))
-
-# Factory: parameters captured by a returned closure are heap-allocated per
-# call. Capturing the accept-loop's `clientFd` local directly makes the
-# spawned thread read the loop slot late — under near-simultaneous
-# connections one fd could be served twice while another is dropped.
-proc makeClientHandler(eng: ptr SharedEngine; fd: SocketHandle): proc() {.gcsafe.} =
-  result = proc() {.gcsafe.} =
-    serveClient(eng, fd)
+proc serverCallback(server: StreamServer, transp: StreamTransport) {.
+    async: (raises: []).} =
+  var eng = cast[SharedEngine](server.udata)
+  await serveConnection(eng, transp)
 
 proc getSocketPath(): string =
   let xdg = getEnv("XDG_RUNTIME_DIR")
@@ -20,62 +15,72 @@ proc getSocketPath(): string =
     return xdg / "eavt" / "eavt-data.sock"
   return getHomeDir() / ".local" / "state" / "eavt" / "eavt-data.sock"
 
-proc createUnixSocket(sockPath: string): SocketHandle =
-  result = nativesockets.createNativeSocket(posix.AF_UNIX, posix.SOCK_STREAM, 0)
-  if result == osInvalidSocket:
-    raiseOSError(osLastError(), "socket()")
-  let sockDir = sockPath.parentDir()
-  if not dirExists(sockDir): createDir(sockDir)
+proc initEngineSafe(cfg: Table[string, string]): SharedEngine {.raises: [].} =
+  try:
+    initSharedEngine(cfg)
+  except Exception:
+    echo "engine init failed"
+    quit(1)
 
-  # Check if another server is already running (or stale socket from crash)
-  block:
-    var testFd = nativesockets.createNativeSocket(posix.AF_UNIX, posix.SOCK_STREAM, 0)
-    var addr_un: Sockaddr_un
-    addr_un.sun_family = TSaFamily(posix.AF_UNIX)
-    copyMem(addr addr_un.sun_path, addr sockPath[0], min(sockPath.len, 108))
-    let rc = posix.connect(testFd, cast[ptr SockAddr](addr addr_un), sizeof(Sockaddr_un).SockLen)
-    discard posix.close(cint(testFd))
-    if rc >= 0:
-      stderr.writeLine "Server already running on ", sockPath
-      quit(1)
-    # Stale socket from crashed server — clean it up
-    try: removeFile(sockPath) except: discard
-
-  var addr_un: Sockaddr_un
-  addr_un.sun_family = TSaFamily(posix.AF_UNIX)
-  copyMem(addr addr_un.sun_path, addr sockPath[0], min(sockPath.len, 108))
-  if bindSocket(result, cast[ptr SockAddr](addr addr_un), sizeof(Sockaddr_un).SockLen) < 0:
-    raiseOSError(osLastError(), "bind()")
-  if nativesockets.listen(result) < 0:
-    raiseOSError(osLastError(), "listen()")
-
-proc acceptClient(serverFd: SocketHandle): SocketHandle =
-  var addr_un: Sockaddr_un
-  var addrLen = sizeof(Sockaddr_un).SockLen
-  result = posix.accept(serverFd, cast[ptr SockAddr](addr addr_un), addr addrLen)
-  if result == osInvalidSocket:
-    raiseOSError(osLastError(), "accept()")
-
-proc main() =
+proc main() {.async.} =
   var sockPath = getSocketPath()
+  var backend = "memory"
+  var dbPath = ""
   var args = commandLineParams()
   var i = 0
   while i < args.len:
     if args[i] == "--socket-path" and i + 1 < args.len:
-      sockPath = args[i + 1]
-      inc i
+      sockPath = args[i + 1]; inc i
+    elif args[i] == "--backend" and i + 1 < args.len:
+      backend = args[i + 1]; inc i
+    elif args[i] == "--path" and i + 1 < args.len:
+      dbPath = args[i + 1]; inc i
     elif args[i] == "--print-socket-path":
       echo sockPath
       return
     inc i
-  echo "EAVT data server starting on ", sockPath
-  initSpawn()
-  var eng = initSharedEngine()
-  echo "Engine initialized"
-  let serverFd = createUnixSocket(sockPath)
-  defer: discard posix.close(cint(serverFd))
+
+  if backend notin ["memory", "file"]:
+    echo "unknown backend: ", backend, " (use memory|file)"
+    quit(1)
+  if backend == "file" and dbPath.len == 0:
+    echo "--backend file requires --path DIR"
+    quit(1)
+
+  echo "EAVT data server (chronos) starting on ", sockPath,
+       "  backend=", backend
+
+  var cfg: Table[string, string]
+  if backend == "file":
+    createDir(dbPath)
+    cfg["backend"] = "file"
+    cfg["path"] = dbPath
+  # initSpawn() runs inside the KVStore constructor (background flush thread);
+  # for file backend the journal replay happens synchronously here, before
+  # the loop starts serving.
+  let eng = initEngineSafe(cfg)
+  var walw: WalWriter = nil
+  if backend == "file":
+    walw = await attachWal(eng.kv, dbPath)
+    echo "WAL attached: ", dbPath / "journal" / "journal"
+
+  # Remove stale socket from a crashed server (probe first).
+  block stale:
+    try:
+      let probe = await initTAddress(sockPath).connect()
+      await probe.closeWait()
+      stderr.writeLine "Server already running on ", sockPath
+      quit(1)
+    except CatchableError:
+      removeFile(sockPath)
+
+  let address = initTAddress(sockPath)
+  let server = createStreamServer(address, serverCallback, udata = cast[pointer](eng))
+  server.start()
   echo "Listening..."
-  while true:
-    let clientFd = acceptClient(serverFd)
-    spawn(makeClientHandler(addr eng, clientFd))
-when isMainModule: main()
+  await server.loopFuture
+  if walw != nil:
+    await walw.stop()
+
+when isMainModule:
+  waitFor main()

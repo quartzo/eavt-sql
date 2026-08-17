@@ -83,7 +83,7 @@ proc readMsg*(fd: SocketHandle): string =
       if n <= 0: return ""
       got += n
 
-proc sexprToJson(e: SExpr): JsonNode =
+proc sexprToJson*(e: SExpr): JsonNode =
   case e.kind
   of sVoid: newJNull()
   of sBool: %e.bval
