@@ -1,7 +1,6 @@
 ## test_kvstore.nim — Unit tests for nim_kvstore.
 
 import std/[unittest, options, tables, strutils, math, os, times, atomics]
-import memory/all
 import file/all
 import journal/all
 import nim_memtable/all
@@ -29,14 +28,12 @@ proc scanKeys(kv: KVStore; cf: int; prefix: seq[byte] = @[]): seq[seq[byte]] =
 
 suite "kvstore: Nim API (KVStore ref)":
   test "new + close memory":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     check kv != nil
     kv.close()
 
   test "put + get round-trip":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     check kv != nil
     kv.put(0, @[byte(1), 2, 3])
     check kv.get(0, @[byte(1), 2, 3])
@@ -45,8 +42,7 @@ suite "kvstore: Nim API (KVStore ref)":
     kv.close()
 
   test "scan returns keys in order":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     kv.put(0, @[byte(3)])
     kv.put(0, @[byte(1)])
     kv.put(0, @[byte(2)])
@@ -58,8 +54,7 @@ suite "kvstore: Nim API (KVStore ref)":
     kv.close()
 
   test "scan with prefix":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     kv.put(0, @[byte(0), 10])
     kv.put(0, @[byte(0), 20])
     kv.put(0, @[byte(1), 30])
@@ -70,8 +65,7 @@ suite "kvstore: Nim API (KVStore ref)":
     kv.close()
 
   test "flush makes data visible after scan":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     kv.put(0, @[byte(5)])
     kv.put(0, @[byte(2)])
     kv.flush()
@@ -80,8 +74,7 @@ suite "kvstore: Nim API (KVStore ref)":
     kv.close()
 
   test "memtableSize reflects puts":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     check kv.memtableSize() == 0
     kv.put(0, @[byte(1), 2, 3])
     check kv.memtableSize() == 3
@@ -90,8 +83,7 @@ suite "kvstore: Nim API (KVStore ref)":
     kv.close()
 
   test "separate CFs are independent":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     kv.put(0, @[byte(1)])
     kv.put(1, @[byte(2)])
     check kv.get(0, @[byte(1)])
@@ -214,8 +206,7 @@ suite "kvstore: read-only":
 
 suite "kvstore: large values":
   test "70 KB key survives put + get":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     var big = newSeq[byte](70000)
     for i in 0..<big.len: big[i] = byte(i and 0xFF)
     kv.put(0, big)
@@ -250,8 +241,7 @@ suite "kvstore: large values":
 
 suite "kvstore: reverse scan":
   test "reverse scan returns keys descending":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     kv.put(0, @[byte(3)])
     kv.put(0, @[byte(1)])
     kv.put(0, @[byte(2)])
@@ -266,8 +256,7 @@ suite "kvstore: reverse scan":
     kv.close()
 
   test "reverse scan after flush still correct":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     kv.put(0, @[byte(5)])
     kv.put(0, @[byte(1)])
     kv.flush()
@@ -493,7 +482,7 @@ proc flushAt(kvAddr: ptr KVStore) {.gcsafe.} =
 suite "kvstore: concurrency — puts":
   proc runConcurrentPuts() =
     initSpawn()
-    var kv = newKVStore({"backend": "memory"}.toTable)
+    var kv = newTempFileKVStore()
     const N = 4
     const M = 50
     var threadKeys: array[N, seq[seq[byte]]]
@@ -528,7 +517,7 @@ suite "kvstore: concurrency — puts":
     runConcurrentPuts()
 
   test "separate CFs are independent (sequential puts)":
-    let kv = newKVStore({"backend": "memory"}.toTable)
+    let kv = newTempFileKVStore()
     const N = 3
     const M = 30
     var cfKeys: array[N, seq[seq[byte]]]
@@ -553,7 +542,7 @@ suite "kvstore: concurrency — puts":
 suite "kvstore: concurrency — scan snapshot isolation":
   proc runCursorBeforeConcurrentWrites() =
     initSpawn()
-    var kv = newKVStore({"backend": "memory"}.toTable)
+    var kv = newTempFileKVStore()
     const PreN = 50
     const ExtraN = 30
 
@@ -592,7 +581,7 @@ suite "kvstore: concurrency — scan snapshot isolation":
     runCursorBeforeConcurrentWrites()
 
   test "cursor captures COW snapshot even during flush window":
-    let kv = newKVStore({"backend": "memory"}.toTable)
+    let kv = newTempFileKVStore()
 
     for i in 0..<20:
       kv.put(0, @[byte(i)])
@@ -620,7 +609,7 @@ suite "kvstore: concurrency — scan snapshot isolation":
 suite "kvstore: concurrency — flush atomicity":
   proc runFlushAtomicity() =
     initSpawn()
-    var kv = newKVStore({"backend": "memory"}.toTable)
+    var kv = newTempFileKVStore()
 
     const PreN = 40
     const DuringN = 25
@@ -654,7 +643,7 @@ suite "kvstore: concurrency — flush atomicity":
 
 suite "kvstore: concurrency — stress":
   test "mixed put + flush + scan under concurrency":
-    let kv = newKVStore({"backend": "memory"}.toTable)
+    let kv = newTempFileKVStore()
 
     const Rounds = 3
     const KeysPerRound = 40
@@ -682,7 +671,7 @@ suite "kvstore: concurrency — stress":
 suite "kvstore: concurrency — put + get integrity":
   proc runBaselineVisible() =
     initSpawn()
-    var kv = newKVStore({"backend": "memory"}.toTable)
+    var kv = newTempFileKVStore()
 
     const BaselineN = 40
     const ExtraPerThread = 60
@@ -715,7 +704,7 @@ suite "kvstore: concurrency — put + get integrity":
 
   proc runNoFalseNegatives() =
     initSpawn()
-    var kv = newKVStore({"backend": "memory"}.toTable)
+    var kv = newTempFileKVStore()
 
     const N = 60
     var allKeys = newSeq[seq[byte]](N)
@@ -743,8 +732,7 @@ suite "kvstore: concurrency — put + get integrity":
 
 suite "kvstore: key-value API (putKv/getKv)":
   test "putKv + getKv round-trip":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     kv.putKv(10, @[byte(1), 2, 3], @[byte(10), 20, 30])
     let val = kv.getKv(10, @[byte(1), 2, 3])
     check val.isSome
@@ -752,15 +740,13 @@ suite "kvstore: key-value API (putKv/getKv)":
     kv.close()
 
   test "getKv returns none for missing key":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     let val = kv.getKv(10, @[byte(9), 9])
     check val.isNone
     kv.close()
 
   test "putKv overwrites existing key":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     kv.putKv(10, @[byte(1)], @[byte(100)])
     kv.putKv(10, @[byte(1)], @[byte(200)])
     let val = kv.getKv(10, @[byte(1)])
@@ -769,8 +755,7 @@ suite "kvstore: key-value API (putKv/getKv)":
     kv.close()
 
   test "key-value CFs are independent from key-only CFs":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     kv.put(0, @[byte(5)])
     kv.putKv(10, @[byte(5)], @[byte(99)])
     check kv.get(0, @[byte(5)])
@@ -780,8 +765,7 @@ suite "kvstore: key-value API (putKv/getKv)":
     kv.close()
 
   test "empty value is preserved":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     let emptyVal: seq[byte] = @[]
     kv.putKv(10, @[byte(7)], emptyVal)
     let val = kv.getKv(10, @[byte(7)])
@@ -791,8 +775,7 @@ suite "kvstore: key-value API (putKv/getKv)":
 
 suite "kvstore: key-value flush":
   test "putKv survives flush":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     kv.putKv(10, @[byte(1)], @[byte(11)])
     kv.putKv(10, @[byte(2)], @[byte(22)])
     kv.flush()
@@ -801,8 +784,7 @@ suite "kvstore: key-value flush":
     kv.close()
 
   test "putKv survives flush + more writes":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     kv.putKv(10, @[byte(1)], @[byte(10)])
     kv.flush()
     kv.putKv(10, @[byte(2)], @[byte(20)])
@@ -814,8 +796,7 @@ suite "kvstore: key-value flush":
     kv.close()
 
   test "overwrite survives flush":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     kv.putKv(10, @[byte(1)], @[byte(100)])
     kv.flush()
     kv.putKv(10, @[byte(1)], @[byte(200)])
@@ -832,8 +813,7 @@ suite "kvstore: key-value scan":
       result.add kvp.get
 
   test "scan returns pairs in key order":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     kv.putKv(10, @[byte(3)], @[byte(30)])
     kv.putKv(10, @[byte(1)], @[byte(10)])
     kv.putKv(10, @[byte(2)], @[byte(20)])
@@ -845,8 +825,7 @@ suite "kvstore: key-value scan":
     kv.close()
 
   test "scan after flush returns all pairs":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     kv.putKv(10, @[byte(5)], @[byte(55)])
     kv.putKv(10, @[byte(2)], @[byte(22)])
     kv.flush()
@@ -859,15 +838,13 @@ suite "kvstore: key-value scan":
     kv.close()
 
   test "scan empty CF returns nothing":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     let pairs = scanPairs(kv, 10)
     check pairs.len == 0
     kv.close()
 
   test "scan with many keys (multi-page)":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     for i in 0..<200:
       var k = newSeq[byte](32)
       k[0] = byte((i shr 24) and 0xFF)
@@ -887,7 +864,7 @@ suite "kvstore: key-value scan":
 suite "kvstore: key-value concurrency":
   proc runConcurrentPutKv() =
     initSpawn()
-    var kv = newKVStore({"backend": "memory"}.toTable)
+    var kv = newTempFileKVStore()
     const N = 4
     const M = 30
 
@@ -926,7 +903,7 @@ suite "kvstore: key-value concurrency":
 
   proc runPutKvSurvivesConcurrentFlush() =
     initSpawn()
-    var kv = newKVStore({"backend": "memory"}.toTable)
+    var kv = newTempFileKVStore()
 
     for i in 0..<30:
       kv.putKv(10, @[byte(i)], @[byte(i * 2)])
@@ -958,8 +935,7 @@ suite "kvstore: key-value concurrency":
 
 suite "kvstore: key-value delete":
   test "delete existing key removes it from get":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     kv.putKv(10, @[byte(1)], @[byte(10)])
     check kv.getKv(10, @[byte(1)]).isSome
     kv.deleteKv(10, @[byte(1)])
@@ -967,15 +943,13 @@ suite "kvstore: key-value delete":
     kv.close()
 
   test "delete non-existing key is harmless":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     kv.deleteKv(10, @[byte(99)])
     check kv.getKv(10, @[byte(99)]).isNone
     kv.close()
 
   test "delete then re-put works":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     kv.putKv(10, @[byte(1)], @[byte(10)])
     kv.deleteKv(10, @[byte(1)])
     kv.putKv(10, @[byte(1)], @[byte(20)])
@@ -985,8 +959,7 @@ suite "kvstore: key-value delete":
     kv.close()
 
   test "deleted key not visible in scan":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     kv.putKv(10, @[byte(1)], @[byte(10)])
     kv.putKv(10, @[byte(2)], @[byte(20)])
     kv.putKv(10, @[byte(3)], @[byte(30)])
@@ -1003,8 +976,7 @@ suite "kvstore: key-value delete":
     kv.close()
 
   test "delete survives flush":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     kv.putKv(10, @[byte(1)], @[byte(10)])
     kv.putKv(10, @[byte(2)], @[byte(20)])
     kv.flush()
@@ -1015,8 +987,7 @@ suite "kvstore: key-value delete":
     kv.close()
 
   test "delete before flush removes from page store":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     kv.putKv(10, @[byte(1)], @[byte(10)])
     kv.putKv(10, @[byte(2)], @[byte(20)])
     kv.deleteKv(10, @[byte(1)])
@@ -1029,8 +1000,7 @@ suite "kvstore: key-value delete":
     kv.close()
 
   test "delete all keys leaves empty CF":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     kv.putKv(10, @[byte(1)], @[byte(10)])
     kv.putKv(10, @[byte(2)], @[byte(20)])
     kv.deleteKv(10, @[byte(1)])
@@ -1041,8 +1011,7 @@ suite "kvstore: key-value delete":
     kv.close()
 
   test "delete-only key (never put) survives flush":
-    let cfg = {"backend": "memory"}.toTable
-    let kv = newKVStore(cfg)
+    let kv = newTempFileKVStore()
     kv.deleteKv(10, @[byte(5)])
     kv.flush()
     check kv.getKv(10, @[byte(5)]).isNone

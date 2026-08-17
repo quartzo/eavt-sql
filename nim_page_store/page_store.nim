@@ -2,12 +2,11 @@
 ##
 ## Port of spier-kvstore/src/generic_page_store.rs (~1800 lines → ~900 lines Nim).
 
-import std/[tables, sets, hashes, strformat, strutils, times, monotimes, options]
+import std/[tables, sets, hashes, strformat, strutils, times, monotimes, options, os]
 import pages
 import std/locks
 
 import blobstore
-import memory/mem_backend as mem_be
 import file/file_backend as fil_be
 import s3/s3_backend as s3_be
 import journal/journal_backend as jou_be
@@ -280,6 +279,10 @@ type
     cache*: PageCache
     lock*: Lock
     backendType*: string
+    ## Directory holding blobs/journal; closePageStore removes it when ownsPath
+    ## is set (tests' tempdir-per-store pattern).
+    dbPath*: string
+    ownsPath*: bool
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -820,19 +823,18 @@ proc collectBlobSizes(s: var PageStoreInner; tree: CfTree;
                                  numLeaves: 0), total, count)
 
 proc newPageStore*(config: Table[string, string]): ptr PageStoreInner =
-  let backend = config.getOrDefault("backend", "memory")
+  let backend = config.getOrDefault("backend", "file")
   let readOnly = config.getOrDefault("read_only", "false") == "true"
   let path = config.getOrDefault("path", "")
   let pageCacheSize = parseInt(config.getOrDefault("page_cache_size", "67108864"))
   let numCf = parseInt(config.getOrDefault("num_cf", "64"))
 
+  if path.len == 0:
+    return nil  # a local path is required (blob dir / journal / WAL)
+
   let blobs: BlobStore =
     case backend:
-    of "memory": mem_be.newMemBlobStore()
-    of "file":
-      if path.len == 0:
-        return nil
-      fil_be.newFileBlobStore(path, readOnly)
+    of "file": fil_be.newFileBlobStore(path, readOnly)
     of "s3": s3_be.newS3BlobStore(config)
     else: nil
 
@@ -840,15 +842,10 @@ proc newPageStore*(config: Table[string, string]): ptr PageStoreInner =
     return nil
 
   let journal =
-    if backend == "memory": nil
-    else:
-      let journalPath = config.getOrDefault("path", "")
-      if journalPath == "": nil
-      else:
-        try:
-          jou_be.newJournal(journalPath)
-        except:
-          nil
+    try:
+      jou_be.newJournal(path)
+    except:
+      nil
 
   result = cast[ptr PageStoreInner](allocShared0(sizeof(PageStoreInner)))
   result.blobs = blobs
@@ -857,6 +854,8 @@ proc newPageStore*(config: Table[string, string]): ptr PageStoreInner =
   result.readOnly = readOnly
   result.cache = initCache(pageCacheSize)
   result.backendType = backend
+  result.dbPath = path
+  result.ownsPath = config.getOrDefault("owns_path", "false") == "true"
   initLock(result.lock)
 
   let roots = blobListRoots(blobs)
@@ -884,6 +883,13 @@ proc newPageStore*(config: Table[string, string]): ptr PageStoreInner =
 proc closePageStore*(ps: ptr PageStoreInner) =
   if ps == nil: return
   if ps.journal != nil: ps.journal.close()
+  let path = ps.dbPath
+  let owns = ps.ownsPath
   deinitLock(ps.lock)
   deallocShared(ps)
+  if owns and path.len > 0:
+    try:
+      removeDir(path)
+    except CatchableError:
+      discard
 

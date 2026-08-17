@@ -2,7 +2,8 @@
 ##
 ## Orchestration layer: coordinates MemTable + PageStore + Journal.
 
-import std/[tables, strutils, os, options]
+import std/[tables, strutils, os, options, times, random]
+import std/[osproc, exitprocs]
 import page_store
 
 import std/locks
@@ -44,6 +45,9 @@ type
     ## the async server buffers them on its event loop (group-commit) and
     ## writes/fsyncs via chronos_file. The sink is called under `kv.lock`.
     journalSink*: proc (data: seq[byte]) {.gcsafe, raises: [].}
+    ## When true, close() removes the whole data directory (tests use it for
+    ## their tempdir-per-store pattern).
+    ownsPath*: bool
 # ═══════════════════════════════════════════════════════════════════════════════
 # KVStore operations
 
@@ -60,6 +64,8 @@ proc newKVStore*(config: Table[string, string]): KVStore =
   var cfg = config
   if not cfg.hasKey("num_cf"):
     cfg["num_cf"] = "64"  ## CFs 0-3: EAVT indexes (key-only). CFs 10+: key-value.
+  if not cfg.hasKey("path") or cfg["path"].len == 0:
+    return nil  # a local path is required (blob dir / journal / WAL)
   let ps = newPageStore(cfg)
   if ps == nil: return nil
   let numCf = parseInt(cfg["num_cf"])
@@ -68,16 +74,16 @@ proc newKVStore*(config: Table[string, string]): KVStore =
   result = KVStore()
   result.ps = ps; result.mt = mt
   result.config = config
-  result.path = config.getOrDefault("path", ":memory:")
+  result.path = cfg["path"]
   result.readOnly = readOnly
   result.numCf = numCf
   result.flushThreshold = parseUInt(config.getOrDefault("flush_threshold", "67108864")).uint64
   result.gcMaxAgeSecs = parseUInt(config.getOrDefault("gc_max_age_secs", "43200")).uint64
-  result.gcMaxRootCount = parseInt(config.getOrDefault("gc_max_root_count", "10"))
+  result.gcMaxRootCount = parseInt(config.getOrDefault("gc_root_count", "10"))
   initLock(result.lock)
   initSpawn()
   # Replay journal
-  if result.path.len > 0 and result.path != ":memory:" and result.path != "":
+  block replay:
     let journalPath = result.path / "journal" / "journal"
     if fileExists(journalPath):
       try:
@@ -122,12 +128,42 @@ proc journalDeliver*(kv: KVStore; data: seq[byte]) {.gcsafe.} =
   except: discard
 
 proc journaling(kv: KVStore): bool {.inline.} =
-  kv.path.len > 0 and kv.path != ":memory:" and kv.path != "" and not kv.readOnly
+  kv.path.len > 0 and not kv.readOnly
+
+# tempdirs handed out by newTempFileKVStore — swept at process exit so a
+# test that forgets close() still does not leak its directory. threadvar:
+# stores are created (and closed) on the main thread; a thread-local seq
+# keeps the exit hook provably gcsafe.
+var gTempDirsStr {.threadvar.}: seq[string]
+addExitProc proc() {.gcsafe.} =
+  for d in gTempDirsStr:
+    try: removeDir(d) except CatchableError: discard
 
 proc close*(kv: KVStore) {.gcsafe.} =
   if kv != nil:
     kv.lock.withLock:
       if kv.ps != nil: closePageStore(kv.ps); kv.ps = nil
+    if kv.ownsPath and kv.path.len > 0:
+      let idx = gTempDirsStr.find(kv.path)
+      if idx >= 0: gTempDirsStr.delete(idx)
+      try:
+        removeDir(kv.path)
+      except CatchableError:
+        discard
+
+proc newTempFileKVStore*(extra: Table[string, string] = initTable[string, string]()): KVStore =
+  ## KVStore on a fresh temp directory (mkdtemp-style), removed on close()
+  ## (or at process exit). The test-suite replacement for the removed
+  ## :memory: backend — exercises the real journal/replay/blob paths.
+  var cfg = {"backend": "file"}.toTable
+  for k, v in extra: cfg[k] = v
+  cfg["path"] = getTempDir() / "eavt_test_" & $getCurrentProcessId() & "_" &
+                $epochTime().uint64 & "_" & $rand(high(int))
+  createDir(cfg["path"])
+  result = newKVStore(cfg)
+  if result != nil:
+    result.ownsPath = true
+    gTempDirsStr.add(cfg["path"])
 
 proc put*(kv: KVStore; cf: int; key: openArray[byte]) {.gcsafe.} =
   var k = newSeq[byte](key.len)

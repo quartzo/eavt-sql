@@ -60,9 +60,18 @@ DIR/blobs/            PageStore blobs (flush target)
 ## Server flags
 
 ```
-eavt-sql-server --backend memory                          # default: no disk
-eavt-sql-server --backend file --path /var/lib/eavt       # WAL + blobs
+eavt-sql-server                                        # default: file backend,
+                                                       #   data dir $XDG_DATA_HOME/eavt/db
+                                                       #   (fallback ~/.local/state/eavt/db)
+eavt-sql-server --path /var/lib/eavt                   # file backend, explicit dir
+eavt-sql-server --backend s3 --path /wal/dir \
+                --s3-endpoint ... --s3-bucket ... \
+                --s3-access-key ... --s3-secret-key ... # blobs in S3, WAL local
 ```
+
+S3 credentials also resolve from `EAVT_S3_ENDPOINT/BUCKET/ACCESS_KEY/SECRET_KEY/REGION/PREFIX/PATH_STYLE`
+(flags win over env). With `--backend s3` the local `--path` still hosts the
+WAL/journal — blobs are flushed to the bucket.
 
 ## Implementation notes
 

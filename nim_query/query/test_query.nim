@@ -24,7 +24,6 @@ import planner_ast
 import stats
 import resolver
 
-import memory/all
 import nim_memtable/all
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -35,10 +34,7 @@ proc newMockCursor(keys: seq[seq[byte]]): Cursor =
   mockCursor(keys)
 
 proc newMemoryKVStore(): KVStore =
-  var tbl = initTable[string, string]()
-  tbl["backend"] = "memory"
-  let cfg = tbl
-  result = newKVStore(cfg)
+  newTempFileKVStore()  # name kept: 140 call sites; now file-backed tempdir
 # ═══════════════════════════════════════════════════════════════════════════════
 # 1. Codec — encode/decode round-trips
 # ═══════════════════════════════════════════════════════════════════════════════

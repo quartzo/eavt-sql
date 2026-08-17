@@ -56,7 +56,7 @@ nim_eavt/                   # EAVT engine: save/retract + resolver + constraints
 nim_kvstore/                # KVStore + MergedCursor
 nim_memtable/               # Per-CF COW treap (ARC-managed)
 nim_page_store/             # COW B-tree, zstd-compressed pages, LRU cache
-nim_blobstore/              # memory / file / S3 backends + journal
+nim_blobstore/              # file / S3 backends + journal (no memory backend)
 nim_spawn/                  # pool-less fire-and-forget spawn (server + flush)
 build/                      # Compiled binaries (gitignored)
 tests/                      # Python benchmarks

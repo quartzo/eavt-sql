@@ -1,6 +1,6 @@
 ## nim_blobstore/blobstore.nim — BlobStore trait.
 ##
-## All backends (memory, file, eventually s3) implement this interface.
+## All backends (file, s3) implement this interface.
 ## The page store dispatches through it — no C-ABI vtable, no casts.
 
 import std/options

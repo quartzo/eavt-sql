@@ -34,6 +34,10 @@ proc main() {.async.} =
   echo "EAVT gateway (chronos) starting on ", sockPath, " → ", downstream
   let gw = initGatewayState(downstream)
 
+  # chronos unlinks the stale socket path but does not create its parent
+  # directory — do it before bind.
+  createDir(sockPath.parentDir())
+
   # Remove stale socket from a crashed gateway (probe first).
   block stale:
     try:

@@ -21,7 +21,6 @@ task dev, "Run data server + gateway in the foreground (Ctrl-C stops both)":
   exec "scripts/dev.sh"
 
 task test_local, "Run each module's tests separately (for debugging)":
-  exec "(cd nim_blobstore/memory  && nimble test)"
   exec "(cd nim_blobstore/file    && nimble test)"
   exec "(cd nim_blobstore/journal && nimble test)"
   exec "(cd nim_memtable          && nimble test)"

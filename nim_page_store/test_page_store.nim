@@ -1,7 +1,6 @@
 ## test_page_store.nim — Unit tests for nim_page_store.
 
-import std/[unittest, options, tables, strutils, math, os, times]
-import memory/all
+import std/[unittest, options, tables, strutils, math, os, times, random]
 import pages
 import page_store
 import page_cursor
@@ -9,7 +8,12 @@ import page_cursor
 # ── Helpers ──
 
 proc newMemStore(): ptr PageStoreInner =
-  let cfg = {"backend": "memory"}.toTable
+  # tempdir-backed store (name kept: many call sites); closePageStore
+  # removes the dir when ownsPath is set
+  var cfg = {"backend": "file", "owns_path": "true"}.toTable
+  cfg["path"] = getTempDir() / "eavt_ps_test_" & $getCurrentProcessId() & "_" &
+                 $epochTime().uint64 & "_" & $rand(high(int))
+  createDir(cfg["path"])
   result = newPageStore(cfg)
 proc commitKeys(s: var PageStoreInner; cf: int; keys: seq[seq[byte]]) =
   s.commitMerge(@[(cf, keys)], true)

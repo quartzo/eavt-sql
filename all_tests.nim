@@ -8,7 +8,6 @@
 ## Run:  nim c --mm:atomicArc --threads:on -d:release -d:useMalloc -r all_tests.nim
 
 # Storage stack
-import nim_blobstore/memory/test_memory
 import nim_blobstore/file/test_file
 import nim_blobstore/journal/test_journal
 import nim_memtable/test_memtable

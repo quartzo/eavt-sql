@@ -19,8 +19,7 @@ proc waitForCount(c: var Atomic[int]; target: int; timeoutMs = 10000) =
     sleep(10)
 
 proc newTestEngine(): EavtEngine =
-  let cfg = {"backend": "memory"}.toTable
-  let kv = newKVStore(cfg)
+  let kv = newTempFileKVStore()
   result = newEavtEngine(kv)
   result.bootstrapResolver()
 
