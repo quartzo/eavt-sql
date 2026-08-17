@@ -58,3 +58,4 @@ pynim_query.so
 # Rust build artifacts
 target/
 build/
+chronos_file.out
