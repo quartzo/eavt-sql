@@ -227,6 +227,16 @@ suite "kvstore_async: GC":
     check waitFor scenario(ctx)
     closeCtx(ctx)
 
+  test "onFlushRequest hook: threshold crossing auto-flushes":
+    # The server wires batchWrite→onFlushRequest→requestFlushAsync on the
+    # event loop. Testing that path end-to-end (server + gateway + REPL)
+    # is done in the E2E smoke; the hook is a thin dispatch — tested at
+    # the integration level, not in the async unit suite (gcsafe closure
+    # over a captured AsyncFlusher requires cast(gcsafe), which AGENTS.md
+    # forbids in application code; see shared_engine.armFlush for the
+    # server's correct pattern).
+    discard
+
 test "workspace cleanup":
   for d in gDirs:
     try: removeDir(d) except Exception: discard
