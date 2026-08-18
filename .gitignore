@@ -59,3 +59,4 @@ pynim_query.so
 target/
 build/
 chronos_file.out
+test_blobstore_async
