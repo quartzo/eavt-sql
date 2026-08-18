@@ -44,7 +44,8 @@ eavt_server_nim/           # Data server: scheme/schema/admin/kv over UDS (msgpa
 eavt_gateway_nim/           # Gateway: compiles SQL→Scheme (chronos, single-thread async), forwards to data server
 eavt-repl-nim/              # REPL client (linenoise, tab-separated output; orc, no threads)
 py_eavt_client/             # Python UDS client (msgpack; sql/scheme/schema/admin)
-vendor/chronos_file_pkg/    # Vendored chronos-file (async file I/O; WAL backend — see VENDORED.md)
+vendor/chronos_file_pkg/    # Vendored chronos-file (async file I/O; WAL + async blobstore bridge) — see VENDORED.md
+nim_blobstore/async/      # Async blobstore facade (pool bridge over sync trait; file/s3 via same bridge)
 nim_sql_parse/              # D.1 — SQL lexer + recursive-descent parser
 nim_datalog/                # D.2 — SQL AST → Datalog IR (EAVT patterns)
 nim_planner/                # D.3 — Cost-based join ordering (EAVT/AEVT/AVET/VAET)
@@ -56,7 +57,7 @@ nim_eavt/                   # EAVT engine: save/retract + resolver + constraints
 nim_kvstore/                # KVStore + MergedCursor
 nim_memtable/               # Per-CF COW treap (ARC-managed)
 nim_page_store/             # COW B-tree, zstd-compressed pages, LRU cache
-nim_blobstore/              # file / S3 backends + journal (no memory backend)
+nim_blobstore/              # file / S3 backends + journal + async facade (no memory backend)
 nim_spawn/                  # pool-less fire-and-forget spawn (server + flush)
 build/                      # Compiled binaries (gitignored)
 tests/                      # Python benchmarks
@@ -150,11 +151,21 @@ Re-bootstrap is prevented by scanning for existing `db.ident` datom (aid=1).
 | REPL CLI | single-thread blocking I/O | `--mm:orc --threads:off` |
 
 `chronos-file` (vendored at `vendor/chronos_file_pkg/`, see VENDORED.md) provides
-the async file I/O the data server's WAL uses: writes go through its thread-pool
-backend (`writeAt`), fsync on a 100ms timer (interval durability — process crash
-is always safe, machine crash loses at most ~100ms; see `docs/wal.md`). Storage
-modules are MM-agnostic: `atomicArc --threads:on` (test suite) and
-`orc --threads:on` (server) both pass 588/588.
+the async file I/O the data server's segmented WAL uses: writes go through its
+thread-pool backend (`writeAt`), fsync on a 100ms timer (interval durability —
+process crash is always safe, machine crash loses at most ~100ms; see `docs/wal.md`).
+The segmented WAL **rotates at flush-capture boundaries** so records written during a
+flush survive it. Storage modules are MM-agnostic: `atomicArc --threads:on`
+(test suite) and `orc --threads:on` (server) both pass 588/588.
+
+`nim_blobstore/async/` is the async facade over the sync `BlobStore` trait:
+a pool of 2-4 worker threads bridges `putPage`/`getPage`/`putRoot`/`getRoot`
+operations (zstd compress/decompress inside the worker) off the event loop;
+completion crosses to the loop via `ThreadSignalPtr` (eventfd) — only the loop
+completes Futures. GC payloads (`seq[byte]` pages, result `seq`s) are owned by
+the loop (in-flight table keeps them alive until the future settles); workers see
+raw pointers only. The sync trait stays for the atomicArc test suite —
+`all_tests` does not import the async module.
 
 **NEVER call `createThread` / instantiate raw `Thread[T]`** — this is a low-level
 API that requires manual lifecycle management of the thread handle. If a `Thread[T]`

@@ -2,7 +2,7 @@
 ##
 ## Orchestration layer: coordinates MemTable + PageStore + Journal.
 
-import std/[tables, strutils, os, options, times, random]
+import std/[tables, strutils, os, options, times, random, algorithm]
 import std/[osproc, exitprocs]
 import page_store
 
@@ -48,6 +48,17 @@ type
     ## When true, close() removes the whole data directory (tests use it for
     ## their tempdir-per-store pattern).
     ownsPath*: bool
+    ## WAL rotation hooks (server with journalSink installed).
+    ## journalSeal is called by flush() at capture time (under kv.lock, from
+    ## the flush thread): it seals the current WAL segment at the logical
+    ## byte boundary of the capture — writes arriving after the seal land in
+    ## the NEXT segment. Returns the boundary.
+    journalSeal*: proc (): int64 {.gcsafe, raises: [].}
+    ## Set by flush() after commitMerge published the new root: every record
+    ## with logical position < walDurableUpTo is durable in the PageStore, so
+    ## the sealed segment covering it may be deleted. The WAL writer polls
+    ## this on its cycle.
+    walDurableUpTo*: Atomic[int64]
 # ═══════════════════════════════════════════════════════════════════════════════
 # KVStore operations
 
@@ -81,14 +92,34 @@ proc newKVStore*(config: Table[string, string]): KVStore =
   result.gcMaxAgeSecs = parseUInt(config.getOrDefault("gc_max_age_secs", "43200")).uint64
   result.gcMaxRootCount = parseInt(config.getOrDefault("gc_root_count", "10"))
   initLock(result.lock)
+  result.walDurableUpTo.store(-1'i64, moRelaxed)
   initSpawn()
-  # Replay journal
+  # Replay journal: legacy single file first (pre-rotation format), then
+  # segments in numeric order (later segments win — newer records overwrite
+  # older ones during batch apply). A torn tail (crash mid-write) ends that
+  # file's replay at its last complete record.
   block replay:
-    let journalPath = result.path / "journal" / "journal"
-    if fileExists(journalPath):
+    var files: seq[string] = @[]
+    let jdir = result.path / "journal"
+    let legacy = jdir / "journal"
+    if fileExists(legacy): files.add(legacy)
+    var segs: seq[tuple[idx: int, path: string]] = @[]
+    if dirExists(jdir):
+      for kind, name in walkDir(jdir):
+        # walkDir yields full paths; splitFile would eat ".00001" as the
+        # extension — use lastPathPart for the whole base name.
+        let base = lastPathPart(name)
+        if kind == pcFile and base.startsWith("journal."):
+          try:
+            segs.add((parseInt(base[8..^1]), name))
+          except ValueError: discard
+    segs.sort(proc(a, b: tuple[idx: int, path: string]): int = cmp(a.idx, b.idx))
+    for s in segs: files.add(s.path)
+    var ops = newSeq[byte](0)
+    for jf in files:
       try:
-        let data = readFile(journalPath)
-        var pos = 0; var ops = newSeq[byte](0)
+        let data = readFile(jf)
+        var pos = 0
         while pos + 4 <= data.len:
           let klen = int(uint32(byte(data[pos])) shl 24 or uint32(byte(data[pos+1])) shl 16 or
                          uint32(byte(data[pos+2])) shl 8 or uint32(byte(data[pos+3])))
@@ -110,8 +141,8 @@ proc newKVStore*(config: Table[string, string]): KVStore =
             ops.add(byte(((klen-1) shr 16) and 0xFF)); ops.add(byte(((klen-1) shr 8) and 0xFF))
             ops.add(byte((klen-1) and 0xFF))
             for i in 1..<klen: ops.add(byte(data[pos - 4 - vlen - klen + i]))
-        if ops.len > 0: result.mtSize = result.mt.batch(ops)
       except: discard
+    if ops.len > 0: result.mtSize = result.mt.batch(ops)
 
 proc journalDeliver*(kv: KVStore; data: seq[byte]) {.gcsafe.} =
   ## Journal bytes (journal-file format) to the sink when installed, else
@@ -268,11 +299,17 @@ proc deleteKv*(kv: KVStore; cf: int; key: openArray[byte]) {.gcsafe.} =
 proc flush*(kv: KVStore) {.gcsafe.} =
   if kv.readOnly: return
   var roots: seq[mt_be.TreapNode]
+  var sealBoundary: int64 = -1
   kv.lock.withLock:
     if kv.flushRoots.len > 0: return
     roots = kv.mt.hnd.live
     kv.mt.clear(); kv.mtSize = 0
     kv.flushRoots = roots
+    # Seal the WAL segment at the capture boundary: records applied after
+    # this point (concurrent writes) land in the NEXT segment and survive
+    # until their own flush publishes.
+    if kv.journalSeal != nil:
+      sealBoundary = kv.journalSeal()
   var keysByCf: seq[(int, seq[seq[byte]])] = @[]
   var pairsByCf: seq[(int, seq[(seq[byte], seq[byte])])] = @[]
   var deletedByCf: seq[(int, seq[seq[byte]])] = @[]
@@ -306,6 +343,10 @@ proc flush*(kv: KVStore) {.gcsafe.} =
     commitMergeKv(kv.ps[], pairsByCf, deletedByCf, true)
   kv.lock.withLock:
     kv.flushRoots = @[]; kv.mtSize = 0
+    # Publish done: everything before the seal boundary is durable in the
+    # PageStore — the sealed WAL segment may be deleted on the next WAL cycle.
+    if sealBoundary >= 0:
+      kv.walDurableUpTo.store(sealBoundary, moRelease)
 
 # ── Background-flush API ──
 #
@@ -416,7 +457,11 @@ proc openScanCursor*(kv: KVStore; cf: int): MergedCursor {.gcsafe.} =
   var flushRoot, liveRoot: mt_be.TreapNode
 
   kv.lock.withLock:
-    let tree = kv.ps[].trees[cf]
+    # ps.lock pairs with the flush thread's tree swaps (commitMerge): the
+    # CfTree struct write is not atomic. Order is always kv.lock → ps.lock;
+    # the flush thread takes ps.lock alone — no cycle.
+    var tree: CfTree
+    kv.ps[].lock.withLock: tree = kv.ps[].trees[cf]
     psSnap = PageStoreSnapshot(rootUuid: tree.rootUuid, height: tree.height)
     if kv.flushRoots.len > 0:
       flushRoot = kv.flushRoots[cf]
@@ -453,7 +498,11 @@ proc openScanCursorKv*(kv: KVStore; cf: int): MergedCursor {.gcsafe.} =
   var flushRoot, liveRoot: mt_be.TreapNode
 
   kv.lock.withLock:
-    let tree = kv.ps[].trees[cf]
+    # ps.lock pairs with the flush thread's tree swaps (commitMerge): the
+    # CfTree struct write is not atomic. Order is always kv.lock → ps.lock;
+    # the flush thread takes ps.lock alone — no cycle.
+    var tree: CfTree
+    kv.ps[].lock.withLock: tree = kv.ps[].trees[cf]
     psSnap = PageStoreSnapshot(rootUuid: tree.rootUuid, height: tree.height)
     if kv.flushRoots.len > 0:
       flushRoot = kv.flushRoots[cf]

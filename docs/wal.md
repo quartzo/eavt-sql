@@ -1,61 +1,81 @@
-# WAL — Write-Ahead Log (interval durability)
+# WAL — Segmented Write-Ahead Log (interval durability)
 
 ## Overview
 
-With `--backend file --path DIR`, the data server persists every write to a
-journal (WAL) before applying it to the MemTable. Writes are handed to a
-`WalWriter` living on the server's chronos event loop; disk I/O goes through
-**chronos-file** (vendored at `vendor/chronos_file_pkg/`), whose thread-pool
-backend runs `pwrite`/`fsync` off the loop.
+With the file backend, the data server persists every write to a segmented
+journal (WAL) before applying it to the MemTable. Writes land in a loop-side
+buffer; disk I/O goes through **chronos-file**'s thread pool; `fsync` fires on
+a 100 ms timer. The journal is **rotated at flush-capture boundaries** so
+records written *during* a flush survive it — see "Why segments" below.
 
 ```
-write path (per request, under kv.lock)          event loop               pool
-┌──────────────────────────┐   sink(bytes)   ┌─────────────┐  writeAt  ┌─────┐
-│ KVStore.put/putKv/batch  │ ───────────────▶│ WalWriter   │ ────────▶ │pread│
-│ Write (MemTable apply)   │   memcpy only   │ .buf (group)│  chained  │pwrite│
-└──────────────────────────┘                 │ fsync 100ms │ ──fsync──▶│fsync│
-                                             └─────────────┘           └─────┘
+write path (loop, under kv.lock)          WAL cycle (loop, 100 ms)
+┌────────────────────────────┐            ┌──────────────────────────────┐
+│ sink: buf.add(data)        │            │ drain: split buf at seal     │
+│ logicalEnd += len          │            │   pre-seal → segment N       │
+└────────────────────────────┘            │   post-seal → segment N+1    │
+                                          │ fsync current segment        │
+flush thread (nim_spawn)                  │ delete sealed segs whose     │
+capture (kv.lock): journalSeal() ────────▶│   boundary ≤ walDurableUpTo  │
+publish  (kv.lock): walDurableUpTo=seal ──┘
 ```
+
+## Why segments (not one truncated file)
+
+Records written during a flush tail the same file *after* the captured ones.
+Truncating — at 0 or at the capture offset — either loses those records (they
+are only in the WAL) or rewrites live bytes with torn-crash regressions.
+Segments are append-only and deleted only once their records are durable in
+the PageStore. A crash mid-flush leaves all segments; replay applies them in
+numeric order (later wins; pre-capture re-applies are idempotent puts).
+
+## Segment files
+
+```
+DIR/journal/journal.NNNNN   segments, 5-digit zero-padded, numeric order
+DIR/journal/journal         legacy single-file format (pre-rotation) —
+                            replayed first if present; no longer written
+```
+
+The correspondence seal↔memtable is exact: the sink and `mt.batch` run under
+the same `kv.lock` (sink first), and the seal runs at capture under that lock
+— every record with logical position < boundary is in the captured roots.
 
 ## Durability policy
 
-**Interval fsync (100ms), Redis-everysec style:**
+**Interval fsync (100 ms):** appends reach the segment via one chained
+`writeAt` per group; `fsync` on the timer plus at shutdown. **Process crash
+is always safe; machine crash loses at most the last ~100 ms.**
 
-- Appends reach the file via one chained `writeAt` per accumulated group
-  (single writer, tracked offset — `AsyncFileBusyError` can never happen on
-  the positioned ops).
-- `fsync` fires on a 100 ms timer, plus a final drain+fsync on shutdown.
-- Semantics: **process crash is always safe** (bytes handed to the sink are
-  in the loop's buffer; the journal file itself only ever contains complete
-  records, and replay tolerates a torn tail by stopping at the first
-  malformed record). **Machine crash loses at most the last ~100 ms** of
-  acknowledged writes.
-
-## Journal format (unchanged)
-
-Stream of records, big-endian:
+## Journal record format (unchanged)
 
 ```
 [4B klen][cf (1B) + key (klen-1 B)][4B vlen][value (vlen B)]
 ```
 
-- `vlen = 0xFFFFFFFF` marks a delete.
-- Key-only CFs 0-3 (EAVT indexes); CFs ≥ 10 are key-value pairs.
-
-## Replay
-
-At startup, **before** the chronos loop starts serving (synchronous, in
-`newKVStore`): records are parsed and applied to the MemTable as a batch.
-A torn tail (partial record from a crash mid-write) ends the replay at the
-last complete record. The resolver/schema is then bootstrapped from the
-replayed `db.*` datoms (`bootstrapResolver`).
+`vlen = 0xFFFFFFFF` marks a delete. A torn tail (crash mid-write) ends that
+file's replay at the last complete record.
 
 ## Files
 
 ```
-DIR/journal/journal   the WAL
-DIR/blobs/            PageStore blobs (flush target)
+DIR/journal/journal.NNNNN   the WAL segments
+DIR/blobs/                  PageStore blobs (flush target)
 ```
+
+## Implementation notes
+
+- `KVStore.journalSink` / `KVStore.journalSeal` / `walDurableUpTo`
+  (nim_kvstore/kvstore.nim): the hooks the server's WalWriter installs. The
+  sink is a memcpy under `kv.lock`; the seal is a counter read.
+- `WalWriter` (eavt_server_nim/wal.nim): loop-owned buffers; rotation closes
+  the sealed segment, records it for deletion, opens the next. Segment
+  discovery uses `lastPathPart` — `splitFile` would eat ".00001" as an
+  extension and silently find nothing.
+- Commit-side tree swaps (`commitMerge*`) take `ps.lock` (loop readers take
+  `kv.lock → ps.lock`; the flush thread takes `ps.lock` alone — no cycle):
+  closes the torn-read race on `ps.trees` between flush and queries.
+
 
 ## Server flags
 
@@ -72,17 +92,3 @@ eavt-sql-server --backend s3 --path /wal/dir \
 S3 credentials also resolve from `EAVT_S3_ENDPOINT/BUCKET/ACCESS_KEY/SECRET_KEY/REGION/PREFIX/PATH_STYLE`
 (flags win over env). With `--backend s3` the local `--path` still hosts the
 WAL/journal — blobs are flushed to the bucket.
-
-## Implementation notes
-
-- `KVStore.journalSink` (nim_kvstore/kvstore.nim): when installed, journal
-  bytes are handed to the sink **under `kv.lock`** — sinks must only do cheap
-  work (the WalWriter sink is a memcpy into its group buffer).
-- The WalWriter captures a heap `WalWriter` ref in the sink closure — never
-  the async `result` FutureVar (that was a SIGSEGV: the sink runs on the
-  write path outside the async frame).
-- Journal is opened `fmReadWriteExisting` (no `O_TRUNC`!) — `fmReadWrite`
-  would erase the journal on every restart.
-- Replay reconstructs ops with the record's own CF (the old replay
-  hard-coded cf=0, corrupting every CF but 0 — pre-existing bug, exposed by
-  the first file-backend persistence test).

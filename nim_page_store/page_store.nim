@@ -365,7 +365,8 @@ proc collectKeysFromIndex(s: var PageStoreInner; pageUuid: array[16, byte];
 
 proc getKeysInPrefix*(s: var PageStoreInner; cf: int; prefix: seq[byte]): seq[seq[byte]] =
   if cf >= s.numCf: return @[]
-  let tree = s.trees[cf]
+  var tree: CfTree
+  s.lock.withLock: tree = s.trees[cf]
   if tree.rootUuid == default(array[16, byte]): return @[]
   if tree.height == 0:
     let keys = loadLeafKeys(s, tree.rootUuid)
@@ -397,7 +398,8 @@ proc loadLeafPairsNoput(s: var PageStoreInner; uuid: array[16, byte]): seq[(seq[
 
 proc getPairsInPrefix*(s: var PageStoreInner; cf: int; prefix: seq[byte]): seq[(seq[byte], seq[byte])] =
   if cf >= s.numCf: return @[]
-  let tree = s.trees[cf]
+  var tree: CfTree
+  s.lock.withLock: tree = s.trees[cf]
   if tree.rootUuid == default(array[16, byte]): return @[]
   if tree.height == 0:
     let pairs = loadLeafPairs(s, tree.rootUuid)
@@ -581,7 +583,7 @@ proc commitMerge*(s: var PageStoreInner; keysByCf: seq[(int, seq[seq[byte]])];
     var sortedKeys = sortedKeysIn
     let tree = s.trees[cf]
     var idx = 0
-    s.trees[cf] =
+    let newTree: CfTree =
       if tree.rootUuid == default(array[16, byte]):
         let pageList = buildPages(sortedKeys)
         var entries: seq[(seq[byte], array[16, byte])] = @[]
@@ -609,9 +611,12 @@ proc commitMerge*(s: var PageStoreInner; keysByCf: seq[(int, seq[seq[byte]])];
           var (root, height) = buildIndexTree(s, result.get, tree.height)
           let numLeaves = countSubtreeLeaves(s, root, height)
           CfTree(rootUuid: root, height: height, numLeaves: numLeaves)
+    s.lock.withLock:
+      s.trees[cf] = newTree
   let newRoot = makeRootName()
   discard blobPutRoot(s.blobs, newRoot, serializeRoot(s.trees))
-  s.currentRoot = newRoot
+  s.lock.withLock:
+    s.currentRoot = newRoot
   if clearJournal:
     journalTruncate(s)
 
@@ -646,7 +651,8 @@ proc commitMergeKv*(s: var PageStoreInner; pairsByCf: seq[(int, seq[(seq[byte], 
     for (k, v) in allPairs:
       if k notin delSet: livePairs.add((k, v))
     if livePairs.len == 0:
-      s.trees[cf] = CfTree(rootUuid: default(array[16, byte]), height: 0, numLeaves: 0)
+      s.lock.withLock:
+        s.trees[cf] = CfTree(rootUuid: default(array[16, byte]), height: 0, numLeaves: 0)
       continue
     let pageList = buildPagesKv(livePairs)
     var entries: seq[(seq[byte], array[16, byte])] = @[]
@@ -657,9 +663,11 @@ proc commitMergeKv*(s: var PageStoreInner; pairsByCf: seq[(int, seq[(seq[byte], 
     let numLeaves = entries.len.uint32
     var (root, height) = buildIndexTree(s, entries, 0)
     if height == 0:
-      s.trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: 0)
+      s.lock.withLock:
+        s.trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: 0)
     else:
-      s.trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: numLeaves)
+      s.lock.withLock:
+        s.trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: numLeaves)
 
   for (cf, sortedPairs) in pairsByCf:
     if cf >= s.numCf or sortedPairs.len == 0: continue
@@ -681,9 +689,11 @@ proc commitMergeKv*(s: var PageStoreInner; pairsByCf: seq[(int, seq[(seq[byte], 
       let numLeaves = entries.len.uint32
       var (root, height) = buildIndexTree(s, entries, 0)
       if height == 0:
-        s.trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: 0)
+        s.lock.withLock:
+          s.trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: 0)
       else:
-        s.trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: numLeaves)
+        s.lock.withLock:
+          s.trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: numLeaves)
     else:
       # Merge into existing tree: collect all existing pairs, merge-sort with new,
       # rebuild pages. Remove keys present in delSet.
@@ -713,7 +723,8 @@ proc commitMergeKv*(s: var PageStoreInner; pairsByCf: seq[(int, seq[(seq[byte], 
         if sortedPairs[bi][0] notin delSet: merged.add sortedPairs[bi]
         inc bi
       if merged.len == 0:
-        s.trees[cf] = CfTree(rootUuid: default(array[16, byte]), height: 0, numLeaves: 0)
+        s.lock.withLock:
+          s.trees[cf] = CfTree(rootUuid: default(array[16, byte]), height: 0, numLeaves: 0)
         continue
       let pageList = buildPagesKv(merged)
       var entries: seq[(seq[byte], array[16, byte])] = @[]
@@ -724,12 +735,15 @@ proc commitMergeKv*(s: var PageStoreInner; pairsByCf: seq[(int, seq[(seq[byte], 
       let numLeaves = entries.len.uint32
       var (root, height) = buildIndexTree(s, entries, 0)
       if height == 0:
-        s.trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: 0)
+        s.lock.withLock:
+          s.trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: 0)
       else:
-        s.trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: numLeaves)
+        s.lock.withLock:
+          s.trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: numLeaves)
   let newRoot = makeRootName()
   discard blobPutRoot(s.blobs, newRoot, serializeRoot(s.trees))
-  s.currentRoot = newRoot
+  s.lock.withLock:
+    s.currentRoot = newRoot
   if clearJournal:
     journalTruncate(s)
 
