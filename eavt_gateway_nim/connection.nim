@@ -17,6 +17,8 @@ import chronos
 import msgpack4nim/msgpack2json
 import scheme, wire
 import stats
+import engine, hostfns
+import eavt
 import eavt_server_nim/protocol except readMsg, writeMsg
 import shared
 import downstream
@@ -89,7 +91,27 @@ proc parseSqlText(text: string): sql_ast.SqlStmt =
     var err = newException(ValueError, "SQL parse error: " & e.msg)
     raise err
 
-proc handleSql(gw: GatewayState; ds: DownstreamConn; node: JsonNode;
+proc nextBatchSafe(sess: StreamingSession; maxRows: int): (seq[seq[SExpr]], bool) =
+  try: sess.nextBatch(maxRows)
+  except Exception as e: raise (ref ValueError)(msg: e.msg)
+
+proc allocateTxSafe(store: engine.QueryStore): int64 {.raises: [ValueError].} =
+  try: store.eavt.allocateTAndWriteTx()
+  except Exception as e: raise (ref ValueError)(msg: e.msg)
+
+proc writeSelectFrame(transp: StreamTransport; rows: seq[seq[SExpr]]; more: bool) {.async.} =
+  var node = newJObject()
+  node["columns"] = %newJArray()
+  var rarr = newJArray()
+  for row in rows:
+    var arr = newJArray()
+    for v in row: arr.add(sexprToJson(v))
+    rarr.add(arr)
+  node["rows"] = rarr
+  node["more"] = %more
+  await transp.writeFrameAsync(msgpack2json.fromJsonNode(node))
+
+proc handleSql(gw: GatewayState; dsPtr: ptr DownstreamConn; node: JsonNode;
                transp: StreamTransport) {.async.} =
   let sqlText = node["sql"].getStr
   var params: seq[SExpr] = @[]
@@ -97,7 +119,7 @@ proc handleSql(gw: GatewayState; ds: DownstreamConn; node: JsonNode;
     for p in node["params"]:
       params.add(jsonParamToSexpr(p))
 
-  var snapshot = await getSnapshot(gw, ds)
+  var snapshot = gw.getSnapshot()
   var compiled: CompileResult = nil
   var lastErr: ref CatchableError = nil
   for attempt in 0..1:
@@ -111,7 +133,12 @@ proc handleSql(gw: GatewayState; ds: DownstreamConn; node: JsonNode;
         # A stale snapshot can only miss recently-declared attributes —
         # refetch once and recompile before giving up.
         if "attribute resolution failed" in e.msg and attempt == 0:
-          snapshot = await refreshSnapshot(gw, ds)
+          # The schema changed via a DML we just forwarded; its WAL bytes are
+          # in flight (server drains subscribers every ~2ms). Wait briefly
+          # for the replica to apply them, then rebuild stats.
+          await sleepAsync(15.milliseconds)
+          gw.invalidateSnapshot()
+          snapshot = gw.getSnapshot()  # rebuild from replica engine
         else:
           raise
     except CatchableError as e:
@@ -119,16 +146,37 @@ proc handleSql(gw: GatewayState; ds: DownstreamConn; node: JsonNode;
   if compiled == nil:
     raise lastErr
 
-  if compiled.isExplain:
-    var rnode = newJObject()
-    rnode["columns"] = %newJArray()
-    var rows = newJArray()
-    rows.add(%[@[renderExplain(compiled)]])
-    rnode["rows"] = rows
-    rnode["more"] = %false
-    await transp.writeFrameAsync(msgpack2json.fromJsonNode(rnode))
+  if compiled.isExplain or (compiled.isSelect and gw.replica != nil):
+    # Execute locally on the replica engine.  EXPLAIN is always local
+    # (pure compilation, no I/O).  SELECT is local when a replica is
+    # available; DML forwards to the data server regardless.
+    if compiled.isExplain:
+      var rnode = newJObject()
+      rnode["columns"] = %newJArray()
+      var rows = newJArray()
+      rows.add(%[@[renderExplain(compiled)]])
+      rnode["rows"] = rows
+      rnode["more"] = %false
+      await transp.writeFrameAsync(msgpack2json.fromJsonNode(rnode))
+      return
+
+    # SELECT local execution: same pattern as the data server's execScheme,
+    # but with a DUMMY tx — the replica never writes txInstant datoms (it is
+    # read-only; the tx value is only read by the tx-entity hostfn).
+    let proto = newQuerySession(gw.replica.store, compiled.program, params,
+                                1'i64, none[int64]())
+    let sess = newStreamingSession(proto)
+    while true:
+      let (rows, more) = nextBatchSafe(sess, 100)
+      await writeSelectFrame(transp, rows, more)
+      if not more: break
     return
 
+  # DML / schema changes: forward as scheme to the data server (lazy
+  # downstream — read-only sessions never connect).
+  if dsPtr[] == nil:
+    dsPtr[] = await connectDownstream(gw.downstreamPath)
+  let ds = dsPtr[]
   let mode = if compiled.isSelect: "query" else: "exec"
   var req = newJObject()
   req["type"] = %"scheme"
@@ -140,10 +188,16 @@ proc handleSql(gw: GatewayState; ds: DownstreamConn; node: JsonNode;
     req["params"] = pa
   await ds.sendJson(req)
   await relayFrames(ds, transp)
+  # Read-your-writes barrier: the DML's WAL bytes were queued to the
+  # replication subscriber before the response above (the sink runs under
+  # kv.lock during execution). The server drains subscribers every ~2ms
+  # and the gateway applies on socket read — a short sleep lets the next
+  # statement in this session see its own writes on the local replica.
+  await sleepAsync(10.milliseconds)
 
 proc handleSchema(gw: GatewayState; ds: DownstreamConn;
                   transp: StreamTransport) {.async.} =
-  let snap = await getSnapshot(gw, ds)
+  let snap = gw.getSnapshot()
   var node = newJObject()
   node["schema"] = statsToJson(snap)
   node["more"] = %false
@@ -173,22 +227,21 @@ proc serveGatewayConnection*(gw: GatewayState; transp: StreamTransport) {.
         await transp.writeErrorAsync("parse error: " & e.msg)
         continue
 
-      if ds == nil:
-        try:
-          ds = await connectDownstream(gw.downstreamPath)
-        except CatchableError:
-          await transp.writeErrorAsync(
-            "cannot connect to data server at " & gw.downstreamPath)
-          break
-
       let t = node["type"].getStr
+      # Downstream is connected lazily: SELECT/EXPLAIN execute on the local
+      # replica and never need the data server. This also keeps reads alive
+      # when the data server is down (stale-read availability).
+      proc ensureDs() {.async.} =
+        if ds == nil:
+          ds = await connectDownstream(gw.downstreamPath)
       try:
         case t
         of "sql":
-          await handleSql(gw, ds, node, transp)
+          await handleSql(gw, addr ds, node, transp)
         of "schema":
           await handleSchema(gw, ds, transp)
         of "scheme", "admin", "kv":
+          await ensureDs()
           await forwardRaw(ds, raw, transp)
         else:
           await transp.writeErrorAsync("unknown request type: " & t)

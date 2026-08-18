@@ -121,7 +121,12 @@ proc execScheme(eng: SharedEngine; req: Request; transp: StreamTransport) {.asyn
   if req.mode != "query" and req.mode != "exec":
     await transp.writeErrorAsync("unknown scheme mode: " & req.mode)
     return
-  let tx = allocateTxSafe(eng)
+  # Only exec (DML) allocates a real tx: it stamps every written datom's `t`
+  # with a fresh txInstant datom. Query-mode programs are read-only by
+  # construction (the compiler never emits save/retract for SELECTs), so a
+  # dummy tx avoids polluting the memtable/WAL — and the replication
+  # stream — with a txInstant datom per SELECT.
+  let tx = if req.mode == "exec": allocateTxSafe(eng) else: 1'i64
   if req.mode == "query":
     let proto = newQuerySession(eng.store, program, req.params, tx, none[int64]())
     let sess = newStreamingSession(proto)

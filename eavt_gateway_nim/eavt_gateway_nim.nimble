@@ -11,5 +11,5 @@ requires "nim >= 2.0.14"
 requires "chronos >= 4.0.0"
 
 task release, "Build the gateway":
-  exec "nim c --mm:orc --threads:off -d:release -d:useMalloc " &
+  exec "nim c --mm:orc --threads:on -d:release -d:useMalloc " &
        "--out:../build/eavt-sql-gateway server.nim"

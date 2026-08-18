@@ -10,6 +10,7 @@
 
 import std/[tables, strutils, os, options, times, random, algorithm]
 import std/[osproc, exitprocs]
+import std/syncio
 import page_store
 
 import std/locks
@@ -79,6 +80,17 @@ proc requestFlush*(kv: KVStore) {.gcsafe.}
 proc flushSync*(kv: KVStore) {.gcsafe.}
 
 
+proc readFileBytes*(path: string): seq[byte] =
+  ## Read raw bytes from a file — returns seq[byte] instead of readFile's
+  ## string.  Used only at startup (before the chronos loop starts);
+  ## runtime reads use chronos-file's readFileBytesAsync (seq[byte], async).
+  let f = syncio.open(path, fmRead)
+  defer: f.close()
+  let sz = getFileSize(f)
+  if sz == 0: return @[]
+  result = newSeq[byte](sz)
+  discard f.readBuffer(addr result[0], sz)
+
 proc parseJournalRecords*(data: openArray[byte]): seq[byte] =
   ## Parse journal records from raw bytes into the memtable batch-apply format.
   ## Key-only CFs 0-3 strip the cf byte from the key (the memtable op stream
@@ -107,6 +119,13 @@ proc parseJournalRecords*(data: openArray[byte]): seq[byte] =
       for i in 1..<klen:
         result.add(byte(data[pos - 4 - vlen - klen + i]))
 
+proc parseJournalFile*(path: string): seq[byte] =
+  ## Parse a single journal file (used by replay at open).
+  try:
+    parseJournalRecords(readFileBytes(path))
+  except CatchableError:
+    @[]
+
 
 proc applyJournalRecords*(kv: KVStore; data: openArray[byte]) {.gcsafe.} =
   ## Apply journal-format records directly to the memtable (batch apply).
@@ -119,7 +138,6 @@ proc applyJournalRecords*(kv: KVStore; data: openArray[byte]) {.gcsafe.} =
   if ops.len > 0:
     kv.lock.withLock:
       kv.mtSize = kv.mt.batch(ops)
-
 
 proc sealLiveToFlush*(kv: KVStore) {.gcsafe.} =
   ## Seal the live memtable into flushRoots (the first half of kv.flush).

@@ -56,6 +56,10 @@ type
     ## index is passed (the just-closed one).  Only memcpy work in the
     ## callback — socket I/O is done async elsewhere.
     onSeal*: proc (segIdx: int) {.gcsafe, raises: [].}
+    ## Called from the sink (under kv.lock, loop thread) for every journal
+    ## record group. The replication hub broadcasts to subscribers here —
+    ## memcpy only, same discipline as the sink itself.
+    onWal*: proc (data: seq[byte]) {.gcsafe, raises: [].}
 
 proc segPath(dir: string; idx: int): string =
   dir / (SegPrefix & align($idx, SegDigits, '0'))
@@ -74,6 +78,8 @@ proc sink(w: WalWriter; data: seq[byte]) {.gcsafe, raises: [].} =
   if w.stopped: return
   w.buf.add(data)
   w.logicalEnd.inc(int64(data.len))
+  if w.onWal != nil:
+    w.onWal(data)
 
 proc seal(w: WalWriter): int64 =
   ## Called by flush() at capture time, under kv.lock (flush thread). Returns

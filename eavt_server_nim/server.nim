@@ -121,6 +121,8 @@ proc main() {.async.} =
   eng.walw = walw
   walw.onSeal = proc(segIdx: int) {.gcsafe.} =
     broadcastSeal(addr eng.hub, segIdx)
+  walw.onWal = proc(data: seq[byte]) {.gcsafe.} =
+    broadcastWal(addr eng.hub, data)
   eng.kv.onFlushPublish = proc(rootName: string) {.gcsafe.} =
     broadcastRoot(addr eng.hub, rootName)
   echo "WAL attached: ", dbPath / "journal" / "journal"
