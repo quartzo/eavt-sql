@@ -11,6 +11,7 @@ import msgpack4nim/msgpack2json
 import scheme, wire
 import stats
 import engine, eavt, kvstore
+import kvstore_async
 import shared_engine
 import protocol
 
@@ -145,6 +146,15 @@ proc handleSchema(eng: SharedEngine; transp: StreamTransport) {.async.} =
 
 proc handleAdmin(eng: SharedEngine; command: string;
                  transp: StreamTransport) {.async.} =
+  proc gcReportText(rep: seq[byte]): string =
+    # 41 bytes: roots_scanned, roots_removed, blobs_scanned, blobs_removed,
+    # live_blobs (u64 LE each) + dryRun flag.
+    if rep.len < 41: return "gc: no report"
+    proc u64le(rep: seq[byte]; off: int): uint64 =
+      for i in 0..7: result = result or (uint64(rep[off + i]) shl uint64(8 * i))
+    "roots_scanned=" & $u64le(rep, 0) & " roots_removed=" & $u64le(rep, 8) &
+      " blobs_scanned=" & $u64le(rep, 16) & " blobs_removed=" & $u64le(rep, 24) &
+      " live_blobs=" & $u64le(rep, 32) & " dry_run=" & $rep[40]
   if command.startsWith("dump"):
     let parts = command.splitWhitespace()
     let index = if parts.len >= 2: parts[1].toUpperAscii() else: "EAVT"
@@ -170,15 +180,30 @@ proc handleAdmin(eng: SharedEngine; command: string;
   else:
     let output = case command
       of "flush":
-        # Transitional (until the async flusher is wired in): schedule via
-        # the hook if installed, else no-op. The hook never blocks the loop.
-        kvstore.requestFlush(eng.kv)
-        "ok: flush requested"
+        # Fire-and-forget: arms the single-flight flusher; the request
+        # returns immediately and the flush runs on this loop (chunked —
+        # the loop keeps serving queries between slices).
+        if eng.kv.readOnly:
+          "error: read-only"
+        else:
+          let fut = eng.flusher.requestFlushAsync()
+          fut.callback = proc(udata: pointer) {.gcsafe, raises: [].} = discard
+          "ok: flush requested"
       of "flush-sync":
-        # Inline synchronous flush. Transitional until flushAsync lands
-        # (then this awaits it — same semantics, no loop blocking).
-        kvstore.flushSync(eng.kv)
-        "ok: flushed"
+        # Await a full pass: on return, every write prior to the request is
+        # durable (WAL-sealed, PageStore-published).
+        if eng.kv.readOnly:
+          "error: read-only"
+        else:
+          await eng.flusher.requestFlushAsync()
+          "ok: flushed"
+      of "gc", "gc-dry":
+        # Explicit GC pass, serialized with flushes by the shared runner.
+        if eng.kv.readOnly:
+          "error: read-only"
+        else:
+          await eng.flusher.requestGcAsync(command == "gc-dry")
+          gcReportText(eng.flusher.lastGcReport)
       of "status":
         "memtable: " & $eng.kv.memtableSize() & " bytes"
       of "memtable":

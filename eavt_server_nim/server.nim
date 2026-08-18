@@ -104,8 +104,8 @@ proc main() {.async.} =
   createDir(dbPath)
 
   # The KVStore is single-threaded; flush/GC run on this event loop (the
-  # async twin in nim_kvstore/async) — no spawn threads. Journal replay
-  # happens synchronously here, before the loop serves.
+  # AsyncFlusher + blob pool created inside initSharedEngine) — no spawn
+  # threads. Journal replay happens synchronously here, before the loop serves.
   let eng = initEngineSafe(cfg)
   var walw: WalWriter = nil
   walw = await attachWal(eng.kv, dbPath)
@@ -132,6 +132,10 @@ proc main() {.async.} =
   await server.loopFuture
   if walw != nil:
     await walw.stop()
+  # Order: WAL stops first (final drain + fsync), then the pool (in-flight
+  # blob writes finish), then the store itself.
+  await eng.close()
+  echo "Shutdown complete."
 
 when isMainModule:
   waitFor main()
