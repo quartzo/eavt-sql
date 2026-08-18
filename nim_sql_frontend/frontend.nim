@@ -21,7 +21,7 @@ proc isDeleteDirect(stmt: DeleteStmt): bool =
       return true
   false
 
-proc fakeSelectFromUpdate(stmt: UpdateStmt): SelectStmt =
+proc fakeSelectFromUpdate*(stmt: UpdateStmt): SelectStmt =
   let firstAlias = if stmt.clauses.len > 0: toLowerAscii(stmt.clauses[0].alias) else: "d1"
   SelectStmt(
     projections: @[Projection(
@@ -31,7 +31,7 @@ proc fakeSelectFromUpdate(stmt: UpdateStmt): SelectStmt =
     conditions: stmt.conditions,
   )
 
-proc fakeSelectFromDelete(stmt: DeleteStmt): SelectStmt =
+proc fakeSelectFromDelete*(stmt: DeleteStmt): SelectStmt =
   let firstAlias = if stmt.conditions.len > 0: toLowerAscii(stmt.conditions[0].left.alias) else: "d1"
   SelectStmt(
     projections: @[Projection(

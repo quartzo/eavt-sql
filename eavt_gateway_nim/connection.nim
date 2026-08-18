@@ -13,6 +13,11 @@
 ## SELECT/EXPLAIN execute locally on the read-only replica — the data
 ## server is only contacted for writes (DML) and admin/kv operations.
 ## This means reads survive data-server outages (stale-read availability).
+##
+## Mixed operations (UPDATE/DELETE with WHERE):
+##   The gateway scans the local replica to find matching entity IDs,
+##   then sends batched concrete save/retract calls to the data server.
+##   The triejoin runs on the replica; the server only does direct writes.
 
 import std/[json, strutils, options]
 import chronos
@@ -27,6 +32,8 @@ import frontend
 import explain
 import ast as sql_ast
 import parser as sql_parser
+
+const BatchSize = 100
 
 proc jsonParamToSexpr(p: JsonNode): SExpr =
   case p.kind
@@ -75,6 +82,150 @@ proc writeSelectFrame(transp: StreamTransport; rows: seq[seq[SExpr]]; more: bool
   node["more"] = %more
   await transp.writeFrameAsync(msgpack2json.fromJsonNode(node))
 
+# ── Mixed-operation helpers ─────────────────────────────────────────────────
+
+proc literalToSexpr(l: sql_ast.Literal): SExpr =
+  case l.lkind
+  of sql_ast.litInt: newInt(l.ival)
+  of sql_ast.litFloat: newFloat(l.fval)
+  of sql_ast.litStr: newStr(l.sval)
+  of sql_ast.litBool: newBool(l.bval)
+  of sql_ast.litBytes: newBytes(l.bytesval)
+
+proc valueToSexpr(v: sql_ast.Value): SExpr =
+  case v.vkind
+  of sql_ast.valLiteral: literalToSexpr(v.vlit)
+  of sql_ast.valParam: newList(@[newSymbol("param"), newInt(v.vparam.int64)])
+  else: newInt(0)
+
+proc canUseMixedUpdate(updateStmt: sql_ast.UpdateStmt): bool =
+  ## Mixed UPDATE only when SET values are literals or params (no alias
+  ## refs, no expression values — those need the triejoin's variable
+  ## bindings).
+  for clause in updateStmt.clauses:
+    for iv in clause.values:
+      if iv.value.vkind notin {sql_ast.valLiteral, sql_ast.valParam}:
+        return false
+  true
+
+proc canUseMixedDelete(deleteStmt: sql_ast.DeleteStmt): bool =
+  ## Mixed DELETE only when condition values are literals or params (no
+  ## field refs, no IN/OR — those need the triejoin).
+  for cond in deleteStmt.conditions:
+    if cond.left.field == "eid": continue
+    if cond.right.rkind notin {sql_ast.crLiteral, sql_ast.crParam}:
+      return false
+  true
+
+proc compileSelectWithRetry(gw: GatewayState;
+                            fakeStmt: sql_ast.SqlStmt): Future[CompileResult] {.async.} =
+  ## Compile a fake SELECT with the same retry logic as handleSql.
+  var snapshot = gw.getSnapshot()
+  var lastErr: ref CatchableError = nil
+  for attempt in 0..1:
+    try:
+      result = compileSql(fakeStmt, snapshot)
+      return
+    except CatchableError as e:
+      lastErr = e
+      if "attribute resolution failed" in e.msg and attempt == 0:
+        await sleepAsync(15.milliseconds)
+        gw.invalidateSnapshot()
+        snapshot = gw.getSnapshot()
+      else:
+        raise newException(ValueError, e.msg)
+  raise lastErr
+
+proc sendSchemeExec(gw: GatewayState; program: SchemeProgram;
+                    params: seq[SExpr]; transp: StreamTransport) {.async.} =
+  ## Send a Scheme program to the data server as an exec request.
+  var req = newJObject()
+  req["type"] = %"scheme"
+  req["program"] = sexprToWire(program.body)
+  req["mode"] = %"exec"
+  if params.len > 0:
+    var pa = newJArray()
+    for p in params: pa.add(sexprToWire(p))
+    req["params"] = pa
+  await gw.conn.request(req, transp)
+
+# ── Mixed-operation handlers ────────────────────────────────────────────────
+
+proc handleUpdateMux(gw: GatewayState; updateStmt: sql_ast.UpdateStmt;
+                     params: seq[SExpr]; transp: StreamTransport) {.async.} =
+  ## UPDATE with WHERE: gateway scans local replica for matching eids,
+  ## sends batched concrete save calls to the data server.
+  let fakeSelect = fakeSelectFromUpdate(updateStmt)
+  let fakeStmt = sql_ast.SqlStmt(kind: sql_ast.stmtSelect, selectStmt: fakeSelect)
+  let selectResult = await compileSelectWithRetry(gw, fakeStmt)
+
+  let proto = newQuerySession(gw.replica.store, selectResult.program,
+                              params, 1'i64, none[int64]())
+  let sess = newStreamingSession(proto)
+
+  var batch: seq[int64]
+  let totalValues = updateStmt.clauses[0].values.len.int64
+  while true:
+    let (rows, more) = nextBatchSafe(sess, BatchSize)
+    for row in rows:
+      if row.len > 0 and row[0].kind == sInt:
+        batch.add(row[0].ival)
+    if batch.len >= BatchSize or (not more and batch.len > 0):
+      var stmts: seq[SExpr]
+      for eid in batch:
+        for clause in updateStmt.clauses:
+          for iv in clause.values:
+            stmts.add(newList(@[newSymbol("save"), newInt(eid),
+                                newStr(iv.attr), valueToSexpr(iv.value)]))
+      stmts.add(newList(@[newSymbol("result"), newInt(batch[0]),
+                          newInt(totalValues)]))
+      let body = if stmts.len == 1: stmts[0]
+                 else: newList(@[newSymbol("begin")] & stmts)
+      await sendSchemeExec(gw, SchemeProgram(body: body), params, transp)
+      batch.setLen(0)
+    if not more: break
+  await sleepAsync(50.milliseconds)
+
+proc handleDeleteMux(gw: GatewayState; deleteStmt: sql_ast.DeleteStmt;
+                     params: seq[SExpr]; transp: StreamTransport) {.async.} =
+  ## DELETE with WHERE: gateway scans local replica for matching eids,
+  ## sends batched concrete retract calls to the data server.
+  let fakeSelect = fakeSelectFromDelete(deleteStmt)
+  let fakeStmt = sql_ast.SqlStmt(kind: sql_ast.stmtSelect, selectStmt: fakeSelect)
+  let selectResult = await compileSelectWithRetry(gw, fakeStmt)
+
+  let proto = newQuerySession(gw.replica.store, selectResult.program,
+                              params, 1'i64, none[int64]())
+  let sess = newStreamingSession(proto)
+
+  var batch: seq[int64]
+  while true:
+    let (rows, more) = nextBatchSafe(sess, BatchSize)
+    for row in rows:
+      if row.len > 0 and row[0].kind == sInt:
+        batch.add(row[0].ival)
+    if batch.len >= BatchSize or (not more and batch.len > 0):
+      var stmts: seq[SExpr]
+      for eid in batch:
+        for cond in deleteStmt.conditions:
+          if cond.left.field == "eid": continue
+          let valExpr = case cond.right.rkind
+            of sql_ast.crParam:
+              newList(@[newSymbol("param"), newInt(cond.right.rparam.int64)])
+            of sql_ast.crLiteral: literalToSexpr(cond.right.rlit)
+            else: newInt(0)
+          stmts.add(newList(@[newSymbol("retract"), newInt(eid),
+                              newStr(cond.left.field), valExpr]))
+      stmts.add(newList(@[newSymbol("result"), newInt(batch[0])]))
+      let body = if stmts.len == 1: stmts[0]
+                 else: newList(@[newSymbol("begin")] & stmts)
+      await sendSchemeExec(gw, SchemeProgram(body: body), params, transp)
+      batch.setLen(0)
+    if not more: break
+  await sleepAsync(50.milliseconds)
+
+# ── Main SQL handler ────────────────────────────────────────────────────────
+
 proc handleSql(gw: GatewayState; node: JsonNode;
                transp: StreamTransport) {.async.} =
   let sqlText = node["sql"].getStr
@@ -83,12 +234,24 @@ proc handleSql(gw: GatewayState; node: JsonNode;
     for p in node["params"]:
       params.add(jsonParamToSexpr(p))
 
+  let stmt = parseSqlText(sqlText)
+
+  # Mixed operations: UPDATE/DELETE with WHERE → gateway scans, server writes.
+  # Only when replica is available and conditions are simple (literal/param).
+  if gw.replica != nil:
+    if stmt.kind == sql_ast.stmtUpdate and canUseMixedUpdate(stmt.updateStmt):
+      await handleUpdateMux(gw, stmt.updateStmt, params, transp)
+      return
+    if stmt.kind == sql_ast.stmtDelete and canUseMixedDelete(stmt.deleteStmt):
+      await handleDeleteMux(gw, stmt.deleteStmt, params, transp)
+      return
+
+  # Existing logic: compile with retry, route by isSelect/isExplain.
   var snapshot = gw.getSnapshot()
   var compiled: CompileResult = nil
   var lastErr: ref CatchableError = nil
   for attempt in 0..1:
     try:
-      let stmt = parseSqlText(sqlText)
       try:
         compiled = compileSql(stmt, snapshot)
         break
@@ -139,11 +302,6 @@ proc handleSql(gw: GatewayState; node: JsonNode;
     for p in params: pa.add(sexprToWire(p))
     req["params"] = pa
   await gw.conn.request(req, transp)
-  # Read-your-writes barrier: the DML's WAL bytes were queued to the
-  # replication subscriber before the response above (the sink runs under
-  # kv.lock during execution). The server drains subscribers every ~2ms
-  # and the gateway applies on socket read — a short sleep lets the next
-  # statement in this session see its own writes on the local replica.
   await sleepAsync(50.milliseconds)
 
 proc handleSchema(gw: GatewayState; transp: StreamTransport) {.async.} =
