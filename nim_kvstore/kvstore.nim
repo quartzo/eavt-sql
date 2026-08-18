@@ -66,6 +66,10 @@ type
     ## the sealed segment covering it may be deleted. The WAL writer polls
     ## this on its cycle.
     walDurableUpTo*: Atomic[int64]
+    ## Called under kv.lock after flush publishes a new root (i.e., the root
+    ## name just committed to PageStore). The replication hub uses it to
+    ## broadcast the new root to replicas. Only memcpy work in the callback.
+    onFlushPublish*: proc (rootName: string) {.gcsafe, raises: [].}
 # ═══════════════════════════════════════════════════════════════════════════════
 # KVStore operations
 
@@ -73,6 +77,71 @@ type
 
 proc requestFlush*(kv: KVStore) {.gcsafe.}
 proc flushSync*(kv: KVStore) {.gcsafe.}
+
+
+proc parseJournalRecords*(data: openArray[byte]): seq[byte] =
+  ## Parse journal records from raw bytes into the memtable batch-apply format.
+  ## Key-only CFs 0-3 strip the cf byte from the key (the memtable op stream
+  ## wants [cf][klen-1][key without the cf byte]; the journal format is
+  ## [4B klen][cf+key][4B vlen][value]).
+  ## A torn tail (truncated record) stops parsing at the last complete record.
+  var pos = 0
+  while pos + 4 <= data.len:
+    let klen = int(uint32(byte(data[pos])) shl 24 or uint32(byte(data[pos+1])) shl 16 or
+                   uint32(byte(data[pos+2])) shl 8 or uint32(byte(data[pos+3])))
+    pos += 4
+    if pos + klen + 4 > data.len: break
+    let cf = byte(data[pos])
+    pos += klen
+    let vlen = int(uint32(byte(data[pos])) shl 24 or uint32(byte(data[pos+1])) shl 16 or
+                   uint32(byte(data[pos+2])) shl 8 or uint32(byte(data[pos+3])))
+    pos += 4
+    if pos + vlen > data.len: break
+    pos += vlen
+    if klen >= 1 and cf <= 3'u8:
+      result.add(cf)
+      result.add(byte(((klen-1) shr 24) and 0xFF))
+      result.add(byte(((klen-1) shr 16) and 0xFF))
+      result.add(byte(((klen-1) shr 8) and 0xFF))
+      result.add(byte((klen-1) and 0xFF))
+      for i in 1..<klen:
+        result.add(byte(data[pos - 4 - vlen - klen + i]))
+
+
+proc applyJournalRecords*(kv: KVStore; data: openArray[byte]) {.gcsafe.} =
+  ## Apply journal-format records directly to the memtable (batch apply).
+  ## Used by the replication replica: the WAL stream arrives as journal-format
+  ## bytes and is applied to the live treap without re-journaling.
+  ## Must NOT be called under kv.lock — the mt.batch call below acquires its
+  ## own internal lock.
+  if data.len == 0: return
+  let ops = parseJournalRecords(data)
+  if ops.len > 0:
+    kv.lock.withLock:
+      kv.mtSize = kv.mt.batch(ops)
+
+
+proc sealLiveToFlush*(kv: KVStore) {.gcsafe.} =
+  ## Seal the live memtable into flushRoots (the first half of kv.flush).
+  ## Used by the replication replica when the server signals a seal event:
+  ## the current live treap becomes the "pending" treap (will be discarded
+  ## when the next root publish arrives) and a fresh live treap takes over.
+  kv.lock.withLock:
+    kv.flushRoots = kv.mt.hnd.live
+    kv.mt.clear()
+    kv.mtSize = 0
+
+
+proc publishRoot*(kv: KVStore; rootName: string) {.gcsafe.} =
+  ## Publish a new root (the second half of kv.flush, minus the blob writes).
+  ## The server already committed the root to disk; this loads it into
+  ## ps.trees and discards the pending treap.
+  let loaded = loadRoot(kv.ps[], rootName)
+  if loaded:
+    kv.lock.withLock:
+      kv.flushRoots = @[]
+      kv.mtSize = 0
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -124,29 +193,9 @@ proc newKVStore*(config: Table[string, string]): KVStore =
     for jf in files:
       try:
         let data = readFile(jf)
-        var pos = 0
-        while pos + 4 <= data.len:
-          let klen = int(uint32(byte(data[pos])) shl 24 or uint32(byte(data[pos+1])) shl 16 or
-                         uint32(byte(data[pos+2])) shl 8 or uint32(byte(data[pos+3])))
-          pos += 4
-          if pos + klen + 4 > data.len: break
-          let cf = byte(data[pos])
-          pos += klen
-          let vlen = int(uint32(byte(data[pos])) shl 24 or uint32(byte(data[pos+1])) shl 16 or
-                         uint32(byte(data[pos+2])) shl 8 or uint32(byte(data[pos+3])))
-          pos += 4
-          if pos + vlen > data.len: break
-          pos += vlen
-          # Journal record: [4B klen][cf + key][4B vlen][value]. Key-only CFs
-          # (0-3, EAVT indexes): the op stream wants [cf][klen-1][key without
-          # the cf byte]. The old code hard-coded cf=0 and kept the cf byte
-          # inside the key, corrupting the replay for every CF but 0.
-          if klen >= 1 and cf <= 3'u8:
-            ops.add(cf); ops.add(byte(((klen-1) shr 24) and 0xFF))
-            ops.add(byte(((klen-1) shr 16) and 0xFF)); ops.add(byte(((klen-1) shr 8) and 0xFF))
-            ops.add(byte((klen-1) and 0xFF))
-            for i in 1..<klen: ops.add(byte(data[pos - 4 - vlen - klen + i]))
-      except: discard
+        if data.len > 0:
+          ops.add parseJournalRecords(cast[seq[byte]](data))
+      except CatchableError: discard
     if ops.len > 0: result.mtSize = result.mt.batch(ops)
 
 proc journalDeliver*(kv: KVStore; data: seq[byte]) {.gcsafe.} =
@@ -352,6 +401,9 @@ proc flush*(kv: KVStore) {.gcsafe.} =
     # PageStore — the sealed WAL segment may be deleted on the next WAL cycle.
     if sealBoundary >= 0:
       kv.walDurableUpTo.store(sealBoundary, moRelease)
+    # Notify the replication hub (if installed) of the newly published root.
+    if kv.onFlushPublish != nil:
+      kv.onFlushPublish(kv.ps[].currentRoot)
 
 # ── Flush arming ──
 #

@@ -3,6 +3,8 @@ import chronos
 import blobstore_async
 import kvstore, eavt, engine
 import kvstore_async
+import replication
+import wal
 
 type
   SharedEngine* = ref object
@@ -12,6 +14,10 @@ type
     pool*: BlobPool
     ## Single-flight flush/GC driver (runs on THIS loop — no threads).
     flusher*: AsyncFlusher
+    ## Push-based replication hub.  Nil when no replicas are connected.
+    hub*: ReplicationHub
+    ## WAL writer — needed by the replication snapshot (open-tail bytes).
+    walw*: WalWriter
 
 proc initSharedEngine*(cfg: Table[string, string]): SharedEngine =
   ## cfg must carry backend (file|s3) and a local path (WAL/journal).

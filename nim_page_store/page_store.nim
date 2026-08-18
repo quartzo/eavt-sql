@@ -787,6 +787,21 @@ proc hasOldRoots*(s: var PageStoreInner; maxAgeSecs: uint64;
   ## Cheap GC-candidate check: lists roots only, walks no blobs.
   classifyRoots(blobListRoots(s.blobs), maxAgeSecs, maxRootCount).remove.len > 0
 
+proc loadRoot*(s: var PageStoreInner; rootName: string): bool =
+  ## Load a named root into s.trees and s.currentRoot. Used by the
+  ## replication replica: the server publishes root names after flush;
+  ## the replica calls loadRoot to swap into the new PageStore state.
+  ## Returns false if the root cannot be read.
+  let data = blobGetRoot(s.blobs, rootName)
+  if data.isNone: return false
+  let trees = deserializeRoot(data.get)
+  s.trees = trees
+  # pad with empty trees if the root has fewer CFs than numCf
+  while s.trees.len < s.numCf:
+    s.trees.add emptyTree()
+  s.currentRoot = rootName
+  true
+
 proc gcFull*(s: var PageStoreInner; maxAgeSecs: uint64; maxRootCount: int;
              dryRun: bool): seq[byte] =
   if s.readOnly:

@@ -5,15 +5,16 @@
 ## nextBatch(100) between frames is the natural suspension point. Errors are
 ## always written as frames — nothing escapes the callback.
 
-import std/[options, strutils, json, os]
+import std/[options, strutils, json]
 import chronos
 import msgpack4nim/msgpack2json
-import scheme, wire
+import scheme
 import stats
 import engine, eavt, kvstore
 import kvstore_async
 import shared_engine
 import protocol
+import replication
 
 proc writeFrameAsync(transp: StreamTransport; body: string) {.async.} =
   var buf = newSeq[byte](4 + body.len)
@@ -246,6 +247,7 @@ proc handleKv(eng: SharedEngine; req: Request; transp: StreamTransport) {.async.
 
 proc serveConnection*(eng: SharedEngine; transp: StreamTransport) {.
     async: (raises: []).} =
+  var isReplication = false
   while true:
     var hdr: array[4, byte]
     try:
@@ -262,6 +264,37 @@ proc serveConnection*(eng: SharedEngine; transp: StreamTransport) {.
         await transp.readExactly(addr raw[0], len)
       except CatchableError:
         break
+
+    # Quick check: if this is a replication subscription, enter the
+    # long-lived push loop immediately (the client sends nothing further
+    # after the initial "replicate" request).
+    if not isReplication:
+      try:
+        let node = toJsonNode(raw)
+        if node["type"].getStr == "replicate":
+          isReplication = true
+          var sub = Subscriber(transp: transp)
+          eng.hub.register(sub)
+          try:
+            # Snapshot: send sealed segments + open segment tail + root.
+            let sealed = collectSnapshot(eng.kv.path, eng.kv.ps[].currentRoot)
+            var tail: seq[byte] = @[]
+            # The open segment's pending buffer is the only data not yet on
+            # disk — everything up to this point is already in sealed segments.
+            if eng.walw != nil:
+              tail = eng.walw.buf  # safe: we're on the loop, drain runs here
+            let rootName = eng.kv.ps[].currentRoot
+            await sub.sendSnapshot(sealed, tail, rootName, eng.kv.path)
+            # Enter the drain loop — pushes wal/seal/root frames forever.
+            await subscriberLoop(eng.kv, sub, addr eng.hub)
+          except CatchableError:
+            discard
+          finally:
+            sub.closed = true
+            eng.hub.remove(sub)
+          return
+      except CatchableError:
+        discard  # not valid JSON, fall through to normal parse
 
     var req: Request
     try:

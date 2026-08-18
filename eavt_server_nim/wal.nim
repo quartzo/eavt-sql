@@ -43,7 +43,7 @@ type
     segIdx: int                  # current segment number
     f: AsyncFile                 # current segment (append; never truncated)
     offset: int64                # write position within the current segment
-    buf: seq[byte]               # pending bytes; buf[0] is logical pos bufPos
+    buf*: seq[byte]               # pending bytes; buf[0] is logical pos bufPos
     bufPos: int64                # logical stream position of buf[0]
     ## logicalEnd is mutated by the sink under kv.lock and read by seal()
     ## under kv.lock — the lock provides the needed visibility.
@@ -52,6 +52,10 @@ type
     sealed: seq[tuple[idx: int, path: string, boundary: int64]]
     draining: bool
     stopped: bool
+    ## Called on the loop after each segment rotation.  The sealed segment's
+    ## index is passed (the just-closed one).  Only memcpy work in the
+    ## callback — socket I/O is done async elsewhere.
+    onSeal*: proc (segIdx: int) {.gcsafe, raises: [].}
 
 proc segPath(dir: string; idx: int): string =
   dir / (SegPrefix & align($idx, SegDigits, '0'))
@@ -102,8 +106,11 @@ proc drain(w: WalWriter) {.async.} =
       if w.bufPos >= seal:
         # Boundary reached: finish this segment, rotate.
         await w.f.closeWait()
-        w.sealed.add((w.segIdx, segPath(w.dir, w.segIdx), seal))
+        let sealedIdx = w.segIdx
+        w.sealed.add((sealedIdx, segPath(w.dir, sealedIdx), seal))
         inc w.segIdx
+        if w.onSeal != nil:
+          w.onSeal(sealedIdx)
         w.f = openSeg(w, w.segIdx)
         w.offset = 0
         w.sealBoundary.store(-1'i64, moRelease)

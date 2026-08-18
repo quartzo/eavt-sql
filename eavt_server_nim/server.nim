@@ -3,6 +3,7 @@ import chronos
 import kvstore
 import shared_engine, connection
 import wal
+import replication
 
 proc serverCallback(server: StreamServer, transp: StreamTransport) {.
     async: (raises: []).} =
@@ -103,12 +104,25 @@ proc main() {.async.} =
   # local dir still hosts the WAL — blobs go to the bucket.
   createDir(dbPath)
 
+
   # The KVStore is single-threaded; flush/GC run on this event loop (the
   # AsyncFlusher + blob pool created inside initSharedEngine) — no spawn
   # threads. Journal replay happens synchronously here, before the loop serves.
   let eng = initEngineSafe(cfg)
+
+  # Replication hub — subscribers get WAL bytes + seal/root notifications.
+  eng.hub = initReplicationHub(dbPath)
+
+  # Hook the replication broadcasts into the WAL writer and flush path.
+  # Both callbacks do memcpy only (socket writes are async, elsewhere on
+  # this same loop).
   var walw: WalWriter = nil
   walw = await attachWal(eng.kv, dbPath)
+  eng.walw = walw
+  walw.onSeal = proc(segIdx: int) {.gcsafe.} =
+    broadcastSeal(addr eng.hub, segIdx)
+  eng.kv.onFlushPublish = proc(rootName: string) {.gcsafe.} =
+    broadcastRoot(addr eng.hub, rootName)
   echo "WAL attached: ", dbPath / "journal" / "journal"
 
   # chronos unlinks the stale socket path but does not create its parent
