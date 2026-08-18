@@ -1,6 +1,6 @@
 ## shared.nim — Gateway shared state (schema snapshot cache).
 ##
-## Single-threaded by construction: the gateway runs on one chronos event
+## Single-threaded by construction: the query server runs on one chronos event
 ## loop, so this is a plain object — no locks.
 
 import std/[times, tables]
@@ -14,7 +14,7 @@ type
   GatewayState* = ref object
     stats*: CompileStats
     fetchedAt*: float
-    conn*: MultiplexedConn  # single shared connection to the data server
+    conn*: MultiplexedConn  # single shared connection to the transactor
     replica*: ReplicaEngine
 
 proc initGatewayState*(downstreamPath: string): GatewayState =

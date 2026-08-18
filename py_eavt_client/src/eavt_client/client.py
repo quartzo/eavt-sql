@@ -45,10 +45,10 @@ class EavtClient:
 
     @staticmethod
     def _default_path() -> str:
-        xdg = Path("/run/user") / str(os.getuid()) / "eavt" / "eavt.sock"
+        xdg = Path("/run/user") / str(os.getuid()) / "eavt" / "eavt-query.sock"
         if xdg.exists() or "XDG_RUNTIME_DIR" in os.environ:
             return str(xdg)
-        return str(Path.home() / ".local" / "state" / "eavt" / "eavt.sock")
+        return str(Path.home() / ".local" / "state" / "eavt" / "eavt-query.sock")
 
     def close(self):
         self._sock.close()

@@ -10,8 +10,8 @@ proc gatewayCallback(server: StreamServer, transp: StreamTransport) {.
 proc getSocketPath(): string =
   let xdg = getEnv("XDG_RUNTIME_DIR")
   if xdg.len > 0:
-    return xdg / "eavt" / "eavt.sock"
-  return getHomeDir() / ".local" / "state" / "eavt" / "eavt.sock"
+    return xdg / "eavt" / "eavt-query.sock"
+  return getHomeDir() / ".local" / "state" / "eavt" / "eavt-query.sock"
 
 proc defaultDataDir(): string =
   let xdg = getEnv("XDG_DATA_HOME")
@@ -38,7 +38,7 @@ proc main() {.async.} =
     inc i
   if dataPath.len == 0:
     dataPath = defaultDataDir()
-  echo "EAVT gateway (chronos) starting on ", sockPath, " → ", downstream,
+  echo "EAVT query server (chronos) starting on ", sockPath, " → ", downstream,
        "  data=", dataPath
 
   let gw = initGatewayState(downstream)
@@ -70,7 +70,7 @@ proc main() {.async.} =
     try:
       let probe = await initTAddress(sockPath).connect()
       await probe.closeWait()
-      stderr.writeLine "Gateway already running on ", sockPath
+      stderr.writeLine "Query server already running on ", sockPath
       quit(1)
     except CatchableError:
       removeFile(sockPath)
@@ -78,7 +78,7 @@ proc main() {.async.} =
   let address = initTAddress(sockPath)
   let server = createStreamServer(address, gatewayCallback, udata = cast[pointer](gw))
   server.start()
-  echo "Gateway initialized"
+  echo "Query server initialized"
   echo "Listening..."
   await server.loopFuture
 

@@ -11,21 +11,21 @@ Every piece of data is an immutable **fact** — a *datom* `(entity, attribute, 
 Requires Nim ≥ 2.0.14 and Python ≥ 3.13 for benchmarks. Zero Rust toolchain.
 
 ```bash
-# Build server + CLI
-nimble dist                    # → build/eavt-sql-server, build/eavt-sql-cli
+# Build transactor + CLI
+nimble dist                    # → build/eavt-sql-transactor, build/eavt-sql-cli
 
 # Run all tests (492 Nim tests)
 nimble test                    # → build/all_tests
 
-# Start the server
-./build/eavt-sql-server        # listens on /run/user/$UID/eavt/eavt.sock
+# Start the transactor
+./build/eavt-sql-transactor    # listens on /run/user/$UID/eavt/eavt-transactor.sock
 ```
 
 ## Server + CLI (Unix Domain Socket + MessagePack)
 
 ```bash
-# Server
-./build/eavt-sql-server
+# Transactor
+./build/eavt-sql-transactor
 
 # REPL (Tab-separated output, linenoise history, dot-commands)
 ./build/eavt-sql-cli
@@ -172,7 +172,7 @@ client.close()
 ## Benchmarks
 
 ```bash
-./build/eavt-sql-server &
+./build/eavt-sql-transactor &
 uv run python tests/bench.py
 ```
 
@@ -181,7 +181,7 @@ See `tests/bench*.py` — insert/query/flush latency, join performance, compile 
 ## Project Layout
 
 ```
-eavt_server_nim/       # UDS server (msgpack, thread-per-connection)
+eavt_transactor_nim/    # UDS transactor (msgpack, thread-per-connection)
 eavt-repl-nim/          # REPL client (linenoise, tab-separated output)
 py_eavt_client/         # Python client (msgpack over UDS)
 nim_sql_parse/          # D.1 — SQL lexer + parser

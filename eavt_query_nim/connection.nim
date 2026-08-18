@@ -1,6 +1,6 @@
 ## connection.nim — Gateway per-connection handling (chronos, single-thread).
 ##
-## All clients share a single multiplexed connection to the data server
+## All clients share a single multiplexed connection to the transactor
 ## (MultiplexedConn in downstream.nim).  Requests carry a correlation id
 ## so responses can be routed back to the originating client transport.
 ##
@@ -15,8 +15,8 @@
 ## This means reads survive data-server outages (stale-read availability).
 ##
 ## Mixed operations (UPDATE/DELETE with WHERE):
-##   The gateway scans the local replica to find matching entity IDs,
-##   then sends batched concrete save/retract calls to the data server.
+##   The query server scans the local replica to find matching entity IDs,
+##   then sends batched concrete save/retract calls to the transactor.
 ##   The triejoin runs on the replica; the server only does direct writes.
 
 import std/[json, strutils, options]
@@ -25,7 +25,7 @@ import msgpack4nim/msgpack2json
 import scheme, wire
 import stats
 import engine
-import eavt_server_nim/protocol except readMsg, writeMsg
+import eavt_transactor_nim/protocol except readMsg, writeMsg
 import shared
 import downstream
 import frontend
@@ -138,7 +138,7 @@ proc compileSelectWithRetry(gw: GatewayState;
 
 proc sendSchemeExec(gw: GatewayState; program: SchemeProgram;
                     params: seq[SExpr]; transp: StreamTransport) {.async.} =
-  ## Send a Scheme program to the data server as an exec request.
+  ## Send a Scheme program to the transactor as an exec request.
   var req = newJObject()
   req["type"] = %"scheme"
   req["program"] = sexprToWire(program.body)
@@ -153,8 +153,8 @@ proc sendSchemeExec(gw: GatewayState; program: SchemeProgram;
 
 proc handleUpdateMux(gw: GatewayState; updateStmt: sql_ast.UpdateStmt;
                      params: seq[SExpr]; transp: StreamTransport) {.async.} =
-  ## UPDATE with WHERE: gateway scans local replica for matching eids,
-  ## sends batched concrete save calls to the data server.
+  ## UPDATE with WHERE: query server scans local replica for matching eids,
+  ## sends batched concrete save calls to the transactor.
   let fakeSelect = fakeSelectFromUpdate(updateStmt)
   let fakeStmt = sql_ast.SqlStmt(kind: sql_ast.stmtSelect, selectStmt: fakeSelect)
   let selectResult = await compileSelectWithRetry(gw, fakeStmt)
@@ -188,8 +188,8 @@ proc handleUpdateMux(gw: GatewayState; updateStmt: sql_ast.UpdateStmt;
 
 proc handleDeleteMux(gw: GatewayState; deleteStmt: sql_ast.DeleteStmt;
                      params: seq[SExpr]; transp: StreamTransport) {.async.} =
-  ## DELETE with WHERE: gateway scans local replica for matching eids,
-  ## sends batched concrete retract calls to the data server.
+  ## DELETE with WHERE: query server scans local replica for matching eids,
+  ## sends batched concrete retract calls to the transactor.
   let fakeSelect = fakeSelectFromDelete(deleteStmt)
   let fakeStmt = sql_ast.SqlStmt(kind: sql_ast.stmtSelect, selectStmt: fakeSelect)
   let selectResult = await compileSelectWithRetry(gw, fakeStmt)
@@ -236,7 +236,7 @@ proc handleSql(gw: GatewayState; node: JsonNode;
 
   let stmt = parseSqlText(sqlText)
 
-  # Mixed operations: UPDATE/DELETE with WHERE → gateway scans, server writes.
+  # Mixed operations: UPDATE/DELETE with WHERE → query server scans, transactor writes.
   # Only when replica is available and conditions are simple (literal/param).
   if gw.replica != nil:
     if stmt.kind == sql_ast.stmtUpdate and canUseMixedUpdate(stmt.updateStmt):
@@ -290,7 +290,7 @@ proc handleSql(gw: GatewayState; node: JsonNode;
       if not more: break
     return
 
-  # DML / schema changes: forward as scheme to the data server via the
+  # DML / schema changes: forward as scheme to the transactor via the
   # shared multiplexed connection.
   let mode = if compiled.isSelect: "query" else: "exec"
   var req = newJObject()
@@ -305,7 +305,7 @@ proc handleSql(gw: GatewayState; node: JsonNode;
   await sleepAsync(50.milliseconds)
 
 proc handleSchema(gw: GatewayState; transp: StreamTransport) {.async.} =
-  ## Served from the local replica's stats — never touches the data server.
+  ## Served from the local replica's stats — never touches the transactor.
   let snap = gw.getSnapshot()
   var node = newJObject()
   node["schema"] = statsToJson(snap)

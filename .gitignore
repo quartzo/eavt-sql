@@ -7,3 +7,4 @@ nim_*/test_*
 nim_*/*/test_*
 nim_query/query/test_query
 __pycache__/
+eavt_*/server

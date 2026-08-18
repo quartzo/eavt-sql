@@ -13,7 +13,7 @@ import page_store
 import kvstore
 import kvstore_async
 
-# Non-raising wrappers (house "Safe" pattern — see eavt_server_nim): the
+# Non-raising wrappers (house "Safe" pattern — see eavt_transactor_nim): the
 # storage API's inferred `raises` is broad (Exception), which {.async.}
 # scenarios cannot call directly. Failures assert loudly instead.
 

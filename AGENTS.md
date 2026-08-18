@@ -7,8 +7,8 @@
 - **Check which tests failed:** `./build/all_tests 2>&1 | grep FAILED`
 - **Count failures:** `./build/all_tests 2>&1 | grep -c FAILED`
 - **Module-level tests:** `nim c --mm:orc --threads:on -d:release -d:useMalloc -r nim_eavt/test_eavt.nim` (replace module as needed)
-- **Build data server + gateway + REPL:** `nimble dist` → `build/eavt-sql-server`, `build/eavt-sql-gateway`, `build/eavt-sql-cli`
-- **Run the stack (data server + gateway):** `nimble dev` (or `scripts/dev.sh`) — Ctrl-C stops both
+- **Build transactor + query server + REPL:** `nimble dist` → `build/eavt-sql-transactor`, `build/eavt-sql-query`, `build/eavt-sql-cli`
+- **Run the stack (transactor + query server):** `nimble dev` (or `scripts/dev.sh`) — Ctrl-C stops both
 - **Python benchmarks:** `uv run python tests/bench.py` (requires msgpack)
 - **Python deps:** `uv sync --group dev`
 
@@ -40,8 +40,8 @@ unnecessary recompilation.
 ## Project Structure
 
 ```
-eavt_server_nim/           # Data server: scheme/schema/admin/kv over UDS (msgpack, chronos loop + blob pool)
-eavt_gateway_nim/           # Gateway: compiles SQL→Scheme (chronos, single-thread async), forwards to data server
+eavt_transactor_nim/        # Transactor: scheme/schema/admin/kv over UDS (msgpack, chronos loop + blob pool)
+eavt_query_nim/             # Query server: compiles SQL→Scheme (chronos, single-thread async), routes writes to transactor
 eavt-repl-nim/              # REPL client (linenoise, tab-separated output; orc, no threads)
 py_eavt_client/             # Python UDS client (msgpack; sql/scheme/schema/admin)
 vendor/chronos_file_pkg/    # Vendored chronos-file (async file I/O; WAL + async blobstore bridge) — see VENDORED.md
@@ -91,12 +91,12 @@ BlobStore (Memory / File / S3)
 
 ### Server Protocol
 
-- **Processes:** gateway owns `eavt.sock` (clients connect here); data server
-  listens on `eavt-data.sock`. SQL is compiled to Scheme **at the gateway**
-  (`docs/scheme-transport.md`); the data server is a pure execution engine.
-- **Request types (data server):** `scheme` (tagged-AST program + `mode`
+- **Processes:** query server owns `eavt-query.sock` (clients connect here); transactor
+  listens on `eavt-transactor.sock`. SQL is compiled to Scheme **at the query server**
+  (`docs/scheme-transport.md`); the transactor is a pure execution engine.
+- **Request types (transactor):** `scheme` (tagged-AST program + `mode`
   query|exec + `params`), `schema` (CompileStats snapshot), `admin`, `kv`.
-  The gateway additionally accepts `sql` (text + params) and passes the rest
+  The query server additionally accepts `sql` (text + params) and passes the rest
   through verbatim.
 - **Position-independence rule:** compiled programs never embed attribute ids;
   attributes resolve by name at execution time (`intern-a`).
@@ -161,12 +161,12 @@ Re-bootstrap is prevented by scanning for existing `db.ident` datom (aid=1).
 
 | Process | Model | Flags |
 |---------|-------|-------|
-| data server | **single chronos event loop** (queries/exec inline, VM yield/resume between batches) + blob pool (2-4 POD workers for zstd + blob I/O) + chronos_file pool (WAL) | `--mm:orc --threads:on` |
-| gateway | **single chronos event loop** (no threads of its own) | `--mm:orc --threads:off` |
+| transactor | **single chronos event loop** (queries/exec inline, VM yield/resume between batches) + blob pool (2-4 POD workers for zstd + blob I/O) + chronos_file pool (WAL) | `--mm:orc --threads:on` |
+| query server | **single chronos event loop** (no threads of its own) | `--mm:orc --threads:off` |
 | REPL CLI | single-thread blocking I/O | `--mm:orc --threads:off` |
 
 `chronos-file` (vendored at `vendor/chronos_file_pkg/`, see VENDORED.md) provides
-the async file I/O the data server's segmented WAL uses: writes go through its
+the async file I/O the transactor's segmented WAL uses: writes go through its
 thread-pool backend (`writeAt`), fsync on a 100ms timer (interval durability —
 process crash is always safe, machine crash loses at most ~100ms; see `docs/wal.md`).
 The segmented WAL **rotates at flush-capture boundaries** so records written during a
@@ -185,7 +185,7 @@ raw pointers only. The sync trait stays for the main test suite —
 
 `nim_kvstore/async/` is the async twin of `kvstore` (flush/GC on the loop):
 flush/GC run on the event loop, all blob I/O through the pool, every GC ref
-loop-owned. The server wires it in `shared_engine.nim` via `onFlushRequest`
+loop-owned. The transactor wires it in `shared_engine.nim` via `onFlushRequest`
 (threshold crossing) and admin commands (`flush`, `flush-sync`, `gc`, `gc-dry`).
 
 **`{.cast(gcsafe).}` is forbidden in application code** — it hides real data races

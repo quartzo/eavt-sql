@@ -6,7 +6,7 @@
 ##   Pipe mode               If stdin is not a TTY, read and execute from stdin
 ##   Interactive mode        Default REPL (no args, stdin is TTY)
 import std/[os, strutils, terminal]
-import eavt_server_nim/client
+import eavt_transactor_nim/client
 import repl
 
 const UsageText = """Usage: eavt-sql-cli [OPTIONS] [SOCKET_PATH]

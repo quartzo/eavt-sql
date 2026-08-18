@@ -16,8 +16,8 @@ type
 proc getSocketPath*(): string =
   let xdg = getEnv("XDG_RUNTIME_DIR")
   if xdg.len > 0:
-    return xdg / "eavt" / "eavt.sock"
-  return getHomeDir() / ".local" / "state" / "eavt" / "eavt.sock"
+    return xdg / "eavt" / "eavt-query.sock"
+  return getHomeDir() / ".local" / "state" / "eavt" / "eavt-query.sock"
 
 proc connect*(c: var EavtClient; sockPath: string = getSocketPath()): bool =
   c = EavtClient(sockPath: sockPath)
@@ -102,8 +102,8 @@ proc recvFrame*(c: var EavtClient): string =
 proc downstreamSocketPath*(): string =
   let xdg = getEnv("XDG_RUNTIME_DIR")
   if xdg.len > 0:
-    return xdg / "eavt" / "eavt-data.sock"
-  return getHomeDir() / ".local" / "state" / "eavt" / "eavt-data.sock"
+    return xdg / "eavt" / "eavt-transactor.sock"
+  return getHomeDir() / ".local" / "state" / "eavt" / "eavt-transactor.sock"
 
 proc exec*(c: var EavtClient; sql: string; params: seq[string] = @[]): seq[SqlResult] =
   var node = newJObject()

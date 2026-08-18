@@ -13,8 +13,8 @@ proc serverCallback(server: StreamServer, transp: StreamTransport) {.
 proc getSocketPath(): string =
   let xdg = getEnv("XDG_RUNTIME_DIR")
   if xdg.len > 0:
-    return xdg / "eavt" / "eavt-data.sock"
-  return getHomeDir() / ".local" / "state" / "eavt" / "eavt-data.sock"
+    return xdg / "eavt" / "eavt-transactor.sock"
+  return getHomeDir() / ".local" / "state" / "eavt" / "eavt-transactor.sock"
 
 proc defaultDataDir(): string =
   let xdg = getEnv("XDG_DATA_HOME")
@@ -96,7 +96,7 @@ proc main() {.async.} =
     let pathStyle = flagOrEnv(args, "--s3-path-style", "EAVT_S3_PATH_STYLE", "true")
     cfg["path_style"] = pathStyle.val
 
-  echo "EAVT data server (chronos) starting on ", sockPath,
+  echo "EAVT transactor (chronos) starting on ", sockPath,
        "  backend=", backend, "  path=", dbPath
 
   # The data dir holds the WAL/journal (and blobs for file). It is created

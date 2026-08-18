@@ -4,7 +4,7 @@
 ## pipelined: each frame is spawned as an independent async handler so
 ## that long-running streams yield between batches while the read loop
 ## continues accepting new frames.  Response frames carry the request's
-## correlation id so the gateway can demultiplex them on a single shared
+## correlation id so the query server can demultiplex them on a single shared
 ## connection that also carries the replication event stream.
 ##
 ## Replication ("replicate") is handled inline: the server registers a

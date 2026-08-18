@@ -4,16 +4,16 @@
 
 Today every client sends raw SQL text (`{"type": "sql"}`) to a single server that
 parses, plans, compiles to Scheme, and executes. This document specifies the new
-architecture: **SQL is compiled to Scheme in a gateway process, and the data server
+architecture: **SQL is compiled to Scheme in a query server process, and the transactor
 becomes a pure Scheme execution engine.**
 
 ### Motivation
 
 - The compiled `SchemeProgram` is db-independent (host functions bind the store only
   at execution time), so compilation can live anywhere.
-- A single compilation point (gateway) serves multiple frontends (Nim REPL, Python
+- A single compilation point (query server) serves multiple frontends (Nim REPL, Python
   client) without duplicating the compiler pipeline in each language.
-- The data server shrinks to execution + storage: no `nim_sql_parse`, `nim_datalog`,
+- The transactor shrinks to execution + storage: no `nim_sql_parse`, `nim_datalog`,
   `nim_planner`, `nim_compiler`, `nim_sql_frontend` imports.
 
 ### Design Goals
@@ -31,32 +31,32 @@ becomes a pure Scheme execution engine.**
 
 ```
 eavt-repl-nim (unchanged)        py_eavt_client (SQL API + new scheme API)
-        └──────────── eavt.sock ────────────┘
+        └──────────── eavt-query.sock ────────────┘
                         │
                         ▼
-     eavt-sql-gateway  (new binary)
+     eavt-sql-query    (new binary)
        • msgpack, thread-per-connection (nim_spawn)
        • compiles SQL → Scheme in-process (nim_sql_frontend)
        • caches schema snapshot for planning/estimates
        • renders EXPLAIN locally
        • passes through scheme / schema / admin / kv
-                        │  eavt-data.sock
+                        │  eavt-transactor.sock
                         ▼
-     eavt-sql-server   (refactored: pure execution engine)
+     eavt-sql-transactor (refactored: pure execution engine)
        • accepts: scheme / schema / admin / kv
        • no SQL parsing, no compiler imports
 ```
 
-- **Processes are independent**; a dev script starts both (data server first).
-  The gateway returns a clear error if the data server is down.
-- **Sockets**: gateway owns `eavt.sock` (clients see no change); data server moves
-  to `eavt-data.sock` and honors `--socket-path`.
-- **Connections**: one client handler ↔ one dedicated downstream connection to the
-  data server. Streaming responses never share a downstream connection (interleaved
-  frames would corrupt the protocol).
-- **Threading**: the gateway is a **single-thread chronos event loop** (each client
-  callback is an async proc owning its downstream connection); the data server is
-  thread-per-connection. SQL compilation runs inline on the gateway loop (ms-scale).
+- **Processes are independent**; a dev script starts both (transactor first).
+  The query server returns a clear error if the transactor is down.
+- **Sockets**: query server owns `eavt-query.sock` (clients see no change); transactor
+  listens on `eavt-transactor.sock` and honors `--socket-path`.
+- **Connections**: one multiplexed connection between query server and transactor
+  carrying all traffic (replication events + forwarded requests). Correlation IDs
+  disambiguate responses; `"ev"` frames are the replication stream.
+- **Threading**: the query server is a **single-thread chronos event loop** (each client
+  callback is an async proc); the transactor is
+  thread-per-connection. SQL compilation runs inline on the query server loop (ms-scale).
 
 ---
 
@@ -66,7 +66,7 @@ Framing is unchanged: 4-byte big-endian length prefix + msgpack payload; respons
 chunked as `{"columns": [...], "rows": [...], "more": bool}` or
 `{"error": str, "more": false}`.
 
-### 3.1 Requests accepted by the data server
+### 3.1 Requests accepted by the transactor
 
 | `type` | Fields | Behavior |
 |--------|--------|----------|
@@ -77,7 +77,7 @@ chunked as `{"columns": [...], "rows": [...], "more": bool}` or
 
 `type: sql` is **removed** from the data server.
 
-### 3.2 Requests accepted by the gateway
+### 3.2 Requests accepted by the query server
 
 | `type` | Fields | Behavior |
 |--------|--------|----------|
@@ -85,6 +85,8 @@ chunked as `{"columns": [...], "rows": [...], "more": bool}` or
 | `scheme` | `program`, `mode`, `params` | Forwarded verbatim |
 | `schema` | — | Served from cache (or fetched) |
 | `admin` / `kv` | — | Transparent pass-through, including streaming (`dump`, `scan`) |
+
+`type: sql` is **removed** from the transactor.
 
 ### 3.3 Tagged AST encoding (`program`, `params`)
 
@@ -156,30 +158,85 @@ no `schema_changed` retry, no forced cache invalidation on writes.
 
 ---
 
-## 5. Schema Snapshot Semantics at the Gateway
+## 5. Schema Snapshot Semantics at the Query Server
 
 - Fetched on demand, cached with a short TTL (~30s).
 - Used for two things only: rejecting unknown attribute names at compile time
   ("attribute resolution failed") and feeding the planner's cardinality estimates.
-- On "attribute resolution failed" the gateway refetches once and recompiles —
+- On "attribute resolution failed" the query server refetches once and recompiles —
   covers the case of an attribute declared moments ago through another connection.
 
 ---
 
-## 6. Implementation Phases
+## 6. Scheme Protocol Contract
+
+The `scheme` request type carries compiled Scheme programs from the query server
+to the transactor.  The transactor is a **pure execution engine** — it never
+parses SQL, plans joins, or selects indexes.  The query server handles all
+compilation.
+
+### Programs the query server sends
+
+| Operation | Scheme program | Notes |
+|-----------|---------------|-------|
+| UPSERT | `(save (alloc-entity N) "attr" (param M))` | Entity allocated at execution time |
+| UPSERT by lookup | `(lookup-entity "attr" val)` + `(save eid "attr" val)` | Entity found by unique attribute |
+| Mixed UPDATE | `(save 101 "attr" (param 1))` — concrete eids | Query server scans replica, batches eids |
+| Mixed DELETE | `(retract 101 "attr" "val")` — concrete eids | Query server scans replica, batches eids |
+| ATTRIBUTE | `(declare-attr "name" "STRING" false)` | Schema declaration |
+| PARTITION | `(declare-partition "name")` | Partition declaration |
+
+### Programs the query server NEVER sends
+
+| Opcode | Why |
+|--------|-----|
+| `scanner-open` | Triejoin runs on the query server's replica |
+| `scanner-push` / `scanner-pop` | Index prefix narrowing — replica only |
+| `scanner-iterate-init` / `scanner-iterate-next` | Leapfrog join — replica only |
+| `while` (scanner loop) | Join iteration — replica only |
+
+The transactor's VM supports these opcodes (shared codebase with the query
+server), but they are **dead code** in the transactor — never invoked by any
+program the query server sends.
+
+### Why not a simpler protocol?
+
+The `scheme` protocol supports **batched operations with entity allocation and
+value chaining** in a single atomic request:
+
+```scheme
+(begin
+  (set! D1 (alloc-entity 4))
+  (set! D2 (alloc-entity 4))
+  (save D1 "ref" D2)     ; D1 references D2 — value is the entity allocated above
+  (save D2 "name" "alice")
+  (result D1 2))
+```
+
+Replacing `scheme` with individual `save`/`retract` requests would lose:
+- **Atomicity**: all-or-nothing execution
+- **Batch allocation**: multiple entity IDs in one round-trip
+- **Value chaining**: one entity's value is another entity allocated in the same batch
+
+The `scheme` protocol preserves these properties while remaining simple enough
+that the transactor never needs the planner, datalog, or SQL parser.
+
+---
+
+## 7. Implementation Phases
 
 | Phase | Scope | Acceptance |
 |-------|-------|------------|
 | F0 | Tagged AST codec (`nim_scheme/wire.nim`); `bvResolvedAttr` → `intern-a`; unknown-attr error | round-trip tests incl. bytes/sym≠str; compiled program executes correctly with different aid assignments; `nimble test` green |
-| F1 | Data server: remove `rkSql`, add `rkScheme`/`rkSchema`; wire `params` through to the hostfn; drop compiler imports; `eavt-data.sock` | server tests: scheme query/exec, typed params, schema snapshot |
+| F1 | Transactor: remove `rkSql`, add `rkScheme`/`rkSchema`; wire `params` through to the hostfn; drop compiler imports; `eavt-transactor.sock` | transactor tests: scheme query/exec, typed params, schema snapshot |
 | F2 | Extract EXPLAIN renderer → `nim_sql_frontend/explain.nim` | EXPLAIN output byte-identical to current |
-| F3 | Gateway package (`eavt_gateway_nim/`) | e2e: SQL select, EXPLAIN, writes, multi-batch streaming (>100 rows), late-declared attribute, data server down → clear error |
+| F3 | Query server package (`eavt_query_nim/`) | e2e: SQL select, EXPLAIN, writes, multi-batch streaming (>100 rows), late-declared attribute, transactor down → clear error |
 | F4 | Python client: `scheme(program_ast, *params)`, `schema()` | bench.py unchanged behavior via SQL API |
-| F5 | `nimble dist` builds gateway; dev script starts both; full `nimble test` | all green |
+| F5 | `nimble dist` builds transactor + query server; dev script starts both; full `nimble test` | all green |
 
 ---
 
-## 7. Related Documents
+## 8. Related Documents
 
 - `docs/scheme-ir.md` — SExpr type system, evaluator, host functions
 - `docs/sql-reference.md` — SQL surface accepted by the compiler

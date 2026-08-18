@@ -2,7 +2,7 @@
 
 ## Overview
 
-With the file backend, the data server persists every write to a segmented
+With the file backend, the transactor persists every write to a segmented
 journal (WAL) before applying it to the MemTable. Writes land in a loop-side
 buffer; disk I/O goes through **chronos-file**'s thread pool; `fsync` fires on
 a 100 ms timer. The journal is **rotated at flush-capture boundaries** so
@@ -68,7 +68,7 @@ DIR/blobs/                  PageStore blobs (flush target)
 - `KVStore.journalSink` / `KVStore.journalSeal` / `walDurableUpTo`
   (nim_kvstore/kvstore.nim): the hooks the server's WalWriter installs. The
   sink is a memcpy under `kv.lock`; the seal is a counter read.
-- `WalWriter` (eavt_server_nim/wal.nim): loop-owned buffers; rotation closes
+- `WalWriter` (eavt_transactor_nim/wal.nim): loop-owned buffers; rotation closes
   the sealed segment, records it for deletion, opens the next. Segment
   discovery uses `lastPathPart` — `splitFile` would eat ".00001" as an
   extension and silently find nothing.
@@ -80,11 +80,11 @@ DIR/blobs/                  PageStore blobs (flush target)
 ## Server flags
 
 ```
-eavt-sql-server                                        # default: file backend,
+eavt-sql-transactor                                        # default: file backend,
                                                        #   data dir $XDG_DATA_HOME/eavt/db
                                                        #   (fallback ~/.local/state/eavt/db)
-eavt-sql-server --path /var/lib/eavt                   # file backend, explicit dir
-eavt-sql-server --backend s3 --path /wal/dir \
+eavt-sql-transactor --path /var/lib/eavt                   # file backend, explicit dir
+eavt-sql-transactor --backend s3 --path /wal/dir \
                 --s3-endpoint ... --s3-bucket ... \
                 --s3-access-key ... --s3-secret-key ... # blobs in S3, WAL local
 ```

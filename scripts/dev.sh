@@ -1,37 +1,37 @@
 #!/usr/bin/env bash
 # dev.sh — run the EAVT SQL stack in the foreground:
-#   data server (eavt-data.sock) + gateway (eavt.sock).
+#   transactor (eavt-transactor.sock) + query server (eavt-query.sock).
 # Ctrl-C stops both.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 BIN_DIR="build"
-DATA_SERVER="$BIN_DIR/eavt-sql-server"
-GATEWAY="$BIN_DIR/eavt-sql-gateway"
+TRANSACTOR="$BIN_DIR/eavt-sql-transactor"
+QUERY="$BIN_DIR/eavt-sql-query"
 
-for bin in "$DATA_SERVER" "$GATEWAY"; do
+for bin in "$TRANSACTOR" "$QUERY"; do
   if [ ! -x "$bin" ]; then
     echo "missing $bin — run: nimble dist" >&2
     exit 1
   fi
 done
 
-data_pid=""
-gw_pid=""
+trans_pid=""
+query_pid=""
 
 cleanup() {
-  [ -n "$gw_pid" ] && kill "$gw_pid" 2>/dev/null || true
-  [ -n "$data_pid" ] && kill "$data_pid" 2>/dev/null || true
+  [ -n "$query_pid" ] && kill "$query_pid" 2>/dev/null || true
+  [ -n "$trans_pid" ] && kill "$trans_pid" 2>/dev/null || true
   wait 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
-"$DATA_SERVER" &
-data_pid=$!
+"$TRANSACTOR" &
+trans_pid=$!
 sleep 0.3
 
-"$GATEWAY" &
-gw_pid=$!
+"$QUERY" &
+query_pid=$!
 
-echo "stack up: gateway on \$(eavt.sock) → data server on \$(eavt-data.sock)"
+echo "stack up: query server on eavt-query.sock → transactor on eavt-transactor.sock"
 wait

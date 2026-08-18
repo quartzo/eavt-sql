@@ -2,11 +2,11 @@
 ##
 ## Opens a read-only KVStore on the shared data directory and populates it
 ## from the replication stream (snapshot + wal/seal/root events from the
-## data server).  SELECT/EXPLAIN queries execute against this engine; DML
-## and schema changes are forwarded to the data server.
+## transactor).  SELECT/EXPLAIN queries execute against this engine; DML
+## and schema changes are forwarded to the transactor.
 ##
 ## Replication events arrive via the onReplicationEvent callback, which
-## the gateway's MultiplexedConn reader task invokes for every "ev" frame.
+## the query server's MultiplexedConn reader task invokes for every "ev" frame.
 
 import std/[json, tables]
 import chronos
@@ -19,7 +19,7 @@ type
     kv*: KVStore
     store*: QueryStore
     connected*: bool
-    path*: string          # data dir (shared with data server)
+    path*: string          # data dir (shared with transactor)
 
 proc openReplica*(dir: string): ReplicaEngine =
   ## Open a read-only KVStore on the data directory.  The journal replay
@@ -36,7 +36,7 @@ proc openReplica*(dir: string): ReplicaEngine =
 
 proc applySnapshot*(r: ReplicaEngine; sealed: seq[string]; openTail: seq[byte];
                     rootName: string) {.async.} =
-  ## Apply the initial snapshot from the data server.  Sealed segments are
+  ## Apply the initial snapshot from the transactor.  Sealed segments are
   ## listed by path (immutable files on the shared filesystem); the open
   ## tail bytes are the volatile in-memory WAL buffer at snapshot time.
   ## Segment files are read async (chronos-file thread pool), never
@@ -74,7 +74,7 @@ proc getStats*(r: ReplicaEngine): stats.CompileStats =
   ## Build compile stats from the current replica state.
   ## Re-bootstraps the resolver and BYPASSES the engine's 30s stats cache —
   ## attributes declared after open arrive as db.* datoms via the WAL
-  ## stream, and the gateway's own invalidation must see them immediately.
+  ## stream, and the query server's own invalidation must see them immediately.
   try:
     r.store.eavt.bootstrapResolver()
   except Exception:

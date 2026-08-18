@@ -4,7 +4,7 @@
 ## persistent ~/.eavt_sql_history.
 
 import std/[strutils, strformat, os, terminal, json]
-import eavt_server_nim/client
+import eavt_transactor_nim/client
 import linenoise
 
 proc cFree(p: pointer) {.importc: "free", header: "<stdlib.h>".}

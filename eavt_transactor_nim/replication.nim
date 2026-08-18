@@ -1,4 +1,4 @@
-## replication.nim — Push-based replication hub for the data server.
+## replication.nim — Push-based replication hub for the transactor.
 ##
 ## The server registers its WAL sink, seal and root publish hooks through
 ## the replication hub.  Connected replicas receive:

@@ -1,14 +1,14 @@
-## downstream.nim — Multiplexed gateway↔data-server connection (chronos).
+## downstream.nim — Multiplexed query-server↔transactor connection (chronos).
 ##
-## One shared connection carries ALL traffic between the gateway and the
-## data server: forwarded requests from every client AND the replication
+## One shared connection carries ALL traffic between the query server and the
+## transactor: forwarded requests from every client AND the replication
 ## event stream (wal/seal/root/snapshot).  Demultiplexing is by frame
 ## shape:
 ##
 ##   • frames with an "ev" key  → replication event (server-push)
 ##   • frames with an "id" key  → response to a forwarded request
 ##
-## The two key sets are disjoint by construction — the data server never
+## The two key sets are disjoint by construction — the transactor never
 ## puts both "ev" and "id" in the same frame.  No correlation IDs are
 ## needed for replication events (there is exactly one stream per
 ## connection); request correlation is by the monotonic id assigned here.
@@ -89,7 +89,7 @@ proc writeErrorAsync*(transp: StreamTransport; msg: string) {.async.} =
 proc failAllPending(conn: MultiplexedConn) =
   for id, p in conn.pending:
     if not p.fut.finished:
-      p.fut.fail(newException(IOError, "data server disconnected"))
+      p.fut.fail(newException(IOError, "transactor disconnected"))
   conn.pending.clear()
 
 proc nextIdStr(conn: MultiplexedConn): string =
@@ -136,10 +136,10 @@ proc sendReplicate(conn: MultiplexedConn) {.async.} =
 # ── Connect + reconnect loop ────────────────────────────────────────────────
 
 proc connectLoop(conn: MultiplexedConn) {.async.} =
-  ## Long-lived task: (re)connect to the data server, subscribe to the
+  ## Long-lived task: (re)connect to the transactor, subscribe to the
   ## replication stream, and run the reader loop until disconnect.
-  ## All pending requests are failed on each disconnect; the gateway's
-  ## client handlers see "data server disconnected" and surface it.
+  ## All pending requests are failed on each disconnect; the query server's
+  ## client handlers see "transactor disconnected" and surface it.
   while true:
     try:
       let address = initTAddress(conn.path)
@@ -166,11 +166,11 @@ proc openMultiplexed*(path: string; onEvent: OnEvent): MultiplexedConn =
 
 proc request*(conn: MultiplexedConn; body: JsonNode;
               clientTransp: StreamTransport) {.async.} =
-  ## Send a request to the data server and relay all response frames to
+  ## Send a request to the transactor and relay all response frames to
   ## the client transport until more=false.  The request body gets an
-  ## injected "id" field; the data server echoes it in every response.
+  ## injected "id" field; the transactor echoes it in every response.
   if not conn.connected:
-    await clientTransp.writeErrorAsync("data server disconnected")
+    await clientTransp.writeErrorAsync("transactor disconnected")
     return
   let id = conn.nextIdStr()
   body["id"] = %id
@@ -180,17 +180,17 @@ proc request*(conn: MultiplexedConn; body: JsonNode;
     await conn.sendJson(body)
   except CatchableError:
     conn.pending.del(id)
-    await clientTransp.writeErrorAsync("data server write failed")
+    await clientTransp.writeErrorAsync("transactor write failed")
     return
   try:
     await fut
   except CatchableError:
-    await clientTransp.writeErrorAsync("data server disconnected")
+    await clientTransp.writeErrorAsync("transactor disconnected")
 
 proc forwardRaw*(conn: MultiplexedConn; raw: string;
                  clientTransp: StreamTransport) {.async.} =
   ## Forward a raw msgpack frame (scheme/admin/kv) from a client to the
-  ## data server.  Parses the frame to inject the correlation id, then
+  ## transactor.  Parses the frame to inject the correlation id, then
   ## relays responses back to the client.
   var body: JsonNode
   try:
@@ -208,8 +208,8 @@ proc close*(conn: MultiplexedConn) {.async: (raises: []).} =
     discard
 
 proc downstreamSocketPath*(): string =
-  ## Default data-server socket path (shared with the data server).
+  ## Default transactor socket path.
   let xdg = getEnv("XDG_RUNTIME_DIR")
   if xdg.len > 0:
-    return xdg / "eavt" / "eavt-data.sock"
-  return getHomeDir() / ".local" / "state" / "eavt" / "eavt-data.sock"
+    return xdg / "eavt" / "eavt-transactor.sock"
+  return getHomeDir() / ".local" / "state" / "eavt" / "eavt-transactor.sock"

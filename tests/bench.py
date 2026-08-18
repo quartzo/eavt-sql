@@ -1,6 +1,6 @@
 """Performance benchmarks — measures insert/query/flush latency via UDS.
 
-Run:  ./build/eavt-sql-server &
+Run:  ./build/eavt-sql-transactor &
       uv run python tests/bench.py
 """
 import time
@@ -12,11 +12,11 @@ _root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_root / "py_eavt_client" / "src"))
 from eavt_client.client import EavtClient
 
-SERVER_BIN = _root / "eavt_server_nim" / "server"
+SERVER_BIN = _root / "eavt_transactor_nim" / "server"
 
 
 def ensure_server():
-    """Start eavt_server_nim if not already running."""
+    """Start transactor if not already running."""
     import socket
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

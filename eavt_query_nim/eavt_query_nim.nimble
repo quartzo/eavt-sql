@@ -1,8 +1,6 @@
-# Package
-
 version       = "0.2.0"
 author        = "fabio"
-description   = "EAVT SQL gateway: compiles SQL to Scheme (chronos, single-thread), forwards to the data server"
+description   = "EAVT query server: compiles SQL to Scheme (chronos, single-thread), routes writes to the transactor"
 license       = "MIT"
 srcDir        = "."
 backend       = "c"
@@ -10,6 +8,6 @@ backend       = "c"
 requires "nim >= 2.0.14"
 requires "chronos >= 4.0.0"
 
-task release, "Build the gateway":
+task release, "Build the query server":
   exec "nim c --mm:orc --threads:on -d:release -d:useMalloc " &
-       "--out:../build/eavt-sql-gateway server.nim"
+       "--out:../build/eavt-sql-query server.nim"
