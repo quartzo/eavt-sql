@@ -44,6 +44,10 @@ type
     bokGet       ## get + decompress      -> page bytes
     bokPutRoot   ## compress + putRoot    -> ()
     bokGetRoot   ## getRoot + decompress  -> root bytes
+    bokDelete    ## delete                -> ()
+    bokDeleteRoot## deleteRoot            -> ()
+    bokList      ## list                  -> ids (16B each)
+    bokListRoots ## listRoots             -> [4B len][name bytes]...
 
   BlobJobObj = object
     ## Manually allocated POD. Fields above the divider are touched by the
@@ -55,18 +59,22 @@ type
                               ## syscalls; s3: per-request client under its lock)
     inPtr: pointer            ## payload to compress/write (bokPut/bokPutRoot)
     inLen: int
-    namePtr: cstring          ## root name (bokPutRoot/bokGetRoot)
+    namePtr: cstring          ## root name (bokPutRoot/bokGetRoot/bokDeleteRoot)
     outPtr: pointer           ## loop-owned output buffer (bokGet/bokGetRoot:
-                              ## raw decompressed bytes land here)
+                              ## raw decompressed bytes land here; bokList/
+                              ## bokListRoots: raw listing bytes land here)
     outCap: int
     outLen: int               ## bytes written by the worker
+    truncated: bool           ## listing did not fit outCap; loop retries
+                              ## with a bigger buffer (needLen carries the size)
+    needLen: int
     compPtr: pointer          ## compress scratch (allocShared, worker writes,
                               ## loop frees) — the backend reads it via
                               ## toOpenArray; no GC object is ever created on
                               ## the worker side
     compCap: int
     compLen: int
-    blobId: ByteArr16         ## in: id to fetch (bokGet); out: new id (bokPut)
+    blobId: ByteArr16         ## in: id to fetch (bokGet/bokDelete); out: new id (bokPut)
     ok: bool                  ## worker success flag
     errBuf: array[96, char]   ## truncated error message, if any
     errLen: int
@@ -216,6 +224,44 @@ proc runJob(job: BlobJob) {.gcsafe, raises: [].} =
         else:
           job.outLen = 0
           job.ok = true
+    of bokDelete:
+      job.store.delete(job.blobId)
+      job.ok = true
+    of bokDeleteRoot:
+      job.store.deleteRoot($job.namePtr)
+      job.ok = true
+    of bokList:
+      # `ids` is created by the backend ON THIS WORKER (bokGet discipline):
+      # a local GC value living and dying inside this frame; only its BYTES
+      # cross back via the POD outPtr.
+      let ids = job.store.list()
+      let n = ids.len * 16
+      job.needLen = n
+      if n > job.outCap:
+        job.truncated = true
+        job.ok = true
+      else:
+        if n > 0: copyMem(job.outPtr, addr ids[0], n)
+        job.outLen = n
+        job.ok = true
+    of bokListRoots:
+      let names = job.store.listRoots()
+      var n = 0
+      for nm in names: n += 4 + nm.len
+      job.needLen = n
+      if n > job.outCap:
+        job.truncated = true
+        job.ok = true
+      else:
+        var off = 0
+        let p = cast[ptr UncheckedArray[byte]](job.outPtr)
+        for nm in names:
+          var len32: int32 = int32(nm.len)
+          copyMem(addr p[off], addr len32, 4); off += 4
+          if nm.len > 0:
+            copyMem(addr p[off], nm[0].unsafeAddr, nm.len); off += nm.len
+        job.outLen = n
+        job.ok = true
   except Exception as e:
     # trait methods carry no raises pragma; their inference is Exception.
     # The worker reports the failure through POD — the caller's future fails.
@@ -227,6 +273,13 @@ proc completionEnqueue(pool: ptr BlobPoolObj; job: BlobJob) =
   release(pool.completionLock)
   if not pool.signalPending.exchange(true, moAcquireRelease):
     discard pool.signal.fireSync()
+
+# Forwards: dispatchCompletion (below) re-enqueues overflowed listings
+# through these loop-side helpers.
+proc submit(pool: BlobPool; store: BlobStore; kind: BlobOpKind): BlobJob {.
+    gcsafe, raises: [].}
+proc enqueueJob(pool: BlobPool; job: BlobJob) {.gcsafe, raises: [IOError].}
+proc armCancel(job: BlobJob; fut: FutureBase) {.gcsafe, raises: [].}
 
 proc workerMain(pool: ptr BlobPoolObj) {.thread, raises: [].} =
   {.gcsafe.}:
@@ -242,7 +295,7 @@ proc workerMain(pool: ptr BlobPoolObj) {.thread, raises: [].} =
       runJob(job)
       completionEnqueue(pool, job)
 
-proc dispatchCompletion(pool: ptr BlobPoolObj; job: BlobJob) =
+proc dispatchCompletion(pool: ptr BlobPoolObj; job: BlobJob) {.raises: [].} =
   ## Loop thread. Settles the future (unless cancelled), then frees the job —
   ## the payload/result buffers are released here, on the owning thread.
   dec pool.inflight
@@ -257,7 +310,41 @@ proc dispatchCompletion(pool: ptr BlobPoolObj; job: BlobJob) =
       case job.kind
       of bokPut: fut[ByteArr16]().complete(job.blobId)
       of bokPutRoot: fut[void]().complete()
+      of bokDelete, bokDeleteRoot: fut[void]().complete()
       of bokGet, bokGetRoot:
+        var outSeq = newSeq[byte](job.outLen)
+        if job.outLen > 0:
+          copyMem(addr outSeq[0], job.outPtr, job.outLen)
+        fut[seq[byte]]().complete(outSeq)
+      of bokList, bokListRoots:
+        if job.truncated and not job.cancelRequested:
+          # Listing overflowed the loop-owned buffer: re-enqueue with a
+          # buffer sized for needLen (doubled floor), CHAINING the caller's
+          # future — the retry's completion settles it.
+          let nj = newJob(pool)
+          nj.kind = job.kind
+          nj.store = job.store
+          nj.outCap = max(job.needLen, job.outCap * 2)
+          nj.resultBuf = newSeq[byte](nj.outCap)
+          nj.outPtr = addr nj.resultBuf[0]
+          nj.resFut = job.resFut
+          armCancel(nj, nj.resFut)
+          # Detach the future from the old job BEFORE freeJob resets it (the
+          # ref now lives on nj); buffers of the old job die with it.
+          job.resFut = nil
+          try:
+            enqueueJob(BlobPool(inner: pool), nj)
+            freeJob(pool, job)
+            return
+          except CatchableError:
+            # Pool closed mid-retry: fail the chained future, drop both jobs.
+            if nj.resFut != nil and not nj.resFut.finished():
+              cast[Future[void]](nj.resFut).fail(
+                newException(IOError, "blob pool is closed"))
+            nj.resFut = nil
+            freeJob(pool, nj)
+            freeJob(pool, job)
+            return
         var outSeq = newSeq[byte](job.outLen)
         if job.outLen > 0:
           copyMem(addr outSeq[0], job.outPtr, job.outLen)
@@ -269,7 +356,7 @@ proc dispatchCompletion(pool: ptr BlobPoolObj; job: BlobJob) =
     job.compLen = 0
   freeJob(pool, job)
 
-proc drainCompletions(pool: ptr BlobPoolObj) =
+proc drainCompletions(pool: ptr BlobPoolObj) {.raises: [].} =
   pool.signalPending.store(false, moRelease)
   acquire(pool.completionLock)
   var localHead = popAll(pool.completionHead, pool.completionTail)
@@ -435,3 +522,72 @@ proc getRootAsync*(pool: BlobPool; store: BlobStore;
   armCancel(job, fut)
   enqueueJob(pool, job)
   fut
+
+proc deleteAsync*(pool: BlobPool; store: BlobStore;
+                  id: ByteArr16): Future[void] =
+  ## Delete a blob. GC path — fire and forget is NOT implied: await it when
+  ## ordering matters (the pool serialises per job, not per id).
+  let job = submit(pool, store, bokDelete)
+  job.blobId = id
+  let fut = newFuture[void]("blob.delete")
+  job.resFut = fut
+  armCancel(job, fut)
+  enqueueJob(pool, job)
+  fut
+
+proc deleteRootAsync*(pool: BlobPool; store: BlobStore;
+                      name: string): Future[void] =
+  let job = submit(pool, store, bokDeleteRoot)
+  job.nameStr = name
+  job.namePtr = cast[cstring](job.nameStr.cstring)
+  let fut = newFuture[void]("blob.deleteRoot")
+  job.resFut = fut
+  armCancel(job, fut)
+  enqueueJob(pool, job)
+  fut
+
+const
+  ListInitialCap = 64 * 1024      ## 4096 blob ids before a retry
+  ListRootsInitialCap = 16 * 1024
+
+proc listRawAsync(pool: BlobPool; store: BlobStore;
+                  kind: BlobOpKind; initialCap: int): Future[seq[byte]] =
+  ## Raw listing bytes. Overflow is handled by dispatch (re-enqueue with a
+  ## bigger loop-owned buffer, chaining the caller's future).
+  let job = submit(pool, store, kind)
+  job.outCap = initialCap
+  job.resultBuf = newSeq[byte](job.outCap)
+  job.outPtr = addr job.resultBuf[0]
+  let fut = newFuture[seq[byte]]("blob.listRaw")
+  job.resFut = fut
+  armCancel(job, fut)
+  enqueueJob(pool, job)
+  fut
+
+proc listAsync*(pool: BlobPool; store: BlobStore): Future[seq[ByteArr16]] {.
+    async.} =
+  ## All blob ids. 16 bytes per id; retry-transparent over the initial cap.
+  let raw = await listRawAsync(pool, store, bokList, ListInitialCap)
+  result.setLen(raw.len div 16)
+  for i in 0..<result.len:
+    if raw.len > 0:
+      copyMem(addr result[i][0], addr raw[i * 16], 16)
+
+proc listRootsAsync*(pool: BlobPool; store: BlobStore): Future[seq[string]] {.
+    async.} =
+  ## All root names. Worker serialises as [4B LE len][bytes] per name.
+  let raw = await listRawAsync(pool, store, bokListRoots, ListRootsInitialCap)
+  var off = 0
+  while off + 4 <= raw.len:
+    var len32: int32
+    copyMem(addr len32, addr raw[off], 4)
+    off += 4
+    let n = int(len32)
+    if n < 0 or off + n > raw.len: break
+    if n > 0:
+      let s = newString(n)
+      copyMem(addr s[0], addr raw[off], n)
+      result.add s
+    else:
+      result.add ""
+    off += n

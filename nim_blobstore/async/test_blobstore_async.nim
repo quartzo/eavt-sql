@@ -118,6 +118,92 @@ suite "blobstore_async: round-trips":
     check waitFor scenario(ctx)
     waitFor ctx.pool.closeBlobPool()
 
+suite "blobstore_async: GC ops (list/delete)":
+  test "delete removes the blob":
+    let ctx = newCtx()
+    proc scenario(ctx: Ctx): Future[bool] {.async.} =
+      var p = newSeq[byte](256)
+      for i in 0..<p.len: p[i] = byte(i)
+      let id = await ctx.pool.putPageAsync(ctx.store, p)
+      if (await ctx.pool.getPageAsync(ctx.store, id)) != p:
+        return false
+      await ctx.pool.deleteAsync(ctx.store, id)
+      var gone = false
+      try: discard await ctx.pool.getPageAsync(ctx.store, id)
+      except CatchableError: gone = true
+      result = gone
+    check waitFor scenario(ctx)
+    waitFor ctx.pool.closeBlobPool()
+
+  test "deleteRoot removes the root":
+    let ctx = newCtx()
+    proc scenario(ctx: Ctx): Future[bool] {.async.} =
+      await ctx.pool.putRootAsync(ctx.store, "root_gc", @[byte(1), 2, 3])
+      await ctx.pool.deleteRootAsync(ctx.store, "root_gc")
+      var gone = false
+      try: discard await ctx.pool.getRootAsync(ctx.store, "root_gc")
+      except CatchableError: gone = true
+      result = gone
+    check waitFor scenario(ctx)
+    waitFor ctx.pool.closeBlobPool()
+
+  test "list returns every blob id":
+    let ctx = newCtx()
+    proc scenario(ctx: Ctx): Future[bool] {.async.} =
+      var ids: seq[ByteArr16] = @[]
+      for k in 0..<10:
+        ids.add await ctx.pool.putPageAsync(ctx.store, @[byte(k)])
+      let listed = await ctx.pool.listAsync(ctx.store)
+      if listed.len < ids.len: return false
+      for id in ids:
+        var found = false
+        for l in listed:
+          if l == id: found = true; break
+        if not found: return false
+      result = true
+    check waitFor scenario(ctx)
+    waitFor ctx.pool.closeBlobPool()
+
+  test "listRoots returns sorted names":
+    let ctx = newCtx()
+    proc scenario(ctx: Ctx): Future[bool] {.async.} =
+      await ctx.pool.putRootAsync(ctx.store, "root_a", @[byte(1)])
+      await ctx.pool.putRootAsync(ctx.store, "root_c", @[byte(3)])
+      await ctx.pool.putRootAsync(ctx.store, "root_b", @[byte(2)])
+      let roots = await ctx.pool.listRootsAsync(ctx.store)
+      result = roots == @["root_a", "root_b", "root_c"]
+    check waitFor scenario(ctx)
+    waitFor ctx.pool.closeBlobPool()
+
+  test "list retry: many blobs overflow the initial buffer":
+    # 5000 ids = 80 KB > the 64 KB initial cap — the dispatch must re-enqueue
+    # with a bigger buffer and settle the caller's future transparently.
+    let ctx = newCtx()
+    proc scenario(ctx: Ctx): Future[bool] {.async.} =
+      var futs: seq[Future[ByteArr16]] = @[]
+      for k in 0..<5000:
+        futs.add ctx.pool.putPageAsync(ctx.store, @[byte(k and 0xFF)])
+      var ids: seq[ByteArr16] = @[]
+      for f in futs: ids.add await f
+      let listed = await ctx.pool.listAsync(ctx.store)
+      result = listed.len == ids.len
+    check waitFor scenario(ctx)
+    waitFor ctx.pool.closeBlobPool()
+
+  test "listRoots retry: many roots overflow the initial buffer":
+    # 6000 names × 9+ chars > 16 KB initial cap.
+    let ctx = newCtx()
+    proc scenario(ctx: Ctx): Future[bool] {.async.} =
+      var futs: seq[Future[void]] = @[]
+      for k in 0..<6000:
+        futs.add ctx.pool.putRootAsync(ctx.store, "root_r_" & align($k, 5, '0'),
+                                       @[byte(k and 0xFF)])
+      for f in futs: await f
+      let roots = await ctx.pool.listRootsAsync(ctx.store)
+      result = roots.len == 6000
+    check waitFor scenario(ctx)
+    waitFor ctx.pool.closeBlobPool()
+
 suite "blobstore_async: concurrency & cancellation":
   test "many sequential puts, concurrent gets":
     let ctx = newCtx()
