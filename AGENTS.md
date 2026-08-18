@@ -6,7 +6,7 @@
 - **Re-run tests without recompiling:** `./build/all_tests` — binary already compiled
 - **Check which tests failed:** `./build/all_tests 2>&1 | grep FAILED`
 - **Count failures:** `./build/all_tests 2>&1 | grep -c FAILED`
-- **Module-level tests:** `nim c --mm:atomicArc --threads:on -d:release -d:useMalloc -r nim_eavt/test_eavt.nim` (replace module as needed)
+- **Module-level tests:** `nim c --mm:orc --threads:on -d:release -d:useMalloc -r nim_eavt/test_eavt.nim` (replace module as needed)
 - **Build data server + gateway + REPL:** `nimble dist` → `build/eavt-sql-server`, `build/eavt-sql-gateway`, `build/eavt-sql-cli`
 - **Run the stack (data server + gateway):** `nimble dev` (or `scripts/dev.sh`) — Ctrl-C stops both
 - **Python benchmarks:** `uv run python tests/bench.py` (requires msgpack)
@@ -26,7 +26,7 @@ nimble test 2>&1 | tail -20
 ./build/all_tests 2>&1 | grep -c FAILED       # how many
 
 # 3. For a single module (compiles + runs, shows full output):
-nim c --mm:atomicArc --threads:on -d:release -d:useMalloc -r nim_eavt/test_eavt.nim 2>&1 | tail -40
+nim c --mm:orc --threads:on -d:release -d:useMalloc -r nim_eavt/test_eavt.nim 2>&1 | tail -40
 ```
 
 **Never:** `nimble test 2>&1 | grep "\[OK\]" | wc -l` without first seeing compiler
@@ -35,7 +35,7 @@ unnecessary recompilation.
 
 ### Prerequisites
 
-- **Nim ≥ 2.0.14** — with `--mm:atomicArc --threads:on -d:useMalloc` for all modules (atomic ref counting, thread-safe)
+- **Nim ≥ 2.0.14** — with `--mm:orc --threads:on -d:useMalloc` for everything (atomic ref counting under threads, plus the cycle collector). Storage is acyclic by design, so it also passes under `--mm:atomicArc` if you ever need a cycle-collector-free build.
 
 ## Project Structure
 
@@ -115,8 +115,8 @@ BlobStore (Memory / File / S3)
 
 ### MemTable (ARC-driven COW)
 
-The persistent treap uses `--mm:atomicArc`, so node lifetime is governed by
-reference counting. `insert` does path-copying — old versions are shared, not mutated.
+The persistent treap uses ARC-family refcounting (`--mm:orc`), so node lifetime is
+governed by atomic reference counting. `insert` does path-copying — old versions are shared, not mutated.
 Cursors hold a `TreapNode` ref directly. No snapshot registry.
 
 ### Flush
@@ -155,8 +155,9 @@ the async file I/O the data server's segmented WAL uses: writes go through its
 thread-pool backend (`writeAt`), fsync on a 100ms timer (interval durability —
 process crash is always safe, machine crash loses at most ~100ms; see `docs/wal.md`).
 The segmented WAL **rotates at flush-capture boundaries** so records written during a
-flush survive it. Storage modules are MM-agnostic: `atomicArc --threads:on`
-(test suite) and `orc --threads:on` (server) both pass 588/588.
+flush survive it. Everything runs `--mm:orc` — suite and all three binaries.
+(Storage is acyclic by design; `atomicArc` also passed, kept as a property note,
+not an exercised configuration.)
 
 `nim_blobstore/async/` is the async facade over the sync `BlobStore` trait:
 a pool of 2-4 worker threads bridges `putPage`/`getPage`/`putRoot`/`getRoot`
@@ -164,8 +165,8 @@ operations (zstd compress/decompress inside the worker) off the event loop;
 completion crosses to the loop via `ThreadSignalPtr` (eventfd) — only the loop
 completes Futures. GC payloads (`seq[byte]` pages, result `seq`s) are owned by
 the loop (in-flight table keeps them alive until the future settles); workers see
-raw pointers only. The sync trait stays for the atomicArc test suite —
-`all_tests` does not import the async module.
+raw pointers only. The sync trait stays for the main test suite —
+`all_tests` does not import the async module (same orc flags, separate binary).
 
 **NEVER call `createThread` / instantiate raw `Thread[T]`** — this is a low-level
 API that requires manual lifecycle management of the thread handle. If a `Thread[T]`
@@ -181,8 +182,8 @@ implemented in this repo: each `spawn(fn)` launches a fresh Nim thread that runs
 and exits — no fixed concurrency limit, no `awaitAll`/join, no backpressure channel.
 Thread handles live in a fixed-size global array (stable addresses, dodging the
 createThread-on-stack race above) and are reaped on each `spawn`. Built for
-`--mm:atomicArc` (workers are Nim-native, atomic ref counting — no cycle collector needed)
-collector).
+ARC-family MMs (`--mm:orc` / `--mm:atomicArc`): workers are Nim-native, atomic
+ref counting — no cross-thread cycle concerns for acyclic payloads.
 
 **Closure-capture rule when spawning in a loop:** a closure that reads a loop or
 body-local variable shares the frame slot — spawned threads read it *late* and get

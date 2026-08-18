@@ -7,7 +7,8 @@
 ## on-stack race documented in AGENTS.md); a reaper drops finished handles
 ## on each spawn, freeing slots for reuse.
 ##
-## Built for `--mm:atomicArc`: worker threads are Nim-native (atomic ref
+## Built for ARC-family memory managers (`--mm:orc`, `--mm:atomicArc`):
+## worker threads are Nim-native (atomic ref
 ## counting — no cycle collector needed). Call `initSpawn()` once
 ## from the main thread before the first `spawn`.
 ##
@@ -43,8 +44,8 @@ proc initSpawn*() {.gcsafe.} =
     gInited = true
 
 proc worker(arg: SpawnArg) {.thread.} =
-  ## Thread trampoline: run the closure, then drop it (atomicArc releases
-  ## `arg` when this frame unwinds).
+  ## Thread trampoline: run the closure, then drop it (atomic refcounts
+  ## release `arg` when this frame unwinds).
   arg.fn()
 
 proc spawn*(fn: proc() {.gcsafe.}) {.gcsafe.} =
