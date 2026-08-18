@@ -1,8 +1,6 @@
 import std/[os, json]
 import chronos
-import msgpack4nim/msgpack2json
-import eavt_server_nim/client except connect, close
-import shared, connection, replica
+import shared, connection, replica, downstream
 
 proc gatewayCallback(server: StreamServer, transp: StreamTransport) {.
     async: (raises: []).} =
@@ -53,9 +51,13 @@ proc main() {.async.} =
     gw.replica = nil
   if gw.replica != nil:
     echo "Replica engine opened on ", dataPath
-    # Start the replication subscription (async task on the event loop).
-    # This runs forever until the server disconnects; it auto-reconnects.
-    asyncSpawn replicationLoop(gw.replica, downstream)
+    # Open the single multiplexed connection to the data server.
+    # Replication events (snapshot/wal/seal/root) arrive as "ev" frames
+    # and are dispatched to the replica via onReplicationEvent.
+    gw.conn = openMultiplexed(downstream,
+      proc(frame: JsonNode) {.gcsafe.} =
+        gw.replica.onReplicationEvent(frame)
+    )
   else:
     echo "Replica disabled (data dir not readable): ", dataPath
 

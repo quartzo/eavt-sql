@@ -6,6 +6,7 @@ type
   RequestKind* = enum
     rkScheme, rkSchema, rkAdmin, rkKv
   Request* = object
+    id*: string            ## correlation id — echoed in responses (multiplexing)
     case kind*: RequestKind
     of rkScheme:
       program*: SExpr      ## decoded tagged-AST program body
@@ -23,21 +24,24 @@ type
 
 proc parseRequest*(data: string): Request =
   let node = toJsonNode(data)
+  if node.hasKey("id"):
+    result.id = node["id"].getStr
   let t = node["type"].getStr
   case t
   of "scheme":
-    result = Request(kind: rkScheme,
+    result = Request(kind: rkScheme, id: result.id,
                      program: wireToSexpr(node["program"]),
                      mode: node["mode"].getStr)
     if node.hasKey("params"):
       for p in node["params"]:
         result.params.add(wireToSexpr(p))
   of "schema":
-    result = Request(kind: rkSchema)
+    result = Request(kind: rkSchema, id: result.id)
   of "admin":
-    result = Request(kind: rkAdmin, command: node["command"].getStr)
+    result = Request(kind: rkAdmin, id: result.id, command: node["command"].getStr)
   of "kv":
-    result = Request(kind: rkKv, kvOp: node["op"].getStr, kvCf: node["cf"].getInt)
+    result = Request(kind: rkKv, id: result.id, kvOp: node["op"].getStr,
+                     kvCf: node["cf"].getInt)
     if node.hasKey("key"):
       result.kvKey = cast[seq[byte]](node["key"].getStr)
     if node.hasKey("value"):
@@ -102,8 +106,10 @@ proc sexprToJson*(e: SExpr): JsonNode =
   of sResource: %e.rid
 
 proc writeResponse*(fd: SocketHandle; columns: seq[string]; rows: seq[seq[SExpr]];
-                     more: bool; error: string = "") =
+                     more: bool; error: string = ""; id: string = "") =
   var node = newJObject()
+  if id.len > 0:
+    node["id"] = %id
   if error.len > 0:
     node["error"] = %error
     node["more"] = %false
@@ -120,5 +126,5 @@ proc writeResponse*(fd: SocketHandle; columns: seq[string]; rows: seq[seq[SExpr]
     node["more"] = %more
   writeMsg(fd, msgpack2json.fromJsonNode(node))
 
-proc writeError*(fd: SocketHandle; msg: string) =
-  writeResponse(fd, @[], @[], false, msg)
+proc writeError*(fd: SocketHandle; msg: string; id: string = "") =
+  writeResponse(fd, @[], @[], false, msg, id)

@@ -1,9 +1,18 @@
 ## connection.nim — Data server per-connection handling (chronos).
 ##
-## One event loop serves every connection; each callback runs a request loop
-## (request → response/stream). Query execution uses the VM's yield/resume:
-## nextBatch(100) between frames is the natural suspension point. Errors are
-## always written as frames — nothing escapes the callback.
+## One event loop serves every connection.  Requests are dispatched
+## pipelined: each frame is spawned as an independent async handler so
+## that long-running streams yield between batches while the read loop
+## continues accepting new frames.  Response frames carry the request's
+## correlation id so the gateway can demultiplex them on a single shared
+## connection that also carries the replication event stream.
+##
+## Replication ("replicate") is handled inline: the server registers a
+## subscriber, sends the snapshot, spawns the drain task, and returns to
+## the read loop.  Replication events (wal/seal/root) are pushed by the
+## drain task onto the same transport — chronos StreamTransport queues
+## writes as complete vectors, so concurrent writers produce whole-frame
+## interleaving (never mid-frame byte corruption).
 
 import std/[options, strutils, json]
 import chronos
@@ -26,8 +35,10 @@ proc writeFrameAsync(transp: StreamTransport; body: string) {.async.} =
 
 proc writeResponseAsync(transp: StreamTransport; columns: seq[string];
                         rows: seq[seq[SExpr]]; more: bool;
-                        error: string = "") {.async.} =
+                        error: string = ""; id: string = "") {.async.} =
   var node = newJObject()
+  if id.len > 0:
+    node["id"] = %id
   if error.len > 0:
     node["error"] = %error
     node["more"] = %false
@@ -44,8 +55,9 @@ proc writeResponseAsync(transp: StreamTransport; columns: seq[string];
     node["more"] = %more
   await transp.writeFrameAsync(msgpack2json.fromJsonNode(node))
 
-proc writeErrorAsync(transp: StreamTransport; msg: string) {.async.} =
-  await writeResponseAsync(transp, @[], @[], false, msg)
+proc writeErrorAsync(transp: StreamTransport; msg: string;
+                     id: string = "") {.async.} =
+  await writeResponseAsync(transp, @[], @[], false, msg, id)
 
 proc nextBatchSafe(sess: StreamingSession; maxRows: int): (seq[seq[SExpr]], bool) {.
     raises: [ValueError].} =
@@ -119,42 +131,38 @@ proc kvScanPairsSafe(eng: SharedEngine; cf: int): seq[(seq[byte], seq[byte])] {.
 proc execScheme(eng: SharedEngine; req: Request; transp: StreamTransport) {.async.} =
   let program = SchemeProgram(body: req.program)
   if req.mode != "query" and req.mode != "exec":
-    await transp.writeErrorAsync("unknown scheme mode: " & req.mode)
+    await transp.writeErrorAsync("unknown scheme mode: " & req.mode, req.id)
     return
-  # Only exec (DML) allocates a real tx: it stamps every written datom's `t`
-  # with a fresh txInstant datom. Query-mode programs are read-only by
-  # construction (the compiler never emits save/retract for SELECTs), so a
-  # dummy tx avoids polluting the memtable/WAL — and the replication
-  # stream — with a txInstant datom per SELECT.
   let tx = if req.mode == "exec": allocateTxSafe(eng) else: 1'i64
   if req.mode == "query":
     let proto = newQuerySession(eng.store, program, req.params, tx, none[int64]())
     let sess = newStreamingSession(proto)
     while true:
       let (rows, more) = nextBatchSafe(sess, 100)
-      await writeResponseAsync(transp, @[], rows, more)
+      await writeResponseAsync(transp, @[], rows, more, id = req.id)
       if not more: break
   else:
     let session = newQuerySession(eng.store, program, req.params, tx, none[int64]())
     let r = executeProgramSafe(session)
     if r.kind == sList and r.items.len >= 2 and r.items[0].kind == sSymbol and
        r.items[0].symval == "result":
-      await writeResponseAsync(transp, @[], @[r.items[1..^1]], false)
+      await writeResponseAsync(transp, @[], @[r.items[1..^1]], false, id = req.id)
     else:
-      await writeResponseAsync(transp, @[], @[], false, "unexpected result: " & $r)
+      await writeResponseAsync(transp, @[], @[], false,
+                                "unexpected result: " & $r, req.id)
 
-proc handleSchema(eng: SharedEngine; transp: StreamTransport) {.async.} =
+proc handleSchema(eng: SharedEngine; id: string;
+                  transp: StreamTransport) {.async.} =
   let cstats = buildStatsSafe(eng)
   var node = newJObject()
+  if id.len > 0: node["id"] = %id
   node["schema"] = statsToJson(cstats)
   node["more"] = %false
   await transp.writeFrameAsync(msgpack2json.fromJsonNode(node))
 
-proc handleAdmin(eng: SharedEngine; command: string;
+proc handleAdmin(eng: SharedEngine; command: string; id: string;
                  transp: StreamTransport) {.async.} =
   proc gcReportText(rep: seq[byte]): string =
-    # 41 bytes: roots_scanned, roots_removed, blobs_scanned, blobs_removed,
-    # live_blobs (u64 LE each) + dryRun flag.
     if rep.len < 41: return "gc: no report"
     proc u64le(rep: seq[byte]; off: int): uint64 =
       for i in 0..7: result = result or (uint64(rep[off + i]) shl uint64(8 * i))
@@ -180,15 +188,14 @@ proc handleAdmin(eng: SharedEngine; command: string;
         SExpr(kind: sInt, ival: datom.t),
       ])
       if rows.len >= 100:
-        await writeResponseAsync(transp, @["e", "attr", "value", "t"], rows, true)
+        await writeResponseAsync(transp, @["e", "attr", "value", "t"], rows,
+                                  true, id = id)
         rows.setLen(0)
-    await writeResponseAsync(transp, @["e", "attr", "value", "t"], rows, false)
+    await writeResponseAsync(transp, @["e", "attr", "value", "t"], rows,
+                              false, id = id)
   else:
     let output = case command
       of "flush":
-        # Fire-and-forget: arms the single-flight flusher; the request
-        # returns immediately and the flush runs on this loop (chunked —
-        # the loop keeps serving queries between slices).
         if eng.kv.readOnly:
           "error: read-only"
         else:
@@ -196,15 +203,12 @@ proc handleAdmin(eng: SharedEngine; command: string;
           fut.callback = proc(udata: pointer) {.gcsafe, raises: [].} = discard
           "ok: flush requested"
       of "flush-sync":
-        # Await a full pass: on return, every write prior to the request is
-        # durable (WAL-sealed, PageStore-published).
         if eng.kv.readOnly:
           "error: read-only"
         else:
           await eng.flusher.requestFlushAsync()
           "ok: flushed"
       of "gc", "gc-dry":
-        # Explicit GC pass, serialized with flushes by the shared runner.
         if eng.kv.readOnly:
           "error: read-only"
         else:
@@ -217,6 +221,7 @@ proc handleAdmin(eng: SharedEngine; command: string;
       else:
         "unknown admin command: " & command
     var node = newJObject()
+    if id.len > 0: node["id"] = %id
     node["output"] = %output
     node["more"] = %false
     await transp.writeFrameAsync(msgpack2json.fromJsonNode(node))
@@ -225,13 +230,14 @@ proc handleKv(eng: SharedEngine; req: Request; transp: StreamTransport) {.async.
   case req.kvOp
   of "put":
     kvPutSafe(eng, req.kvCf, req.kvKey, req.kvValue)
-    await writeResponseAsync(transp, @[], @[], false)
+    await writeResponseAsync(transp, @[], @[], false, id = req.id)
   of "get":
     let val = kvGetSafe(eng, req.kvCf, req.kvKey)
     if val.isSome:
-      await writeResponseAsync(transp, @[], @[@[SExpr(kind: sBytes, bytesval: val.get)]], false)
+      await writeResponseAsync(transp, @[], @[@[SExpr(kind: sBytes, bytesval: val.get)]],
+                                false, id = req.id)
     else:
-      await writeResponseAsync(transp, @[], @[], false)
+      await writeResponseAsync(transp, @[], @[], false, id = req.id)
   of "scan":
     let pairs = kvScanPairsSafe(eng, req.kvCf)
     var rows: seq[seq[SExpr]]
@@ -241,14 +247,38 @@ proc handleKv(eng: SharedEngine; req: Request; transp: StreamTransport) {.async.
         SExpr(kind: sBytes, bytesval: value),
       ])
       if rows.len >= 100:
-        await writeResponseAsync(transp, @["key", "value"], rows, true)
+        await writeResponseAsync(transp, @["key", "value"], rows, true, id = req.id)
         rows.setLen(0)
-    await writeResponseAsync(transp, @["key", "value"], rows, false)
+    await writeResponseAsync(transp, @["key", "value"], rows, false, id = req.id)
   of "delete":
     kvDeleteSafe(eng, req.kvCf, req.kvKey)
-    await writeResponseAsync(transp, @[], @[], false)
+    await writeResponseAsync(transp, @[], @[], false, id = req.id)
   else:
-    await writeResponseAsync(transp, @[], @[], false, "unknown kv op: " & req.kvOp)
+    await writeResponseAsync(transp, @[], @[], false,
+                              "unknown kv op: " & req.kvOp, req.id)
+
+# ── Pipelined request dispatch ──────────────────────────────────────────────
+
+proc processFrame(eng: SharedEngine; raw: string; id: string;
+                  transp: StreamTransport) {.async: (raises: []).} =
+  ## Parse one request frame and dispatch to the appropriate handler.
+  ## Errors are written back as response frames (tagged with the request's
+  ## correlation id) — nothing escapes this proc.
+  try:
+    var req = parseRequest(raw)
+    req.id = id  # id from the outer frame header (already parsed)
+    case req.kind
+    of rkScheme: await execScheme(eng, req, transp)
+    of rkSchema: await handleSchema(eng, req.id, transp)
+    of rkAdmin: await handleAdmin(eng, req.command, req.id, transp)
+    of rkKv: await handleKv(eng, req, transp)
+  except CatchableError as e:
+    try:
+      await transp.writeErrorAsync(e.msg, id)
+    except CatchableError:
+      discard
+
+# ── Main connection loop ────────────────────────────────────────────────────
 
 proc serveConnection*(eng: SharedEngine; transp: StreamTransport) {.
     async: (raises: []).} =
@@ -270,9 +300,11 @@ proc serveConnection*(eng: SharedEngine; transp: StreamTransport) {.
       except CatchableError:
         break
 
-    # Quick check: if this is a replication subscription, enter the
-    # long-lived push loop immediately (the client sends nothing further
-    # after the initial "replicate" request).
+    # Replication subscription: register subscriber, send snapshot, spawn
+    # the drain task, and continue reading.  The drain loop pushes
+    # wal/seal/root events onto the same transport concurrently with
+    # response frames from spawned request handlers — chronos StreamTransport
+    # queues writes as complete vectors, so frames never interleave bytes.
     if not isReplication:
       try:
         let node = toJsonNode(raw)
@@ -281,44 +313,28 @@ proc serveConnection*(eng: SharedEngine; transp: StreamTransport) {.
           var sub = Subscriber(transp: transp)
           eng.hub.register(sub)
           try:
-            # Snapshot: send sealed segments + open segment tail + root.
             let sealed = collectSnapshot(eng.kv.path, eng.kv.ps[].currentRoot)
             var tail: seq[byte] = @[]
-            # The open segment's pending buffer is the only data not yet on
-            # disk — everything up to this point is already in sealed segments.
             if eng.walw != nil:
-              tail = eng.walw.buf  # safe: we're on the loop, drain runs here
+              tail = eng.walw.buf
             let rootName = eng.kv.ps[].currentRoot
             await sub.sendSnapshot(sealed, tail, rootName, eng.kv.path)
-            # Enter the drain loop — pushes wal/seal/root frames forever.
-            await subscriberLoop(eng.kv, sub, addr eng.hub)
+            # Spawn the drain loop — runs forever, pushes events.
+            asyncSpawn subscriberLoop(eng.kv, sub, addr eng.hub)
           except CatchableError:
-            discard
-          finally:
             sub.closed = true
             eng.hub.remove(sub)
-          return
+          continue  # back to read loop (pipelined)
       except CatchableError:
         discard  # not valid JSON, fall through to normal parse
 
-    var req: Request
+    # Extract correlation id (quick JSON peek) then spawn the handler.
+    var id = ""
     try:
-      req = parseRequest(raw)
-    except CatchableError as e:
-      try:
-        await transp.writeErrorAsync("parse error: " & e.msg)
-      except CatchableError:
-        break
-      continue
+      let node = toJsonNode(raw)
+      if node.hasKey("id"):
+        id = node["id"].getStr
+    except CatchableError:
+      discard  # malformed — processFrame will surface the parse error
 
-    try:
-      case req.kind
-      of rkScheme: await execScheme(eng, req, transp)
-      of rkSchema: await handleSchema(eng, transp)
-      of rkAdmin: await handleAdmin(eng, req.command, transp)
-      of rkKv: await handleKv(eng, req, transp)
-    except CatchableError as e:
-      try:
-        await transp.writeErrorAsync(e.msg)
-      except CatchableError:
-        break
+    asyncSpawn processFrame(eng, raw, id, transp)

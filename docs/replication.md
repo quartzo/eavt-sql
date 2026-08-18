@@ -10,9 +10,10 @@ independent query engine), isolates query load from the write path, and
 keeps reads available when the data server is down (stale reads).
 
 ```
-clients ──eavt.sock──▶ GATEWAY ──sql(DML/admin/kv)──▶ DATA SERVER (writer)
-                        │  ▲
-                        │  └── replication stream (WAL bytes, seal, root)
+clients ──eavt.sock──▶ GATEWAY ──multiplexed──▶ DATA SERVER (writer)
+                        │  ▲         conn
+                        │  └── replication events (wal/seal/root)
+                        │  └── response frames (id-tagged)
                         ▼
                    SELECT/EXPLAIN execute locally
                    (QueryStore + VM — same libs as the server)
@@ -20,10 +21,36 @@ clients ──eavt.sock──▶ GATEWAY ──sql(DML/admin/kv)──▶ DATA S
 
 ## Protocol
 
-One-way stream on a dedicated downstream connection (same 4-byte-BE length +
-msgpack framing as all EAVT messages). The gateway sends
-`{"type":"replicate"}`; the data server responds with a snapshot, then pushes
-events keyed by `"ev"`:
+**One multiplexed connection** carries all gateway→server traffic: forwarded
+requests from every client AND the replication event stream.  Demultiplexing
+is by frame shape (disjoint key sets — no ambiguity):
+
+| Frame has… | Meaning | Routed to |
+|-----------|---------|-----------|
+| `"ev"` key | Replication event (server-push) | replica engine (`onReplicationEvent`) |
+| `"id"` key | Response to a forwarded request | matching pending client transport |
+
+### Correlation IDs
+
+Every forwarded request gets a monotonic `id` injected by the gateway's
+`MultiplexedConn`.  The data server echoes `id` in every response frame
+(`writeResponseAsync`, `writeErrorAsync`, schema/admin/kv writers).  The
+gateway's reader task demultiplexes: `"ev"` frames go to the replica;
+`"id"` frames are relayed to the client transport registered in the pending
+table; the pending future completes when `more=false`.
+
+Replication events carry `"ev"` only — the reader dispatches them to the
+replica's `onReplicationEvent` callback (snapshot/wal/seal/root).
+
+### Snapshot + replication events
+
+The gateway sends `{"type":"replicate"}` once on connection open.  The data
+server registers a subscriber, sends the snapshot, spawns the drain task,
+and **returns to the read loop** — subsequent request frames are dispatched
+pipelined (each spawned as an independent async handler).  Replication
+events and response frames write concurrently to the same transport;
+chronos `StreamTransport` queues writes as complete vectors — frames are
+never interleaved at the byte level.
 
 | Event | Payload | Meaning |
 |-------|---------|---------|
@@ -52,40 +79,49 @@ make interleaving safe on the single event loop.
 
 The WAL sink broadcasts bytes to subscribers **under kv.lock, before the DML
 response is written** — so by the time the gateway relays a DML response,
-its bytes are already queued server-side. The gateway sleeps 10 ms after
-relaying a DML (server drains subscribers every ~2 ms + UDS latency), so the
-next statement in the same session sees its own writes on the local replica.
+its bytes are already queued server-side.  The gateway sleeps 50 ms after
+relaying a DML (server drains subscribers every ~2 ms + UDS latency + reader
+task scheduling), so the next statement in the same session sees its own
+writes on the local replica.
 
 Schema freshness: the gateway rebuilds compile stats from the replica on
 TTL (30 s) or on "attribute resolution failed" (retry with 15 ms grace +
 resolver re-bootstrap + engine stats-cache bypass).
 
+## Pipelined server dispatch
+
+The data server reads frames in a tight loop and **spawns** each request
+handler (`asyncSpawn processFrame`).  Long-running streaming queries yield
+between batches (`nextBatch(100)`) while the loop continues accepting new
+frames.  Multiple handlers write concurrently to the same transport —
+chronos `StreamTransport` queues writes as complete vectors, so frames are
+never interleaved at the byte level.  This gives true parallelism across
+concurrent gateway clients on a single connection.
+
 ## Consistency & availability
 
 - **Data server down**: SELECT/EXPLAIN keep answering from the last
-  replicated state (stale reads); writes fail with a clear error. The
-  replication loop auto-reconnects (1 s) and re-snapshots when the server
-  returns.
-- **Transport**: UDS today. The protocol is transport-agnostic (chronos
+  replicated state (stale reads); writes fail with "data server
+  disconnected".  The `MultiplexedConn` auto-reconnects (1 s backoff),
+  re-subscribes, and re-snapshots when the server returns.
+- **Transport**: UDS today.  The protocol is transport-agnostic (chronos
   StreamTransport) — TCP replicas are a configuration change, enabling
-  large read scale-out. Blobs in S3 remove the shared-filesystem coupling
+  large read scale-out.  Blobs in S3 remove the shared-filesystem coupling
   for page reads.
 - **Single writer**: enforced by the socket stale-check (second server on
-  the same socket refuses to start). Replicas never write.
+  the same socket refuses to start).  Replicas never write.
+- **Head-of-line blocking**: the single reader task relays response frames
+  to client transports sequentially.  A slow client can delay other
+  clients' responses.  Acceptable for UDS (no real backpressure locally);
+  TCP deployments may need per-pending write queues.
 
 ## Design notes
 
-- **Two gateway→server connections (per role, not per party).** The plan
-  called for multiplexing the replication stream onto "the existing
-  connection" — but no such single connection exists: forwarding
-  connections are per-client-session and ephemeral, while the replication
-  subscription is gateway-global and must outlive every client. And the
-  wire protocol has no correlation IDs: unsolicited `wal` frames arriving
-  between a forwarded DML and its response would be indistinguishable to
-  the verbatim relay (`relayFrames` relays everything until `more=false`).
-  So the subscription is a dedicated long-lived connection opened at
-  gateway startup. True multiplexing would require adding correlation IDs
-  to the protocol — a larger redesign with no current benefit.
+- **Single multiplexed connection.**  The gateway opens one `MultiplexedConn`
+  at startup.  All client requests (scheme/admin/kv) and the replication
+  stream share this connection.  Correlation IDs (`"id"` field) disambiguate
+  responses; `"ev"` frames are the replication stream.  No per-client
+  downstream connections — the shared conn replaces them entirely.
 - v2 (replica reads sealed WAL directly from disk instead of receiving the
   open tail over the wire) was considered and **rejected**: slower,
   WAL-lifecycle state management on the server (pin/ack for segment

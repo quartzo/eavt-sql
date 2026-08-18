@@ -4,14 +4,14 @@
 ## from the replication stream (snapshot + wal/seal/root events from the
 ## data server).  SELECT/EXPLAIN queries execute against this engine; DML
 ## and schema changes are forwarded to the data server.
+##
+## Replication events arrive via the onReplicationEvent callback, which
+## the gateway's MultiplexedConn reader task invokes for every "ev" frame.
 
-import std/[json, os, tables, options]
+import std/[json, tables]
 import chronos
 import chronos_file
-import msgpack4nim/msgpack2json
-import scheme
-import kvstore, eavt, engine, hostfns
-import eavt_server_nim/client as ds
+import kvstore, eavt, engine
 import stats
 
 type
@@ -86,42 +86,7 @@ proc close*(r: ReplicaEngine) =
   if r != nil and r.kv != nil:
     r.kv.close()
 
-# ── Replication subscription ─────────────────────────────────────────────────
-
-proc connectDownstream(dataPath: string): Future[StreamTransport] {.async.} =
-  let address = initTAddress(dataPath)
-  return await address.connect()
-
-proc sendReplicateRequest(transp: StreamTransport) {.async.} =
-  var node = newJObject()
-  node["type"] = %"replicate"
-  let body = msgpack2json.fromJsonNode(node)
-  var buf = newSeq[byte](4 + body.len)
-  buf[0] = byte(body.len shr 24); buf[1] = byte(body.len shr 16)
-  buf[2] = byte(body.len shr 8); buf[3] = byte(body.len)
-  copyMem(addr buf[4], unsafeAddr body[0], body.len)
-  discard await transp.write(buf)
-
-proc readFrameAsync(transp: StreamTransport): Future[JsonNode] {.async.} =
-  ## Read one msgpack frame and parse to JsonNode.  Returns nil on disconnect.
-  var hdr: array[4, byte]
-  try:
-    await transp.readExactly(addr hdr[0], 4)
-  except CatchableError:
-    return nil
-  let len = int(hdr[0]) shl 24 or int(hdr[1]) shl 16 or
-            int(hdr[2]) shl 8 or int(hdr[3])
-  if len <= 0 or len > 100_000_000:
-    return nil
-  let raw = newString(len)
-  try:
-    await transp.readExactly(addr raw[0], len)
-  except CatchableError:
-    return nil
-  try:
-    result = toJsonNode(raw)
-  except CatchableError:
-    result = nil
+# ── Replication event handler (called by MultiplexedConn reader) ─────────────
 
 proc handleSnapshot(r: ReplicaEngine; node: JsonNode) {.async.} =
   var sealed: seq[string] = @[]
@@ -133,48 +98,26 @@ proc handleSnapshot(r: ReplicaEngine; node: JsonNode) {.async.} =
   let root = node.getOrDefault("root").getStr("")
   await applySnapshot(r, sealed, tail, root)
 
-proc replicationLoop*(r: ReplicaEngine; downstreamPath: string) {.async.} =
-  ## Long-lived async task: subscribe to the data server's replication
-  ## stream and apply events to the local replica engine.
-  while true:
-    var transp: StreamTransport
+proc onReplicationEvent*(r: ReplicaEngine; frame: JsonNode) {.gcsafe, raises: [].} =
+  ## Dispatch one replication event frame.  Called from the MultiplexedConn
+  ## reader task on the event loop — safe to touch the replica without locks.
+  let ev = frame.getOrDefault("ev").getStr
+  case ev
+  of "snapshot":
     try:
-      transp = await connectDownstream(downstreamPath)
+      asyncSpawn handleSnapshot(r, frame)
+      echo "Replication: snapshot received (",
+           frame.getOrDefault("sealed").len, " segments, root=",
+           frame.getOrDefault("root").getStr, ")"
     except CatchableError:
-      await sleepAsync(1000.milliseconds)
-      continue
-
-    try:
-      await sendReplicateRequest(transp)
-      # Read snapshot
-      let snapshot = await readFrameAsync(transp)
-      if snapshot == nil or snapshot.getOrDefault("ev").getStr != "snapshot":
-        await transp.closeWait()
-        await sleepAsync(1000.milliseconds)
-        continue
-      await handleSnapshot(r, snapshot)
-      echo "Replication: snapshot applied (",
-           snapshot["sealed"].len, " segments, root=", snapshot["root"].getStr, ")"
-
-      # Stream loop: wal/seal/root events
-      while true:
-        let frame = await readFrameAsync(transp)
-        if frame == nil: break
-        let ev = frame.getOrDefault("ev").getStr
-        case ev
-        of "wal":
-          var data: seq[byte] = @[]
-          for b in frame.getOrDefault("data"):
-            data.add(byte(b.getInt))
-          r.applyWal(data)
-        of "seal":
-          r.applySeal()
-        of "root":
-          r.applyRoot(frame.getOrDefault("name").getStr(""))
-        else: discard  # unknown event type — ignore
-    except CatchableError:
-      discard  # disconnect or parse error — reconnect
-
-    r.connected = false
-    await transp.closeWait()
-    await sleepAsync(1000.milliseconds)  # reconnect delay
+      discard
+  of "wal":
+    var data: seq[byte] = @[]
+    for b in frame.getOrDefault("data"):
+      data.add(byte(b.getInt))
+    r.applyWal(data)
+  of "seal":
+    r.applySeal()
+  of "root":
+    r.applyRoot(frame.getOrDefault("name").getStr(""))
+  else: discard

@@ -3,10 +3,10 @@
 ## Single-threaded by construction: the gateway runs on one chronos event
 ## loop, so this is a plain object — no locks.
 
-import std/[times, json, options, tables]
-import chronos
+import std/[times, tables]
 import stats
 import replica
+import downstream
 
 const SCHEMA_TTL_SECONDS = 30.0
 
@@ -14,14 +14,11 @@ type
   GatewayState* = ref object
     stats*: CompileStats
     fetchedAt*: float
-    downstreamPath*: string
+    conn*: MultiplexedConn  # single shared connection to the data server
     replica*: ReplicaEngine
 
-proc initGatewayState*(downstream: string): GatewayState =
-  result = GatewayState(
-    fetchedAt: -1.0,
-    downstreamPath: downstream,
-  )
+proc initGatewayState*(downstreamPath: string): GatewayState =
+  result = GatewayState(fetchedAt: -1.0)
 
 proc getSnapshot*(gw: GatewayState): CompileStats {.raises: [].} =
   ## Build or return cached stats from the replica engine.
