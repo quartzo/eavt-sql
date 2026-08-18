@@ -765,6 +765,28 @@ proc collectTreeUuids(s: var PageStoreInner; tree: CfTree;
       collectTreeUuids(s, CfTree(rootUuid: childUuid, height: tree.height - 1,
                                    numLeaves: 0), live)
 
+proc classifyRoots(roots: seq[string]; maxAgeSecs: uint64;
+                   maxRootCount: int): tuple[keep, remove: seq[string]] =
+  ## Split roots (newest-first) into keep/remove by age and count. Root names
+  ## embed a negated timestamp, so lexicographic order is newest-first and
+  ## roots[0] (the current root) is always kept.
+  if roots.len == 0: return
+  let latestUs = parseRootUs(roots[0])
+  let maxAgeUs = cast[int64](maxAgeSecs) * 1_000_000
+  for i, name in roots:
+    let us = parseRootUs(name)
+    let tooOld = latestUs - us > maxAgeUs
+    let beyondCount = maxRootCount > 0 and i >= maxRootCount
+    if tooOld or beyondCount:
+      result.remove.add name
+    else:
+      result.keep.add name
+
+proc hasOldRoots*(s: var PageStoreInner; maxAgeSecs: uint64;
+                  maxRootCount: int): bool =
+  ## Cheap GC-candidate check: lists roots only, walks no blobs.
+  classifyRoots(blobListRoots(s.blobs), maxAgeSecs, maxRootCount).remove.len > 0
+
 proc gcFull*(s: var PageStoreInner; maxAgeSecs: uint64; maxRootCount: int;
              dryRun: bool): seq[byte] =
   if s.readOnly:
@@ -772,18 +794,7 @@ proc gcFull*(s: var PageStoreInner; maxAgeSecs: uint64; maxRootCount: int;
   let roots = blobListRoots(s.blobs)
   if roots.len == 0: return @[]
   let rootsScanned = roots.len
-  let latestUs = parseRootUs(roots[0])
-  let maxAgeUs = cast[int64](maxAgeSecs) * 1_000_000
-  var rootsToKeep: seq[string] = @[]
-  var rootsToRemove: seq[string] = @[]
-  for i, name in roots:
-    let us = parseRootUs(name)
-    let tooOld = latestUs - us > maxAgeUs
-    let beyondCount = maxRootCount > 0 and i >= maxRootCount
-    if tooOld or beyondCount:
-      rootsToRemove.add name
-    else:
-      rootsToKeep.add name
+  let (rootsToKeep, rootsToRemove) = classifyRoots(roots, maxAgeSecs, maxRootCount)
   var liveUuids: HashSet[array[16, byte]]
   for name in rootsToKeep:
     let data = blobGetRoot(s.blobs, name)

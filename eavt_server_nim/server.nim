@@ -103,8 +103,9 @@ proc main() {.async.} =
   # local dir still hosts the WAL — blobs go to the bucket.
   createDir(dbPath)
 
-  # initSpawn() runs inside the KVStore constructor (background flush thread);
-  # journal replay happens synchronously here, before the loop serves.
+  # The KVStore is single-threaded; flush/GC run on this event loop (the
+  # async twin in nim_kvstore/async) — no spawn threads. Journal replay
+  # happens synchronously here, before the loop serves.
   let eng = initEngineSafe(cfg)
   var walw: WalWriter = nil
   walw = await attachWal(eng.kv, dbPath)

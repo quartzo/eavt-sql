@@ -2,7 +2,8 @@
 ##
 ## Unit tests for the EAVT engine (Nim API, no C-ABI).
 
-import std/[unittest, tables, os, times, options, atomics]
+import std/[unittest, tables, os, times, options]
+import std/typedthreads
 import eavt
 import kvstore
 import keys
@@ -10,13 +11,6 @@ import resolver
 import hostfns
 import engine
 import scheme
-import spawn
-
-proc waitForCount(c: var Atomic[int]; target: int; timeoutMs = 10000) =
-  let deadline = epochTime() + float64(timeoutMs) / 1000.0
-  while c.load(moRelaxed) < target:
-    doAssert epochTime() < deadline, "timeout waiting for " & $target & " spawns"
-    sleep(10)
 
 proc newTestEngine(): EavtEngine =
   let kv = newTempFileKVStore()
@@ -216,57 +210,58 @@ suite "eavt: bootstrap":
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Concurrency — multi-thread EavtEngine (same internal path as UDS saveWithT)
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Thread harness: test-local raw threads, all joined before the handles'
+# scope ends (see test_kvstore.nim for the rationale — deterministic
+# teardown, no global thread table).
 
 type
-  SaveCtx = object
-    eng: EavtEngine
-    attr: string
-    startIdx: int
-    count: int
+  EavtJobKind = enum
+    jkSaveRange   ## eavtSave(allocateEntityId(), attr, "value_"&(a+i)) for i in 0..<b
+    jkSaveSame    ## eavtSave(eid, attr, "val_"&(a+i))                 for i in 0..<b
+    jkDeclare     ## eavtDeclareAttr("shared.field")
 
-  SaveSameCtx = object
-    eng: EavtEngine
+  EavtJob = object
+    eng: ptr EavtEngine
+    attr: string
     eid: int64
-    attr: string
-    startIdx: int
-    count: int
+    a, b: int
+    kind: EavtJobKind
 
-  DeclareCtx = object
-    eng: EavtEngine
+proc eavtJobWorker(job: EavtJob) {.thread.} =
+  let eng = job.eng[]
+  case job.kind
+  of jkSaveRange:
+    for i in 0..<job.b:
+      let idx = job.a + i
+      discard eng.eavtSave(eng.allocateEntityId(), job.attr, "value_" & $idx, 1)
+  of jkSaveSame:
+    for i in 0..<job.b:
+      let idx = job.a + i
+      discard eng.eavtSave(job.eid, job.attr, "val_" & $idx, 1)
+  of jkDeclare:
+    discard eng.eavtDeclareAttr("shared.field", DbTypeString, false)
 
-proc saveWorkerAt(engAddr: ptr EavtEngine; attr: string; startIdx, count: int) {.gcsafe.} =
-  let eng = engAddr[]
-  for i in 0..<count:
-    let idx = startIdx + i
-    discard eng.eavtSave(eng.allocateEntityId(), attr, "value_" & $idx, 1)
-
-proc saveToSameEntityAt(engAddr: ptr EavtEngine; eid: int64; attr: string; startIdx, count: int) {.gcsafe.} =
-  let eng = engAddr[]
-  for i in 0..<count:
-    let idx = startIdx + i
-    discard eng.eavtSave(eid, attr, "val_" & $idx, 1)
-
-proc declareWorkerAt(engAddr: ptr EavtEngine) {.gcsafe.} =
-  let eng = engAddr[]
-  discard eng.eavtDeclareAttr("shared.field", DbTypeString, false)
+proc runJobs(jobs: openArray[EavtJob]) =
+  var ts = newSeq[Thread[EavtJob]](jobs.len)
+  for i in 0..<jobs.len:
+    createThread(ts[i], eavtJobWorker, jobs[i])
+  for t in mitems(ts):
+    joinThread(t)
 
 suite "eavt: concurrency":
   proc runConcurrentSavesDifferent() =
-    initSpawn()
     var eng = newTestEngine()
     discard eng.eavtDeclareAttr("person.name", DbTypeString, false)
 
     const N = 4
     const M = 20
-    var done: Atomic[int]
-    done.store(0, moRelaxed)
+    var jobs: seq[EavtJob]
     for t in 0..<N:
-      let startIdx = t * M
-      spawn(proc() {.gcsafe.} =
-        saveWorkerAt(addr eng, "person.name", startIdx, M)
-        discard done.fetchAdd(1, moRelaxed))
-    waitForCount(done, N)
+      jobs.add EavtJob(eng: addr eng, attr: "person.name", a: t * M, b: M,
+                       kind: jkSaveRange)
+    runJobs(jobs)
 
     var found = 0
     let mc = eng.kv.openScanCursor(0)
@@ -278,21 +273,17 @@ suite "eavt: concurrency":
     runConcurrentSavesDifferent()
 
   proc runConcurrentSavesSame() =
-    initSpawn()
     var eng = newTestEngine()
     discard eng.eavtDeclareAttr("counter.value", DbTypeString, false)
     let eid = eng.allocateEntityId()
 
     const N = 4
     const M = 25
-    var done: Atomic[int]
-    done.store(0, moRelaxed)
+    var jobs: seq[EavtJob]
     for t in 0..<N:
-      let startIdx = t * M
-      spawn(proc() {.gcsafe.} =
-        saveToSameEntityAt(addr eng, eid, "counter.value", startIdx, M)
-        discard done.fetchAdd(1, moRelaxed))
-    waitForCount(done, N)
+      jobs.add EavtJob(eng: addr eng, attr: "counter.value", eid: eid,
+                       a: t * M, b: M, kind: jkSaveSame)
+    runJobs(jobs)
 
     let ePrefix = encodeEid(eid)
     var activeCount = 0
@@ -308,17 +299,13 @@ suite "eavt: concurrency":
     runConcurrentSavesSame()
 
   proc runConcurrentDeclares() =
-    initSpawn()
     var eng = newTestEngine()
 
     const N = 6
-    var done: Atomic[int]
-    done.store(0, moRelaxed)
+    var jobs: seq[EavtJob]
     for t in 0..<N:
-      spawn(proc() {.gcsafe.} =
-        declareWorkerAt(addr eng)
-        discard done.fetchAdd(1, moRelaxed))
-    waitForCount(done, N)
+      jobs.add EavtJob(eng: addr eng, kind: jkDeclare)
+    runJobs(jobs)
 
     let aid = eng.lookupAttr("shared.field")
     check aid.isSome

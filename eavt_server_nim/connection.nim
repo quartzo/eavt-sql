@@ -145,8 +145,6 @@ proc handleSchema(eng: SharedEngine; transp: StreamTransport) {.async.} =
 
 proc handleAdmin(eng: SharedEngine; command: string;
                  transp: StreamTransport) {.async.} =
-  proc flushSettled(): bool =
-    eng.kv.flushStartSeq() <= eng.kv.flushEndSeq()
   if command.startsWith("dump"):
     let parts = command.splitWhitespace()
     let index = if parts.len >= 2: parts[1].toUpperAscii() else: "EAVT"
@@ -172,17 +170,14 @@ proc handleAdmin(eng: SharedEngine; command: string;
   else:
     let output = case command
       of "flush":
+        # Transitional (until the async flusher is wired in): schedule via
+        # the hook if installed, else no-op. The hook never blocks the loop.
         kvstore.requestFlush(eng.kv)
         "ok: flush requested"
       of "flush-sync":
-        # Wait async for any in-flight background flush, then arm one and
-        # wait for it — the heavy work stays on the flush thread, never the
-        # event loop.
-        while not flushSettled():
-          await sleepAsync(2.milliseconds)
-        kvstore.requestFlush(eng.kv)
-        while not flushSettled():
-          await sleepAsync(2.milliseconds)
+        # Inline synchronous flush. Transitional until flushAsync lands
+        # (then this awaits it — same semantics, no loop blocking).
+        kvstore.flushSync(eng.kv)
         "ok: flushed"
       of "status":
         "memtable: " & $eng.kv.memtableSize() & " bytes"
