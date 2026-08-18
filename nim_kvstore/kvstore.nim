@@ -1,6 +1,12 @@
 ## kvstore.nim — Nim KVStore (put, get, scan, flush, GC, cursor merge).
 ##
 ## Orchestration layer: coordinates MemTable + PageStore + Journal.
+##
+## Threading: NONE. This module is single-threaded (the server runs it on its
+## chronos loop; tests run it on the main thread). `lock` only exists to keep
+## the loop's critical sections explicit and to pair with PageStore tree
+## swaps. The async twin (flush/GC via the blob pool, chunked treap drain)
+## lives in async/kvstore_async.nim.
 
 import std/[tables, strutils, os, options, times, random, algorithm]
 import std/[osproc, exitprocs]
@@ -13,7 +19,6 @@ import nim_memtable/treap_backend as mt_be
 import treap_cursor
 import page_cursor
 import query/cursor
-import spawn
 export cursor
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -25,7 +30,10 @@ type
     mt*: mt_be.MemTable
     mtSize*: uint64
     flushRoots*: seq[mt_be.TreapNode]
-    lock: Lock
+    ## Guards capture/publish critical sections (kept explicit even though
+    ## the owner is single-threaded; pairs with PageStore tree swaps — see
+    ## openScanCursor). Exported for the async twin in async/kvstore_async.
+    lock*: Lock
     config*: Table[string, string]
     path*: string
     readOnly*: bool
@@ -33,13 +41,12 @@ type
     flushThreshold*: uint64
     gcMaxAgeSecs*: uint64
     gcMaxRootCount*: int
-    # ── Background-flush coordination ──
-    # Monotonic counters: bumped under `lock`. "In flight" ≡ start > end.
-    flushStart: Atomic[uint64]
-    flushEnd: Atomic[uint64]
-    # Set by requestFlush while a flush is running; the running flush
-    # clears it and re-iterates, so a request made mid-flush is honoured.
-    flushPending: Atomic[bool]
+    ## Flush arming hook: called (on the owner thread, OUTSIDE `kv.lock`)
+    ## when a write crosses flushThreshold and by requestFlush(). The async
+    ## server installs a proc that schedules flushAsync on its event loop;
+    ## nil (tests, sync callers) means "no background flusher" — call
+    ## flush()/flushSync() explicitly.
+    onFlushRequest*: proc () {.gcsafe.}
     ## When set, journal bytes (same format as the journal file) are handed
     ## to this sink instead of being written to the journal file inline —
     ## the async server buffers them on its event loop (group-commit) and
@@ -49,10 +56,10 @@ type
     ## their tempdir-per-store pattern).
     ownsPath*: bool
     ## WAL rotation hooks (server with journalSink installed).
-    ## journalSeal is called by flush() at capture time (under kv.lock, from
-    ## the flush thread): it seals the current WAL segment at the logical
-    ## byte boundary of the capture — writes arriving after the seal land in
-    ## the NEXT segment. Returns the boundary.
+    ## journalSeal is called by flush() at capture time (under kv.lock, on
+    ## the flushing context — the loop thread): it seals the current WAL
+    ## segment at the logical byte boundary of the capture — writes arriving
+    ## after the seal land in the NEXT segment. Returns the boundary.
     journalSeal*: proc (): int64 {.gcsafe, raises: [].}
     ## Set by flush() after commitMerge published the new root: every record
     ## with logical position < walDurableUpTo is durable in the PageStore, so
@@ -66,7 +73,6 @@ type
 
 proc requestFlush*(kv: KVStore) {.gcsafe.}
 proc flushSync*(kv: KVStore) {.gcsafe.}
-proc runBackgroundFlush*(kv: KVStore) {.gcsafe.}
 
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -93,7 +99,6 @@ proc newKVStore*(config: Table[string, string]): KVStore =
   result.gcMaxRootCount = parseInt(config.getOrDefault("gc_root_count", "10"))
   initLock(result.lock)
   result.walDurableUpTo.store(-1'i64, moRelaxed)
-  initSpawn()
   # Replay journal: legacy single file first (pre-rotation format), then
   # segments in numeric order (later segments win — newer records overwrite
   # older ones during batch apply). A torn tail (crash mid-write) ends that
@@ -348,79 +353,27 @@ proc flush*(kv: KVStore) {.gcsafe.} =
     if sealBoundary >= 0:
       kv.walDurableUpTo.store(sealBoundary, moRelease)
 
-# ── Background-flush API ──
+# ── Flush arming ──
 #
-# Two flavours:
-#   requestFlush()       — async, fire-and-forget. Arms a background flush
-#                          (bumps flushStart) and invokes onFlushRequest.
-#   flushSync()          — synchronous. Waits for any in-flight flush via
-#                          100ms polling (no Cond), then runs one inline,
-#                          re-iterating if flushPending was set meanwhile.
-# runBackgroundFlush() is the loop spawned by onFlushRequest: it drains the
-# MemTable and re-iterates as long as flushPending is set on completion.
-#
-# Invariant: only one flush runs at a time. Background and sync mutually
-# exclude via "flushStart > flushEnd" (the in-flight slot); each takes the
-# slot by bumping flushStart before doing any work.
-
-proc flushStartSeq*(kv: KVStore): uint64 {.gcsafe.} =
-  kv.flushStart.load(moRelaxed)
-
-proc flushEndSeq*(kv: KVStore): uint64 {.gcsafe.} =
-  kv.flushEnd.load(moRelaxed)
+# requestFlush() dispatches to the onFlushRequest hook (installed by the
+# server; nil in tests). The heavy work lives in one of two places:
+#   flush()/flushSync()  — inline, synchronous (tests, tooling);
+#   async/kvstore_async.nim flushAsync() — chunked, blob-pool backed
+#     (the server's event loop).
+# Both use the same capture/publish steps as flush(), so WAL sealing and
+# walDurableUpTo publication behave identically.
 
 proc requestFlush*(kv: KVStore) {.gcsafe.} =
-  ## Ask for a background flush. Idempotent. If a flush is already running,
-  ## marks flushPending so the runner re-iterates; otherwise arms a fresh
-  ## flush (flushStart++) and spawns runBackgroundFlush. The storage is
-  ## self-contained — no external wiring needed.
-  kv.flushPending.store(true, moRelaxed)
-  var fire = false
-  kv.lock.withLock:
-    if kv.flushStart.load(moRelaxed) == kv.flushEnd.load(moRelaxed):
-      discard kv.flushStart.fetchAdd(1, moRelaxed)
-      fire = true
-  if fire:
-    spawn(proc() {.gcsafe.} = runBackgroundFlush(kv))
-
-proc runBackgroundFlush*(kv: KVStore) {.gcsafe.} =
-  ## Background flush loop. Spawned by requestFlush. Drains the MemTable
-  ## and, if flushPending was set while running, re-iterates so concurrent
-  ## writes are not lost. Caller must NOT hold `kv.lock`.
-  while true:
-    kv.flush()
-    var cont = false
-    kv.lock.withLock:
-      discard kv.flushEnd.fetchAdd(1, moRelaxed)
-      if kv.flushPending.load(moRelaxed):
-        kv.flushPending.store(false, moRelaxed)
-        discard kv.flushStart.fetchAdd(1, moRelaxed)
-        cont = true
-    if not cont: break
+  ## Ask the installed hook to schedule a flush. Idempotent by contract
+  ## (the async flusher collapses concurrent requests). No hook: no-op.
+  if kv.onFlushRequest != nil:
+    kv.onFlushRequest()
 
 proc flushSync*(kv: KVStore) {.gcsafe.} =
-  ## Synchronous flush. Waits for any in-flight flush (100ms polling), then
-  ## runs one inline, re-iterating if flushPending was set meanwhile. On
-  ## return, every write prior to the call is durable.
-  while true:
-    var inFlight = false
-    kv.lock.withLock:
-      inFlight = kv.flushStart.load(moRelaxed) > kv.flushEnd.load(moRelaxed)
-    if not inFlight: break
-    sleep(100)
-  kv.lock.withLock:
-    discard kv.flushStart.fetchAdd(1, moRelaxed)
-    kv.flushPending.store(false, moRelaxed)
-  while true:
-    kv.flush()
-    var cont = false
-    kv.lock.withLock:
-      discard kv.flushEnd.fetchAdd(1, moRelaxed)
-      if kv.flushPending.load(moRelaxed):
-        kv.flushPending.store(false, moRelaxed)
-        discard kv.flushStart.fetchAdd(1, moRelaxed)
-        cont = true
-    if not cont: break
+  ## Synchronous flush — with no background flusher thread, this is simply
+  ## an inline flush() (kept as a separate name for call-site clarity).
+  ## On return, every write prior to the call is durable.
+  kv.flush()
 
 proc batchWrite*(kv: KVStore; ops: openArray[byte]) {.gcsafe.} =
   var needsFlush = false

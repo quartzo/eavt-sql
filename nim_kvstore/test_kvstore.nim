@@ -1,20 +1,15 @@
 ## test_kvstore.nim — Unit tests for nim_kvstore.
 
-import std/[unittest, options, tables, strutils, math, os, times, atomics]
+import std/[unittest, options, tables, strutils, math, os, times]
+import std/typedthreads
 import file/all
 import journal/all
 import nim_memtable/all
 import pages
 import page_store
+import blobstore
 import kvstore
 import scheme
-import spawn
-
-proc waitForCount(c: var Atomic[int]; target: int; timeoutMs = 10000) =
-  let deadline = epochTime() + float64(timeoutMs) / 1000.0
-  while c.load(moRelaxed) < target:
-    doAssert epochTime() < deadline, "timeout waiting for " & $target & " spawns"
-    sleep(10)
 
 proc scanKeys(kv: KVStore; cf: int; prefix: seq[byte] = @[]): seq[seq[byte]] =
   let mc = kv.openScanCursor(cf)
@@ -455,33 +450,59 @@ suite "v2scanner_leap":
 # KVStore — concurrency tests
 # ═══════════════════════════════════════════════════════════════════════════════════
 
-# spawn-friendly workers (generate their keys from simple params so
-# closures only capture `addr kv` + integers, keeping the GC-safety prover
-# happy without capturing seqs/refs).
+# Thread harness: test-local raw threads, joined before the handle's scope
+# ends. This avoids the createThread-on-stack race (AGENTS.md: the join
+# happens while the local is alive, so nimZeroMem can never race the child's
+# descriptor read) and, unlike the removed global-spawn table, thread args
+# are destroyed deterministically at scope exit on the main thread.
 
-proc putRangeAt(kvAddr: ptr KVStore; cf, startKey, count: int) {.gcsafe.} =
-  let kv = kvAddr[]
-  for i in 0..<count:
-    kv.put(cf, @[byte(startKey + i)])
+type
+  PutterKind = enum
+    pkPutRange     ## put(cf, @[byte(a+i)])        for i in 0..<b
+    pkPutTagged    ## put(cf, @[byte(a), byte(i)]) for i in 0..<b  (a = tag)
+    pkPutTwoByte   ## put(cf, 2-byte LE i)         for i in 0..<a
+    pkFlush        ## flush()
+    pkPutKvTagged  ## putKv(cf, [a,i], [a,i])      for i in 0..<b
+    pkPutKvCont    ## putKv(cf, [a+i], [(a+i)*2])  for i in 0..<b
 
-proc putThreadTaggedAt(kvAddr: ptr KVStore; cf, tag, count: int) {.gcsafe.} =
-  let kv = kvAddr[]
-  for i in 0..<count:
-    # 2-byte keys: byte((tag shl 8) or i) truncated to byte(i), which made
-    # distinct threads write the same keys (last-writer-wins).
-    kv.put(cf, @[byte(tag), byte(i)])
+  PutterArg = object
+    kv: ptr KVStore
+    cf, a, b: int
+    kind: PutterKind
 
-proc putTwoByteAt(kvAddr: ptr KVStore; cf, count: int) {.gcsafe.} =
-  let kv = kvAddr[]
-  for i in 0..<count:
-    kv.put(cf, @[byte(i and 0xFF), byte((i shr 8) and 0xFF)])
+proc putterWorker(arg: PutterArg) {.thread.} =
+  let kv = arg.kv[]
+  case arg.kind
+  of pkPutRange:
+    for i in 0..<arg.b:
+      kv.put(arg.cf, @[byte(arg.a + i)])
+  of pkPutTagged:
+    for i in 0..<arg.b:
+      kv.put(arg.cf, @[byte(arg.a), byte(i)])
+  of pkPutTwoByte:
+    for i in 0..<arg.a:
+      kv.put(arg.cf, @[byte(i and 0xFF), byte((i shr 8) and 0xFF)])
+  of pkFlush:
+    kv.flush()
+  of pkPutKvTagged:
+    for i in 0..<arg.b:
+      kv.putKv(arg.cf, @[byte(arg.a), byte(i)], @[byte(arg.a), byte(i)])
+  of pkPutKvCont:
+    for i in 0..<arg.b:
+      let k = arg.a + i
+      kv.putKv(arg.cf, @[byte(k)], @[byte(k * 2)])
 
-proc flushAt(kvAddr: ptr KVStore) {.gcsafe.} =
-  kvAddr[].flush()
+proc runThreads(args: openArray[PutterArg]) =
+  ## Launch one thread per arg and join ALL of them before returning —
+  ## teardown is deterministic and happens on this thread.
+  var ts = newSeq[Thread[PutterArg]](args.len)
+  for i in 0..<args.len:
+    createThread(ts[i], putterWorker, args[i])
+  for t in mitems(ts):
+    joinThread(t)
 
 suite "kvstore: concurrency — puts":
   proc runConcurrentPuts() =
-    initSpawn()
     var kv = newTempFileKVStore()
     const N = 4
     const M = 50
@@ -491,19 +512,10 @@ suite "kvstore: concurrency — puts":
       for i in 0..<M:
         threadKeys[t][i] = @[byte(t), byte(i)]
 
-    var done: Atomic[int]
-    done.store(0, moRelaxed)
-
-    # Factory: see runConcurrentPutKv — direct loop-var capture duplicates
-    # the value across spawned threads.
-    proc makePutter(kvAddr: ptr KVStore; t: int): proc() {.gcsafe.} =
-      result = proc() {.gcsafe.} =
-        putThreadTaggedAt(kvAddr, 0, t, M)
-        discard done.fetchAdd(1, moRelaxed)
-
+    var args: seq[PutterArg]
     for t in 0..<N:
-      spawn(makePutter(addr kv, t))
-    waitForCount(done, N)
+      args.add PutterArg(kv: addr kv, cf: 0, a: t, b: M, kind: pkPutTagged)
+    runThreads(args)
 
     var count = 0
     for t in 0..<N:
@@ -541,7 +553,6 @@ suite "kvstore: concurrency — puts":
 
 suite "kvstore: concurrency — scan snapshot isolation":
   proc runCursorBeforeConcurrentWrites() =
-    initSpawn()
     var kv = newTempFileKVStore()
     const PreN = 50
     const ExtraN = 30
@@ -557,12 +568,7 @@ suite "kvstore: concurrency — scan snapshot isolation":
 
     let mcBefore = kv.openScanCursor(0)
 
-    var done: Atomic[int]
-    done.store(0, moRelaxed)
-    spawn(proc() {.gcsafe.} =
-      putRangeAt(addr kv, 0, PreN, ExtraN)
-      discard done.fetchAdd(1, moRelaxed))
-    waitForCount(done, 1)
+    runThreads(@[PutterArg(kv: addr kv, cf: 0, a: PreN, b: ExtraN, kind: pkPutRange)])
 
     var oldCount = 0
     while mcBefore.next().isSome:
@@ -608,7 +614,6 @@ suite "kvstore: concurrency — scan snapshot isolation":
 
 suite "kvstore: concurrency — flush atomicity":
   proc runFlushAtomicity() =
-    initSpawn()
     var kv = newTempFileKVStore()
 
     const PreN = 40
@@ -621,15 +626,9 @@ suite "kvstore: concurrency — flush atomicity":
     for i in 0..<DuringN:
       duringKeys[i] = @[byte(PreN + i)]
 
-    var done: Atomic[int]
-    done.store(0, moRelaxed)
-    spawn(proc() {.gcsafe.} =
-      putRangeAt(addr kv, 0, PreN, DuringN)
-      discard done.fetchAdd(1, moRelaxed))
-    spawn(proc() {.gcsafe.} =
-      flushAt(addr kv)
-      discard done.fetchAdd(1, moRelaxed))
-    waitForCount(done, 2)
+    runThreads(@[
+      PutterArg(kv: addr kv, cf: 0, a: PreN, b: DuringN, kind: pkPutRange),
+      PutterArg(kv: addr kv, kind: pkFlush)])
 
     for i in 0..<PreN:
       check kv.get(0, @[byte(i)])
@@ -670,7 +669,6 @@ suite "kvstore: concurrency — stress":
 
 suite "kvstore: concurrency — put + get integrity":
   proc runBaselineVisible() =
-    initSpawn()
     var kv = newTempFileKVStore()
 
     const BaselineN = 40
@@ -684,12 +682,9 @@ suite "kvstore: concurrency — put + get integrity":
     var extraKeys = newSeq[seq[byte]](ExtraPerThread)
     for i in 0..<ExtraPerThread:
       extraKeys[i] = @[byte(BaselineN + i)]
-    var done: Atomic[int]
-    done.store(0, moRelaxed)
-    spawn(proc() {.gcsafe.} =
-      putRangeAt(addr kv, 0, BaselineN, ExtraPerThread)
-      discard done.fetchAdd(1, moRelaxed))
-    waitForCount(done, 1)
+
+    runThreads(@[PutterArg(kv: addr kv, cf: 0, a: BaselineN, b: ExtraPerThread,
+                           kind: pkPutRange)])
 
     for i in 0..<BaselineN:
       check kv.get(0, baseline[i])
@@ -703,7 +698,6 @@ suite "kvstore: concurrency — put + get integrity":
     runBaselineVisible()
 
   proc runNoFalseNegatives() =
-    initSpawn()
     var kv = newTempFileKVStore()
 
     const N = 60
@@ -711,12 +705,7 @@ suite "kvstore: concurrency — put + get integrity":
     for i in 0..<N:
       allKeys[i] = @[byte(i and 0xFF), byte((i shr 8) and 0xFF)]
 
-    var done: Atomic[int]
-    done.store(0, moRelaxed)
-    spawn(proc() {.gcsafe.} =
-      putTwoByteAt(addr kv, 0, N)
-      discard done.fetchAdd(1, moRelaxed))
-    waitForCount(done, 1)
+    runThreads(@[PutterArg(kv: addr kv, cf: 0, a: N, kind: pkPutTwoByte)])
 
     for i in 0..<N:
       check kv.get(0, allKeys[i])
@@ -863,32 +852,14 @@ suite "kvstore: key-value scan":
 
 suite "kvstore: key-value concurrency":
   proc runConcurrentPutKv() =
-    initSpawn()
     var kv = newTempFileKVStore()
     const N = 4
     const M = 30
 
-    var done: Atomic[int]
-    done.store(0, moRelaxed)
-
-    # Closure factory: parameters captured by a returned closure are
-    # heap-allocated per call. Capturing the loop variable `t` directly makes
-    # every spawned thread read the same stack slot late — values get
-    # duplicated (t=1,2,3,3) and one thread's writes vanish.
-    proc makePutter(kv: ptr KVStore; t: int): proc() {.gcsafe.} =
-      result = proc() {.gcsafe.} =
-        # Use same pattern as putThreadTaggedAt but with putKv.
-        # 2-byte keys: byte((t shl 8) or i) truncates to byte(i), which
-        # made all threads write the same 30 keys (last-writer-wins).
-        for i in 0..<M:
-          let key = @[byte(t), byte(i)]
-          let val = @[byte(t), byte(i)]
-          kv[].putKv(10, key, val)
-        discard done.fetchAdd(1, moRelaxed)
-
+    var args: seq[PutterArg]
     for t in 0..<N:
-      spawn(makePutter(addr kv, t))
-    waitForCount(done, N)
+      args.add PutterArg(kv: addr kv, cf: 10, a: t, b: M, kind: pkPutKvTagged)
+    runThreads(args)
 
     for t in 0..<N:
       for i in 0..<M:
@@ -902,23 +873,14 @@ suite "kvstore: key-value concurrency":
     runConcurrentPutKv()
 
   proc runPutKvSurvivesConcurrentFlush() =
-    initSpawn()
     var kv = newTempFileKVStore()
 
     for i in 0..<30:
       kv.putKv(10, @[byte(i)], @[byte(i * 2)])
 
-    var done: Atomic[int]
-    done.store(0, moRelaxed)
-    spawn(proc() {.gcsafe.} =
-      let kvRef = (addr kv)[]
-      for i in 30..<50:
-        kvRef.putKv(10, @[byte(i)], @[byte(i * 2)])
-      discard done.fetchAdd(1, moRelaxed))
-    spawn(proc() {.gcsafe.} =
-      flushAt(addr kv)
-      discard done.fetchAdd(1, moRelaxed))
-    waitForCount(done, 2)
+    runThreads(@[
+      PutterArg(kv: addr kv, cf: 10, a: 30, b: 20, kind: pkPutKvCont),
+      PutterArg(kv: addr kv, kind: pkFlush)])
 
     for i in 0..<50:
       let val = kv.getKv(10, @[byte(i)])
@@ -1016,3 +978,62 @@ suite "kvstore: key-value delete":
     kv.flush()
     check kv.getKv(10, @[byte(5)]).isNone
     kv.close()
+
+# ── GC (synchronous gcFull; the async post-flush auto-GC lives in
+# async/test_kvstore_async.nim) ──
+
+suite "kvstore: GC (sync gcFull)":
+  test "gcFull prunes roots past gc_root_count":
+    var extra = initTable[string, string]()
+    extra["gc_root_count"] = "3"
+    let kv = newTempFileKVStore(extra)
+    defer: kv.close()
+    for round in 0..<6:
+      for i in 0..<50:
+        kv.put(0, @[byte(round), byte(i)])
+      kv.flush()
+    check kv.ps[].blobs.listRoots().len == 7  # initial + 6 flushes
+    discard gcFull(kv.ps[], kv.gcMaxAgeSecs, kv.gcMaxRootCount, false)
+    check kv.ps[].blobs.listRoots().len <= 3
+    check scanKeys(kv, 0).len == 300
+
+  test "gcFull dry run leaves store intact and reports":
+    let kv = newTempFileKVStore()
+    defer: kv.close()
+    for i in 0..<10: kv.put(0, @[byte(i)])
+    kv.flush()
+    let rootsBefore = kv.ps[].blobs.listRoots().len
+    check rootsBefore >= 1
+    let rep = gcFull(kv.ps[], kv.gcMaxAgeSecs, kv.gcMaxRootCount, true)
+    check rep.len == 41
+    check rep[40] == 1  # dryRun flag
+    check kv.ps[].blobs.listRoots().len == rootsBefore
+
+  test "gcFull removes roots past gc_root_count":
+    var extra = initTable[string, string]()
+    extra["gc_root_count"] = "2"
+    let kv = newTempFileKVStore(extra)
+    defer: kv.close()
+    for round in 0..<5:
+      kv.put(0, @[byte(round)])
+      kv.flush()
+    check kv.ps[].blobs.listRoots().len == 6  # initial + 5 flushes
+    let rep = gcFull(kv.ps[], kv.gcMaxAgeSecs, kv.gcMaxRootCount, false)
+    check rep.len == 41
+    check rep[40] == 0
+    check kv.ps[].blobs.listRoots().len <= 2
+    check scanKeys(kv, 0).len == 5
+
+  test "flush with GC leaves data readable across many rounds":
+    var extra = initTable[string, string]()
+    extra["gc_root_count"] = "1"
+    let kv = newTempFileKVStore(extra)
+    defer: kv.close()
+    for round in 0..<4:
+      for i in 0..<25:
+        kv.put(0, @[byte(round), byte(i)])
+      kv.flush()
+      discard gcFull(kv.ps[], kv.gcMaxAgeSecs, kv.gcMaxRootCount, false)
+    check kv.ps[].blobs.listRoots().len <= 1
+    check scanKeys(kv, 0).len == 100
+

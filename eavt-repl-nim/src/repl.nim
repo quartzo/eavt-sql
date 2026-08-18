@@ -54,6 +54,11 @@ proc cmdFlushSync() =
     let r = gClient.admin("flush-sync")
     echo r
 
+proc cmdGc(dryRun: bool) =
+  catchDisconnect:
+    let r = gClient.admin(if dryRun: "gc-dry" else: "gc")
+    echo r
+
 proc cmdStatus() =
   catchDisconnect:
     let r = gClient.admin("status")
@@ -109,6 +114,8 @@ Dot commands (no semicolon):
   .help                  Show this help
   .flush                 Request background flush (returns immediately)
   .flush-sync            Flush and wait for completion
+  .gc                    Run blob GC now (report roots/blobs removed)
+  .gc-dry                Dry-run GC (report only, removes nothing)
   .status                Database overview
   .tree                  Per-column-family stats
   .memtable              MemTable contents and sizes
@@ -133,6 +140,10 @@ proc handleDot(line: string): bool =
     cmdFlush()
   of ".flush-sync":
     cmdFlushSync()
+  of ".gc":
+    cmdGc(false)
+  of ".gc-dry":
+    cmdGc(true)
   of ".status":
     cmdStatus()
   of ".tree":

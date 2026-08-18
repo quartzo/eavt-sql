@@ -4,6 +4,7 @@ import std/[unittest, options, tables, strutils, math, os, times, random]
 import pages
 import page_store
 import page_cursor
+import blobstore
 
 # ── Helpers ──
 
@@ -192,3 +193,64 @@ suite "page_cursor: seek":
     let c2 = PageStoreCursor(s: s, cf: 0, rootUuid: s[].trees[0].rootUuid, height: s[].trees[0].height)
     let collected2 = collectAll(c2)
     check collected2.len == 20
+
+# ── GC ──
+
+proc u64le(b: seq[byte]; off: int): uint64 =
+  for i in 0..7: result = result or (uint64(b[off + i]) shl uint64(8 * i))
+
+suite "page_store: GC":
+  test "gcFull removes orphan blobs":
+    let s = newMemStore()
+    defer: closePageStore(s)
+    commitKeys(s[], 0, bigKeys(50, 0))
+    # Orphan blob: referenced by no root.
+    discard s[].blobs.put(@[byte(1), 2, 3])
+    let before = s[].blobs.list().len
+    check before >= 2
+    let rep = s[].gcFull(0, 0, false)  # keep only the latest root
+    check u64le(rep, 16) == uint64(before)  # blobs_scanned
+    check u64le(rep, 24) == 1'u64           # blobs_removed: just the orphan
+    check u64le(rep, 0) >= 1'u64             # roots_scanned >= 1
+    check s[].blobs.list().len == before - 1
+    # Live keys survive.
+    let c = PageStoreCursor(s: s, cf: 0, rootUuid: s[].trees[0].rootUuid, height: s[].trees[0].height)
+    check collectAll(c).len == 50
+
+  test "gcFull dry run preserves everything":
+    let s = newMemStore()
+    defer: closePageStore(s)
+    commitKeys(s[], 0, bigKeys(10, 0))
+    commitKeys(s[], 0, bigKeys(10, 1))
+    discard s[].blobs.put(@[byte(9)])
+    let rootsBefore = s[].blobs.listRoots().len
+    let blobsBefore = s[].blobs.list().len
+    let rep = s[].gcFull(0, 0, true)
+    check rep[40] == 1                     # dryRun flag
+    # 3 roots (initial + 2 commits); age 0 keeps only the latest → 2 removed.
+    check u64le(rep, 0) == 3'u64
+    check u64le(rep, 8) == 2'u64
+    check s[].blobs.listRoots().len == rootsBefore
+    check s[].blobs.list().len == blobsBefore
+
+  test "count-based GC keeps N newest roots":
+    let s = newMemStore()
+    defer: closePageStore(s)
+    for i in 0..<5: commitKeys(s[], 0, bigKeys(3, byte(i)))
+    check s[].blobs.listRoots().len == 6  # initial root + 5 commits
+    discard s[].gcFull(43200, 3, false)  # age off, keep 3
+    check s[].blobs.listRoots().len == 3
+    # Current tree intact: all 15 keys readable.
+    let c = PageStoreCursor(s: s, cf: 0, rootUuid: s[].trees[0].rootUuid, height: s[].trees[0].height)
+    check collectAll(c).len == 15
+
+  test "hasOldRoots: false within window, true past count or age":
+    let s = newMemStore()
+    defer: closePageStore(s)
+    commitKeys(s[], 0, bigKeys(3, 0))
+    check not s[].hasOldRoots(43200, 10)
+    for i in 1..<11: commitKeys(s[], 0, bigKeys(3, byte(i)))
+    check s[].blobs.listRoots().len == 12  # initial + 11 commits
+    check s[].hasOldRoots(43200, 10)   # 12 roots > count window
+    check not s[].hasOldRoots(43200, 0)  # 0 = unlimited count
+    check s[].hasOldRoots(0, 0)        # age 0: any older-than-latest root
