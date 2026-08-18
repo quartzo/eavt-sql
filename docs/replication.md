@@ -75,6 +75,17 @@ resolver re-bootstrap + engine stats-cache bypass).
 
 ## Design notes
 
+- **Two gateway→server connections (per role, not per party).** The plan
+  called for multiplexing the replication stream onto "the existing
+  connection" — but no such single connection exists: forwarding
+  connections are per-client-session and ephemeral, while the replication
+  subscription is gateway-global and must outlive every client. And the
+  wire protocol has no correlation IDs: unsolicited `wal` frames arriving
+  between a forwarded DML and its response would be indistinguishable to
+  the verbatim relay (`relayFrames` relays everything until `more=false`).
+  So the subscription is a dedicated long-lived connection opened at
+  gateway startup. True multiplexing would require adding correlation IDs
+  to the protocol — a larger redesign with no current benefit.
 - v2 (replica reads sealed WAL directly from disk instead of receiving the
   open tail over the wire) was considered and **rejected**: slower,
   WAL-lifecycle state management on the server (pin/ack for segment

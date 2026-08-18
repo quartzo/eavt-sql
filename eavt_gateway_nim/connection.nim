@@ -195,8 +195,8 @@ proc handleSql(gw: GatewayState; dsPtr: ptr DownstreamConn; node: JsonNode;
   # statement in this session see its own writes on the local replica.
   await sleepAsync(10.milliseconds)
 
-proc handleSchema(gw: GatewayState; ds: DownstreamConn;
-                  transp: StreamTransport) {.async.} =
+proc handleSchema(gw: GatewayState; transp: StreamTransport) {.async.} =
+  ## Served from the local replica's stats — never touches the data server.
   let snap = gw.getSnapshot()
   var node = newJObject()
   node["schema"] = statsToJson(snap)
@@ -239,7 +239,7 @@ proc serveGatewayConnection*(gw: GatewayState; transp: StreamTransport) {.
         of "sql":
           await handleSql(gw, addr ds, node, transp)
         of "schema":
-          await handleSchema(gw, ds, transp)
+          await handleSchema(gw, transp)
         of "scheme", "admin", "kv":
           await ensureDs()
           await forwardRaw(ds, raw, transp)
