@@ -216,10 +216,10 @@ def _flush_empresa_batch(client, batch):
             body.append([S("save"), S("E"), "empresa.razao_social", row[1]])
         if row[2]:
             body.append([S("save"), S("E"), "empresa.natureza_juridica",
-                         [S("lookup-entity"), "natureza.codigo", row[2]]])
+                         [S("get-or-create-entity"), "natureza.codigo", row[2]]])
         if row[3]:
             body.append([S("save"), S("E"), "empresa.qualificacao_resp",
-                         [S("lookup-entity"), "qualificacao.codigo", row[3]]])
+                         [S("get-or-create-entity"), "qualificacao.codigo", row[3]]])
         if row[4]:
             body.append([S("save"), S("E"), "empresa.capital_social",
                          float(row[4].replace(",", "."))])
@@ -261,7 +261,7 @@ def merge_simples(client: EavtClient, data_dir: Path):
             continue
 
         body = [
-            [S("set!"), S("E"), [S("lookup-entity"), "empresa.cnpj_base", row[0]]],
+            [S("set!"), S("E"), [S("get-or-create-entity"), "empresa.cnpj_base", row[0]]],
         ]
         for attr, val in sets:
             body.append([S("when"), S("E"),
@@ -322,7 +322,7 @@ def _flush_estab_batch(client, batch):
         body.append([S("set!"), S("E"), [S("alloc-entity"), 4]])
         body.append([S("save"), S("E"), "estab.cnpj_completo", cnpj_full])
         body.append([S("save"), S("E"), "estab.empresa",
-                     [S("lookup-entity"), "empresa.cnpj_base", cnpj_base]])
+                     [S("get-or-create-entity"), "empresa.cnpj_base", cnpj_base]])
         if row[3]:
             body.append([S("save"), S("E"), "estab.matriz_filial", row[3]])
         if row[4]:
@@ -333,21 +333,21 @@ def _flush_estab_batch(client, batch):
             body.append([S("save"), S("E"), "estab.data_situacao", row[6]])
         if row[7]:
             body.append([S("save"), S("E"), "estab.motivo",
-                         [S("lookup-entity"), "motivo.codigo", row[7]]])
+                         [S("get-or-create-entity"), "motivo.codigo", row[7]]])
         if row[9]:
             body.append([S("save"), S("E"), "estab.pais",
-                         [S("lookup-entity"), "pais.codigo", row[9]]])
+                         [S("get-or-create-entity"), "pais.codigo", row[9]]])
         if row[10] and row[10] != ZERO_DATE:
             body.append([S("save"), S("E"), "estab.data_inicio_ativ", row[10]])
         if row[11]:
             body.append([S("save"), S("E"), "estab.cnae_principal",
-                         [S("lookup-entity"), "cnae.codigo", row[11]]])
+                         [S("get-or-create-entity"), "cnae.codigo", row[11]]])
         if row[12]:
             for code in row[12].split(","):
                 code = code.strip()
                 if code:
                     body.append([S("save"), S("E"), "estab.cnae_secundario",
-                                 [S("lookup-entity"), "cnae.codigo", code]])
+                                 [S("get-or-create-entity"), "cnae.codigo", code]])
         if row[13]:
             body.append([S("save"), S("E"), "estab.tipo_logradouro", row[13]])
         if row[14]:
@@ -364,7 +364,7 @@ def _flush_estab_batch(client, batch):
             body.append([S("save"), S("E"), "estab.uf", row[19]])
         if row[20]:
             body.append([S("save"), S("E"), "estab.municipio",
-                         [S("lookup-entity"), "municipio.codigo", row[20]]])
+                         [S("get-or-create-entity"), "municipio.codigo", row[20]]])
         if row[21]:
             body.append([S("save"), S("E"), "estab.ddd1", row[21]])
         if row[22]:
@@ -420,7 +420,7 @@ def _flush_socio_batch(client, batch):
         cnpj_base = row[0]
         body.append([S("set!"), S("E"), [S("alloc-entity"), 4]])
         body.append([S("save"), S("E"), "socio.empresa",
-                     [S("lookup-entity"), "empresa.cnpj_base", cnpj_base]])
+                     [S("get-or-create-entity"), "empresa.cnpj_base", cnpj_base]])
         if row[1]:
             body.append([S("save"), S("E"), "socio.tipo_pessoa", row[1]])
         if row[2]:
@@ -429,12 +429,12 @@ def _flush_socio_batch(client, batch):
             body.append([S("save"), S("E"), "socio.cpf_cnpj", row[3]])
         if row[4]:
             body.append([S("save"), S("E"), "socio.qualificacao",
-                         [S("lookup-entity"), "qualificacao.codigo", row[4]]])
+                         [S("get-or-create-entity"), "qualificacao.codigo", row[4]]])
         if row[5] and row[5] != ZERO_DATE:
             body.append([S("save"), S("E"), "socio.data_entrada", row[5]])
         if row[6]:
             body.append([S("save"), S("E"), "socio.pais",
-                         [S("lookup-entity"), "pais.codigo", row[6]]])
+                         [S("get-or-create-entity"), "pais.codigo", row[6]]])
         if row[10]:
             body.append([S("save"), S("E"), "socio.faixa_etaria", row[10]])
 

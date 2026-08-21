@@ -489,6 +489,22 @@ method lookupEntity(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
       return done(SExpr(kind: sInt, ival: int64(eid.get)))
     return done(newVoid())
 
+method getOrCreateEntity(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
+    ## Get-or-create by unique attribute: returns the eid of the entity holding
+    ## `value` for `attr`; if none exists, allocates in `partition` and saves.
+    let attr = expectStr(args[0])
+    let val = args[1]
+    if not h.engine.isUniqueAttr(attr):
+      raise newException(EvalError,
+        "get-or-create-entity: attribute is not UNIQUE")
+    let found = h.engine.lookupEntity(attr, val)
+    if found.isSome:
+      return done(SExpr(kind: sInt, ival: int64(found.get)))
+    let partition = if args.len > 2: uint64(expectInt(args[2])) else: 4'u64
+    let eid = h.engine.allocateInPartition(partition)
+    h.engine.saveWithT(eid, attr, val, h.tx, h.asOfTx.get(0))
+    return done(SExpr(kind: sInt, ival: eid))
+
 method lookupValue(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     let eid = expectInt(args[0])
     let attr = expectStr(args[1])

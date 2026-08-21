@@ -220,6 +220,7 @@ method retract*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = disca
 method allocEntity*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
 method txEntity*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
 method lookupEntity*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method getOrCreateEntity*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
 method lookupValue*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
 method declareAttr*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
 method declarePartition*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
@@ -741,6 +742,7 @@ proc evalExpr(expr: SExpr; env: var Environment; host: HostFns;
       of "alloc-entity": return host.allocEntity(args)
       of "tx-entity": return host.txEntity(args)
       of "lookup-entity": return host.lookupEntity(args)
+      of "get-or-create-entity": return host.getOrCreateEntity(args)
       of "lookup-value": return host.lookupValue(args)
       of "declare-attr": return host.declareAttr(args)
       of "declare-partition": return host.declarePartition(args)

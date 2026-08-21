@@ -1056,6 +1056,60 @@ suite "engine: combined roundtrip":
     let r2 = executeProgram(session)
     check r2.items[1].sval == "Zed"
 
+  test "get-or-create-entity creates then reuses":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    let prog = SchemeProgram(body: scheme.parse(
+      "(begin " &
+      "  (declare-attr \"co.reg\" \":db.type/string\" #f #t) " &
+      "  (set! a (get-or-create-entity \"co.reg\" \"R1\")) " &
+      "  (set! b (get-or-create-entity \"co.reg\" \"R1\")) " &
+      "  (set! c (get-or-create-entity \"co.reg\" \"R2\")) " &
+      "  (result a b c (lookup-value a \"co.reg\")))"))
+    let session = newQuerySession(q, prog, @[], 1, none[int64]())
+    let result = executeProgram(session)
+    let a = result.items[1].ival
+    let b = result.items[2].ival
+    let c = result.items[3].ival
+    check a > 0
+    check b == a          # same value → same entity
+    check c != a          # different value → new entity
+    check result.items[4].sval == "R1"
+
+  test "get-or-create-entity persists across sessions":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    q.declareAttrFromSql("co.reg", ":db.type/string", false, true, 1)
+
+    var prog = SchemeProgram(body: scheme.parse(
+      "(result (get-or-create-entity \"co.reg\" \"X9\"))"))
+    var session = newQuerySession(q, prog, @[], 1, none[int64]())
+    let r1 = executeProgram(session)
+    let eid = r1.items[1].ival
+
+    prog = SchemeProgram(body: scheme.parse(
+      "(result (lookup-entity \"co.reg\" \"X9\"))"))
+    session = newQuerySession(q, prog, @[], 2, none[int64]())
+    let r2 = executeProgram(session)
+    check r2.items[1].ival == eid
+
+  test "get-or-create-entity on non-unique errors":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    q.declareAttrFromSql("tag.x", ":db.type/string", true, false, 1)
+
+    let prog = SchemeProgram(body: scheme.parse(
+      "(get-or-create-entity \"tag.x\" \"anything\")"))
+    let session = newQuerySession(q, prog, @[], 0, none[int64]())
+    expect EvalError:
+      discard executeProgram(session)
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Engine: error paths
 # ═══════════════════════════════════════════════════════════════════════════════
