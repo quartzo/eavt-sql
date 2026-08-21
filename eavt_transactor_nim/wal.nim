@@ -30,6 +30,7 @@ import std/[os, strutils, algorithm, atomics]
 import chronos
 import chronos_file
 import kvstore
+import nim_memtable/treap_backend
 
 const
   FsyncIntervalMs = 100
@@ -73,13 +74,55 @@ proc openSeg(w: WalWriter; idx: int): AsyncFile {.raises: [AsyncFileError].} =
     discard  # openAsync below surfaces a real error
   result = openAsync(p, fmReadWriteExisting)  # never O_TRUNC
 
-proc sink(w: WalWriter; data: seq[byte]) {.gcsafe, raises: [].} =
-  ## Called under kv.lock on the loop thread — cheap work only.
+proc sink(w: WalWriter; entries: seq[CfKey]) {.gcsafe, raises: [].} =
+  ## Called under kv.lock on the loop thread — serializes entries directly
+  ## into the WAL buffer (w.buf) without intermediate allocations.
   if w.stopped: return
-  w.buf.add(data)
-  w.logicalEnd.inc(int64(data.len))
+  for e in entries:
+    let klen = e.key.len
+    let totKlen = 1 + klen
+    w.buf.add(byte((totKlen shr 24) and 0xFF))
+    w.buf.add(byte((totKlen shr 16) and 0xFF))
+    w.buf.add(byte((totKlen shr 8) and 0xFF))
+    w.buf.add(byte(totKlen and 0xFF))
+    w.buf.add(e.cf)
+    if klen > 0:
+      # Add key bytes one by one (avoid copyMem into seq)
+      for i in 0 ..< klen:
+        w.buf.add(e.key[i])
+    w.buf.add(0'u8)  # vlen byte 3
+    w.buf.add(0'u8)  # vlen byte 2
+    w.buf.add(0'u8)  # vlen byte 1
+    w.buf.add(1'u8)  # vlen byte 0 = 1
+    w.buf.add(0'u8)  # value = 0x00
+  let totalBytes = block:
+    var s = 0
+    for e in entries: s += 4 + 1 + e.key.len + 4 + 1
+    s
+  w.logicalEnd.inc(int64(totalBytes))
   if w.onWal != nil:
-    w.onWal(data)
+    # Legacy callback — needs serialized bytes. Build a single buffer for it.
+    # This path is only used by replication; if it becomes a bottleneck,
+    # the callback should accept CfKey entries too.
+    var tmp = newSeq[byte](totalBytes)
+    var pos = 0
+    for e in entries:
+      let klen = e.key.len
+      let totKlen = 1 + klen
+      tmp[pos] = byte((totKlen shr 24) and 0xFF)
+      tmp[pos+1] = byte((totKlen shr 16) and 0xFF)
+      tmp[pos+2] = byte((totKlen shr 8) and 0xFF)
+      tmp[pos+3] = byte(totKlen and 0xFF)
+      tmp[pos+4] = e.cf
+      if klen > 0:
+        copyMem(addr tmp[pos+5], unsafeAddr e.key[0], klen)
+      tmp[pos+5+klen] = 0
+      tmp[pos+6+klen] = 0
+      tmp[pos+7+klen] = 0
+      tmp[pos+8+klen] = 1
+      tmp[pos+9+klen] = 0
+      pos += 10 + klen
+    w.onWal(tmp)
 
 proc seal(w: WalWriter): int64 =
   ## Called by flush() at capture time, under kv.lock (flush thread). Returns
@@ -175,8 +218,8 @@ proc attachWal*(kv: KVStore; dbPath: string): Future[WalWriter] {.async.} =
   w.offset = int64(getFileSize(segPath(w.dir, w.segIdx)))
   # Capture the heap refs (never the async FutureVar) — hooks run on the
   # write path / flush thread outside this frame.
-  kv.journalSink = proc(data: seq[byte]) {.gcsafe, raises: [].} =
-    sink(w, data)
+  kv.journalSink = proc(entries: seq[CfKey]) {.gcsafe, raises: [].} =
+    sink(w, entries)
   kv.journalSeal = proc(): int64 {.gcsafe, raises: [].} =
     seal(w)
   asyncSpawn w.walCycle()

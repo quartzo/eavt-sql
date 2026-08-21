@@ -2,7 +2,7 @@
 ##
 ## Port of spier-eavt-query/src/engine/query_engine_inner.rs + lib.rs (~1293 lines Rust → Nim).
 
-import std/[options, tables, strutils, sequtils]
+import std/[options, tables, strutils, sequtils, monotimes]
 import scheme
 import kvstore
 import eavt
@@ -20,11 +20,44 @@ type
   QueryStore* = ref object of EngineOps
     eavt*: EavtEngine
     kv*: KVStore             # Nim ref — no C-ABI
+    # perf counters for saveWithT
+    saveCount*: int64
+    saveLookupAttrNs*: int64    # nanoseconds
+    saveTypeCheckNs*: int64
+    saveEncodeNs*: int64
+    saveRetractScanNs*: int64
+    saveBuildEntriesNs*: int64
+    saveBatchWriteNs*: int64
 
 proc newQueryStore*(kv: KVStore): QueryStore =
   let eng = newEavtEngine(kv)
   eng.bootstrapResolver()
   QueryStore(eavt: eng, kv: kv)
+
+proc resetSaveCounters*(q: QueryStore) =
+  q.saveCount = 0
+  q.saveLookupAttrNs = 0
+  q.saveTypeCheckNs = 0
+  q.saveEncodeNs = 0
+  q.saveRetractScanNs = 0
+  q.saveBuildEntriesNs = 0
+  q.saveBatchWriteNs = 0
+
+proc printSavePerf*(q: QueryStore) =
+  if q.saveCount == 0: return
+  let total = q.saveLookupAttrNs + q.saveTypeCheckNs + q.saveEncodeNs +
+              q.saveRetractScanNs + q.saveBuildEntriesNs + q.saveBatchWriteNs
+  template pct(ns: int64): string = formatFloat(ns.float / total.float * 100, ffDecimal, 1)
+  template ms(ns: int64): string = formatFloat(ns.float / 1_000_000, ffDecimal, 1)
+  echo "=== saveWithT perf (", q.saveCount, " calls) ==="
+  echo "  lookupAttr:     ", ms(q.saveLookupAttrNs), " ms  (", pct(q.saveLookupAttrNs), "%)"
+  echo "  typeCheck:      ", ms(q.saveTypeCheckNs), " ms  (", pct(q.saveTypeCheckNs), "%)"
+  echo "  encode:         ", ms(q.saveEncodeNs), " ms  (", pct(q.saveEncodeNs), "%)"
+  echo "  retractScan:    ", ms(q.saveRetractScanNs), " ms  (", pct(q.saveRetractScanNs), "%)"
+  echo "  buildEntries:   ", ms(q.saveBuildEntriesNs), " ms  (", pct(q.saveBuildEntriesNs), "%)"
+  echo "  batchWrite:     ", ms(q.saveBatchWriteNs), " ms  (", pct(q.saveBatchWriteNs), "%)"
+  echo "  total:          ", ms(total), " ms"
+  echo "  avg per save:   ", formatFloat(total.float / q.saveCount.float / 1_000_000, ffDecimal, 3), " ms"
 
 # ── SExpr → storage value ──
 
@@ -60,15 +93,30 @@ method openCursor(q: QueryStore; cfId: uint32; prefix: seq[byte]): Cursor =
 
 method saveWithT(q: QueryStore; eid: int64; attr: string; val: SExpr;
                   t: int64; asOf: int64) =
+  q.saveCount += 1
+  var t0 = getMonoTime()
+
   let attrIdOpt = q.eavt.lookupAttr(attr)
   if attrIdOpt.isNone:
     raise newException(EvalError, "save to undeclared attr: " & attr)
   let attrId = attrIdOpt.get
+
+  q.saveLookupAttrNs += (getMonoTime().ticks - t0.ticks)
+  t0 = getMonoTime()
+
   let vt = q.eavt.valueTypeFor(attrId).get(scanner.DbTypeString)
   let many = q.eavt.isMany(attrId)
   let mode = valueTypeToEncodeMode(vt)
+
+  q.saveTypeCheckNs += (getMonoTime().ticks - t0.ticks)
+  t0 = getMonoTime()
+
   let encoded = encodeValue(sexprToValueForType(val, vt), mode, eid)
   let indexed = q.eavt.resolver.isIndexed(attrId)
+
+  q.saveEncodeNs += (getMonoTime().ticks - t0.ticks)
+  t0 = getMonoTime()
+
   if not many:
     var ePrefix = keys.encodeEid(eid)
     ePrefix.add byte(attrId shr 24); ePrefix.add byte((attrId shr 16) and 0xFF)
@@ -79,8 +127,18 @@ method saveWithT(q: QueryStore; eid: int64; attr: string; val: SExpr;
       if (esf and 1) != 0: continue
       var retEntries = buildEavtEntries(eid, attrId, ek[12 ..< ek.len - 8], t, true, mode, indexed)
       q.eavt.batchWrite(retEntries)
+
+  q.saveRetractScanNs += (getMonoTime().ticks - t0.ticks)
+  t0 = getMonoTime()
+
   var entries = buildEavtEntries(eid, attrId, encoded, t, false, mode, indexed)
+
+  q.saveBuildEntriesNs += (getMonoTime().ticks - t0.ticks)
+  t0 = getMonoTime()
+
   q.eavt.batchWrite(entries)
+
+  q.saveBatchWriteNs += (getMonoTime().ticks - t0.ticks)
 
 method retract(q: QueryStore; eid: int64; attr: string; val: SExpr;
                 t: int64; asOf: int64) =

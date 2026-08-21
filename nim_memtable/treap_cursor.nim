@@ -2,6 +2,11 @@
 ##
 ## Iterates all keys in order. No prefix filtering — the scanner handles
 ## that via seek(). Uses stack-based in-order traversal.
+##
+## When a cursor is created from a root, it increments root.readerCount.
+## When the cursor is destroyed (ARC drops refcount to 0), the destructor
+## decrements readerCount. This lets the insert path skip COW when
+## readerCount == 0 (no active cursors).
 
 import std/options
 import treap_backend  # TreapNode, Key, cmpKey
@@ -9,18 +14,26 @@ import treap_backend  # TreapNode, Key, cmpKey
 type
   KvPair* = tuple[key: Key, value: Option[Value]]
 
+  ReaderGuard* = object
+    ## Value-type wrapper that decrements readerCount on destruction.
+    root*: TreapNode
+
   TreapCursor* = ref object
-    root: TreapNode
+    guard: ReaderGuard
     stack: seq[TreapNode]
     current: Option[Key]
     currentKv: Option[KvPair]
     atEnd*: bool
 
+proc `=destroy`(g: ReaderGuard) =
+  if g.root != nil:
+    g.root.readerCount -= 1
+
 # ── Internal: seek stack to first node >= target ──
 
 proc seekStack(c: TreapCursor; target: Key) =
   c.stack = @[]
-  var n = c.root
+  var n = c.guard.root
   while n != nil:
     if cmpKey(n.key, target) >= 0:
       c.stack.add(n); n = n.left
@@ -52,9 +65,10 @@ proc ensure(c: TreapCursor) =
 # ── Public API ──
 
 proc newTreapCursor*(root: TreapNode): TreapCursor =
-  result = TreapCursor(root: root, atEnd: false)
+  result = TreapCursor(guard: ReaderGuard(root: root), atEnd: false)
   if root == nil:
     result.atEnd = true; return
+  root.readerCount += 1
   result.seekStack(newSeq[byte](0))  # start from first key
 
 proc peek*(c: TreapCursor): Option[Key] =

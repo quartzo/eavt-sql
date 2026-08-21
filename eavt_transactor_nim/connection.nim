@@ -144,6 +144,10 @@ proc execScheme(eng: SharedEngine; req: Request; transp: StreamTransport) {.asyn
   else:
     let session = newQuerySession(eng.store, program, req.params, tx, none[int64]())
     let r = executeProgramSafe(session)
+    eng.store.printSavePerf()
+    eng.store.resetSaveCounters()
+    eng.store.kv.printBwPerf()
+    eng.store.kv.resetBwCounters()
     if r.kind == sList and r.items.len >= 2 and r.items[0].kind == sSymbol and
        r.items[0].symval == "result":
       await writeResponseAsync(transp, @[], @[r.items[1..^1]], false, id = req.id)

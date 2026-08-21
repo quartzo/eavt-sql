@@ -49,23 +49,19 @@ suite "memtable: put + size":
 suite "memtable: batch":
   test "batch of 3 keys increases size":
     let mt = newMemTable(1)
-    var ops = newSeq[byte](0)
-    ops.add(byte(0)); ops.add(0); ops.add(0); ops.add(0); ops.add(1)
-    ops.add(byte(1))
-    ops.add(byte(0)); ops.add(0); ops.add(0); ops.add(0); ops.add(1)
-    ops.add(byte(2))
-    ops.add(byte(0)); ops.add(0); ops.add(0); ops.add(0); ops.add(1)
-    ops.add(byte(3))
-    let sz = mt.batch(ops)
+    let entries = @[
+      CfKey(cf: 0, key: @[byte(1)]),
+      CfKey(cf: 0, key: @[byte(2)]),
+      CfKey(cf: 0, key: @[byte(3)]),
+    ]
+    let sz = mt.batch(entries)
     check sz > 0
 
   test "batch with duplicate key is idempotent":
     let mt = newMemTable(1)
-    var ops = newSeq[byte](0)
-    ops.add(byte(0)); ops.add(0); ops.add(0); ops.add(0); ops.add(1)
-    ops.add(byte(7))
-    let sz1 = mt.batch(ops)
-    let sz2 = mt.batch(ops)
+    let entries = @[CfKey(cf: 0, key: @[byte(7)])]
+    let sz1 = mt.batch(entries)
+    let sz2 = mt.batch(entries)
     check sz1 == sz2
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -88,12 +84,13 @@ suite "memtable: cursor scan":
     let mt = newMemTable(1)
     discard mt.put(0, @[byte(5)])
     discard mt.put(0, @[byte(3)])
-    let rootAfterInsert = mt.hnd.live[0]  # capture ref
-    discard mt.put(0, @[byte(7)])         # new root
-    let c = newTreapCursor(rootAfterInsert)
+    # With mutable insert (readerCount == 0), the root is mutated in-place.
+    # To get COW isolation, create a cursor BEFORE the next put.
+    let c = newTreapCursor(mt.hnd.live[0])  # cursor increments readerCount
+    discard mt.put(0, @[byte(7)])           # COW: cursor holds readerCount > 0
     check c.next().get == @[byte(3)]
     check c.next().get == @[byte(5)]
-    check c.next().isNone  # 7 is NOT visible (COW isolation)
+    check c.next().isNone  # 7 is NOT visible (COW isolation via cursor)
 
   test "clear does not affect captured root":
     let mt = newMemTable(1)

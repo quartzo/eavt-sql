@@ -7,6 +7,7 @@ import std/[tables, strutils, options, times, sets]
 import resolver
 import keys
 import kvstore
+import nim_memtable/treap_backend
 import scheme
 import stats
 import std/locks
@@ -63,33 +64,32 @@ proc newEavtEngine*(kv: KVStore): EavtEngine =
 
 proc batchWrite*(eng: EavtEngine; entries: seq[EavtEntry]) =
   if entries.len == 0: return
-  var ops: seq[byte] = @[]
-  for e in entries:
-    ops.add e.cf
-    let kl = e.key.len.uint32
-    ops.add byte(kl shr 24); ops.add byte((kl shr 16) and 0xFF)
-    ops.add byte((kl shr 8) and 0xFF); ops.add byte(kl and 0xFF)
-    ops.add e.key
-  eng.kv.batchWrite(ops)
+  var cfs: seq[CfKey] = newSeq[CfKey](entries.len)
+  for i, e in entries:
+    cfs[i] = CfKey(cf: e.cf, key: e.key)
+  eng.kv.batchWrite(cfs)
 
 proc scanPrefix*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byte]] =
-  ## Scan all keys in CF with given prefix using streaming cursor.
+  ## Scan keys in CF matching prefix. Uses seek() to jump directly to the
+  ## first matching key instead of scanning from the beginning.
   let mc = eng.kv.openScanCursor(cf)
+  mc.seek(prefix)
   while true:
     let k = mc.next()
     if k.isNone: break
     let key = k.get
-    if key.len < prefix.len or key[0..<prefix.len] != prefix: continue
+    if key.len < prefix.len or key[0..<prefix.len] != prefix: break
     result.add key
 
 proc estimateCount*(eng: EavtEngine; cf: int; prefix: seq[byte]): int64 =
-  ## Count keys with prefix using streaming scan. Returns at least 1.
+  ## Count keys matching prefix. Uses seek() to jump to the first match.
   let mc = eng.kv.openScanCursor(cf)
+  mc.seek(prefix)
   while true:
     let k = mc.next()
     if k.isNone: break
     let key = k.get
-    if key.len < prefix.len or key[0..<prefix.len] != prefix: continue
+    if key.len < prefix.len or key[0..<prefix.len] != prefix: break
     inc result
   result = max(result, 1)
 

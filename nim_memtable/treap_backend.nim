@@ -14,6 +14,11 @@ type
   Key* = seq[byte]
   Value* = seq[byte]
 
+  CfKey* = object
+    ## Write command: column family + key bytes.
+    cf*: uint8
+    key*: seq[byte]
+
   TreapNode* {.acyclic.} = ref object
     key*: Key
     value*: Option[Value]   ## none for key-only CFs (0-3), some for key-value CFs (>=10)
@@ -21,6 +26,7 @@ type
     prio*: uint32
     left*: TreapNode
     right*: TreapNode
+    readerCount*: int       ## cursors holding a ref to this root; 0 = safe to mutate in-place
 
   MemTableHandle* = object
     live*: seq[TreapNode]
@@ -30,7 +36,7 @@ type
 # Treap helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-proc cmpKey*(a, b: Key): int =
+proc cmpKey*(a, b: openArray[byte]): int =
   let n = min(a.len, b.len)
   for i in 0 ..< n:
     if a[i] < b[i]: return -1
@@ -42,7 +48,7 @@ proc cmpKey*(a, b: Key): int =
 proc newLeaf(key: Key; value: Option[Value] = none(Value); deleted: bool = false): TreapNode =
   TreapNode(key: key, value: value, deleted: deleted, prio: cast[uint32](rand(int.high)))
 
-proc containsKey*(node: TreapNode; key: Key): bool =
+proc containsKey*(node: TreapNode; key: openArray[byte]): bool =
   var n = node
   while n != nil:
     let c = cmpKey(key, n.key)
@@ -79,30 +85,69 @@ proc rotateLeft(n: TreapNode): TreapNode =
   var nn = TreapNode(key: n.key, value: n.value, deleted: n.deleted, prio: n.prio, left: n.left, right: r.left)
   result = TreapNode(key: r.key, value: r.value, deleted: r.deleted, prio: r.prio, left: nn, right: r.right)
 
-proc insert(node: TreapNode, key: Key; value: Option[Value] = none(Value);
-             deleted: bool = false): TreapNode =
-  if node == nil: return newLeaf(key, value, deleted)
+proc rotateRightMut(n: TreapNode): TreapNode =
+  ## In-place right rotation. Returns new root (the left child).
+  let l = n.left
+  n.left = l.right
+  l.right = n
+  return l
+
+proc rotateLeftMut(n: TreapNode): TreapNode =
+  ## In-place left rotation. Returns new root (the right child).
+  let r = n.right
+  n.right = r.left
+  r.left = n
+  return r
+
+proc insert(node: TreapNode, key: openArray[byte]; value: Option[Value] = none(Value);
+             deleted: bool = false; mutable: bool = false): (TreapNode, bool) =
+  if node == nil:
+    # Copy key into owned seq[byte] for storage in the node
+    var k = newSeq[byte](key.len)
+    if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
+    return (newLeaf(k, value, deleted), true)
   let c = cmpKey(key, node.key)
   if c < 0:
-    let nl = insert(node.left, key, value, deleted)
-    var nn = TreapNode(key: node.key, value: node.value, deleted: node.deleted,
-                       prio: node.prio, left: nl, right: node.right)
-    if nn.left != nil and nn.left.prio > nn.prio: return rotateRight(nn)
-    return nn
+    let (nl, wasNew) = insert(node.left, key, value, deleted, mutable)
+    if mutable:
+      node.left = nl
+      if node.left != nil and node.left.prio > node.prio:
+        return (rotateRightMut(node), wasNew)
+      return (node, wasNew)
+    else:
+      var nn = TreapNode(key: node.key, value: node.value, deleted: node.deleted,
+                         prio: node.prio, left: nl, right: node.right)
+      if nn.left != nil and nn.left.prio > nn.prio: return (rotateRight(nn), wasNew)
+      return (nn, wasNew)
   elif c > 0:
-    let nr = insert(node.right, key, value, deleted)
-    var nn = TreapNode(key: node.key, value: node.value, deleted: node.deleted,
-                       prio: node.prio, left: node.left, right: nr)
-    if nn.right != nil and nn.right.prio > nn.prio: return rotateLeft(nn)
-    return nn
+    let (nr, wasNew) = insert(node.right, key, value, deleted, mutable)
+    if mutable:
+      node.right = nr
+      if node.right != nil and node.right.prio > node.prio:
+        return (rotateLeftMut(node), wasNew)
+      return (node, wasNew)
+    else:
+      var nn = TreapNode(key: node.key, value: node.value, deleted: node.deleted,
+                         prio: node.prio, left: node.left, right: nr)
+      if nn.right != nil and nn.right.prio > nn.prio: return (rotateLeft(nn), wasNew)
+      return (nn, wasNew)
   else:
     # Key exists: update value and/or deleted flag.
     # When deleted, clear the value so tombstone detection works.
-    let newVal = if deleted: none(Value)
-                 elif value.isSome: value
-                 else: node.value
-    return TreapNode(key: node.key, value: newVal, deleted: deleted,
-                     prio: node.prio, left: node.left, right: node.right)
+    if mutable:
+      if deleted:
+        node.value = none(Value)
+        node.deleted = true
+      elif value.isSome:
+        node.value = value
+        node.deleted = false
+      return (node, false)
+    else:
+      let newVal = if deleted: none(Value)
+                   elif value.isSome: value
+                   else: node.value
+      return (TreapNode(key: node.key, value: newVal, deleted: deleted,
+                        prio: node.prio, left: node.left, right: node.right), false)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════════════════════════
@@ -133,39 +178,37 @@ proc size*(mt: MemTable): uint64 =
 
 proc put*(mt: MemTable; cf: int; key: openArray[byte]): uint64 =
   if cf < 0 or cf >= mt.numCf: raise newException(ValueError, "invalid cf")
-  var k = newSeq[byte](key.len)
-  if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
-  let wasNew = not containsKey(mt.hnd.live[cf], k)
-  mt.hnd.live[cf] = insert(mt.hnd.live[cf], k)
-  if wasNew: mt.hnd.cfSize[cf] += k.len
+  let root = mt.hnd.live[cf]
+  let mutable = root == nil or root.readerCount == 0
+  let (newRoot, wasNew) = insert(root, key, mutable = mutable)
+  mt.hnd.live[cf] = newRoot
+  if wasNew: mt.hnd.cfSize[cf] += key.len
   mt.size()
 
 proc putKv*(mt: MemTable; cf: int; key, value: openArray[byte]): uint64 =
   if cf < 0 or cf >= mt.numCf: raise newException(ValueError, "invalid cf")
-  var k = newSeq[byte](key.len)
-  if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
   var v = newSeq[byte](value.len)
   if value.len > 0: copyMem(addr v[0], unsafeAddr value[0], value.len)
-  let wasNew = not containsKey(mt.hnd.live[cf], k)
-  mt.hnd.live[cf] = insert(mt.hnd.live[cf], k, some(v))
-  if wasNew: mt.hnd.cfSize[cf] += k.len + v.len
+  let root = mt.hnd.live[cf]
+  let mutable = root == nil or root.readerCount == 0
+  let (newRoot, wasNew) = insert(root, key, some(v), mutable = mutable)
+  mt.hnd.live[cf] = newRoot
+  if wasNew: mt.hnd.cfSize[cf] += key.len + v.len
   mt.size()
 
 proc deleteKv*(mt: MemTable; cf: int; key: openArray[byte]) =
   ## Mark a key as deleted (tombstone). If the key doesn't exist, create a
   ## tombstone node so the deletion is persisted through flush.
   if cf < 0 or cf >= mt.numCf: raise newException(ValueError, "invalid cf")
-  var k = newSeq[byte](key.len)
-  if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
-  mt.hnd.live[cf] = insert(mt.hnd.live[cf], k, none(Value), deleted=true)
+  let root = mt.hnd.live[cf]
+  let mutable = root == nil or root.readerCount == 0
+  mt.hnd.live[cf] = insert(root, key, none(Value), deleted=true, mutable = mutable)[0]
 
 proc getValue*(mt: MemTable; cf: int; key: openArray[byte]): Option[Value] =
   if cf < 0 or cf >= mt.hnd.live.len: return none(Value)
   var n = mt.hnd.live[cf]
-  var k = newSeq[byte](key.len)
-  if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
   while n != nil:
-    let c = cmpKey(k, n.key)
+    let c = cmpKey(key, n.key)
     if c == 0: return if n.deleted: none(Value) else: n.value
     elif c < 0: n = n.left
     else: n = n.right
@@ -174,27 +217,22 @@ proc getValue*(mt: MemTable; cf: int; key: openArray[byte]): Option[Value] =
 proc getValue*(node: TreapNode; key: openArray[byte]): Option[Value] =
   ## Search a specific TreapNode root for a key, returning its value.
   var n = node
-  var k = newSeq[byte](key.len)
-  if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
   while n != nil:
-    let c = cmpKey(k, n.key)
+    let c = cmpKey(key, n.key)
     if c == 0: return if n.deleted: none(Value) else: n.value
     elif c < 0: n = n.left
     else: n = n.right
   return none(Value)
 
-proc batch*(mt: MemTable; ops: openArray[byte]): uint64 =
-  var pos = 0
-  while pos + 5 <= ops.len:
-    let cf = ops[pos].int
-    let klen = int(uint32(ops[pos+1]) shl 24 or uint32(ops[pos+2]) shl 16 or
-                   uint32(ops[pos+3]) shl 8 or uint32(ops[pos+4]))
-    if pos + 5 + klen > ops.len or cf < 0 or cf >= mt.numCf: break
-    let k = ops[pos+5 ..< pos+5+klen]
-    let wasNew = not containsKey(mt.hnd.live[cf], k)
-    mt.hnd.live[cf] = insert(mt.hnd.live[cf], k)
-    if wasNew: mt.hnd.cfSize[cf] += k.len
-    pos += 5 + klen
+proc batch*(mt: MemTable; entries: seq[CfKey]): uint64 =
+  for e in entries:
+    let cf = e.cf.int
+    if cf < 0 or cf >= mt.numCf: continue
+    let root = mt.hnd.live[cf]
+    let mutable = root == nil or root.readerCount == 0
+    let (newRoot, wasNew) = insert(root, e.key, mutable = mutable)
+    mt.hnd.live[cf] = newRoot
+    if wasNew: mt.hnd.cfSize[cf] += e.key.len
   mt.size()
 
 proc clear*(mt: MemTable) =
@@ -206,16 +244,16 @@ proc contains*(mt: MemTable; cf: int; key: openArray[byte]): bool =
   if cf < 0 or cf >= mt.hnd.live.len: return false
   let root = mt.hnd.live[cf]
   if root == nil: return false
-  var k = newSeq[byte](key.len)
-  if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
-  result = containsKey(root, k)
+  result = containsKey(root, key)
 
 proc countPrefix*(mt: MemTable; cf: int; prefix: openArray[byte]): uint64 =
   if cf < 0 or cf >= mt.hnd.live.len: return 0
   let root = mt.hnd.live[cf]
   if root == nil: return 0
+  if prefix.len == 0:
+    return cast[uint64](countAll(root))
+  # Build upper bound from prefix for range count
   var pfx = newSeq[byte](prefix.len)
   if prefix.len > 0: copyMem(addr pfx[0], unsafeAddr prefix[0], prefix.len)
-  result = if pfx.len == 0: cast[uint64](countAll(root))
-           else: cast[uint64](countInRange(root, pfx, prefixUpperBound(pfx)))
+  result = cast[uint64](countInRange(root, pfx, prefixUpperBound(pfx)))
 

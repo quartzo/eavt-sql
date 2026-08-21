@@ -8,7 +8,7 @@
 ## swaps. The async twin (flush/GC via the blob pool, chunked treap drain)
 ## lives in async/kvstore_async.nim.
 
-import std/[tables, strutils, os, options, times, random, algorithm]
+import std/[tables, strutils, os, options, times, random, algorithm, monotimes]
 import std/[osproc, exitprocs]
 import std/syncio
 import page_store
@@ -48,11 +48,10 @@ type
     ## nil (tests, sync callers) means "no background flusher" — call
     ## flush()/flushSync() explicitly.
     onFlushRequest*: proc () {.gcsafe.}
-    ## When set, journal bytes (same format as the journal file) are handed
-    ## to this sink instead of being written to the journal file inline —
-    ## the async server buffers them on its event loop (group-commit) and
-    ## writes/fsyncs via chronos_file. The sink is called under `kv.lock`.
-    journalSink*: proc (data: seq[byte]) {.gcsafe, raises: [].}
+    ## When set, journal entries are handed to this sink instead of being
+    ## written to the journal file inline — the sink serializes them directly
+    ## into the WAL buffer. Called under `kv.lock`.
+    journalSink*: proc (entries: seq[mt_be.CfKey]) {.gcsafe, raises: [].}
     ## When true, close() removes the whole data directory (tests use it for
     ## their tempdir-per-store pattern).
     ownsPath*: bool
@@ -71,6 +70,11 @@ type
     ## name just committed to PageStore). The replication hub uses it to
     ## broadcast the new root to replicas. Only memcpy work in the callback.
     onFlushPublish*: proc (rootName: string) {.gcsafe, raises: [].}
+    # perf counters for batchWrite
+    bwCount*: int64
+    bwJournalNs*: int64
+    bwTreapNs*: int64
+    bwTotalNs*: int64
 # ═══════════════════════════════════════════════════════════════════════════════
 # KVStore operations
 
@@ -91,12 +95,13 @@ proc readFileBytes*(path: string): seq[byte] =
   result = newSeq[byte](sz)
   discard f.readBuffer(addr result[0], sz)
 
-proc parseJournalRecords*(data: openArray[byte]): seq[byte] =
-  ## Parse journal records from raw bytes into the memtable batch-apply format.
-  ## Key-only CFs 0-3 strip the cf byte from the key (the memtable op stream
-  ## wants [cf][klen-1][key without the cf byte]; the journal format is
-  ## [4B klen][cf+key][4B vlen][value]).
+proc parseJournalRecords*(data: openArray[byte]): seq[mt_be.CfKey] =
+  ## Parse journal records from raw bytes into CfKey entries for memtable batch apply.
+  ## Journal format: [4B klen][cf+key][4B vlen][value].
+  ## Key-only CFs 0-3: the cf byte is part of the key in the journal, but we
+  ## extract it as the CfKey.cf and store the remaining bytes as CfKey.key.
   ## A torn tail (truncated record) stops parsing at the last complete record.
+  result = @[]
   var pos = 0
   while pos + 4 <= data.len:
     let klen = int(uint32(byte(data[pos])) shl 24 or uint32(byte(data[pos+1])) shl 16 or
@@ -111,15 +116,13 @@ proc parseJournalRecords*(data: openArray[byte]): seq[byte] =
     if pos + vlen > data.len: break
     pos += vlen
     if klen >= 1 and cf <= 3'u8:
-      result.add(cf)
-      result.add(byte(((klen-1) shr 24) and 0xFF))
-      result.add(byte(((klen-1) shr 16) and 0xFF))
-      result.add(byte(((klen-1) shr 8) and 0xFF))
-      result.add(byte((klen-1) and 0xFF))
-      for i in 1..<klen:
-        result.add(byte(data[pos - 4 - vlen - klen + i]))
+      var key = newSeq[byte](klen - 1)
+      let keyStart = pos - 4 - vlen - klen + 1
+      for i in 0 ..< klen - 1:
+        key[i] = byte(data[keyStart + i])
+      result.add(mt_be.CfKey(cf: cf, key: key))
 
-proc parseJournalFile*(path: string): seq[byte] =
+proc parseJournalFile*(path: string): seq[mt_be.CfKey] =
   ## Parse a single journal file (used by replay at open).
   try:
     parseJournalRecords(readFileBytes(path))
@@ -134,10 +137,10 @@ proc applyJournalRecords*(kv: KVStore; data: openArray[byte]) {.gcsafe.} =
   ## Must NOT be called under kv.lock — the mt.batch call below acquires its
   ## own internal lock.
   if data.len == 0: return
-  let ops = parseJournalRecords(data)
-  if ops.len > 0:
+  let entries = parseJournalRecords(data)
+  if entries.len > 0:
     kv.lock.withLock:
-      kv.mtSize = kv.mt.batch(ops)
+      kv.mtSize = kv.mt.batch(entries)
 
 proc sealLiveToFlush*(kv: KVStore) {.gcsafe.} =
   ## Seal the live memtable into flushRoots (the first half of kv.flush).
@@ -207,26 +210,36 @@ proc newKVStore*(config: Table[string, string]): KVStore =
           except ValueError: discard
     segs.sort(proc(a, b: tuple[idx: int, path: string]): int = cmp(a.idx, b.idx))
     for s in segs: files.add(s.path)
-    var ops = newSeq[byte](0)
+    var entries: seq[mt_be.CfKey] = @[]
     for jf in files:
       try:
         let data = readFile(jf)
         if data.len > 0:
-          ops.add parseJournalRecords(cast[seq[byte]](data))
+          entries.add parseJournalRecords(cast[seq[byte]](data))
       except CatchableError: discard
-    if ops.len > 0: result.mtSize = result.mt.batch(ops)
+    if entries.len > 0: result.mtSize = result.mt.batch(entries)
 
-proc journalDeliver*(kv: KVStore; data: seq[byte]) {.gcsafe.} =
-  ## Journal bytes (journal-file format) to the sink when installed, else
-  ## best-effort append to the journal file. Called under `kv.lock`.
+proc journalDeliver*(kv: KVStore; entries: seq[mt_be.CfKey]) {.gcsafe.} =
+  ## Journal entries to the sink when installed, else best-effort append
+  ## to the journal file (legacy fallback, serializes here). Called under `kv.lock`.
   if kv.journalSink != nil:
-    kv.journalSink(data)
+    kv.journalSink(entries)
     return
+  # Legacy fallback: serialize to file directly
   try:
     let journalPath = kv.path / "journal" / "journal"
     createDir(parentDir(journalPath))
     var f = open(journalPath, fmAppend)
-    discard f.writeBytes(data, 0, data.len)
+    for e in entries:
+      let klen = e.key.len
+      let totKlen = 1 + klen
+      var hdr = newSeq[byte](4 + totKlen + 4 + 1)
+      hdr[0] = byte((totKlen shr 24) and 0xFF); hdr[1] = byte((totKlen shr 16) and 0xFF)
+      hdr[2] = byte((totKlen shr 8) and 0xFF); hdr[3] = byte(totKlen and 0xFF)
+      hdr[4] = e.cf
+      if klen > 0: copyMem(addr hdr[5], unsafeAddr e.key[0], klen)
+      hdr[5+klen] = 0; hdr[6+klen] = 0; hdr[7+klen] = 0; hdr[8+klen] = 1; hdr[9+klen] = 0
+      discard f.writeBytes(hdr, 0, hdr.len)
     f.close()
   except: discard
 
@@ -276,17 +289,7 @@ proc put*(kv: KVStore; cf: int; key: openArray[byte]) {.gcsafe.} =
     kv.mtSize = kv.mt.put(cf, k)
     if kv.mtSize >= kv.flushThreshold: needsFlush = true
     if journaling(kv):
-      var jk = newSeq[byte](1 + key.len)
-      jk[0] = byte(cf)
-      if key.len > 0: copyMem(addr jk[1], unsafeAddr key[0], key.len)
-      let totKlen = 1 + key.len
-      var hdr = newSeq[byte](4 + totKlen + 4 + 1)
-      hdr[0] = byte((totKlen shr 24) and 0xFF); hdr[1] = byte((totKlen shr 16) and 0xFF)
-      hdr[2] = byte((totKlen shr 8) and 0xFF); hdr[3] = byte(totKlen and 0xFF)
-      copyMem(addr hdr[4], addr jk[0], totKlen)
-      hdr[4 + totKlen] = 0; hdr[5 + totKlen] = 0; hdr[6 + totKlen] = 0; hdr[7 + totKlen] = 1
-      hdr[8 + totKlen] = 0
-      kv.journalDeliver(hdr)
+      kv.journalDeliver(@[mt_be.CfKey(cf: cf.uint8, key: k)])
   if needsFlush: kv.requestFlush()
 
 proc get*(kv: KVStore; cf: int; key: openArray[byte]): bool {.gcsafe.} =
@@ -311,6 +314,7 @@ proc putKv*(kv: KVStore; cf: int; key, value: openArray[byte]) {.gcsafe.} =
     kv.mtSize = kv.mt.putKv(cf, k, v)
     if kv.mtSize >= kv.flushThreshold: needsFlush = true
     if journaling(kv):
+      # Key-value journal format: [totKlen:4B][cf+key][vlen:4B][value]
       var jk = newSeq[byte](1 + key.len)
       jk[0] = byte(cf)
       if key.len > 0: copyMem(addr jk[1], unsafeAddr key[0], key.len)
@@ -326,7 +330,14 @@ proc putKv*(kv: KVStore; cf: int; key, value: openArray[byte]) {.gcsafe.} =
       hdr[7 + totKlen] = byte(vlen and 0xFF)
       if value.len > 0: copyMem(addr hdr[8 + totKlen], addr v[0], value.len)
       hdr[8 + totKlen + value.len] = 0
-      kv.journalDeliver(hdr)
+      if kv.journalSink == nil:
+        try:
+          let journalPath = kv.path / "journal" / "journal"
+          createDir(parentDir(journalPath))
+          var f = open(journalPath, fmAppend)
+          discard f.writeBytes(hdr, 0, hdr.len)
+          f.close()
+        except: discard
   if needsFlush: kv.requestFlush()
 
 proc getKv*(kv: KVStore; cf: int; key: openArray[byte]): Option[seq[byte]] {.gcsafe.} =
@@ -351,22 +362,29 @@ proc getKv*(kv: KVStore; cf: int; key: openArray[byte]): Option[seq[byte]] {.gcs
 proc deleteKv*(kv: KVStore; cf: int; key: openArray[byte]) {.gcsafe.} =
   var k = newSeq[byte](key.len)
   if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
-  kv.lock.withLock:
-    mt_be.deleteKv(kv.mt, cf, k)
-    if journaling(kv):
-      var jk = newSeq[byte](1 + key.len)
-      jk[0] = byte(cf)
-      if key.len > 0: copyMem(addr jk[1], unsafeAddr key[0], key.len)
-      let totKlen = 1 + key.len
-      # vlen = 0xFFFFFFFF marks a delete
-      var hdr = newSeq[byte](4 + totKlen + 4 + 1)
-      hdr[0] = byte((totKlen shr 24) and 0xFF); hdr[1] = byte((totKlen shr 16) and 0xFF)
-      hdr[2] = byte((totKlen shr 8) and 0xFF); hdr[3] = byte(totKlen and 0xFF)
-      copyMem(addr hdr[4], addr jk[0], totKlen)
-      hdr[4 + totKlen] = 0xFF; hdr[5 + totKlen] = 0xFF
-      hdr[6 + totKlen] = 0xFF; hdr[7 + totKlen] = 0xFF
-      hdr[8 + totKlen] = 0
-      kv.journalDeliver(hdr)
+  mt_be.deleteKv(kv.mt, cf, k)
+  if journaling(kv):
+    var jk = newSeq[byte](1 + key.len)
+    jk[0] = byte(cf)
+    if key.len > 0: copyMem(addr jk[1], unsafeAddr key[0], key.len)
+    let totKlen = 1 + key.len
+    # vlen = 0xFFFFFFFF marks a delete
+    var hdr = newSeq[byte](4 + totKlen + 4 + 1)
+    hdr[0] = byte((totKlen shr 24) and 0xFF); hdr[1] = byte((totKlen shr 16) and 0xFF)
+    hdr[2] = byte((totKlen shr 8) and 0xFF); hdr[3] = byte(totKlen and 0xFF)
+    copyMem(addr hdr[4], addr jk[0], totKlen)
+    hdr[4 + totKlen] = 0xFF; hdr[5 + totKlen] = 0xFF
+    hdr[6 + totKlen] = 0xFF; hdr[7 + totKlen] = 0xFF
+    hdr[8 + totKlen] = 0
+    # Legacy: write directly to journal file (CfKey doesn't support delete format)
+    if kv.journalSink == nil:
+      try:
+        let journalPath = kv.path / "journal" / "journal"
+        createDir(parentDir(journalPath))
+        var f = open(journalPath, fmAppend)
+        discard f.writeBytes(hdr, 0, hdr.len)
+        f.close()
+      except: discard
 
 proc flush*(kv: KVStore) {.gcsafe.} =
   if kv.readOnly: return
@@ -445,31 +463,38 @@ proc flushSync*(kv: KVStore) {.gcsafe.} =
   ## On return, every write prior to the call is durable.
   kv.flush()
 
-proc batchWrite*(kv: KVStore; ops: openArray[byte]) {.gcsafe.} =
+proc batchWrite*(kv: KVStore; entries: seq[mt_be.CfKey]) {.gcsafe.} =
+  kv.bwCount += 1
+  let t0 = getMonoTime()
   var needsFlush = false
-  kv.lock.withLock:
-    if journaling(kv) and ops.len > 0:
-      let raw = cast[ptr UncheckedArray[byte]](unsafeAddr ops[0]); var pos = 0
-      var journal: seq[byte] = @[]
-      while pos + 5 <= ops.len:
-        let cf = raw[pos]
-        let klen = int(uint32(raw[pos+1]) shl 24 or uint32(raw[pos+2]) shl 16 or
-                      uint32(raw[pos+3]) shl 8 or uint32(raw[pos+4]))
-        let totKlen = 1 + klen
-        var hdr = newSeq[byte](4 + totKlen + 4 + 1)
-        hdr[0] = byte((totKlen shr 24) and 0xFF); hdr[1] = byte((totKlen shr 16) and 0xFF)
-        hdr[2] = byte((totKlen shr 8) and 0xFF); hdr[3] = byte(totKlen and 0xFF)
-        hdr[4] = cf
-        if klen > 0: copyMem(addr hdr[5], addr raw[pos+5], klen)
-        hdr[5+klen] = 0; hdr[6+klen] = 0; hdr[7+klen] = 0; hdr[8+klen] = 1; hdr[9+klen] = 0
-        journal.add(hdr)
-        pos += 5 + klen
-      if journal.len > 0: kv.journalDeliver(journal)
-    kv.mtSize = kv.mt.batch(ops)
-    if kv.mtSize >= kv.flushThreshold: needsFlush = true
+  if journaling(kv) and entries.len > 0:
+    kv.journalDeliver(entries)
+  kv.bwJournalNs += (getMonoTime().ticks - t0.ticks)
+  let t1 = getMonoTime()
+  kv.mtSize = kv.mt.batch(entries)
+  kv.bwTreapNs += (getMonoTime().ticks - t1.ticks)
+  if kv.mtSize >= kv.flushThreshold: needsFlush = true
+  kv.bwTotalNs += (getMonoTime().ticks - t0.ticks)
   if needsFlush: kv.requestFlush()
 
 proc memtableSize*(kv: KVStore): uint64 {.gcsafe.} = kv.mtSize
+
+proc resetBwCounters*(kv: KVStore) =
+  kv.bwCount = 0
+  kv.bwJournalNs = 0
+  kv.bwTreapNs = 0
+  kv.bwTotalNs = 0
+
+proc printBwPerf*(kv: KVStore) =
+  if kv.bwCount == 0: return
+  let total = kv.bwTotalNs
+  template pct(ns: int64): string = formatFloat(ns.float / total.float * 100, ffDecimal, 1)
+  template ms(ns: int64): string = formatFloat(ns.float / 1_000_000, ffDecimal, 1)
+  echo "=== batchWrite perf (", kv.bwCount, " calls) ==="
+  echo "  journal:        ", ms(kv.bwJournalNs), " ms  (", pct(kv.bwJournalNs), "%)"
+  echo "  treap:          ", ms(kv.bwTreapNs), " ms  (", pct(kv.bwTreapNs), "%)"
+  echo "  total:          ", ms(total), " ms"
+  echo "  avg per batch:  ", formatFloat(total.float / kv.bwCount.float / 1_000_000, ffDecimal, 3), " ms"
 
 # ── Streaming scan entry point ──
 
