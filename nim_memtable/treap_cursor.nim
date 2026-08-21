@@ -145,3 +145,15 @@ proc update*(c: TreapCursor; newRoot: TreapNode) =
   c.current = none(Key)
   c.currentKv = none(KvPair)
   c.atEnd = (newRoot == nil)
+
+proc release*(c: TreapCursor) =
+  ## Drop the reader hold on the current root (readerCount -= 1) and reset
+  ## iteration state. Keeps readerCount at 0 between scans so inserts
+  ## mutate in-place instead of path-copying. Re-acquired by update().
+  if c.guard.root != nil:
+    c.guard.root.readerCount -= 1
+    c.guard.root = nil
+  c.stack.setLen(0)
+  c.current = none(Key)
+  c.currentKv = none(KvPair)
+  c.atEnd = true

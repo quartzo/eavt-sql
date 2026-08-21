@@ -3,7 +3,7 @@
 ## Port of spier-transactor/src/eavt.rs (~1099 lines Rust → Nim).
 ## Coordinates Resolver + KVStore for entity-attribute-value-time operations.
 
-import std/[tables, strutils, options, times, sets, monotimes]
+import std/[tables, strutils, options, times, sets, monotimes, algorithm]
 import resolver
 import keys
 import kvstore
@@ -61,6 +61,11 @@ type
     # Reusable cursor for scanPrefix (single-threaded event loop — no races)
     spCursor*: MergedCursor
     spCf*: int
+    # Reusable cursors for scanPrefixActive
+    saPs*: PageStoreCursor
+    saFlush*: TreapCursor
+    saLive*: TreapCursor
+    saCf*: int
     # scanPrefix perf counters
     spCount*: int64
     spOpenCursorNs*: int64
@@ -122,9 +127,13 @@ proc scanPrefix*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byte]] =
   eng.spIterateNs += (getMonoTime().ticks - t0.ticks)
   eng.spKeysReturned += result.len
 
-proc scanPrefixNoMerge*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byte]] =
-  ## Scan keys in CF matching prefix. Creates individual source cursors
-  ## directly — no MergedCursor, no heap, no merge. For retractScan.
+type
+  CollectEntry = tuple[key: seq[byte], srcIdx: int]
+
+proc scanPrefixActive*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byte]] =
+  ## Scan keys in CF matching prefix. Returns only active (non-retracted) datoms.
+  ## Reuses cursors from previous call (update in-place). Single source fast path
+  ## skips sort when only live treap has data.
   var psSnap: PageStoreSnapshot
   var flushRoot, liveRoot: TreapNode
   var tree: CfTree
@@ -134,43 +143,143 @@ proc scanPrefixNoMerge*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[by
     flushRoot = eng.kv.flushRoots[cf]
   liveRoot = eng.kv.mt.hnd.live[cf]
 
-  # PageStore source
-  if psSnap.rootUuid != default(array[16, byte]):
-    var psc = PageStoreCursor(
-      s: eng.kv.ps, cf: cf, rootUuid: psSnap.rootUuid, height: psSnap.height,
-      isKv: cf >= 10)
-    psc.seek(prefix)
-    while true:
-      let k = psc.peek()
-      if k.isNone: break
-      let key = k.get
-      if key.len < prefix.len or key[0..<prefix.len] != prefix: break
-      result.add key
-      discard psc.next()
+  # Reuse or create cursors
+  if eng.saCf == cf and eng.saLive != nil:
+    # Same CF — update in-place
+    if eng.saPs != nil: eng.saPs.update(psSnap.rootUuid, psSnap.height)
+    if eng.saFlush != nil: eng.saFlush.update(flushRoot)
+    eng.saLive.update(liveRoot)
+  else:
+    # Different CF or first call — create new cursors
+    if psSnap.rootUuid != default(array[16, byte]):
+      eng.saPs = PageStoreCursor(
+        s: eng.kv.ps, cf: cf, rootUuid: psSnap.rootUuid, height: psSnap.height,
+        isKv: cf >= 10)
+    else:
+      eng.saPs = nil
+    if flushRoot != nil:
+      eng.saFlush = newTreapCursor(flushRoot)
+    else:
+      eng.saFlush = nil
+    if liveRoot != nil:
+      eng.saLive = newTreapCursor(liveRoot)
+    else:
+      eng.saLive = nil
+    eng.saCf = cf
 
-  # Flush treap source
-  if flushRoot != nil:
-    var tc = newTreapCursor(flushRoot)
-    tc.seek(prefix)
-    while true:
-      let k = tc.peek()
-      if k.isNone: break
-      let key = k.get
-      if key.len < prefix.len or key[0..<prefix.len] != prefix: break
-      result.add key
-      discard tc.next()
+  # Release treap reader holds when the scan ends — keeps readerCount at 0
+  # between calls so batchWrite inserts mutate in-place (no COW path-copy).
+  defer:
+    if eng.saLive != nil: eng.saLive.release()
+    if eng.saFlush != nil: eng.saFlush.release()
 
-  # Live treap source
-  if liveRoot != nil:
-    var tc = newTreapCursor(liveRoot)
-    tc.seek(prefix)
+  # Count non-empty sources
+  var sourceCount = 0
+  if eng.saPs != nil and psSnap.rootUuid != default(array[16, byte]): inc sourceCount
+  if eng.saFlush != nil and flushRoot != nil: inc sourceCount
+  if eng.saLive != nil and liveRoot != nil: inc sourceCount
+
+  if sourceCount == 0: return
+
+  # ── Fast path: single source (live treap only) ──
+  # Skip sort/merge, just collect + dedup + filter
+  if sourceCount == 1 and eng.saLive != nil and liveRoot != nil:
+    eng.saLive.seek(prefix)
+    var sourceKeys: seq[seq[byte]] = @[]
     while true:
-      let k = tc.peek()
+      let k = eng.saLive.peek()
       if k.isNone: break
       let key = k.get
       if key.len < prefix.len or key[0..<prefix.len] != prefix: break
-      result.add key
-      discard tc.next()
+      sourceKeys.add key
+      discard eng.saLive.next()
+    # Dedup backward by key-prefix, filter retracted
+    var lastPrefix: seq[byte] = @[]
+    for j in countdown(sourceKeys.len - 1, 0):
+      let key = sourceKeys[j]
+      let keyPrefix = key[0 ..< key.len - 8]
+      if keyPrefix != lastPrefix:
+        let sf = beUint64(key, key.len - 8)
+        if (sf and 1) == 0:  # not retracted
+          result.add key
+        lastPrefix = keyPrefix
+    return
+
+  # ── Multi-source path ──
+  type SrcKind = enum skPageStore, skTreap
+  type Src = object
+    case kind: SrcKind
+    of skPageStore: ps: PageStoreCursor
+    of skTreap: tc: TreapCursor
+
+  var sources: seq[Src] = @[]
+  if eng.saPs != nil and psSnap.rootUuid != default(array[16, byte]):
+    eng.saPs.seek(prefix)
+    sources.add Src(kind: skPageStore, ps: eng.saPs)
+  if eng.saFlush != nil and flushRoot != nil:
+    eng.saFlush.seek(prefix)
+    sources.add Src(kind: skTreap, tc: eng.saFlush)
+  if eng.saLive != nil and liveRoot != nil:
+    eng.saLive.seek(prefix)
+    sources.add Src(kind: skTreap, tc: eng.saLive)
+
+  if sources.len == 0: return
+
+  proc currentKey(s: Src): Option[seq[byte]] =
+    case s.kind
+    of skPageStore: s.ps.peek()
+    of skTreap: s.tc.peek()
+
+  proc advance(s: Src) =
+    case s.kind
+    of skPageStore: discard s.ps.next()
+    of skTreap: discard s.tc.next()
+
+  # 1. Collect from each source with dedup by key-prefix
+  var collected: seq[CollectEntry] = @[]
+  for i, s in sources:
+    var sourceKeys: seq[seq[byte]] = @[]
+    while true:
+      let k = s.currentKey()
+      if k.isNone: break
+      let key = k.get
+      if key.len < prefix.len or key[0..<prefix.len] != prefix: break
+      sourceKeys.add key
+      advance(s)
+    var lastPrefix: seq[byte] = @[]
+    for j in countdown(sourceKeys.len - 1, 0):
+      let key = sourceKeys[j]
+      let keyPrefix = key[0 ..< key.len - 8]
+      if keyPrefix != lastPrefix:
+        collected.add((key, i))
+        lastPrefix = keyPrefix
+
+  if collected.len == 0: return
+
+  # 2. Merge by full key (ascending)
+  collected.sort(proc (a, b: CollectEntry): int {.gcsafe.} =
+    let ka = a.key
+    let kb = b.key
+    let minLen = min(ka.len, kb.len)
+    for i in 0 ..< minLen:
+      if ka[i] < kb[i]: return -1
+      if ka[i] > kb[i]: return 1
+    if ka.len < kb.len: return -1
+    if ka.len > kb.len: return 1
+    return 0
+  )
+
+  # 3. Filter: for each unique key-prefix, if most recent is retracted → discard
+  var lastPrefix: seq[byte] = @[]
+  for (key, srcIdx) in collected:
+    let keyPrefix = key[0 ..< key.len - 8]
+    if keyPrefix == lastPrefix: continue
+    let sf = beUint64(key, key.len - 8)
+    if (sf and 1) == 1:
+      lastPrefix = keyPrefix
+      continue
+    result.add key
+    lastPrefix = keyPrefix
 
 proc resetSpCounters*(eng: EavtEngine) =
   eng.spCount = 0

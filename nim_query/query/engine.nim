@@ -141,7 +141,7 @@ method saveWithT(q: QueryStore; eid: int64; attr: string; val: SExpr;
 
     var tScan = getMonoTime()
     var foundKeys: seq[seq[byte]] = @[]
-    for ek in q.eavt.scanPrefixNoMerge(0, ePrefix):
+    for ek in q.eavt.scanPrefixActive(0, ePrefix):
       foundKeys.add(ek)
     q.saveRetractSeekNs += (getMonoTime().ticks - tScan.ticks)
 
@@ -149,8 +149,6 @@ method saveWithT(q: QueryStore; eid: int64; attr: string; val: SExpr;
     var retracted = 0
     for ek in foundKeys:
       if ek.len < 20: continue
-      let esf = beUint64(ek, ek.len - 8)
-      if (esf and 1) != 0: continue
       var retEntries = buildEavtEntries(eid, attrId, ek[12 ..< ek.len - 8], t, true, mode, indexed)
       q.eavt.batchWrite(retEntries)
       retracted += 1
@@ -220,41 +218,25 @@ method lookupEntity(q: QueryStore; attrName: string; value: SExpr): Option[int64
   var prefix = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
                 byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
   prefix.add encoded
-  let scanRes = q.eavt.scanPrefix(2, prefix)
+  let scanRes = q.eavt.scanPrefixActive(2, prefix)
   if scanRes.len == 0: return none[int64]()
   let k = scanRes[0]
   if k.len < 20: return none[int64]()
-  let sf = beUint64(k, k.len - 8)
-  if (sf and 1) == 1: return none[int64]()  # retracted
   some(decodeEid(beUint64(k, k.len - 16)))
 
 method lookupValue(q: QueryStore; eid: int64; attrName: string): Option[SExpr] =
   let aidOpt = q.eavt.lookupAttr(attrName)
   if aidOpt.isNone: return none[SExpr]()
   let aid = aidOpt.get
-  # eavt key: [eid 8B BE][attr 4B BE][val][sf 8B BE]
   var prefix = keys.encodeEid(eid)
   prefix.add byte(aid shr 24); prefix.add byte((aid shr 16) and 0xFF)
   prefix.add byte((aid shr 8) and 0xFF); prefix.add byte(aid and 0xFF)
-  let scanRes = q.eavt.scanPrefix(0, prefix)
-  # Key order: by (prefix, sf). sf = (t<<1)|retracted. Within the same
-  # [eid][attr][val] group, a retraction (sf=odd) sorts right after its
-  # original (sf=even). Walk backwards: if the newest entry in a group is
-  # retracted the whole group is dead.  Otherwise the newest active wins.
-  var retractedGroup: seq[byte] = @[]
-  for j in countdown(scanRes.len - 1, 0):
-    let k = scanRes[j]
-    if k.len < 20: continue
-    let sf = beUint64(k, k.len - 8)
-    let group = k[0 ..< k.len - 8]
-    if (sf and 1) == 1:
-      retractedGroup = group
-      continue
-    if group == retractedGroup:
-      continue   # group was killed by a later retraction
-    let vt = q.eavt.valueTypeFor(aid).get(resolver.DbTypeString)
-    return some(keys.decodeStoredValue(k[12 ..< k.len - 8], vt))
-  none[SExpr]()
+  let scanRes = q.eavt.scanPrefixActive(0, prefix)
+  if scanRes.len == 0: return none[SExpr]()
+  let k = scanRes[0]
+  if k.len < 20: return none[SExpr]()
+  let vt = q.eavt.valueTypeFor(aid).get(resolver.DbTypeString)
+  return some(keys.decodeStoredValue(k[12 ..< k.len - 8], vt))
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # QuerySession — runs compiled Scheme programs
