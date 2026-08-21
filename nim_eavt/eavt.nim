@@ -8,7 +8,9 @@ import resolver
 import keys
 import kvstore
 import page_store     # CfTree
-import page_cursor   # PageStoreSnapshot
+import page_cursor   # PageStoreSnapshot, PageStoreCursor
+import treap_cursor   # newTreapCursor
+import query/cursor   # treapCursor constructor
 import nim_memtable/treap_backend
 import scheme
 import stats
@@ -119,6 +121,56 @@ proc scanPrefix*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byte]] =
     result.add key
   eng.spIterateNs += (getMonoTime().ticks - t0.ticks)
   eng.spKeysReturned += result.len
+
+proc scanPrefixNoMerge*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byte]] =
+  ## Scan keys in CF matching prefix. Creates individual source cursors
+  ## directly — no MergedCursor, no heap, no merge. For retractScan.
+  var psSnap: PageStoreSnapshot
+  var flushRoot, liveRoot: TreapNode
+  var tree: CfTree
+  eng.kv.ps[].lock.withLock: tree = eng.kv.ps[].trees[cf]
+  psSnap = PageStoreSnapshot(rootUuid: tree.rootUuid, height: tree.height)
+  if eng.kv.flushRoots.len > 0:
+    flushRoot = eng.kv.flushRoots[cf]
+  liveRoot = eng.kv.mt.hnd.live[cf]
+
+  # PageStore source
+  if psSnap.rootUuid != default(array[16, byte]):
+    var psc = PageStoreCursor(
+      s: eng.kv.ps, cf: cf, rootUuid: psSnap.rootUuid, height: psSnap.height,
+      isKv: cf >= 10)
+    psc.seek(prefix)
+    while true:
+      let k = psc.peek()
+      if k.isNone: break
+      let key = k.get
+      if key.len < prefix.len or key[0..<prefix.len] != prefix: break
+      result.add key
+      discard psc.next()
+
+  # Flush treap source
+  if flushRoot != nil:
+    var tc = newTreapCursor(flushRoot)
+    tc.seek(prefix)
+    while true:
+      let k = tc.peek()
+      if k.isNone: break
+      let key = k.get
+      if key.len < prefix.len or key[0..<prefix.len] != prefix: break
+      result.add key
+      discard tc.next()
+
+  # Live treap source
+  if liveRoot != nil:
+    var tc = newTreapCursor(liveRoot)
+    tc.seek(prefix)
+    while true:
+      let k = tc.peek()
+      if k.isNone: break
+      let key = k.get
+      if key.len < prefix.len or key[0..<prefix.len] != prefix: break
+      result.add key
+      discard tc.next()
 
 proc resetSpCounters*(eng: EavtEngine) =
   eng.spCount = 0

@@ -141,7 +141,7 @@ method saveWithT(q: QueryStore; eid: int64; attr: string; val: SExpr;
 
     var tScan = getMonoTime()
     var foundKeys: seq[seq[byte]] = @[]
-    for ek in q.eavt.scanPrefix(0, ePrefix):
+    for ek in q.eavt.scanPrefixNoMerge(0, ePrefix):
       foundKeys.add(ek)
     q.saveRetractSeekNs += (getMonoTime().ticks - tScan.ticks)
 
