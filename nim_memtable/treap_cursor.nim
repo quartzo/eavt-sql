@@ -131,3 +131,17 @@ proc seek*(c: TreapCursor; target: Key) =
   c.atEnd = false
   c.seekStack(target)
   c.advance()
+
+proc update*(c: TreapCursor; newRoot: TreapNode) =
+  ## Update cursor in-place to point at a new treap root. Transfers
+  ## readerCount from old root to new root. Stack is cleared — caller
+  ## must seek() before iterating.
+  if c.guard.root != nil:
+    c.guard.root.readerCount -= 1
+  c.guard.root = newRoot
+  if newRoot != nil:
+    newRoot.readerCount += 1
+  c.stack.setLen(0)
+  c.current = none(Key)
+  c.currentKv = none(KvPair)
+  c.atEnd = (newRoot == nil)

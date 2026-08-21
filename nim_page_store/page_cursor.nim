@@ -38,10 +38,8 @@ type
 # ── Helpers ──
 
 proc loadIndexPage(s: var PageStoreInner; uuid: array[16, byte]): seq[(seq[byte], array[16, byte])] =
-  let data = blobGet(s.blobs, uuid)
-  if data.isNone:
-    raise newException(IOError, "index blob not found")
-  deserializeIndexPage(data.get)
+  let raw = loadLeafRaw(s, uuid)
+  deserializeIndexPage(raw)
 
 proc loadLeaf(c: PageStoreCursor; uuid: array[16, byte]) =
   if c.isKv:
@@ -192,3 +190,16 @@ proc seek*(c: PageStoreCursor; target: seq[byte]) =
     c.advance()
     if c.curKey.isSome and cmpSeq(c.curKey.get, target) >= 0: return
   c.atEnd = true
+
+proc update*(c: PageStoreCursor; rootUuid: array[16, byte]; height: uint8) =
+  ## Update cursor in-place to point at a new B-tree root. Clears internal
+  ## state so the next seek/ensure will re-descend from the new root.
+  c.rootUuid = rootUuid
+  c.height = height
+  c.indexStack.setLen(0)
+  c.leafKeys.setLen(0)
+  c.leafPairs.setLen(0)
+  c.leafIdx = 0
+  c.curKey = none(seq[byte])
+  c.curPair = none((seq[byte], seq[byte]))
+  c.atEnd = (rootUuid == default(array[16, byte]))

@@ -220,13 +220,11 @@ proc findPrefixRange*(entries: seq[(seq[byte], array[16, byte])];
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PageCache — simple LRU via access-order counter.
-# Stores zstd-compressed page bytes (as returned by blobstore).
-# 3-5× smaller than decompressed → 3-5× more pages in cache → fewer I/Os.
-# Decompression is paid on cache hit (~0.5ms) but I/O saving dominates.
+# Stores decompressed page bytes to avoid repeated decompress on cache hits.
 
 type
   CacheEntry = object
-    compressed: seq[byte]    ## zstd-compressed page (from blobstore)
+    data: seq[byte]          ## decompressed page bytes
     accessOrder: int64
 
   PageCache = object
@@ -245,13 +243,13 @@ proc get(cc: var PageCache; uuid: array[16, byte]): Option[seq[byte]] =
     if uuid in cc.map:
       cc.map[uuid].accessOrder = cc.nextOrder
       inc cc.nextOrder
-      return some(cc.map[uuid].compressed)
+      return some(cc.map[uuid].data)
     return none(seq[byte])
 
-proc put(cc: var PageCache; uuid: array[16, byte]; compressed: seq[byte]) =
+proc put(cc: var PageCache; uuid: array[16, byte]; data: seq[byte]) =
   cc.lock.withLock:
     if uuid in cc.map: return
-    let sz = compressed.len
+    let sz = data.len
     while cc.currentBytes + sz > cc.maxBytes and cc.map.len > 0:
       var minKey: array[16, byte]
       var minOrder = high(int64)
@@ -259,11 +257,11 @@ proc put(cc: var PageCache; uuid: array[16, byte]; compressed: seq[byte]) =
         if v.accessOrder < minOrder:
           minOrder = v.accessOrder
           minKey = k
-      cc.currentBytes -= cc.map[minKey].compressed.len
+      cc.currentBytes -= cc.map[minKey].data.len
       cc.map.del(minKey)
     if sz <= cc.maxBytes:
       cc.currentBytes += sz
-      cc.map[uuid] = CacheEntry(compressed: compressed, accessOrder: cc.nextOrder)
+      cc.map[uuid] = CacheEntry(data: data, accessOrder: cc.nextOrder)
       inc cc.nextOrder
 
 
@@ -325,16 +323,16 @@ proc journalTruncate*(s: var PageStoreInner) =
 
 proc loadLeafRaw*(s: var PageStoreInner; uuid: array[16, byte]): seq[byte] =
   ## Return decompressed (prefix-compressed, NOT expanded) page bytes.
-  ## Caches zstd-compressed bytes. Decompresses on every call —
-  ## the cache exists to avoid I/O, not CPU.
+  ## Caches decompressed bytes — no decompress on cache hit.
   let cached = s.cache.get(uuid)
   if cached.isSome:
-    return decompress(cached.get)       # decompress from cache
-  let compressed = s.blobs.get(uuid)     # raw blobstore call (no zstd)
+    return cached.get
+  let compressed = s.blobs.get(uuid)
   if compressed.isNone:
     raise newException(IOError, "leaf blob not found")
-  s.cache.put(uuid, compressed.get)     # cache zstd-compressed
-  return decompress(compressed.get)
+  let decompressed = decompress(compressed.get)
+  s.cache.put(uuid, decompressed)
+  return decompressed
 
 proc loadLeafKeys*(s: var PageStoreInner; uuid: array[16, byte]): seq[seq[byte]] =
   let raw = loadLeafRaw(s, uuid)

@@ -28,6 +28,12 @@ type
     saveRetractScanNs*: int64
     saveBuildEntriesNs*: int64
     saveBatchWriteNs*: int64
+    # retractScan breakdown
+    saveRetractPrefixNs*: int64  # prefix build time
+    saveRetractSeekNs*: int64    # scanPrefix (cursor seek + iteration)
+    saveRetractApplyNs*: int64   # filter + buildEavtEntries + batchWrite
+    saveRetractCount*: int64     # datoms actually retracted
+    saveRetractScans*: int64     # number of retractScan calls
 
 proc newQueryStore*(kv: KVStore): QueryStore =
   let eng = newEavtEngine(kv)
@@ -42,6 +48,11 @@ proc resetSaveCounters*(q: QueryStore) =
   q.saveRetractScanNs = 0
   q.saveBuildEntriesNs = 0
   q.saveBatchWriteNs = 0
+  q.saveRetractPrefixNs = 0
+  q.saveRetractSeekNs = 0
+  q.saveRetractApplyNs = 0
+  q.saveRetractCount = 0
+  q.saveRetractScans = 0
 
 proc printSavePerf*(q: QueryStore) =
   if q.saveCount == 0: return
@@ -54,6 +65,10 @@ proc printSavePerf*(q: QueryStore) =
   echo "  typeCheck:      ", ms(q.saveTypeCheckNs), " ms  (", pct(q.saveTypeCheckNs), "%)"
   echo "  encode:         ", ms(q.saveEncodeNs), " ms  (", pct(q.saveEncodeNs), "%)"
   echo "  retractScan:    ", ms(q.saveRetractScanNs), " ms  (", pct(q.saveRetractScanNs), "%)"
+  echo "    prefix:       ", ms(q.saveRetractPrefixNs), " ms"
+  echo "    seek:         ", ms(q.saveRetractSeekNs), " ms"
+  echo "    apply:        ", ms(q.saveRetractApplyNs), " ms"
+  echo "    retracted:    ", q.saveRetractCount, " datoms in ", q.saveRetractScans, " scans"
   echo "  buildEntries:   ", ms(q.saveBuildEntriesNs), " ms  (", pct(q.saveBuildEntriesNs), "%)"
   echo "  batchWrite:     ", ms(q.saveBatchWriteNs), " ms  (", pct(q.saveBatchWriteNs), "%)"
   echo "  total:          ", ms(total), " ms"
@@ -118,15 +133,30 @@ method saveWithT(q: QueryStore; eid: int64; attr: string; val: SExpr;
   t0 = getMonoTime()
 
   if not many:
+    var tPrefix = getMonoTime()
     var ePrefix = keys.encodeEid(eid)
     ePrefix.add byte(attrId shr 24); ePrefix.add byte((attrId shr 16) and 0xFF)
     ePrefix.add byte((attrId shr 8) and 0xFF); ePrefix.add byte(attrId and 0xFF)
+    q.saveRetractPrefixNs += (getMonoTime().ticks - tPrefix.ticks)
+
+    var tScan = getMonoTime()
+    var foundKeys: seq[seq[byte]] = @[]
     for ek in q.eavt.scanPrefix(0, ePrefix):
+      foundKeys.add(ek)
+    q.saveRetractSeekNs += (getMonoTime().ticks - tScan.ticks)
+
+    tScan = getMonoTime()
+    var retracted = 0
+    for ek in foundKeys:
       if ek.len < 20: continue
       let esf = beUint64(ek, ek.len - 8)
       if (esf and 1) != 0: continue
       var retEntries = buildEavtEntries(eid, attrId, ek[12 ..< ek.len - 8], t, true, mode, indexed)
       q.eavt.batchWrite(retEntries)
+      retracted += 1
+    q.saveRetractApplyNs += (getMonoTime().ticks - tScan.ticks)
+    q.saveRetractCount += retracted
+    q.saveRetractScans += 1
 
   q.saveRetractScanNs += (getMonoTime().ticks - t0.ticks)
   t0 = getMonoTime()

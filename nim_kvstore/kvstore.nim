@@ -499,39 +499,32 @@ proc printBwPerf*(kv: KVStore) =
 # ── Streaming scan entry point ──
 
 proc openScanCursor*(kv: KVStore; cf: int): MergedCursor {.gcsafe.} =
-  var sources: seq[Cursor] = @[]
-
+  ## Create MergedCursor with fixed layout: 0=PageStore, 1=flush, 2=live.
+  ## update() assumes this layout for in-place source updates.
   var psSnap: PageStoreSnapshot
   var flushRoot, liveRoot: mt_be.TreapNode
 
-  kv.lock.withLock:
-    # ps.lock pairs with the flush thread's tree swaps (commitMerge): the
-    # CfTree struct write is not atomic. Order is always kv.lock → ps.lock;
-    # the flush thread takes ps.lock alone — no cycle.
-    var tree: CfTree
-    kv.ps[].lock.withLock: tree = kv.ps[].trees[cf]
-    psSnap = PageStoreSnapshot(rootUuid: tree.rootUuid, height: tree.height)
-    if kv.flushRoots.len > 0:
-      flushRoot = kv.flushRoots[cf]
-    liveRoot = kv.mt.hnd.live[cf]
+  var tree: CfTree
+  kv.ps[].lock.withLock: tree = kv.ps[].trees[cf]
+  psSnap = PageStoreSnapshot(rootUuid: tree.rootUuid, height: tree.height)
+  if kv.flushRoots.len > 0:
+    flushRoot = kv.flushRoots[cf]
+  liveRoot = kv.mt.hnd.live[cf]
 
-  if psSnap.rootUuid != default(array[16, byte]):
-    var psc = PageStoreCursor(
-      s: kv.ps, cf: cf, rootUuid: psSnap.rootUuid, height: psSnap.height,
-      isKv: cf >= 10)
-    sources.add pageStoreCursor(psc)
-
-  if flushRoot != nil:
-    let tc = newTreapCursor(flushRoot)
-    if not tc.atEnd:
-      sources.add treapCursor(tc)
-
-  if liveRoot != nil:
-    let tc = newTreapCursor(liveRoot)
-    if not tc.atEnd:
-      sources.add treapCursor(tc)
+  # Always create all 3 sources — update() assumes fixed indices
+  var sources: seq[Cursor] = @[]
+  sources.add pageStoreCursor(PageStoreCursor(
+    s: kv.ps, cf: cf, rootUuid: psSnap.rootUuid, height: psSnap.height,
+    isKv: cf >= 10))
+  sources.add treapCursor(newTreapCursor(flushRoot))
+  sources.add treapCursor(newTreapCursor(liveRoot))
 
   result = newMergedCursor(sources)
+  result.cf = cf
+  result.psRootUuid = psSnap.rootUuid
+  result.psHeight = psSnap.height
+  result.flushRoot = flushRoot
+  result.liveRoot = liveRoot
 
 proc openScanCursorKv*(kv: KVStore; cf: int): MergedCursor {.gcsafe.} =
   ## Open a scan cursor for key-value CFs (>= 10). Returns a MergedCursor
@@ -545,16 +538,13 @@ proc openScanCursorKv*(kv: KVStore; cf: int): MergedCursor {.gcsafe.} =
   var psSnap: PageStoreSnapshot
   var flushRoot, liveRoot: mt_be.TreapNode
 
-  kv.lock.withLock:
-    # ps.lock pairs with the flush thread's tree swaps (commitMerge): the
-    # CfTree struct write is not atomic. Order is always kv.lock → ps.lock;
-    # the flush thread takes ps.lock alone — no cycle.
-    var tree: CfTree
-    kv.ps[].lock.withLock: tree = kv.ps[].trees[cf]
-    psSnap = PageStoreSnapshot(rootUuid: tree.rootUuid, height: tree.height)
-    if kv.flushRoots.len > 0:
-      flushRoot = kv.flushRoots[cf]
-    liveRoot = kv.mt.hnd.live[cf]
+  # Single-threaded event loop — no lock needed.
+  var tree: CfTree
+  kv.ps[].lock.withLock: tree = kv.ps[].trees[cf]
+  psSnap = PageStoreSnapshot(rootUuid: tree.rootUuid, height: tree.height)
+  if kv.flushRoots.len > 0:
+    flushRoot = kv.flushRoots[cf]
+  liveRoot = kv.mt.hnd.live[cf]
 
   if psSnap.rootUuid != default(array[16, byte]):
     var psc = PageStoreCursor(

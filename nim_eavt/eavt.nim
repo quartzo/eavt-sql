@@ -3,10 +3,12 @@
 ## Port of spier-transactor/src/eavt.rs (~1099 lines Rust → Nim).
 ## Coordinates Resolver + KVStore for entity-attribute-value-time operations.
 
-import std/[tables, strutils, options, times, sets]
+import std/[tables, strutils, options, times, sets, monotimes]
 import resolver
 import keys
 import kvstore
+import page_store     # CfTree
+import page_cursor   # PageStoreSnapshot
 import nim_memtable/treap_backend
 import scheme
 import stats
@@ -54,6 +56,15 @@ type
     lock: Lock
     cachedStats*: CompileStats
     cachedStatsTime*: float64
+    # Reusable cursor for scanPrefix (single-threaded event loop — no races)
+    spCursor*: MergedCursor
+    spCf*: int
+    # scanPrefix perf counters
+    spCount*: int64
+    spOpenCursorNs*: int64
+    spSeekNs*: int64
+    spIterateNs*: int64
+    spKeysReturned*: int64
 
 proc newEavtEngine*(kv: KVStore): EavtEngine =
   result = EavtEngine(kv: kv, resolver: newResolver())
@@ -70,16 +81,64 @@ proc batchWrite*(eng: EavtEngine; entries: seq[EavtEntry]) =
   eng.kv.batchWrite(cfs)
 
 proc scanPrefix*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byte]] =
-  ## Scan keys in CF matching prefix. Uses seek() to jump directly to the
-  ## first matching key instead of scanning from the beginning.
-  let mc = eng.kv.openScanCursor(cf)
-  mc.seek(prefix)
+  ## Scan keys in CF matching prefix. Reuses cursor from previous call —
+  ## updates in-place if roots changed, then seeks to new prefix.
+  eng.spCount += 1
+  var t0 = getMonoTime()
+
+  # Read current roots
+  var psSnap: PageStoreSnapshot
+  var flushRoot, liveRoot: TreapNode
+  var tree: CfTree
+  eng.kv.ps[].lock.withLock: tree = eng.kv.ps[].trees[cf]
+  psSnap = PageStoreSnapshot(rootUuid: tree.rootUuid, height: tree.height)
+  if eng.kv.flushRoots.len > 0:
+    flushRoot = eng.kv.flushRoots[cf]
+  liveRoot = eng.kv.mt.hnd.live[cf]
+
+  if eng.spCursor == nil or eng.spCf != cf:
+    # First call or different CF — create cursor from scratch
+    eng.spCursor = eng.kv.openScanCursor(cf)
+    eng.spCf = cf
+  else:
+    # Same CF — update in-place (zero allocs if roots unchanged)
+    eng.spCursor.update(psSnap.rootUuid, psSnap.height, flushRoot, liveRoot)
+
+  eng.spOpenCursorNs += (getMonoTime().ticks - t0.ticks)
+
+  t0 = getMonoTime()
+  eng.spCursor.seek(prefix)
+  eng.spSeekNs += (getMonoTime().ticks - t0.ticks)
+
+  t0 = getMonoTime()
   while true:
-    let k = mc.next()
+    let k = eng.spCursor.next()
     if k.isNone: break
     let key = k.get
     if key.len < prefix.len or key[0..<prefix.len] != prefix: break
     result.add key
+  eng.spIterateNs += (getMonoTime().ticks - t0.ticks)
+  eng.spKeysReturned += result.len
+
+proc resetSpCounters*(eng: EavtEngine) =
+  eng.spCount = 0
+  eng.spOpenCursorNs = 0
+  eng.spSeekNs = 0
+  eng.spIterateNs = 0
+  eng.spKeysReturned = 0
+
+proc printSpPerf*(eng: EavtEngine) =
+  if eng.spCount == 0: return
+  let total = eng.spOpenCursorNs + eng.spSeekNs + eng.spIterateNs
+  template pct(ns: int64): string = formatFloat(ns.float / total.float * 100, ffDecimal, 1)
+  template ms(ns: int64): string = formatFloat(ns.float / 1_000_000, ffDecimal, 1)
+  echo "=== scanPrefix perf (", eng.spCount, " calls) ==="
+  echo "  openCursor:     ", ms(eng.spOpenCursorNs), " ms  (", pct(eng.spOpenCursorNs), "%)"
+  echo "  seek:           ", ms(eng.spSeekNs), " ms  (", pct(eng.spSeekNs), "%)"
+  echo "  iterate:        ", ms(eng.spIterateNs), " ms  (", pct(eng.spIterateNs), "%)"
+  echo "  total:          ", ms(total), " ms"
+  echo "  keys returned:  ", eng.spKeysReturned
+  echo "  empty scans:    ", eng.spCount - eng.spKeysReturned
 
 proc estimateCount*(eng: EavtEngine; cf: int; prefix: seq[byte]): int64 =
   ## Count keys matching prefix. Uses seek() to jump to the first match.

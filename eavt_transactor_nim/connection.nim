@@ -146,6 +146,8 @@ proc execScheme(eng: SharedEngine; req: Request; transp: StreamTransport) {.asyn
     let r = executeProgramSafe(session)
     eng.store.printSavePerf()
     eng.store.resetSaveCounters()
+    eng.store.eavt.printSpPerf()
+    eng.store.eavt.resetSpCounters()
     eng.store.kv.printBwPerf()
     eng.store.kv.resetBwCounters()
     if r.kind == sList and r.items.len >= 2 and r.items[0].kind == sSymbol and

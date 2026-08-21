@@ -7,6 +7,7 @@ import std/options
 import page_store    # cmpSeq
 import page_cursor   # PageStoreCursor, PageStoreSnapshot
 import treap_cursor  # TreapCursor
+import nim_memtable/treap_backend  # TreapNode
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MinHeap for merge operations
@@ -72,6 +73,12 @@ type
     curKey*: Option[seq[byte]]
     curPair*: Option[(seq[byte], seq[byte])]
     isKv*: bool
+    # Known roots for update detection
+    cf*: int
+    psRootUuid*: array[16, byte]
+    psHeight*: uint8
+    flushRoot*: TreapNode
+    liveRoot*: TreapNode
 
   Cursor* = ref object
     case kind*: CursorKind
@@ -173,6 +180,33 @@ proc seek*(mc: MergedCursor; target: seq[byte]) {.gcsafe.} =
   mc.atEnd = false
   mc.curKey = none(seq[byte])
   mc.advance()
+
+proc update*(mc: MergedCursor; psRootUuid: array[16, byte]; psHeight: uint8;
+             flushRoot, liveRoot: TreapNode) {.gcsafe.} =
+  ## Update cursor in-place to reflect new roots. Same semantics as creating
+  ## a new cursor: reset to initial state, ready to read first element.
+  ## Caller must seek() before iterating. Zero allocations when roots unchanged.
+  # Source 0: PageStore
+  if mc.sources.len > 0 and mc.sources[0].kind == ckPageStore:
+    if mc.psRootUuid != psRootUuid:
+      mc.sources[0].ps.update(psRootUuid, psHeight)
+      mc.psRootUuid = psRootUuid
+      mc.psHeight = psHeight
+  # Source 1: flush treap
+  if mc.sources.len > 1 and mc.sources[1].kind == ckTreap:
+    if mc.flushRoot != flushRoot:
+      mc.sources[1].tc.update(flushRoot)
+      mc.flushRoot = flushRoot
+  # Source 2: live treap — always changes (new datoms written)
+  if mc.sources.len > 2 and mc.sources[2].kind == ckTreap:
+    mc.sources[2].tc.update(liveRoot)
+    mc.liveRoot = liveRoot
+  # Reset to initial state — same as newMergedCursor
+  mc.heap.data.setLen(0)
+  mc.lastKey.setLen(0)
+  mc.curKey = none(seq[byte])
+  mc.curPair = none((seq[byte], seq[byte]))
+  mc.atEnd = false
 
 # ── Dispatch procs (call MergedCursor procs defined above) ──
 
