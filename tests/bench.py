@@ -59,7 +59,7 @@ def main():
         # Insert N entities
         t0 = time.perf_counter()
         for i in range(n):
-            sql(client, "UPSERT SET bench.name = %1, bench.value = %2", f"entity_{i}", str(i))
+            sql(client, "UPSERT SET bench.name = %1, bench.value = %2", f"entity_{i}", i)
         elapsed = (time.perf_counter() - t0) * 1000
         per_op = elapsed / n
         print(f"  {'INSERT (UPSERT × N)':40s} {elapsed:8.1f}ms total {per_op:6.3f}ms/op")
@@ -71,25 +71,25 @@ def main():
         eid_rows = sql(client, "UPSERT SET bench.name = %1", "test_entity")
         eid = eid_rows[0][0] if eid_rows else 0
 
-        bench(client, "SELECT by eid", lambda: sql(client, "SELECT d1.bench.name WHERE d1.eid = %1", str(eid)), 10)
+        bench(client, "SELECT by eid", lambda: sql(client, "SELECT d1.bench.name WHERE d1.eid = %1", eid), 10)
 
-        bench(client, "SELECT by attr value", lambda: sql(client, "SELECT d1.bench.name WHERE d1.bench.value = %1", str(n // 2)), 10)
+        bench(client, "SELECT by attr value", lambda: sql(client, "SELECT d1.bench.name WHERE d1.bench.value = %1", n // 2), 10)
 
         bench(client, "SELECT all names", lambda: sql(client, "SELECT d1.bench.name"), 3)
 
         bench(client, "SELECT range (25%)", lambda: sql(client,
             "SELECT d1.bench.name WHERE d1.bench.value >= %1 AND d1.bench.value < %2",
-            str(n // 4), str(n // 2)), 3)
+            n // 4, n // 2), 3)
 
         # JOIN test
         sql(client, "ATTRIBUTE bench.target REF ONE")
         first = sql(client, "SELECT d1.eid WHERE d1.bench.name = %1", "entity_0")
-        first_eid = str(first[0][0]) if first else "0"
+        first_eid = first[0][0] if first else 0
         step = max(1, n // 100)
         for i in range(0, n, step):
             r = sql(client, "SELECT d1.eid WHERE d1.bench.name = %1", f"entity_{i}")
             if r:
-                sql(client, "UPSERT AS D1 = %1 SET bench.target = %2", str(r[0][0]), first_eid)
+                sql(client, "UPSERT AS D1 = %1 SET bench.target = %2", r[0][0], first_eid)
 
         bench(client, "JOIN (~1% have ref)", lambda: sql(client,
             "SELECT d1.bench.name, d2.bench.name WHERE d1.bench.target = d2.eid"), 3)

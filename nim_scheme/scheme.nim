@@ -68,6 +68,50 @@ const RangeOpLt = 4'i32
 const RangeOpLte = 5'i32
 const RangeOpIn = 6'i32
 
+proc encodeIntBytes(n: int64): seq[byte] =
+  var x = cast[uint64](n xor (1'i64 shl 63))
+  result = newSeqOfCap[byte](8)
+  for i in countdown(7, 0): result.add byte((x shr (i * 8)) and 0xFF)
+proc encodeFloatBytes(f: float64): seq[byte] =
+  var x = cast[uint64](f)
+  if (x shr 63) == 1: x = not x
+  else: x = x xor (1'u64 shl 63)
+  result = newSeqOfCap[byte](8)
+  for i in countdown(7, 0): result.add byte((x shr (i * 8)) and 0xFF)
+proc encodeVariableBytes(s: string): seq[byte] =
+  let raw = s.cstring
+  var len = 0
+  while raw[len] != '\0': inc len
+  result = newSeqOfCap[byte](len + (len div 8) + 2)
+  var pos = 0
+  while pos < len:
+    let remaining = len - pos
+    let blockLen = min(remaining, 8)
+    for j in 0..<blockLen: result.add byte(raw[pos + j])
+    for j in blockLen..<8: result.add byte(0)
+    if remaining <= 8: result.add byte(blockLen)
+    else: result.add byte(0xFF)
+    pos += blockLen
+proc encodeVariableUnorderedBytes(data: seq[byte]): seq[byte] =
+  let length = data.len
+  result = newSeqOfCap[byte](length + 4)
+  result.add byte(length shr 24); result.add byte((length shr 16) and 0xFF)
+  result.add byte((length shr 8) and 0xFF); result.add byte(length and 0xFF)
+  result.add data
+proc encodeSExprBytes(v: SExpr): seq[byte] =
+  case v.kind:
+  of sInt: result = encodeIntBytes(v.ival)
+  of sFloat: result = encodeFloatBytes(v.fval)
+  of sStr: result = encodeVariableBytes(v.sval)
+  of sBytes: result = encodeVariableUnorderedBytes(v.bytesval)
+  of sBool:
+    result = newSeqOfCap[byte](8)
+    result.add byte(if v.bval: 0x80 else: 0x00)
+    for _ in 1..7: result.add byte(0)
+  else:
+    result = newSeqOfCap[byte](8)
+    for _ in 0..7: result.add byte(0)
+
 proc cmpValueS(a, b: SExpr): int =
   if a.kind != b.kind:
     return ord(a.kind) - ord(b.kind)
@@ -738,9 +782,9 @@ proc evalSpecialForm(name: string; args: SExpr; env: var Environment;
       return done(newList(@[newList(@[newVoid(), newVoid(), newInt(-1)])]))
     var outItems: seq[SExpr] = @[]
     for (lo, hi, flags) in merged:
-      let loS = if lo.isSome: lo.get else: newVoid()
-      let hiS = if hi.isSome: hi.get else: newVoid()
-      outItems.add newList(@[loS, hiS, newInt(flags)])
+      let loB = if lo.isSome: newBytes(encodeSExprBytes(lo.get)) else: newVoid()
+      let hiB = if hi.isSome: newBytes(encodeSExprBytes(hi.get)) else: newVoid()
+      outItems.add newList(@[loB, hiB, newInt(flags)])
     return done(newList(outItems))
   of "while":
     if args.items.len < 2:

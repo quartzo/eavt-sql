@@ -16,7 +16,7 @@ import scanner
 type
   LeapIterator* = ref object
     scanners*: seq[V2Scanner]
-    specs*: seq[RangeSpec]
+    specs*: seq[ByteRangeSpec]
     started*: bool
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -140,36 +140,43 @@ proc leapConverge*(scanners: var seq[V2Scanner]): bool =
 # apply_ranges — pure predicate, no seeking
 # ═══════════════════════════════════════════════════════════════════════════════
 
-proc valueInSpecs*(cur: SExpr; specs: seq[RangeSpec]): bool =
+proc bytesCmp(a, b: seq[byte]): int =
+  let n = min(a.len, b.len)
+  for i in 0..<n:
+    if a[i] < b[i]: return -1
+    elif a[i] > b[i]: return 1
+  if a.len < b.len: -1 elif a.len > b.len: 1 else: 0
+
+proc valueInSpecsBytes*(cur: seq[byte]; specs: seq[ByteRangeSpec]): bool =
   if specs.len == 0: return true
-  # Empty sentinel: single triple with flags=-1 means unsatisfiable
   if specs.len == 1 and specs[0].flags == -1: return false
   for spec in specs:
     if spec.flags == -1: return false
     if spec.hi.isSome:
       let hiOpen = (spec.flags and RangeHiOpen) != 0
-      let pastHi = if hiOpen: cur >= spec.hi.get else: cur > spec.hi.get
+      let cmpHi = bytesCmp(cur, spec.hi.get)
+      let pastHi = if hiOpen: cmpHi >= 0 else: cmpHi > 0
       if pastHi: continue
     if spec.lo.isSome:
       let loOpen = (spec.flags and RangeLoOpen) != 0
-      let beforeLo = if loOpen: cur <= spec.lo.get else: cur < spec.lo.get
+      let cmpLo = bytesCmp(cur, spec.lo.get)
+      let beforeLo = if loOpen: cmpLo <= 0 else: cmpLo < 0
       if beforeLo: continue
-    # within this spec
     return true
   false
 
-proc applyRanges*(scanners: var seq[V2Scanner]; specs: seq[RangeSpec]): bool =
+proc applyRanges*(scanners: var seq[V2Scanner]; specs: seq[ByteRangeSpec]): bool =
   if specs.len == 0: return true
   if specs.len == 1 and specs[0].flags == -1: return false
-  let cv = scanners[0].extractCurrent()
-  if cv.isNone: return false
-  valueInSpecs(cv.get, specs)
+  let curOpt = scanners[0].currentValueBytes()
+  if curOpt.isNone: return false
+  valueInSpecsBytes(curOpt.get, specs)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# parse_ranges — now parses list of [lo, hi, flags] triples
+# parse_ranges — now parses list of [lo, hi, flags] triples (lo/hi as bytes)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-proc parseRanges*(sexpr: SExpr): seq[RangeSpec] =
+proc parseRanges*(sexpr: SExpr): seq[ByteRangeSpec] =
   case sexpr.kind:
   of sList:
     for item in sexpr.items:
@@ -179,21 +186,24 @@ proc parseRanges*(sexpr: SExpr): seq[RangeSpec] =
         let flagsRaw = item.items[2]
         if flagsRaw.kind != sInt: continue
         let flags = int32(flagsRaw.ival)
-        let lo = if loRaw.kind == sVoid: none[SExpr]() else: some(loRaw)
-        let hi = if hiRaw.kind == sVoid: none[SExpr]() else: some(hiRaw)
-        result.add RangeSpec(lo: lo, hi: hi, flags: flags)
+        let lo = if loRaw.kind == sVoid: none[seq[byte]]()
+                 elif loRaw.kind == sBytes: some(loRaw.bytesval)
+                 else: none[seq[byte]]()
+        let hi = if hiRaw.kind == sVoid: none[seq[byte]]()
+                 elif hiRaw.kind == sBytes: some(hiRaw.bytesval)
+                 else: none[seq[byte]]()
+        result.add ByteRangeSpec(lo: lo, hi: hi, flags: flags)
       elif item.kind == sList and item.items.len == 0:
         discard
   else: discard
 
-proc convergeWithRanges*(scanners: var seq[V2Scanner]; specs: seq[RangeSpec]): bool =
+proc convergeWithRanges*(scanners: var seq[V2Scanner]; specs: seq[ByteRangeSpec]): bool =
   if not leapConverge(scanners): return false
   if specs.len == 0: return true
   if specs.len == 1 and specs[0].flags == -1: return false
   let maxIter = specs.len + 30
   for _ in 0..<maxIter:
-    # Peek validation via scanner's validateOrProposeNextElement
-    let (res, propose) = scanners[0].validateOrProposeNextElement(specs)
+    let (res, propose) = scanners[0].validateOrProposeNextElementBytes(specs)
     case res:
     of vrValid:
       return true
@@ -201,30 +211,27 @@ proc convergeWithRanges*(scanners: var seq[V2Scanner]; specs: seq[RangeSpec]): b
       return false
     of vrPropose:
       if propose.isSome:
-        # Efficient propose via seek (prefix-aware, O(log n))
-        scanners[0].seekToValue(propose.get)
+        scanners[0].seekToBytes(propose.get)
         if scanners[0].atEnd(): return false
-        # If loOpen and we landed exactly on lo, skip it
         let loOpenProposed = block:
           var isOpen = false
           for spec in specs:
-            if spec.lo.isSome and spec.lo.get == propose.get and (spec.flags and RangeLoOpen) != 0:
+            if spec.lo.isSome and bytesCmp(spec.lo.get, propose.get) == 0 and (spec.flags and RangeLoOpen) != 0:
               isOpen = true; break
           isOpen
         if loOpenProposed:
-          let cur2 = scanners[0].extractCurrent()
-          if cur2.isSome and cur2.get == propose.get:
+          let cur2 = scanners[0].currentValueBytes()
+          if cur2.isSome and bytesCmp(cur2.get, propose.get) == 0:
             scanners[0].leapNextAt()
             if scanners[0].atEnd(): return false
         if not leapConverge(scanners): return false
       else:
-        # No specific lo to propose (gap with kind mismatch) — step smallest
         var minIdx = 0
-        var minVal: Option[SExpr] = none[SExpr]()
+        var minVal: Option[seq[byte]] = none[seq[byte]]()
         for i, sc in scanners:
-          let v = sc.extractCurrent()
+          let v = sc.currentValueBytes()
           if v.isSome:
-            if minVal.isNone or v.get < minVal.get:
+            if minVal.isNone or bytesCmp(v.get, minVal.get) < 0:
               minVal = v; minIdx = i
           else:
             minIdx = i; break

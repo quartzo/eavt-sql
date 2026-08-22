@@ -84,7 +84,7 @@ class EavtClient:
         """Execute SQL and return all result chunks as list of dicts."""
         req = {"type": "sql", "sql": query}
         if params:
-            req["params"] = list(params)
+            req["params"] = [to_wire(p) for p in params]
         self._send_msg(_PACKER.pack(req))
         results = []
         while True:

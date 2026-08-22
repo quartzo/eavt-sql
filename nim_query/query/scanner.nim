@@ -589,6 +589,75 @@ proc validateOrProposeNextElement*(sc: V2Scanner; specs: seq[RangeSpec]): tuple[
   # Gap between intervals but no lo proposal found (e.g., kind mismatch) → step one
   return (vrPropose, none[SExpr]())
 
+proc currentValueBytes*(sc: V2Scanner): Option[seq[byte]] =
+  let kOpt = sc.pos.currentActiveKey
+  if kOpt.isNone: return none[seq[byte]]()
+  let k = kOpt.get
+  if classifyKey(sc, k) notin {kvpMatch, kvpNoPrefix}: return none[seq[byte]]()
+  let vs = sc.valueStart(k)
+  let ve = sc.valueEnd(k)
+  if vs < 0 or ve > k.len or vs >= ve: return none[seq[byte]]()
+  some(k[vs..<ve])
+
+proc cmpBytes(a, b: seq[byte]): int =
+  let n = min(a.len, b.len)
+  for i in 0..<n:
+    if a[i] < b[i]: return -1
+    elif a[i] > b[i]: return 1
+  if a.len < b.len: -1 elif a.len > b.len: 1 else: 0
+
+proc seekToBytes*(sc: V2Scanner; valueBytes: seq[byte]) =
+  var target = sc.prefixCache
+  target.add valueBytes
+  for _ in 0..7: target.add 0'u8
+  sc.pos.cursor.seek(target)
+  sc.advanceToActiveAt()
+
+proc validateOrProposeNextElementBytes*(sc: V2Scanner; specs: seq[ByteRangeSpec]): tuple[res: ValidateResult, propose: Option[seq[byte]]] =
+  let curOpt = sc.currentValueBytes()
+  if curOpt.isNone:
+    return (vrAtEnd, none[seq[byte]]())
+  let cur = curOpt.get
+  if specs.len == 0:
+    return (vrValid, none[seq[byte]]())
+  if specs.len == 1 and specs[0].flags == -1:
+    return (vrAtEnd, none[seq[byte]]())
+  for spec in specs:
+    if spec.flags == -1: continue
+    if spec.hi.isSome:
+      let hiOpen = (spec.flags and RangeHiOpen) != 0
+      let cmpHi = cmpBytes(cur, spec.hi.get)
+      let pastHi = if hiOpen: cmpHi >= 0 else: cmpHi > 0
+      if pastHi: continue
+    if spec.lo.isSome:
+      let loOpen = (spec.flags and RangeLoOpen) != 0
+      let cmpLo = cmpBytes(cur, spec.lo.get)
+      let beforeLo = if loOpen: cmpLo <= 0 else: cmpLo < 0
+      if beforeLo: continue
+    return (vrValid, none[seq[byte]]())
+  for spec in specs:
+    if spec.flags == -1: continue
+    if spec.lo.isNone: continue
+    let loOpen = (spec.flags and RangeLoOpen) != 0
+    let cmpLo = cmpBytes(cur, spec.lo.get)
+    let beforeLo = if loOpen: cmpLo <= 0 else: cmpLo < 0
+    if beforeLo:
+      return (vrPropose, some(spec.lo.get))
+  var pastAll = true
+  for spec in specs:
+    if spec.hi.isNone:
+      pastAll = false
+      break
+    let hiOpen = (spec.flags and RangeHiOpen) != 0
+    let cmpHi = cmpBytes(cur, spec.hi.get)
+    let pastHi = if hiOpen: cmpHi >= 0 else: cmpHi > 0
+    if not pastHi:
+      pastAll = false
+      break
+  if pastAll:
+    return (vrAtEnd, none[seq[byte]]())
+  return (vrPropose, none[seq[byte]]())
+
 # ── attr_id helpers ──
 
 proc attrIdFromPrefixBytes*(sc: V2Scanner): Option[uint32] =

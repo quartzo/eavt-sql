@@ -53,6 +53,11 @@ type
     hi*: Option[SExpr]
     flags*: int32
 
+  ByteRangeSpec* = object
+    lo*: Option[seq[byte]]
+    hi*: Option[seq[byte]]
+    flags*: int32
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # merge_intervals
 # ═══════════════════════════════════════════════════════════════════════════════
