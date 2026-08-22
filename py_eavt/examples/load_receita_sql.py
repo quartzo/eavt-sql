@@ -31,6 +31,82 @@ BATCH_SIZE = 500
 ZERO_DATE = "00000000"
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tagged-wire constructors (docs/scheme-transport.md §3.3)
+#   0=int 1=float 2=str 3=symbol 4=bool 5=bytes 6=void 7=list
+#
+# Symbols and attribute names repeat on every row, so their nodes are cached
+# and shared across forms; value nodes are always fresh. Sharing is safe —
+# msgpack serializes each occurrence independently (no cycles by construction).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_sym_cache: dict[str, list] = {}
+_attr_cache: dict[str, list] = {}
+
+
+def WSym(name: str) -> list:
+    n = _sym_cache.get(name)
+    if n is None:
+        n = [3, name]
+        _sym_cache[name] = n
+    return n
+
+
+def WAttr(name: str) -> list:
+    n = _attr_cache.get(name)
+    if n is None:
+        n = [2, name]
+        _attr_cache[name] = n
+    return n
+
+
+def WInt(i: int) -> list:
+    return [0, i]
+
+
+def WFloat(f: float) -> list:
+    return [1, f]
+
+
+def WStr(s: str) -> list:
+    return [2, s]
+
+
+def WForm(*nodes) -> list:
+    """Wire node for a form: (n0 n1 ...) -> [7, [n0, n1, ...]]"""
+    return [7, list(nodes)]
+
+
+E_SYM = WSym("E")
+SETBANG = WSym("set!")
+SAVE = WSym("save")
+RESULT = WSym("result")
+WHEN = WSym("when")
+BEGIN = WSym("begin")
+GOC = WSym("get-or-create-entity")
+ALLOC_E_4 = WForm(WSym("alloc-entity"), WInt(4))
+
+
+def set_e_alloc() -> list:
+    """(set! E (alloc-entity 4))"""
+    return WForm(SETBANG, E_SYM, ALLOC_E_4)
+
+
+def save_w(attr: str, val_node: list) -> list:
+    """(save E attr val-node)"""
+    return WForm(SAVE, E_SYM, WAttr(attr), val_node)
+
+
+def wstr_save(attr: str, val: str) -> list:
+    """(save E attr "val")"""
+    return WForm(SAVE, E_SYM, WAttr(attr), WStr(val))
+
+
+def goc(attr: str, val: str) -> list:
+    """(get-or-create-entity attr "val") as an expression node."""
+    return WForm(GOC, WAttr(attr), WStr(val))
+
+
 def rows_from_zip(zip_path: Path):
     with zipfile.ZipFile(zip_path) as zf:
         name = zf.namelist()[0]
@@ -128,9 +204,9 @@ S = Sym  # shorthand for Scheme symbol
 
 
 def run_scheme_batch(client: EavtClient, body: list) -> int:
-    """Execute a Scheme (begin ...) program in exec mode. Returns first EID."""
-    program = [S("begin")] + body
-    results = client.scheme(program, mode="exec")
+    """Execute a wire-tagged (begin ...) program in exec mode. Returns first EID."""
+    program = WForm(BEGIN, *body)
+    results = client.scheme_wire(program, mode="exec")
     return results[0]["rows"][0][0]
 
 
@@ -167,10 +243,10 @@ def load_lookups(client: EavtClient, data_dir: Path, batch_size: int):
 def _flush_lookup_batch(client, prefix, desc_attr, batch):
     body = []
     for row in batch:
-        body.append([S("set!"), S("E"), [S("alloc-entity"), 4]])
-        body.append([S("save"), S("E"), f"{prefix}.codigo", row[0]])
-        body.append([S("save"), S("E"), f"{prefix}.{desc_attr}", row[1]])
-    body.append([S("result"), S("E"), len(batch) * 2])
+        body.append(set_e_alloc())
+        body.append(wstr_save(f"{prefix}.codigo", row[0]))
+        body.append(wstr_save(f"{prefix}.{desc_attr}", row[1]))
+    body.append(WForm(RESULT, E_SYM, WInt(len(batch) * 2)))
     run_scheme_batch(client, body)
 
 
@@ -210,22 +286,22 @@ def load_empresas(client: EavtClient, data_dir: Path, n: int, batch_size: int):
 def _flush_empresa_batch(client, batch):
     body = []
     for row in batch:
-        body.append([S("set!"), S("E"), [S("alloc-entity"), 4]])
-        body.append([S("save"), S("E"), "empresa.cnpj_base", row[0]])
+        body.append(set_e_alloc())
+        body.append(wstr_save("empresa.cnpj_base", row[0]))
         if row[1]:
-            body.append([S("save"), S("E"), "empresa.razao_social", row[1]])
+            body.append(wstr_save("empresa.razao_social", row[1]))
         if row[2]:
-            body.append([S("save"), S("E"), "empresa.natureza_juridica",
-                         [S("get-or-create-entity"), "natureza.codigo", row[2]]])
+            body.append(save_w("empresa.natureza_juridica",
+                               goc("natureza.codigo", row[2])))
         if row[3]:
-            body.append([S("save"), S("E"), "empresa.qualificacao_resp",
-                         [S("get-or-create-entity"), "qualificacao.codigo", row[3]]])
+            body.append(save_w("empresa.qualificacao_resp",
+                               goc("qualificacao.codigo", row[3])))
         if row[4]:
-            body.append([S("save"), S("E"), "empresa.capital_social",
-                         float(row[4].replace(",", "."))])
+            body.append(save_w("empresa.capital_social",
+                               WFloat(float(row[4].replace(",", ".")))))
         if row[5]:
-            body.append([S("save"), S("E"), "empresa.porte", row[5]])
-    body.append([S("result"), S("E"), len(batch) * 6])
+            body.append(wstr_save("empresa.porte", row[5]))
+    body.append(WForm(RESULT, E_SYM, WInt(len(batch) * 6)))
     run_scheme_batch(client, body)
 
 
@@ -261,12 +337,12 @@ def merge_simples(client: EavtClient, data_dir: Path):
             continue
 
         body = [
-            [S("set!"), S("E"), [S("get-or-create-entity"), "empresa.cnpj_base", row[0]]],
+            [SETBANG, E_SYM, goc("empresa.cnpj_base", row[0])],
         ]
         for attr, val in sets:
-            body.append([S("when"), S("E"),
-                         [S("save"), S("E"), attr, val]])
-        body.append([S("result"), S("E"), len(sets)])
+            body.append(WForm(WHEN, E_SYM,
+                              WForm(SAVE, E_SYM, WAttr(attr), WStr(val))))
+        body.append(WForm(RESULT, E_SYM, WInt(len(sets))))
 
         try:
             run_scheme_batch(client, body)
@@ -319,64 +395,61 @@ def _flush_estab_batch(client, batch):
         cnpj_base = row[0]
         cnpj_full = row[0] + row[1].zfill(4) + row[2].zfill(2)
 
-        body.append([S("set!"), S("E"), [S("alloc-entity"), 4]])
-        body.append([S("save"), S("E"), "estab.cnpj_completo", cnpj_full])
-        body.append([S("save"), S("E"), "estab.empresa",
-                     [S("get-or-create-entity"), "empresa.cnpj_base", cnpj_base]])
+        body.append(set_e_alloc())
+        body.append(wstr_save("estab.cnpj_completo", cnpj_full))
+        body.append(save_w("estab.empresa", goc("empresa.cnpj_base", cnpj_base)))
         if row[3]:
-            body.append([S("save"), S("E"), "estab.matriz_filial", row[3]])
+            body.append(wstr_save("estab.matriz_filial", row[3]))
         if row[4]:
-            body.append([S("save"), S("E"), "estab.nome_fantasia", row[4]])
+            body.append(wstr_save("estab.nome_fantasia", row[4]))
         if row[5]:
-            body.append([S("save"), S("E"), "estab.situacao", row[5]])
+            body.append(wstr_save("estab.situacao", row[5]))
         if row[6] and row[6] != ZERO_DATE:
-            body.append([S("save"), S("E"), "estab.data_situacao", row[6]])
+            body.append(wstr_save("estab.data_situacao", row[6]))
         if row[7]:
-            body.append([S("save"), S("E"), "estab.motivo",
-                         [S("get-or-create-entity"), "motivo.codigo", row[7]]])
+            body.append(save_w("estab.motivo", goc("motivo.codigo", row[7])))
         if row[9]:
-            body.append([S("save"), S("E"), "estab.pais",
-                         [S("get-or-create-entity"), "pais.codigo", row[9]]])
+            body.append(save_w("estab.pais", goc("pais.codigo", row[9])))
         if row[10] and row[10] != ZERO_DATE:
-            body.append([S("save"), S("E"), "estab.data_inicio_ativ", row[10]])
+            body.append(wstr_save("estab.data_inicio_ativ", row[10]))
         if row[11]:
-            body.append([S("save"), S("E"), "estab.cnae_principal",
-                         [S("get-or-create-entity"), "cnae.codigo", row[11]]])
+            body.append(save_w("estab.cnae_principal",
+                               goc("cnae.codigo", row[11])))
         if row[12]:
             for code in row[12].split(","):
                 code = code.strip()
                 if code:
-                    body.append([S("save"), S("E"), "estab.cnae_secundario",
-                                 [S("get-or-create-entity"), "cnae.codigo", code]])
+                    body.append(save_w("estab.cnae_secundario",
+                                       goc("cnae.codigo", code)))
         if row[13]:
-            body.append([S("save"), S("E"), "estab.tipo_logradouro", row[13]])
+            body.append(wstr_save("estab.tipo_logradouro", row[13]))
         if row[14]:
-            body.append([S("save"), S("E"), "estab.logradouro", row[14]])
+            body.append(wstr_save("estab.logradouro", row[14]))
         if row[15]:
-            body.append([S("save"), S("E"), "estab.numero", row[15]])
+            body.append(wstr_save("estab.numero", row[15]))
         if row[16]:
-            body.append([S("save"), S("E"), "estab.complemento", row[16]])
+            body.append(wstr_save("estab.complemento", row[16]))
         if row[17]:
-            body.append([S("save"), S("E"), "estab.bairro", row[17]])
+            body.append(wstr_save("estab.bairro", row[17]))
         if row[18]:
-            body.append([S("save"), S("E"), "estab.cep", row[18]])
+            body.append(wstr_save("estab.cep", row[18]))
         if row[19]:
-            body.append([S("save"), S("E"), "estab.uf", row[19]])
+            body.append(wstr_save("estab.uf", row[19]))
         if row[20]:
-            body.append([S("save"), S("E"), "estab.municipio",
-                         [S("get-or-create-entity"), "municipio.codigo", row[20]]])
+            body.append(save_w("estab.municipio",
+                               goc("municipio.codigo", row[20])))
         if row[21]:
-            body.append([S("save"), S("E"), "estab.ddd1", row[21]])
+            body.append(wstr_save("estab.ddd1", row[21]))
         if row[22]:
-            body.append([S("save"), S("E"), "estab.telefone1", row[22]])
+            body.append(wstr_save("estab.telefone1", row[22]))
         if row[23]:
-            body.append([S("save"), S("E"), "estab.ddd2", row[23]])
+            body.append(wstr_save("estab.ddd2", row[23]))
         if row[24]:
-            body.append([S("save"), S("E"), "estab.telefone2", row[24]])
+            body.append(wstr_save("estab.telefone2", row[24]))
         if row[27]:
-            body.append([S("save"), S("E"), "estab.email", row[27]])
+            body.append(wstr_save("estab.email", row[27]))
 
-    body.append([S("result"), S("E"), len(batch) * 20])
+    body.append(WForm(RESULT, E_SYM, WInt(len(batch) * 20)))
     run_scheme_batch(client, body)
 
 
@@ -418,27 +491,26 @@ def _flush_socio_batch(client, batch):
     body = []
     for row in batch:
         cnpj_base = row[0]
-        body.append([S("set!"), S("E"), [S("alloc-entity"), 4]])
-        body.append([S("save"), S("E"), "socio.empresa",
-                     [S("get-or-create-entity"), "empresa.cnpj_base", cnpj_base]])
+        body.append(set_e_alloc())
+        body.append(save_w("socio.empresa",
+                           goc("empresa.cnpj_base", cnpj_base)))
         if row[1]:
-            body.append([S("save"), S("E"), "socio.tipo_pessoa", row[1]])
+            body.append(wstr_save("socio.tipo_pessoa", row[1]))
         if row[2]:
-            body.append([S("save"), S("E"), "socio.nome", row[2]])
+            body.append(wstr_save("socio.nome", row[2]))
         if row[3]:
-            body.append([S("save"), S("E"), "socio.cpf_cnpj", row[3]])
+            body.append(wstr_save("socio.cpf_cnpj", row[3]))
         if row[4]:
-            body.append([S("save"), S("E"), "socio.qualificacao",
-                         [S("get-or-create-entity"), "qualificacao.codigo", row[4]]])
+            body.append(save_w("socio.qualificacao",
+                               goc("qualificacao.codigo", row[4])))
         if row[5] and row[5] != ZERO_DATE:
-            body.append([S("save"), S("E"), "socio.data_entrada", row[5]])
+            body.append(wstr_save("socio.data_entrada", row[5]))
         if row[6]:
-            body.append([S("save"), S("E"), "socio.pais",
-                         [S("get-or-create-entity"), "pais.codigo", row[6]]])
+            body.append(save_w("socio.pais", goc("pais.codigo", row[6])))
         if row[10]:
-            body.append([S("save"), S("E"), "socio.faixa_etaria", row[10]])
+            body.append(wstr_save("socio.faixa_etaria", row[10]))
 
-    body.append([S("result"), S("E"), len(batch) * 8])
+    body.append(WForm(RESULT, E_SYM, WInt(len(batch) * 8)))
     run_scheme_batch(client, body)
 
 

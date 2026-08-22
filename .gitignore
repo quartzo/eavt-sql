@@ -4,7 +4,9 @@ chronos_file.out
 test_blobstore_async
 test_kvstore_async
 nim_*/test_*
+!nim_*/test_*.nim
 nim_*/*/test_*
+!nim_*/*/test_*.nim
 nim_query/query/test_query
 __pycache__/
 eavt_*/server

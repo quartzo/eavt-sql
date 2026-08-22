@@ -22,7 +22,7 @@
 import std/[json, strutils, options]
 import chronos
 import msgpack4nim/msgpack2json
-import scheme, wire
+import scheme, wire, msgpack_scan
 import stats
 import engine
 import eavt_transactor_nim/protocol except readMsg, writeMsg
@@ -326,26 +326,35 @@ proc serveGatewayConnection*(gw: GatewayState; transp: StreamTransport) {.
       if len > 0:
         await transp.readExactly(addr raw[0], len)
 
-      var node: JsonNode
-      try:
-        node = toJsonNode(raw)
-        if node.kind != JObject or not node.hasKey("type"):
-          raise newException(ValueError, "request must be an object with a type")
-      except CatchableError as e:
-        await transp.writeErrorAsync("parse error: " & e.msg)
+      # Dispatch by top-level "type" key only.  Forwarded types
+      # (scheme/admin/kv) never get a full msgpack→JsonNode conversion —
+      # their payload passes through raw; only the sql path parses (small
+      # frames, compiled locally anyway).
+      if not isMsgpackMap(raw):
+        await transp.writeErrorAsync("parse error: request must be an object")
         continue
 
-      let t = node["type"].getStr
+      let t = getTopStr(raw, "type")
       try:
         case t
         of "sql":
+          var node: JsonNode
+          try:
+            node = toJsonNode(raw)
+          except CatchableError as e:
+            await transp.writeErrorAsync("parse error: " & e.msg)
+            continue
           await handleSql(gw, node, transp)
         of "schema":
           await handleSchema(gw, transp)
         of "scheme", "admin", "kv":
           await gw.conn.forwardRaw(raw, transp)
         else:
-          await transp.writeErrorAsync("unknown request type: " & t)
+          if not hasTopKey(raw, "type"):
+            await transp.writeErrorAsync(
+              "parse error: request must be an object with a type")
+          else:
+            await transp.writeErrorAsync("unknown request type: " & t)
       except CatchableError as e:
         await transp.writeErrorAsync(e.msg)
   except CatchableError:

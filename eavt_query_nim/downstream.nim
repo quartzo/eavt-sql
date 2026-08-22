@@ -24,6 +24,7 @@
 import std/[json, os, tables]
 import chronos
 import msgpack4nim/msgpack2json
+import msgpack_scan
 
 type
   PendingReq = ref object
@@ -102,27 +103,29 @@ proc readerLoop(conn: MultiplexedConn) {.async.} =
   ## Reads frames forever.  Replication events ("ev") go to the onEvent
   ## callback; responses ("id") are relayed to the matching pending
   ## client transport and the pending future is completed on more=false.
+  ## Frames are scanned by top-level key only — full msgpack→JsonNode
+  ## conversion happens solely for replication events.
   while true:
     let body = await conn.readFrame()
     if body.len == 0:
       return  # disconnect — connectLoop will reconnect
-    var frame: JsonNode
-    try:
-      frame = toJsonNode(body)
-    except CatchableError:
-      continue  # malformed — skip
-    if frame.hasKey("ev"):
+    if hasTopKey(body, "ev"):
       if conn.onEvent != nil:
+        var frame: JsonNode
+        try:
+          frame = toJsonNode(body)
+        except CatchableError:
+          continue  # malformed event — skip
         conn.onEvent(frame)
-    elif frame.hasKey("id"):
-      let id = frame["id"].getStr
+    elif hasTopKey(body, "id"):
+      let id = getTopStr(body, "id")
       let p = conn.pending.getOrDefault(id)
       if p != nil:
         try:
           await p.transp.writeFrameAsync(body)
         except CatchableError:
           discard  # client gone — pending will be cleaned up
-        if not frame.getOrDefault("more").getBool(false):
+        if not getTopBool(body, "more"):
           p.fut.complete()
           conn.pending.del(id)
 
@@ -190,15 +193,29 @@ proc request*(conn: MultiplexedConn; body: JsonNode;
 proc forwardRaw*(conn: MultiplexedConn; raw: string;
                  clientTransp: StreamTransport) {.async.} =
   ## Forward a raw msgpack frame (scheme/admin/kv) from a client to the
-  ## transactor.  Parses the frame to inject the correlation id, then
-  ## relays responses back to the client.
-  var body: JsonNode
-  try:
-    body = toJsonNode(raw)
-  except CatchableError as e:
-    await clientTransp.writeErrorAsync("parse error: " & e.msg)
+  ## transactor.  The correlation id is injected by appending ("id", n)
+  ## to the top-level map — no parse, no re-serialization; the payload
+  ## bytes pass through untouched.
+  if not conn.connected:
+    await clientTransp.writeErrorAsync("transactor disconnected")
     return
-  await conn.request(body, clientTransp)
+  let id = conn.nextIdStr()
+  let framed = injectTopPair(raw, "id", id)
+  if framed.len == 0:
+    await clientTransp.writeErrorAsync("parse error: request must be an object")
+    return
+  let fut = newFuture[void]("mux-forward-raw")
+  conn.pending[id] = PendingReq(transp: clientTransp, fut: fut)
+  try:
+    await conn.sendFrame(framed)
+  except CatchableError:
+    conn.pending.del(id)
+    await clientTransp.writeErrorAsync("transactor write failed")
+    return
+  try:
+    await fut
+  except CatchableError:
+    await clientTransp.writeErrorAsync("transactor disconnected")
 
 proc close*(conn: MultiplexedConn) {.async: (raises: []).} =
   try:

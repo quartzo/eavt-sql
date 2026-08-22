@@ -3,6 +3,11 @@ from pathlib import Path
 
 import msgpack
 
+# Shared Packer — packb() builds a new Packer per call; reusing one skips
+# that setup cost on every request (single-threaded use only).
+_PACKER = msgpack.Packer()
+_UNPACKER_KW = {"raw": False}
+
 
 class Sym(str):
     """Marks a string as a Scheme symbol (wire tag 3). Plain `str` values
@@ -80,7 +85,7 @@ class EavtClient:
         req = {"type": "sql", "sql": query}
         if params:
             req["params"] = list(params)
-        self._send_msg(msgpack.packb(req))
+        self._send_msg(_PACKER.pack(req))
         results = []
         while True:
             resp = msgpack.unpackb(self._recv_msg())
@@ -108,9 +113,34 @@ class EavtClient:
     def admin(self, command: str) -> str:
         """Send admin command and return output."""
         req = {"type": "admin", "command": command}
-        self._send_msg(msgpack.packb(req))
+        self._send_msg(_PACKER.pack(req))
         resp = msgpack.unpackb(self._recv_msg())
         return resp.get("output", "")
+
+    def _recv_loop(self):
+        """Read response chunks until more=false; raises on error frames."""
+        results = []
+        while True:
+            resp = msgpack.unpackb(self._recv_msg(), **_UNPACKER_KW)
+            if "error" in resp and resp["error"]:
+                raise RuntimeError(resp["error"])
+            results.append(resp)
+            if not resp.get("more", False):
+                break
+        return results
+
+    def scheme_wire(self, program, *params, mode: str = "exec") -> list[dict]:
+        """Execute a program already in tagged-wire form (lists of
+        [tag, value] nodes) — skips the to_wire() conversion pass.
+
+        Wire tag table (docs/scheme-transport.md §3.3):
+          0=int, 1=float, 2=str, 3=symbol, 4=bool, 5=bytes, 6=void, 7=list
+        """
+        req = {"type": "scheme", "program": program, "mode": mode}
+        if params:
+            req["params"] = list(params)
+        self._send_msg(_PACKER.pack(req))
+        return self._recv_loop()
 
     def scheme(self, program, *params, mode: str = "query") -> list[dict]:
         """Execute a Scheme program (tagged AST, see to_wire) on the server.
@@ -121,21 +151,13 @@ class EavtClient:
         req = {"type": "scheme", "program": to_wire(program), "mode": mode}
         if params:
             req["params"] = [to_wire(p) for p in params]
-        self._send_msg(msgpack.packb(req))
-        results = []
-        while True:
-            resp = msgpack.unpackb(self._recv_msg())
-            if resp.get("error"):
-                raise RuntimeError(resp["error"])
-            results.append(resp)
-            if not resp.get("more", False):
-                break
-        return results
+        self._send_msg(_PACKER.pack(req))
+        return self._recv_loop()
 
     def schema(self) -> dict:
         """Fetch the schema snapshot (attrIds, indexEstimates, partitionIds, refAttrs)."""
         req = {"type": "schema"}
-        self._send_msg(msgpack.packb(req))
+        self._send_msg(_PACKER.pack(req))
         resp = msgpack.unpackb(self._recv_msg())
         if resp.get("error"):
             raise RuntimeError(resp["error"])

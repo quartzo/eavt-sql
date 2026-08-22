@@ -34,6 +34,13 @@ type
     saveRetractApplyNs*: int64   # filter + buildEavtEntries + batchWrite
     saveRetractCount*: int64     # datoms actually retracted
     saveRetractScans*: int64     # number of retractScan calls
+    # unique-attr lookup counters (lookupEntity; get-or-create hit path)
+    lookupCount*: int64
+    lookupNs*: int64             # full lookupEntity wall
+    lookupScanNs*: int64         # scanPrefixActive portion
+    # scheme exec request counters (set by the transactor connection loop)
+    execCount*: int64
+    execWallNs*: int64           # executeProgram wall per exec request
 
 proc newQueryStore*(kv: KVStore): QueryStore =
   let eng = newEavtEngine(kv)
@@ -53,6 +60,11 @@ proc resetSaveCounters*(q: QueryStore) =
   q.saveRetractApplyNs = 0
   q.saveRetractCount = 0
   q.saveRetractScans = 0
+  q.lookupCount = 0
+  q.lookupNs = 0
+  q.lookupScanNs = 0
+  q.execCount = 0
+  q.execWallNs = 0
 
 proc printSavePerf*(q: QueryStore) =
   if q.saveCount == 0: return
@@ -73,6 +85,18 @@ proc printSavePerf*(q: QueryStore) =
   echo "  batchWrite:     ", ms(q.saveBatchWriteNs), " ms  (", pct(q.saveBatchWriteNs), "%)"
   echo "  total:          ", ms(total), " ms"
   echo "  avg per save:   ", formatFloat(total.float / q.saveCount.float / 1_000_000, ffDecimal, 3), " ms"
+  if q.execCount > 0:
+    let wall = q.execWallNs.float
+    template wpct(ns: int64): string = formatFloat(ns.float / wall * 100, ffDecimal, 1)
+    echo "=== exec perf (", q.execCount, " requests) ==="
+    echo "  exec wall:      ", ms(q.execWallNs), " ms  (avg ",
+      formatFloat(wall / q.execCount.float / 1_000_000, ffDecimal, 3), " ms/request)"
+    echo "  saveWithT:      ", ms(total), " ms  (", wpct(total), "% of wall)"
+    echo "  entity lookups: ", ms(q.lookupNs), " ms  (", wpct(q.lookupNs), "% of wall; ",
+      q.lookupCount, " lookups)"
+    echo "    scan portion: ", ms(q.lookupScanNs), " ms"
+    echo "  rest (VM/allocs): ", ms(q.execWallNs - total - q.lookupNs), " ms  (",
+      wpct(q.execWallNs - total - q.lookupNs), "% of wall)"
 
 # ── SExpr → storage value ──
 
@@ -209,8 +233,11 @@ method isUniqueAttr(q: QueryStore; name: string): bool =
 
 method lookupEntity(q: QueryStore; attrName: string; value: SExpr): Option[int64] =
   ## Unique-attr lookup: scan avet [attr 4B][val][eid 8B][sf 8B] by prefix.
+  let t0 = getMonoTime().ticks
   let aidOpt = q.eavt.lookupAttr(attrName)
-  if aidOpt.isNone: return none[int64]()
+  if aidOpt.isNone:
+    q.lookupNs += getMonoTime().ticks - t0
+    return none[int64]()
   let aid = aidOpt.get
   let vt = q.eavt.valueTypeFor(aid).get(resolver.DbTypeString)
   let mode = valueTypeToEncodeMode(vt)
@@ -218,11 +245,17 @@ method lookupEntity(q: QueryStore; attrName: string; value: SExpr): Option[int64
   var prefix = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
                 byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
   prefix.add encoded
+  let tScan = getMonoTime().ticks
   let scanRes = q.eavt.scanPrefixActive(2, prefix)
-  if scanRes.len == 0: return none[int64]()
-  let k = scanRes[0]
-  if k.len < 20: return none[int64]()
-  some(decodeEid(beUint64(k, k.len - 16)))
+  q.lookupScanNs += getMonoTime().ticks - tScan
+  var found = none[int64]()
+  if scanRes.len > 0:
+    let k = scanRes[0]
+    if k.len >= 20:
+      found = some(decodeEid(beUint64(k, k.len - 16)))
+  q.lookupNs += getMonoTime().ticks - t0
+  inc q.lookupCount
+  return found
 
 method lookupValue(q: QueryStore; eid: int64; attrName: string): Option[SExpr] =
   let aidOpt = q.eavt.lookupAttr(attrName)

@@ -1,6 +1,6 @@
 ## test_wire.nim — Unit tests for nim_scheme/wire (tagged AST transport).
 
-import std/[unittest, json]
+import std/[unittest, json, strutils]
 import scheme, wire
 
 proc rt(e: SExpr): SExpr = wireToSexpr(sexprToWire(e))
@@ -95,3 +95,70 @@ suite "wire.program":
     let prog = SchemeProgram(body: parse(src))
     let r = rt(prog.body)
     check $r == $prog.body
+
+# ── Direct msgpack decode (wireFromMsgpack) ─────────────────────────────────
+import msgpack4nim/msgpack2json
+
+proc sameSexpr(a, b: SExpr): bool =
+  if a.kind != b.kind: return false
+  case a.kind
+  of sVoid: true
+  of sBool: a.bval == b.bval
+  of sInt: a.ival == b.ival
+  of sFloat: a.fval == b.fval
+  of sStr: a.sval == b.sval
+  of sSymbol: a.symval == b.symval
+  of sBytes: a.bytesval == b.bytesval
+  of sResource: a.rid == b.rid
+  of sList:
+    if a.items.len != b.items.len: return false
+    for i in 0 ..< a.items.len:
+      if not sameSexpr(a.items[i], b.items[i]): return false
+    true
+
+proc mpRoundTrip(e: SExpr): SExpr =
+  ## encode → JsonNode → msgpack bytes → direct decode
+  wireFromMsgpack(fromJsonNode(sexprToWire(e)))
+
+suite "wire.msgpack-direct":
+  test "round-trips all scalar kinds":
+    check sameSexpr(mpRoundTrip(newInt(-42)), newInt(-42))
+    check sameSexpr(mpRoundTrip(newInt(int64.high)), newInt(int64.high))
+    check sameSexpr(mpRoundTrip(newInt(int64.low)), newInt(int64.low))
+    check sameSexpr(mpRoundTrip(newFloat(3.25)), newFloat(3.25))
+    check sameSexpr(mpRoundTrip(newStr("hé\"llo\n")), newStr("hé\"llo\n"))
+    check sameSexpr(mpRoundTrip(newSymbol("scanner-open")), newSymbol("scanner-open"))
+    check mpRoundTrip(newBool(true)).bval == true
+    check mpRoundTrip(newVoid()).kind == sVoid
+    check sameSexpr(mpRoundTrip(newBytes(@[byte(0), byte(255)])),
+                    newBytes(@[byte(0), byte(255)]))
+    check mpRoundTrip(newBytes(@[])).bytesval.len == 0
+  test "long string (>31 chars uses str8/str16 path)":
+    let long = newStr("x".repeat(100))
+    check sameSexpr(mpRoundTrip(long), long)
+  test "nested program shape round-trips":
+    let e = newList(@[
+      newSymbol("begin"),
+      newList(@[newSymbol("save"), newSymbol("E"), newStr("company.name"),
+                newStr("Acme")]),
+      newList(@[newSymbol("get-or-create-entity"), newStr("empresa.cnpj_base"),
+                newStr("12345678")]),
+      newList(@[newSymbol("result"), newSymbol("E"), newInt(80)]),
+    ])
+    check sameSexpr(mpRoundTrip(e), e)
+  test "deep nesting under the cap":
+    var e = newInt(1)
+    for i in 0 ..< 50:
+      e = newList(@[newSymbol("wrap"), e])
+    check sameSexpr(mpRoundTrip(e), e)
+  test "truncated input raises":
+    let bytes = fromJsonNode(sexprToWire(newList(@[newSymbol("ab"), newInt(5)])))
+    for n in 0 ..< bytes.len:
+      expect(WireError): discard wireFromMsgpack(bytes[0 ..< n])
+  test "non-array input raises":
+    expect(WireError): discard wireFromMsgpack(fromJsonNode(%"hello"))
+    expect(WireError): discard wireFromMsgpack(fromJsonNode(%*[1, 2, 3]))
+  test "unknown tag raises":
+    expect(WireError): discard wireFromMsgpack(fromJsonNode(%*[99, 1]))
+  test "bool tag with non-bool payload raises":
+    expect(WireError): discard wireFromMsgpack(fromJsonNode(%*[4, "x"]))

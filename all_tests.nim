@@ -18,6 +18,7 @@ import nim_eavt/test_eavt
 # Query engine
 import nim_scheme/test_scheme
 import nim_scheme/test_wire
+import nim_scheme/test_msgpack_scan
 import nim_query/query/test_query
 
 # SQL pipeline

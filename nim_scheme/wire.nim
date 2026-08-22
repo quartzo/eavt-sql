@@ -1,16 +1,22 @@
 ## wire.nim — Tagged AST transport encoding for SExpr.
 ##
-## Encodes/decodes SExpr trees as 2-element tagged JSON arrays
-## (`[tag, value]`) suitable for msgpack transport via msgpack2json.
-## The tag preserves distinctions plain JSON cannot express:
-## symbol × string, int64 × float64, and raw bytes.
+## Encodes/decodes SExpr trees as 2-element tagged arrays
+## (`[tag, value]`) on the msgpack wire.  The tag preserves
+## distinctions plain values cannot express: symbol × string,
+## int64 × float64, and raw bytes.
 ##
 ## Tag table (see docs/scheme-transport.md §3.3):
 ##   0 = int, 1 = float, 2 = str, 3 = symbol, 4 = bool,
 ##   5 = bytes, 6 = void, 7 = list
+##
+## Two decode paths exist:
+##   • wireToSexpr(JsonNode) — legacy, via a JSON tree (msgpack2json)
+##   • wireFromMsgpack(string) — direct from raw msgpack bytes; builds
+##     the SExpr in one pass with no intermediate tree.  This is what
+##     the transactor uses per request.
 
 import std/[json, strutils]
-import scheme
+import scheme, msgpack_scan
 
 type
   WireError* = object of CatchableError
@@ -90,3 +96,174 @@ proc wireToSexpr*(n: JsonNode): SExpr =
     newList(items)
   else:
     raise newException(WireError, "unknown wire tag: " & $tag)
+
+# ── Direct msgpack decode (no intermediate JSON tree) ───────────────────────
+
+proc mpReadInt(buf: string; pos: var int; limit: int): int64 =
+  ## Read any msgpack int encoding at pos, advancing pos.
+  if pos >= limit: raise newException(WireError, "truncated int")
+  let b = ord(buf[pos])
+  inc pos
+  case b
+  of 0x00..0x7f: return int64(b)
+  of 0xe0..0xff: return int64(cast[int8](byte(b)))
+  else:
+    let n = case b
+      of 0xcc, 0xd0: 1
+      of 0xcd, 0xd1: 2
+      of 0xce, 0xd2: 4
+      of 0xcf, 0xd3: 8
+      else: -1
+    if n < 0 or pos + n > limit:
+      raise newException(WireError, "bad or truncated int")
+    var v: uint64 = 0
+    for i in 0 ..< n:
+      v = (v shl 8) or uint64(ord(buf[pos + i]))
+    inc pos, n
+    case b
+    of 0xd0: return int64(cast[int8](byte(v and 0xff)))
+    of 0xd1: return int64(cast[int16](uint16(v and 0xffff)))
+    of 0xd2: return int64(cast[int32](uint32(v and 0xffffffff'u64)))
+    of 0xd3: return cast[int64](v)
+    else:    return cast[int64](v)
+
+proc mpReadStr(buf: string; pos: var int; limit: int): string =
+  ## Read any msgpack str encoding at pos, advancing pos.
+  if pos >= limit: raise newException(WireError, "truncated str")
+  let b = ord(buf[pos])
+  inc pos
+  var n = -1
+  case b
+  of 0xa0..0xbf: n = b and 0x1f
+  of 0xd9:
+    if pos >= limit: raise newException(WireError, "truncated str header")
+    n = ord(buf[pos]); inc pos
+  of 0xda:
+    if pos + 2 > limit: raise newException(WireError, "truncated str header")
+    n = (ord(buf[pos]) shl 8) or ord(buf[pos + 1]); inc pos, 2
+  of 0xdb:
+    if pos + 4 > limit: raise newException(WireError, "truncated str header")
+    n = int64(ord(buf[pos])) shl 24 or (int64(ord(buf[pos + 1])) shl 16) or
+        (int64(ord(buf[pos + 2])) shl 8) or int64(ord(buf[pos + 3]))
+    inc pos, 4
+  else:
+    raise newException(WireError, "expected str value")
+  if n < 0 or pos + n > limit:
+    raise newException(WireError, "str length out of range")
+  result = newString(n)
+  if n > 0:
+    copyMem(addr result[0], unsafeAddr buf[pos], n)
+  inc pos, n
+
+proc mpReadArrayHeader(buf: string; pos: var int; limit: int): int =
+  ## Read array element count at pos, advancing past the header.
+  if pos >= limit: raise newException(WireError, "truncated array")
+  let b = ord(buf[pos])
+  inc pos
+  case b
+  of 0x90..0x9f: return b and 0x0f
+  of 0xdc:
+    if pos + 2 > limit: raise newException(WireError, "truncated array header")
+    let n = (ord(buf[pos]) shl 8) or ord(buf[pos + 1])
+    inc pos, 2
+    return n
+  of 0xdd:
+    if pos + 4 > limit: raise newException(WireError, "truncated array header")
+    let n = (int64(ord(buf[pos])) shl 24) or (int64(ord(buf[pos + 1])) shl 16) or
+            (int64(ord(buf[pos + 2])) shl 8) or int64(ord(buf[pos + 3]))
+    inc pos, 4
+    if n < 0 or n > int64(limit): raise newException(WireError, "array too long")
+    return int(n)
+  else:
+    raise newException(WireError, "expected array value")
+
+proc mpNode(buf: string; pos: var int; limit: int; depth: int): SExpr =
+  ## Decode one tagged-AST node `[tag, value]` at pos, advancing pos past
+  ## it.  Sequential — never pre-skips, so depth == wire nesting level.
+  if depth > MaxDepth:
+    raise newException(WireError,
+      "wire node nesting deeper than " & $MaxDepth)
+  let count = mpReadArrayHeader(buf, pos, limit)
+  if count != 2:
+    raise newException(WireError,
+      "wire node must be [tag, value], got " & $count & " elements")
+  let tag = mpReadInt(buf, pos, limit)
+  case tag
+  of tagInt:
+    newInt(mpReadInt(buf, pos, limit))
+  of tagFloat:
+    if pos >= limit: raise newException(WireError, "truncated float")
+    let b = ord(buf[pos])
+    inc pos
+    case b
+    of 0xcb:
+      if pos + 8 > limit: raise newException(WireError, "truncated f64")
+      var u: uint64 = 0
+      for i in 0 ..< 8:                      # msgpack floats are big-endian
+        u = (u shl 8) or uint64(ord(buf[pos + i]))
+      inc pos, 8
+      newFloat(cast[float64](u))
+    of 0xca:
+      if pos + 4 > limit: raise newException(WireError, "truncated f32")
+      var u: uint32 = 0
+      for i in 0 ..< 4:
+        u = (u shl 8) or uint32(ord(buf[pos + i]))
+      inc pos, 4
+      newFloat(float64(cast[float32](u)))
+    else:
+      dec pos
+      newFloat(float64(mpReadInt(buf, pos, limit)))  # ints coerce, as in wireToSexpr
+  of tagStr:
+    newStr(mpReadStr(buf, pos, limit))
+  of tagSymbol:
+    newSymbol(mpReadStr(buf, pos, limit))
+  of tagBool:
+    if pos >= limit: raise newException(WireError, "truncated bool")
+    let b = ord(buf[pos]); inc pos
+    case b
+    of 0xc2: newBool(false)
+    of 0xc3: newBool(true)
+    else: raise newException(WireError, "tag 4 (bool) value must be a bool")
+  of tagBytes:
+    # encoder emits [5, [b0, b1, ...]] — an ARRAY OF INTS
+    let n = mpReadArrayHeader(buf, pos, limit)
+    var bs = newSeq[byte](n)
+    for i in 0 ..< n:
+      let v = mpReadInt(buf, pos, limit)
+      if v < 0 or v > 255:
+        raise newException(WireError, "bytes array item out of range: " & $v)
+      bs[i] = byte(v)
+    newBytes(bs)
+  of tagVoid:
+    if pos >= limit or ord(buf[pos]) != 0xc0:
+      raise newException(WireError, "tag 6 (void) value must be nil")
+    inc pos
+    newVoid()
+  of tagList:
+    let n = mpReadArrayHeader(buf, pos, limit)
+    var items = newSeq[SExpr](n)
+    for i in 0 ..< n:
+      items[i] = mpNode(buf, pos, limit, depth + 1)
+    newList(items)
+  else:
+    raise newException(WireError, "unknown wire tag: " & $tag)
+
+proc wireFromMsgpackAt*(data: string; start, stop: int): SExpr {.
+    raises: [WireError].} =
+  ## Decode one tagged node from the slot [start, stop) of raw msgpack.
+  var pos = start
+  result = mpNode(data, pos, stop, 0)
+  if pos != stop:
+    raise newException(WireError, "trailing bytes after wire node")
+
+proc wireFromMsgpack*(data: string): SExpr {.raises: [WireError].} =
+  ## Decode a whole tagged-AST program body from raw msgpack — the direct
+  ## replacement for `toJsonNode(data)` + `wireToSexpr(node)`.
+  wireFromMsgpackAt(data, 0, data.len)
+
+proc programFromMsgpack*(data: string): SExpr {.raises: [WireError].} =
+  ## Decode the top-level "program" value of a request frame.
+  let (found, s, e) = topValue(data, "program")
+  if not found:
+    raise newException(WireError, "request is missing program")
+  wireFromMsgpackAt(data, s, e)

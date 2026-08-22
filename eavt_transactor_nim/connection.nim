@@ -14,10 +14,10 @@
 ## writes as complete vectors, so concurrent writers produce whole-frame
 ## interleaving (never mid-frame byte corruption).
 
-import std/[options, strutils, json]
+import std/[options, strutils, json, monotimes]
 import chronos
 import msgpack4nim/msgpack2json
-import scheme
+import scheme, msgpack_scan
 import stats
 import engine, eavt, kvstore
 import kvstore_async
@@ -143,7 +143,10 @@ proc execScheme(eng: SharedEngine; req: Request; transp: StreamTransport) {.asyn
       if not more: break
   else:
     let session = newQuerySession(eng.store, program, req.params, tx, none[int64]())
+    let tExec = getMonoTime().ticks
     let r = executeProgramSafe(session)
+    eng.store.execWallNs += getMonoTime().ticks - tExec
+    inc eng.store.execCount
     eng.store.printSavePerf()
     eng.store.resetSaveCounters()
     eng.store.eavt.printSpPerf()
@@ -312,35 +315,26 @@ proc serveConnection*(eng: SharedEngine; transp: StreamTransport) {.
     # response frames from spawned request handlers — chronos StreamTransport
     # queues writes as complete vectors, so frames never interleave bytes.
     if not isReplication:
-      try:
-        let node = toJsonNode(raw)
-        if node["type"].getStr == "replicate":
-          isReplication = true
-          var sub = Subscriber(transp: transp)
-          eng.hub.register(sub)
-          try:
-            let sealed = collectSnapshot(eng.kv.path, eng.kv.ps[].currentRoot)
-            var tail: seq[byte] = @[]
-            if eng.walw != nil:
-              tail = eng.walw.buf
-            let rootName = eng.kv.ps[].currentRoot
-            await sub.sendSnapshot(sealed, tail, rootName, eng.kv.path)
-            # Spawn the drain loop — runs forever, pushes events.
-            asyncSpawn subscriberLoop(eng.kv, sub, addr eng.hub)
-          except CatchableError:
-            sub.closed = true
-            eng.hub.remove(sub)
-          continue  # back to read loop (pipelined)
-      except CatchableError:
-        discard  # not valid JSON, fall through to normal parse
+      if getTopStr(raw, "type") == "replicate":
+        isReplication = true
+        var sub = Subscriber(transp: transp)
+        eng.hub.register(sub)
+        try:
+          let sealed = collectSnapshot(eng.kv.path, eng.kv.ps[].currentRoot)
+          var tail: seq[byte] = @[]
+          if eng.walw != nil:
+            tail = eng.walw.buf
+          let rootName = eng.kv.ps[].currentRoot
+          await sub.sendSnapshot(sealed, tail, rootName, eng.kv.path)
+          # Spawn the drain loop — runs forever, pushes events.
+          asyncSpawn subscriberLoop(eng.kv, sub, addr eng.hub)
+        except CatchableError:
+          sub.closed = true
+          eng.hub.remove(sub)
+        continue  # back to read loop (pipelined)
 
-    # Extract correlation id (quick JSON peek) then spawn the handler.
-    var id = ""
-    try:
-      let node = toJsonNode(raw)
-      if node.hasKey("id"):
-        id = node["id"].getStr
-    except CatchableError:
-      discard  # malformed — processFrame will surface the parse error
+    # Correlation id via top-level key scan — no full frame parse here;
+    # processFrame decodes what it needs.
+    let id = getTopStr(raw, "id")
 
     asyncSpawn processFrame(eng, raw, id, transp)

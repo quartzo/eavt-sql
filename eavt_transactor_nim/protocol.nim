@@ -1,6 +1,6 @@
 import std/[json, nativesockets, posix]
 import msgpack4nim/msgpack2json
-import scheme, wire
+import scheme, wire, msgpack_scan
 
 type
   RequestKind* = enum
@@ -23,29 +23,37 @@ type
       kvValue*: seq[byte]  ## used for "put"
 
 proc parseRequest*(data: string): Request =
-  let node = toJsonNode(data)
-  if node.hasKey("id"):
-    result.id = node["id"].getStr
-  let t = node["type"].getStr
+  ## Decode a client frame straight from raw msgpack — the tagged-AST
+  ## program never materializes as an intermediate JSON tree.
+  if not isMsgpackMap(data):
+    raise newException(ValueError, "request must be an object")
+  result.id = getTopStr(data, "id")
+  let t = getTopStr(data, "type")
   case t
   of "scheme":
     result = Request(kind: rkScheme, id: result.id,
-                     program: wireToSexpr(node["program"]),
-                     mode: node["mode"].getStr)
-    if node.hasKey("params"):
-      for p in node["params"]:
-        result.params.add(wireToSexpr(p))
+                     program: programFromMsgpack(data),
+                     mode: getTopStr(data, "mode"))
+    let (pf, ps, pe) = topValue(data, "params")
+    if pf:
+      for (s, e) in topArrayElems(data, ps, pe):
+        result.params.add(wireFromMsgpackAt(data, s, e))
   of "schema":
     result = Request(kind: rkSchema, id: result.id)
   of "admin":
-    result = Request(kind: rkAdmin, id: result.id, command: node["command"].getStr)
+    if not hasTopKey(data, "command"):
+      raise newException(ValueError, "request is missing command")
+    result = Request(kind: rkAdmin, id: result.id,
+                     command: getTopStr(data, "command"))
   of "kv":
-    result = Request(kind: rkKv, id: result.id, kvOp: node["op"].getStr,
-                     kvCf: node["cf"].getInt)
-    if node.hasKey("key"):
-      result.kvKey = cast[seq[byte]](node["key"].getStr)
-    if node.hasKey("value"):
-      result.kvValue = cast[seq[byte]](node["value"].getStr)
+    if not hasTopKey(data, "cf"):
+      raise newException(ValueError, "request is missing cf")
+    result = Request(kind: rkKv, id: result.id, kvOp: getTopStr(data, "op"),
+                     kvCf: int(getTopInt(data, "cf")))
+    let (kf, ks, ke) = topValue(data, "key")
+    if kf: result.kvKey = valueBytesAt(data, ks, ke)
+    let (vf, vs, ve) = topValue(data, "value")
+    if vf: result.kvValue = valueBytesAt(data, vs, ve)
   else:
     raise newException(ValueError, "unknown request type: " & t)
 
