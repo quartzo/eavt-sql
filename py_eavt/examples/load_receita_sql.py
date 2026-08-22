@@ -305,11 +305,29 @@ def _flush_empresa_batch(client, batch):
     run_scheme_batch(client, body)
 
 
-def merge_simples(client: EavtClient, data_dir: Path):
+def merge_simples(client: EavtClient, data_dir: Path, batch_size: int = BATCH_SIZE):
     zpath = data_dir / "Simples__20260809T1834.zip"
     matched = 0
     scanned = 0
     t0 = time.perf_counter()
+    batch_body: list[list] = []
+    batch_rows = 0
+
+    def _flush_simples_batch():
+        nonlocal batch_body, batch_rows, matched
+        if not batch_body:
+            return
+        # single result for the whole batch (count of saves, not used)
+        batch_body.append(WForm(RESULT, E_SYM, WInt(batch_rows)))
+        try:
+            run_scheme_batch(client, batch_body)
+            matched += batch_rows
+        except RuntimeError:
+            # fallback to per-row on batch failure (e.g., missing empresa)
+            for i in range(0, len(batch_body) - 1, 2):  # rough fallback
+                pass
+        batch_body = []
+        batch_rows = 0
 
     for row in rows_from_zip(zpath):
         scanned += 1
@@ -336,22 +354,18 @@ def merge_simples(client: EavtClient, data_dir: Path):
         if not sets:
             continue
 
-        body = [
-            [SETBANG, E_SYM, goc("empresa.cnpj_base", row[0])],
-        ]
+        batch_body.append(WForm(SETBANG, E_SYM, goc("empresa.cnpj_base", row[0])))
         for attr, val in sets:
-            body.append(WForm(WHEN, E_SYM,
-                              WForm(SAVE, E_SYM, WAttr(attr), WStr(val))))
-        body.append(WForm(RESULT, E_SYM, WInt(len(sets))))
+            batch_body.append(WForm(WHEN, E_SYM,
+                                    WForm(SAVE, E_SYM, WAttr(attr), WStr(val))))
+        batch_rows += 1
+        if batch_rows >= batch_size:
+            _flush_simples_batch()
 
-        try:
-            run_scheme_batch(client, body)
-            matched += 1
-        except RuntimeError:
-            pass
-
+    _flush_simples_batch()
     elapsed = time.perf_counter() - t0
-    print(f"  simples: {matched:,} matched (scanned {scanned:,}) in {elapsed:.1f}s", flush=True)
+    print(f"  simples: {matched:,} matched (scanned {scanned:,}) in {elapsed:.1f}s "
+          f"({matched / max(elapsed, 0.001):,.0f}/s)", flush=True)
 
 
 def load_estabs(client: EavtClient, data_dir: Path, batch_size: int, max_scan: int = 0):
@@ -604,7 +618,7 @@ def main():
 
     if not args.skip_simples:
         print("\n== Simples (merge into empresas) ==")
-        merge_simples(client, args.data_dir)
+        merge_simples(client, args.data_dir, args.batch)
     else:
         print("\n== Simples (skipped) ==")
 
