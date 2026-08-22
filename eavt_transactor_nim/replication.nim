@@ -13,11 +13,12 @@
 ## Protocol: length-prefixed msgpack frames (same framing as client protocol),
 ## one-way server → replica, keyed by "ev" field.
 
-import std/[json, os, strutils, algorithm]
-import msgpack4nim/msgpack2json
+import std/[os, strutils, algorithm, streams]
+import msgpack4nim
 import chronos
 import kvstore
 import common
+import wire
 
 # ── Subscriber ──────────────────────────────────────────────────────────────
 
@@ -41,8 +42,8 @@ proc sendFrame(s: Subscriber; body: string) {.async.} =
   except CatchableError:
     s.closed = true
 
-proc sendEvent(s: Subscriber; node: JsonNode) {.async.} =
-  await s.sendFrame(msgpack2json.fromJsonNode(node))
+proc sendEvent(s: Subscriber; body: string) {.async.} =
+  await s.sendFrame(body)
 
 # ── Snapshot construction ───────────────────────────────────────────────────
 
@@ -68,17 +69,22 @@ proc sendSnapshot*(s: Subscriber; sealed: seq[string]; openSeg: seq[byte];
   ## go in the frame. The replica reconstructs: PageStore trees from
   ## rootName + replays sealed segments into its pending treap + replays
   ## openTail into its live treap.
-  var node = newJObject()
-  node["ev"] = %"snapshot"
-  var segsArr = newJArray()
-  for p in sealed: segsArr.add(%p)
-  node["sealed"] = segsArr
-  var tailArr = newJArray()
-  for b in openSeg: tailArr.add(%b)
-  node["openTail"] = tailArr
-  node["root"] = %rootName
-  node["blobDir"] = %blobDir
-  await s.sendEvent(node)
+  var ms = MsgStream.init(256 + openSeg.len)
+  ms.pack_map(5)
+  ms.pack("ev"); ms.pack("snapshot")
+  ms.pack("sealed")
+  ms.pack_array(sealed.len)
+  for p in sealed: ms.pack(p)
+  ms.pack("openTail")
+  # Encode as msgpack bin (raw bytes) instead of JSON int array
+  ms.pack_bin(openSeg.len)
+  if openSeg.len > 0:
+    var tmp = newString(openSeg.len)
+    copyMem(addr tmp[0], unsafeAddr openSeg[0], openSeg.len)
+    appendRaw(ms, tmp)
+  ms.pack("root"); ms.pack(rootName)
+  ms.pack("blobDir"); ms.pack(blobDir)
+  await s.sendEvent(ms.data)
 
 # ── Replication hub ──────────────────────────────────────────────────────────
 
@@ -119,20 +125,30 @@ proc drain*(s: Subscriber; kv: KVStore) {.async.} =
   if s.closed: return
   if s.buf.len > 0:
     let data = s.buf; s.buf = @[]
-    var node = newJObject()
-    node["ev"] = %"wal"
-    var arr = newJArray()
-    for b in data: arr.add(%b)
-    node["data"] = arr
-    await s.sendEvent(node)
+    var ms = MsgStream.init(64 + data.len)
+    ms.pack_map(2)
+    ms.pack("ev"); ms.pack("wal")
+    ms.pack("data")
+    ms.pack_bin(data.len)
+    if data.len > 0:
+      var tmp = newString(data.len)
+      copyMem(addr tmp[0], unsafeAddr data[0], data.len)
+      appendRaw(ms, tmp)
+    await s.sendEvent(ms.data)
   while s.seals.len > 0:
     let idx = s.seals[0]; s.seals.delete(0)
-    var node = newJObject(); node["ev"] = %"seal"; node["idx"] = %idx
-    await s.sendEvent(node)
+    var ms = MsgStream.init(32)
+    ms.pack_map(2)
+    ms.pack("ev"); ms.pack("seal")
+    ms.pack("idx"); ms.pack(idx)
+    await s.sendEvent(ms.data)
   while s.roots.len > 0:
     let name = s.roots[0]; s.roots.delete(0)
-    var node = newJObject(); node["ev"] = %"root"; node["name"] = %name
-    await s.sendEvent(node)
+    var ms = MsgStream.init(64)
+    ms.pack_map(2)
+    ms.pack("ev"); ms.pack("root")
+    ms.pack("name"); ms.pack(name)
+    await s.sendEvent(ms.data)
 
 proc subscriberLoop*(kv: KVStore; s: Subscriber; hub: ptr ReplicationHub) {.async.} =
   try:

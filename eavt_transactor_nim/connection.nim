@@ -14,9 +14,9 @@
 ## writes as complete vectors, so concurrent writers produce whole-frame
 ## interleaving (never mid-frame byte corruption).
 
-import std/[options, strutils, json, monotimes]
+import std/[options, strutils, monotimes, streams]
 import chronos
-import msgpack4nim/msgpack2json
+import msgpack4nim
 import scheme, msgpack_scan
 import stats
 import engine, eavt, kvstore
@@ -24,6 +24,7 @@ import kvstore_async
 import shared_engine
 import protocol
 import replication
+import wire
 
 proc writeFrameAsync(transp: StreamTransport; body: string) {.async.} =
   var buf = newSeq[byte](4 + body.len)
@@ -36,24 +37,31 @@ proc writeFrameAsync(transp: StreamTransport; body: string) {.async.} =
 proc writeResponseAsync(transp: StreamTransport; columns: seq[string];
                         rows: seq[seq[SExpr]]; more: bool;
                         error: string = ""; id: string = "") {.async.} =
-  var node = newJObject()
-  if id.len > 0:
-    node["id"] = %id
+  var ms = MsgStream.init(256)
+  var fieldCount = 1  # "more"
+  if id.len > 0: inc fieldCount
   if error.len > 0:
-    node["error"] = %error
-    node["more"] = %false
+    inc fieldCount  # "error"
   else:
-    var carr = newJArray()
-    for c in columns: carr.add(%c)
-    node["columns"] = carr
-    var rarr = newJArray()
+    fieldCount += 2  # "columns" + "rows"
+  ms.pack_map(fieldCount)
+  if id.len > 0:
+    ms.pack("id"); ms.pack(id)
+  if error.len > 0:
+    ms.pack("error"); ms.pack(error)
+    ms.pack("more"); ms.pack(false)
+  else:
+    ms.pack("columns")
+    ms.pack_array(columns.len)
+    for c in columns: ms.pack(c)
+    ms.pack("rows")
+    ms.pack_array(rows.len)
     for row in rows:
-      var arr = newJArray()
-      for v in row: arr.add(sexprToJson(v))
-      rarr.add(arr)
-    node["rows"] = rarr
-    node["more"] = %more
-  await transp.writeFrameAsync(msgpack2json.fromJsonNode(node))
+      ms.pack_array(row.len)
+      for v in row:
+        writeSExprPlain(ms, v)
+    ms.pack("more"); ms.pack(more)
+  await transp.writeFrameAsync(ms.data)
 
 proc writeErrorAsync(transp: StreamTransport; msg: string;
                      id: string = "") {.async.} =
@@ -163,11 +171,16 @@ proc execScheme(eng: SharedEngine; req: Request; transp: StreamTransport) {.asyn
 proc handleSchema(eng: SharedEngine; id: string;
                   transp: StreamTransport) {.async.} =
   let cstats = buildStatsSafe(eng)
-  var node = newJObject()
-  if id.len > 0: node["id"] = %id
-  node["schema"] = statsToJson(cstats)
-  node["more"] = %false
-  await transp.writeFrameAsync(msgpack2json.fromJsonNode(node))
+  var ms = MsgStream.init(256)
+  var fieldCount = 2  # "schema" + "more"
+  if id.len > 0: inc fieldCount
+  ms.pack_map(fieldCount)
+  if id.len > 0:
+    ms.pack("id"); ms.pack(id)
+  ms.pack("schema")
+  packStats(ms, cstats)
+  ms.pack("more"); ms.pack(false)
+  await transp.writeFrameAsync(ms.data)
 
 proc handleAdmin(eng: SharedEngine; command: string; id: string;
                  transp: StreamTransport) {.async.} =
@@ -229,11 +242,15 @@ proc handleAdmin(eng: SharedEngine; command: string; id: string;
         $eng.kv.memtableSize()
       else:
         "unknown admin command: " & command
-    var node = newJObject()
-    if id.len > 0: node["id"] = %id
-    node["output"] = %output
-    node["more"] = %false
-    await transp.writeFrameAsync(msgpack2json.fromJsonNode(node))
+    var ms = MsgStream.init(128)
+    var fieldCount = 2  # "output" + "more"
+    if id.len > 0: inc fieldCount
+    ms.pack_map(fieldCount)
+    if id.len > 0:
+      ms.pack("id"); ms.pack(id)
+    ms.pack("output"); ms.pack(output)
+    ms.pack("more"); ms.pack(false)
+    await transp.writeFrameAsync(ms.data)
 
 proc handleKv(eng: SharedEngine; req: Request; transp: StreamTransport) {.async.} =
   case req.kvOp
@@ -336,5 +353,4 @@ proc serveConnection*(eng: SharedEngine; transp: StreamTransport) {.
     # Correlation id via top-level key scan — no full frame parse here;
     # processFrame decodes what it needs.
     let id = getTopStr(raw, "id")
-
     asyncSpawn processFrame(eng, raw, id, transp)

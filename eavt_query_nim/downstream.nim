@@ -21,9 +21,10 @@
 ## immediately and a reconnect loop (1 s backoff) re-opens the socket
 ## and re-subscribes.
 
-import std/[json, os, tables]
+import std/[os, tables]
 import chronos
-import msgpack4nim/msgpack2json
+import std/streams
+import msgpack4nim
 import msgpack_scan
 
 type
@@ -31,7 +32,7 @@ type
     transp: StreamTransport   # client transport to relay responses to
     fut: Future[void]         # completed when more=false
 
-  OnEvent* = proc(frame: JsonNode) {.gcsafe, raises: [].}
+  OnEvent* = proc(frame: string) {.gcsafe, raises: [].}
 
   MultiplexedConn* = ref object
     path*: string
@@ -51,8 +52,8 @@ proc sendFrame(conn: MultiplexedConn; body: string) {.async.} =
     copyMem(addr buf[4], addr body[0], body.len)
   discard await conn.transp.write(buf)
 
-proc sendJson(conn: MultiplexedConn; node: JsonNode) {.async.} =
-  await conn.sendFrame(msgpack2json.fromJsonNode(node))
+proc sendRaw(conn: MultiplexedConn; raw: string) {.async.} =
+  await conn.sendFrame(raw)
 
 proc readFrame(conn: MultiplexedConn): Future[string] {.async.} =
   ## Read one length-prefixed msgpack frame.  Empty string = closed.
@@ -80,10 +81,11 @@ proc writeFrameAsync*(transp: StreamTransport; body: string) {.async.} =
   discard await transp.write(buf)
 
 proc writeErrorAsync*(transp: StreamTransport; msg: string) {.async.} =
-  var node = newJObject()
-  node["error"] = %msg
-  node["more"] = %false
-  await transp.writeFrameAsync(msgpack2json.fromJsonNode(node))
+  var ms = MsgStream.init(64)
+  ms.pack_map(2)
+  ms.pack("error"); ms.pack(msg)
+  ms.pack("more"); ms.pack(false)
+  await transp.writeFrameAsync(ms.data)
 
 # ── Pending table helpers ───────────────────────────────────────────────────
 
@@ -103,20 +105,15 @@ proc readerLoop(conn: MultiplexedConn) {.async.} =
   ## Reads frames forever.  Replication events ("ev") go to the onEvent
   ## callback; responses ("id") are relayed to the matching pending
   ## client transport and the pending future is completed on more=false.
-  ## Frames are scanned by top-level key only — full msgpack→JsonNode
-  ## conversion happens solely for replication events.
+  ## Frames are scanned by top-level key only — no full msgpack→JsonNode
+  ## conversion.
   while true:
     let body = await conn.readFrame()
     if body.len == 0:
       return  # disconnect — connectLoop will reconnect
     if hasTopKey(body, "ev"):
       if conn.onEvent != nil:
-        var frame: JsonNode
-        try:
-          frame = toJsonNode(body)
-        except CatchableError:
-          continue  # malformed event — skip
-        conn.onEvent(frame)
+        conn.onEvent(body)
     elif hasTopKey(body, "id"):
       let id = getTopStr(body, "id")
       let p = conn.pending.getOrDefault(id)
@@ -132,9 +129,10 @@ proc readerLoop(conn: MultiplexedConn) {.async.} =
 # ── Subscribe (send replicate request) ──────────────────────────────────────
 
 proc sendReplicate(conn: MultiplexedConn) {.async.} =
-  var node = newJObject()
-  node["type"] = %"replicate"
-  await conn.sendJson(node)
+  var ms = MsgStream.init(32)
+  ms.pack_map(1)
+  ms.pack("type"); ms.pack("replicate")
+  await conn.sendRaw(ms.data)
 
 # ── Connect + reconnect loop ────────────────────────────────────────────────
 
@@ -167,20 +165,23 @@ proc openMultiplexed*(path: string; onEvent: OnEvent): MultiplexedConn =
   result = MultiplexedConn(path: path, onEvent: onEvent)
   asyncSpawn result.connectLoop()
 
-proc request*(conn: MultiplexedConn; body: JsonNode;
+proc request*(conn: MultiplexedConn; body: string;
               clientTransp: StreamTransport) {.async.} =
-  ## Send a request to the transactor and relay all response frames to
-  ## the client transport until more=false.  The request body gets an
-  ## injected "id" field; the transactor echoes it in every response.
+  ## Send a raw msgpack request to the transactor and relay all response
+  ## frames to the client transport until more=false.  The request body
+  ## gets an injected "id" field via injectTopPair.
   if not conn.connected:
     await clientTransp.writeErrorAsync("transactor disconnected")
     return
   let id = conn.nextIdStr()
-  body["id"] = %id
+  let framed = injectTopPair(body, "id", id)
+  if framed.len == 0:
+    await clientTransp.writeErrorAsync("parse error: request must be an object")
+    return
   let fut = newFuture[void]("mux-request")
   conn.pending[id] = PendingReq(transp: clientTransp, fut: fut)
   try:
-    await conn.sendJson(body)
+    await conn.sendFrame(framed)
   except CatchableError:
     conn.pending.del(id)
     await clientTransp.writeErrorAsync("transactor write failed")

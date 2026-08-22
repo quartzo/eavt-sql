@@ -15,7 +15,8 @@
 ##     the SExpr in one pass with no intermediate tree.  This is what
 ##     the transactor uses per request.
 
-import std/[json, strutils]
+import std/[json, strutils, streams]
+import msgpack4nim
 import scheme, msgpack_scan
 
 type
@@ -47,6 +48,97 @@ proc sexprToWire*(e: SExpr): JsonNode =
     var arr = newJArray()
     for item in e.items: arr.add(sexprToWire(item))
     %*[tagList, arr]
+  of sResource:
+    raise newException(WireError, "cannot encode sResource on the wire")
+
+proc appendRaw*(s: MsgStream; bytes: string) {.inline.} =
+  ## Append pre-encoded msgpack bytes to a MsgStream.  CRITICAL: plain
+  ## `s.data.add(bytes)` does NOT advance the stream position — the next
+  ## `pack` would overwrite the appended bytes (StringStream writes at
+  ## `pos` via copyMem, not at data.len).
+  if bytes.len > 0:
+    s.data.add(bytes)
+    s.setPosition(s.data.len)
+
+proc writeSExprWire*(s: MsgStream; e: SExpr) =
+  ## Write one SExpr as a tagged wire node `[tag, value]` directly into
+  ## an existing MsgStream.
+  s.pack_array(2)
+  case e.kind
+  of sInt:
+    s.pack(tagInt); s.pack(e.ival)
+  of sFloat:
+    s.pack(tagFloat); s.pack(e.fval)
+  of sStr:
+    s.pack(tagStr); s.pack(e.sval)
+  of sSymbol:
+    s.pack(tagSymbol); s.pack(e.symval)
+  of sBool:
+    s.pack(tagBool); s.pack(e.bval)
+  of sBytes:
+    s.pack(tagBytes)
+    s.pack_array(e.bytesval.len)
+    for b in e.bytesval: s.pack(int64(b))
+  of sVoid:
+    s.pack(tagVoid); s.pack_imp_nil()
+  of sList:
+    s.pack(tagList)
+    s.pack_array(e.items.len)
+    for item in e.items: writeSExprWire(s, item)
+  of sResource:
+    raise newException(WireError, "cannot encode sResource on the wire")
+
+proc sexprToMsgpack*(e: SExpr): string =
+  ## Encode one SExpr as a tagged wire node `[tag, value]` in msgpack bytes.
+  ## Direct replacement for `fromJsonNode(sexprToWire(e))`.
+  var s = MsgStream.init(64)
+  writeSExprWire(s, e)
+  s.data
+
+proc sexprToPlainMsgpack*(e: SExpr): string =
+  ## Encode one SExpr as a plain msgpack value (no wire tag wrapper).
+  ## Used for response rows — values go directly as msgpack types.
+  var s = MsgStream.init(64)
+  proc encPlain(s: MsgStream; e: SExpr) =
+    case e.kind
+    of sInt:    s.pack(e.ival)
+    of sFloat:  s.pack(e.fval)
+    of sStr:    s.pack(e.sval)
+    of sSymbol: s.pack(e.symval)
+    of sBool:   s.pack(e.bval)
+    of sBytes:
+      s.pack_bin(e.bytesval.len)
+      if e.bytesval.len > 0:
+        var tmp = newString(e.bytesval.len)
+        copyMem(addr tmp[0], unsafeAddr e.bytesval[0], e.bytesval.len)
+        appendRaw(s, tmp)
+    of sVoid:   s.pack_imp_nil()
+    of sList:
+      s.pack_array(e.items.len)
+      for item in e.items: encPlain(s, item)
+    of sResource:
+      raise newException(WireError, "cannot encode sResource on the wire")
+  encPlain(s, e)
+  s.data
+
+proc writeSExprPlain*(s: MsgStream; e: SExpr) =
+  ## Write one SExpr as a plain msgpack value directly to a MsgStream.
+  case e.kind
+  of sInt:    s.pack(e.ival)
+  of sFloat:  s.pack(e.fval)
+  of sStr:    s.pack(e.sval)
+  of sSymbol: s.pack(e.symval)
+  of sBool:   s.pack(e.bval)
+  of sBytes:
+    s.pack_bin(e.bytesval.len)
+    if e.bytesval.len > 0:
+      var tmp = newString(e.bytesval.len)
+      copyMem(addr tmp[0], unsafeAddr e.bytesval[0], e.bytesval.len)
+      appendRaw(s, tmp)
+  of sVoid:   s.pack_imp_nil()
+  of sList:
+    s.pack_array(e.items.len)
+    for item in e.items: writeSExprPlain(s, item)
   of sResource:
     raise newException(WireError, "cannot encode sResource on the wire")
 

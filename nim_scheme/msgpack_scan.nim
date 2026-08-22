@@ -166,7 +166,7 @@ proc mapCountAndHeaderLen(buf: string): tuple[count: int64, hdr: int] =
     return (rdBe32(buf, 1), 5)
   return (-1, 0)
 
-proc decodeStrAt(buf: string; start, stop: int): string {.raises: [].} =
+proc decodeStrAt*(buf: string; start, stop: int): string {.raises: [].} =
   ## Decode a msgpack str occupying [start, stop); "" if it is not a str.
   if start < 0 or stop > buf.len or start >= stop: return ""
   let b = rd8(buf, start)

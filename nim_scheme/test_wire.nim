@@ -162,3 +162,22 @@ suite "wire.msgpack-direct":
     expect(WireError): discard wireFromMsgpack(fromJsonNode(%*[99, 1]))
   test "bool tag with non-bool payload raises":
     expect(WireError): discard wireFromMsgpack(fromJsonNode(%*[4, "x"]))
+
+  test "sexprToMsgpack matches sexprToWire+fromJsonNode":
+    proc mpDirect(e: SExpr): SExpr = wireFromMsgpack(sexprToMsgpack(e))
+    check sameSexpr(mpDirect(newInt(-42)), newInt(-42))
+    check sameSexpr(mpDirect(newFloat(3.25)), newFloat(3.25))
+    check sameSexpr(mpDirect(newStr("hello")), newStr("hello"))
+    check sameSexpr(mpDirect(newSymbol("save")), newSymbol("save"))
+    check mpDirect(newBool(true)).bval == true
+    check mpDirect(newVoid()).kind == sVoid
+    check sameSexpr(mpDirect(newBytes(@[byte(0), byte(255)])),
+                    newBytes(@[byte(0), byte(255)]))
+    let nested = newList(@[newSymbol("begin"),
+                           newList(@[newSymbol("save"), newSymbol("E"),
+                                     newStr("x"), newInt(1)])])
+    check sameSexpr(mpDirect(nested), nested)
+    # Verify byte-level equality with legacy path
+    check sexprToMsgpack(newInt(42)) == fromJsonNode(sexprToWire(newInt(42)))
+    check sexprToMsgpack(newStr("x")) == fromJsonNode(sexprToWire(newStr("x")))
+    check sexprToMsgpack(newSymbol("a")) == fromJsonNode(sexprToWire(newSymbol("a")))

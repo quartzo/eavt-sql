@@ -8,11 +8,13 @@
 ## Replication events arrive via the onReplicationEvent callback, which
 ## the query server's MultiplexedConn reader task invokes for every "ev" frame.
 
-import std/[json, tables]
+import std/[tables, streams]
 import chronos
 import chronos_file
+import msgpack4nim
 import kvstore, eavt, engine
 import stats
+import msgpack_scan
 
 type
   ReplicaEngine* = ref object
@@ -88,36 +90,63 @@ proc close*(r: ReplicaEngine) =
 
 # ── Replication event handler (called by MultiplexedConn reader) ─────────────
 
-proc handleSnapshot(r: ReplicaEngine; node: JsonNode) {.async.} =
+proc handleSnapshot(r: ReplicaEngine; frame: string) {.async.} =
   var sealed: seq[string] = @[]
-  for s in node.getOrDefault("sealed"):
-    sealed.add(s.getStr)
+  let (sf, ss, se) = topValue(frame, "sealed")
+  if sf:
+    for (s, e) in topArrayElems(frame, ss, se):
+      let decoded = decodeStrAt(frame, s, e)
+      if decoded.len > 0: sealed.add(decoded)
   var tail: seq[byte] = @[]
-  for b in node.getOrDefault("openTail"):
-    tail.add(byte(b.getInt))
-  let root = node.getOrDefault("root").getStr("")
+  let (tf, ts, te) = topValue(frame, "openTail")
+  if tf:
+    for (s, e) in topArrayElems(frame, ts, te):
+      # Each element is a byte (int)
+      if s < e and e <= frame.len:
+        let b = ord(frame[s])
+        if b >= 0x00 and b <= 0x7f: tail.add(byte(b))
+        elif b >= 0xcc and b <= 0xcf:
+          # uint — read value from subsequent bytes
+          var val = 0
+          for i in 1 ..< (e - s): val = (val shl 8) or ord(frame[s + i])
+          tail.add(byte(val and 0xff))
+  let root = getTopStr(frame, "root")
   await applySnapshot(r, sealed, tail, root)
 
-proc onReplicationEvent*(r: ReplicaEngine; frame: JsonNode) {.gcsafe, raises: [].} =
-  ## Dispatch one replication event frame.  Called from the MultiplexedConn
-  ## reader task on the event loop — safe to touch the replica without locks.
-  let ev = frame.getOrDefault("ev").getStr
+proc onReplicationEvent*(r: ReplicaEngine; frame: string) {.gcsafe, raises: [].} =
+  ## Dispatch one replication event frame (raw msgpack bytes).  Called from
+  ## the MultiplexedConn reader task on the event loop — safe to touch the
+  ## replica without locks.
+  let ev = getTopStr(frame, "ev")
   case ev
   of "snapshot":
     try:
       asyncSpawn handleSnapshot(r, frame)
+      # Count sealed segments for the log message
+      var sealedCount = 0
+      let (sf, ss, se) = topValue(frame, "sealed")
+      if sf:
+        for (s, e) in topArrayElems(frame, ss, se): inc sealedCount
       echo "Replication: snapshot received (",
-           frame.getOrDefault("sealed").len, " segments, root=",
-           frame.getOrDefault("root").getStr, ")"
+           sealedCount, " segments, root=",
+           getTopStr(frame, "root"), ")"
     except CatchableError:
       discard
   of "wal":
     var data: seq[byte] = @[]
-    for b in frame.getOrDefault("data"):
-      data.add(byte(b.getInt))
+    let (df, ds, de) = topValue(frame, "data")
+    if df:
+      let raw = valueBytesAt(frame, ds, de)
+      if raw.len > 0: data = raw
+      else:
+        # Fallback: array of ints
+        for (s, e) in topArrayElems(frame, ds, de):
+          if s < e and e <= frame.len:
+            let b = ord(frame[s])
+            if b >= 0x00 and b <= 0x7f: data.add(byte(b))
     r.applyWal(data)
   of "seal":
     r.applySeal()
   of "root":
-    r.applyRoot(frame.getOrDefault("name").getStr(""))
+    r.applyRoot(getTopStr(frame, "name"))
   else: discard

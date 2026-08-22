@@ -1,4 +1,4 @@
-import std/[os, json]
+import std/os
 import chronos
 import shared, connection, replica, downstream
 
@@ -55,7 +55,7 @@ proc main() {.async.} =
     # Replication events (snapshot/wal/seal/root) arrive as "ev" frames
     # and are dispatched to the replica via onReplicationEvent.
     gw.conn = openMultiplexed(downstream,
-      proc(frame: JsonNode) {.gcsafe.} =
+      proc(frame: string) {.gcsafe.} =
         gw.replica.onReplicationEvent(frame)
     )
   else:

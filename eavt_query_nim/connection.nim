@@ -19,9 +19,9 @@
 ##   then sends batched concrete save/retract calls to the transactor.
 ##   The triejoin runs on the replica; the server only does direct writes.
 
-import std/[json, strutils, options]
+import std/[strutils, options, streams]
 import chronos
-import msgpack4nim/msgpack2json
+import msgpack4nim
 import scheme, wire, msgpack_scan
 import stats
 import engine
@@ -35,30 +35,6 @@ import parser as sql_parser
 
 const BatchSize = 100
 
-proc jsonParamToSexpr(p: JsonNode): SExpr =
-  case p.kind
-  of JInt: newInt(p.getInt)
-  of JFloat: newFloat(p.getFloat)
-  of JString: newStr(p.getStr)
-  of JBool: newBool(p.getBool)
-  of JNull: newVoid()
-  of JArray:
-    var allInts = p.len > 0
-    for v in p:
-      if v.kind != JInt: allInts = false; break
-    if allInts:
-      var bs: seq[byte]
-      for v in p:
-        let i = v.getInt
-        if i < 0 or i > 255:
-          raise newException(ValueError, "param byte out of range: " & $i)
-        bs.add(byte(i))
-      newBytes(bs)
-    else:
-      raise newException(ValueError, "unsupported param type: array")
-  of JObject:
-    raise newException(ValueError, "unsupported param type: object")
-
 proc parseSqlText(text: string): sql_ast.SqlStmt =
   try:
     sql_parser.parse(text)
@@ -71,16 +47,17 @@ proc nextBatchSafe(sess: StreamingSession; maxRows: int): (seq[seq[SExpr]], bool
   except Exception as e: raise (ref ValueError)(msg: e.msg)
 
 proc writeSelectFrame(transp: StreamTransport; rows: seq[seq[SExpr]]; more: bool) {.async.} =
-  var node = newJObject()
-  node["columns"] = %newJArray()
-  var rarr = newJArray()
+  var ms = MsgStream.init(256)
+  ms.pack_map(3)
+  ms.pack("columns"); ms.pack_array(0)
+  ms.pack("rows")
+  ms.pack_array(rows.len)
   for row in rows:
-    var arr = newJArray()
-    for v in row: arr.add(sexprToJson(v))
-    rarr.add(arr)
-  node["rows"] = rarr
-  node["more"] = %more
-  await transp.writeFrameAsync(msgpack2json.fromJsonNode(node))
+    ms.pack_array(row.len)
+    for v in row:
+      writeSExprPlain(ms, v)
+  ms.pack("more"); ms.pack(more)
+  await transp.writeFrameAsync(ms.data)
 
 # ── Mixed-operation helpers ─────────────────────────────────────────────────
 
@@ -136,17 +113,27 @@ proc compileSelectWithRetry(gw: GatewayState;
         raise newException(ValueError, e.msg)
   raise lastErr
 
+proc buildSchemeRequest(program: SExpr; mode: string;
+                         params: seq[SExpr]): string =
+  ## Build a scheme request as raw msgpack bytes.
+  var ms = MsgStream.init(256)
+  let fieldCount = if params.len > 0: 4 else: 3
+  ms.pack_map(fieldCount)
+  ms.pack("type"); ms.pack("scheme")
+  ms.pack("program")
+  writeSExprWire(ms, program)
+  ms.pack("mode"); ms.pack(mode)
+  if params.len > 0:
+    ms.pack("params")
+    ms.pack_array(params.len)
+    for p in params:
+      writeSExprWire(ms, p)
+  ms.data
+
 proc sendSchemeExec(gw: GatewayState; program: SchemeProgram;
                     params: seq[SExpr]; transp: StreamTransport) {.async.} =
   ## Send a Scheme program to the transactor as an exec request.
-  var req = newJObject()
-  req["type"] = %"scheme"
-  req["program"] = sexprToWire(program.body)
-  req["mode"] = %"exec"
-  if params.len > 0:
-    var pa = newJArray()
-    for p in params: pa.add(sexprToWire(p))
-    req["params"] = pa
+  let req = buildSchemeRequest(program.body, "exec", params)
   await gw.conn.request(req, transp)
 
 # ── Mixed-operation handlers ────────────────────────────────────────────────
@@ -226,13 +213,17 @@ proc handleDeleteMux(gw: GatewayState; deleteStmt: sql_ast.DeleteStmt;
 
 # ── Main SQL handler ────────────────────────────────────────────────────────
 
-proc handleSql(gw: GatewayState; node: JsonNode;
+proc handleSql(gw: GatewayState; raw: string;
                transp: StreamTransport) {.async.} =
-  let sqlText = node["sql"].getStr
+  let sqlText = getTopStr(raw, "sql")
+  if sqlText.len == 0:
+    await transp.writeErrorAsync("sql request missing sql field")
+    return
   var params: seq[SExpr] = @[]
-  if node.hasKey("params"):
-    for p in node["params"]:
-      params.add(jsonParamToSexpr(p))
+  let (pf, ps, pe) = topValue(raw, "params")
+  if pf:
+    for (s, e) in topArrayElems(raw, ps, pe):
+      params.add(wireFromMsgpackAt(raw, s, e))
 
   let stmt = parseSqlText(sqlText)
 
@@ -271,13 +262,16 @@ proc handleSql(gw: GatewayState; node: JsonNode;
   if compiled.isExplain or (compiled.isSelect and gw.replica != nil):
     # Execute locally on the replica engine.
     if compiled.isExplain:
-      var rnode = newJObject()
-      rnode["columns"] = %newJArray()
-      var rows = newJArray()
-      rows.add(%[@[renderExplain(compiled)]])
-      rnode["rows"] = rows
-      rnode["more"] = %false
-      await transp.writeFrameAsync(msgpack2json.fromJsonNode(rnode))
+      var ms = MsgStream.init(256)
+      ms.pack_map(3)
+      ms.pack("columns"); ms.pack_array(0)
+      ms.pack("rows")
+      ms.pack_array(1)
+      ms.pack_array(1)
+      let explainStr = renderExplain(compiled)
+      ms.pack(explainStr)
+      ms.pack("more"); ms.pack(false)
+      await transp.writeFrameAsync(ms.data)
       return
 
     # SELECT local execution: dummy tx (replica is read-only).
@@ -293,24 +287,19 @@ proc handleSql(gw: GatewayState; node: JsonNode;
   # DML / schema changes: forward as scheme to the transactor via the
   # shared multiplexed connection.
   let mode = if compiled.isSelect: "query" else: "exec"
-  var req = newJObject()
-  req["type"] = %"scheme"
-  req["program"] = sexprToWire(compiled.program.body)
-  req["mode"] = %mode
-  if params.len > 0:
-    var pa = newJArray()
-    for p in params: pa.add(sexprToWire(p))
-    req["params"] = pa
+  let req = buildSchemeRequest(compiled.program.body, mode, params)
   await gw.conn.request(req, transp)
   await sleepAsync(50.milliseconds)
 
 proc handleSchema(gw: GatewayState; transp: StreamTransport) {.async.} =
   ## Served from the local replica's stats — never touches the transactor.
   let snap = gw.getSnapshot()
-  var node = newJObject()
-  node["schema"] = statsToJson(snap)
-  node["more"] = %false
-  await transp.writeFrameAsync(msgpack2json.fromJsonNode(node))
+  var ms = MsgStream.init(256)
+  ms.pack_map(2)
+  ms.pack("schema")
+  packStats(ms, snap)
+  ms.pack("more"); ms.pack(false)
+  await transp.writeFrameAsync(ms.data)
 
 proc serveGatewayConnection*(gw: GatewayState; transp: StreamTransport) {.
     async: (raises: []).} =
@@ -338,13 +327,7 @@ proc serveGatewayConnection*(gw: GatewayState; transp: StreamTransport) {.
       try:
         case t
         of "sql":
-          var node: JsonNode
-          try:
-            node = toJsonNode(raw)
-          except CatchableError as e:
-            await transp.writeErrorAsync("parse error: " & e.msg)
-            continue
-          await handleSql(gw, node, transp)
+          await handleSql(gw, raw, transp)
         of "schema":
           await handleSchema(gw, transp)
         of "scheme", "admin", "kv":

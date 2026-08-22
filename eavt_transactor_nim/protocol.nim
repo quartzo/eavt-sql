@@ -1,5 +1,5 @@
-import std/[json, nativesockets, posix]
-import msgpack4nim/msgpack2json
+import std/[nativesockets, posix, streams]
+import msgpack4nim
 import scheme, wire, msgpack_scan
 
 type
@@ -95,44 +95,33 @@ proc readMsg*(fd: SocketHandle): string =
       if n <= 0: return ""
       got += n
 
-proc sexprToJson*(e: SExpr): JsonNode =
-  case e.kind
-  of sVoid: newJNull()
-  of sBool: %e.bval
-  of sInt: %e.ival
-  of sFloat: %e.fval
-  of sStr: %e.sval
-  of sBytes:
-    var arr = newJArray()
-    for b in e.bytesval: arr.add(%b)
-    arr
-  of sSymbol: %e.symval
-  of sList:
-    var arr = newJArray()
-    for item in e.items: arr.add(sexprToJson(item))
-    arr
-  of sResource: %e.rid
-
 proc writeResponse*(fd: SocketHandle; columns: seq[string]; rows: seq[seq[SExpr]];
                      more: bool; error: string = ""; id: string = "") =
-  var node = newJObject()
-  if id.len > 0:
-    node["id"] = %id
+  var ms = MsgStream.init(256)
+  var fieldCount = 1  # "more" is always present
+  if id.len > 0: inc fieldCount
   if error.len > 0:
-    node["error"] = %error
-    node["more"] = %false
+    inc fieldCount  # "error"
   else:
-    var carr = newJArray()
-    for c in columns: carr.add(%c)
-    node["columns"] = carr
-    var rarr = newJArray()
+    fieldCount += 2  # "columns" + "rows"
+  ms.pack_map(fieldCount)
+  if id.len > 0:
+    ms.pack("id"); ms.pack(id)
+  if error.len > 0:
+    ms.pack("error"); ms.pack(error)
+    ms.pack("more"); ms.pack(false)
+  else:
+    ms.pack("columns")
+    ms.pack_array(columns.len)
+    for c in columns: ms.pack(c)
+    ms.pack("rows")
+    ms.pack_array(rows.len)
     for row in rows:
-      var arr = newJArray()
-      for v in row: arr.add(sexprToJson(v))
-      rarr.add(arr)
-    node["rows"] = rarr
-    node["more"] = %more
-  writeMsg(fd, msgpack2json.fromJsonNode(node))
+      ms.pack_array(row.len)
+      for v in row:
+        writeSExprPlain(ms, v)
+    ms.pack("more"); ms.pack(more)
+  writeMsg(fd, ms.data)
 
 proc writeError*(fd: SocketHandle; msg: string; id: string = "") =
   writeResponse(fd, @[], @[], false, msg, id)
