@@ -16,7 +16,7 @@ import scanner
 type
   LeapIterator* = ref object
     scanners*: seq[V2Scanner]
-    rawOps*: seq[seq[(int32, SExpr)]]
+    specs*: seq[RangeSpec]
     started*: bool
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -137,87 +137,101 @@ proc leapConverge*(scanners: var seq[V2Scanner]): bool =
   false
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# apply_ranges
+# apply_ranges — pure predicate, no seeking
 # ═══════════════════════════════════════════════════════════════════════════════
 
-proc applyRanges*(scanners: var seq[V2Scanner]; rawOps: seq[seq[(int32, SExpr)]]): bool =
-  if rawOps.len == 0: return true
-
-  var allIntervals: seq[(Option[SExpr], Option[SExpr], int32)] = @[]
-  for branch in rawOps:
-    allIntervals.add opsToIntervals(branch)
-  let merged = mergeIntervals(allIntervals)
-  var rangeSpecs: seq[RangeSpec] = @[]
-  for (lo, hi, flags) in merged:
-    rangeSpecs.add RangeSpec(lo: lo, hi: hi, flags: flags)
-
-  if rangeSpecs.len == 0: return false
-
-  let maxIter = rangeSpecs.len + 2
-  for iter in 0..<maxIter:
-    var cur: SExpr
-    block getCur:
-      let cv = scanners[0].extractCurrent()
-      if cv.isSome: cur = cv.get
-      else: return false
-
-    var anyApplied = false
-    for spec in rangeSpecs:
-      if spec.hi.isSome:
-        let hiOpen = (spec.flags and RangeHiOpen) != 0
-        let pastHi = if hiOpen: cur >= spec.hi.get else: cur > spec.hi.get
-        if pastHi: continue
-      if spec.lo.isSome:
-        let loOpen = (spec.flags and RangeLoOpen) != 0
-        let beforeLo = if loOpen: cur <= spec.lo.get else: cur < spec.lo.get
-        if beforeLo:
-          if cur.kind != spec.lo.get.kind: return false
-          let lo = spec.lo.get
-          for sc in scanners.mitems:
-            sc.seekToValue(lo)
-          if not leapConverge(scanners): return false
-          if loOpen:
-            let cv = scanners[0].extractCurrent()
-            let atLo = cv.isSome and cv.get == lo
-            if atLo:
-              for sc in scanners.mitems:
-                sc.leapNextAt()
-              if not leapConverge(scanners): return false
-          anyApplied = true
-          break
-        else:
-          return true
-      else:
-        return true
-    if not anyApplied: return false
+proc valueInSpecs*(cur: SExpr; specs: seq[RangeSpec]): bool =
+  if specs.len == 0: return true
+  # Empty sentinel: single triple with flags=-1 means unsatisfiable
+  if specs.len == 1 and specs[0].flags == -1: return false
+  for spec in specs:
+    if spec.flags == -1: return false
+    if spec.hi.isSome:
+      let hiOpen = (spec.flags and RangeHiOpen) != 0
+      let pastHi = if hiOpen: cur >= spec.hi.get else: cur > spec.hi.get
+      if pastHi: continue
+    if spec.lo.isSome:
+      let loOpen = (spec.flags and RangeLoOpen) != 0
+      let beforeLo = if loOpen: cur <= spec.lo.get else: cur < spec.lo.get
+      if beforeLo: continue
+    # within this spec
+    return true
   false
 
+proc applyRanges*(scanners: var seq[V2Scanner]; specs: seq[RangeSpec]): bool =
+  if specs.len == 0: return true
+  if specs.len == 1 and specs[0].flags == -1: return false
+  let cv = scanners[0].extractCurrent()
+  if cv.isNone: return false
+  valueInSpecs(cv.get, specs)
+
 # ═══════════════════════════════════════════════════════════════════════════════
-# parse_ranges
+# parse_ranges — now parses list of [lo, hi, flags] triples
 # ═══════════════════════════════════════════════════════════════════════════════
 
-proc parseRanges(sexpr: SExpr): seq[seq[(int32, SExpr)]] =
+proc parseRanges*(sexpr: SExpr): seq[RangeSpec] =
   case sexpr.kind:
   of sList:
-    var branch: seq[(int32, SExpr)] = @[]
     for item in sexpr.items:
-      case item.kind:
-      of sList:
-        if item.items.len == 1:
-          if item.items[0].kind == sSymbol and item.items[0].symval == "branch":
-            if branch.len > 0:
-              result.add branch
-              branch = @[]
-            continue
-        if item.items.len >= 2 and item.items[0].kind == sInt:
-          let op = int32(expectInt(item.items[0]))
-          let val = item.items[1]
-          branch.add (op, val)
-          continue
-      else: discard
-    if branch.len > 0:
-      result.add branch
+      if item.kind == sList and item.items.len == 3:
+        let loRaw = item.items[0]
+        let hiRaw = item.items[1]
+        let flagsRaw = item.items[2]
+        if flagsRaw.kind != sInt: continue
+        let flags = int32(flagsRaw.ival)
+        let lo = if loRaw.kind == sVoid: none[SExpr]() else: some(loRaw)
+        let hi = if hiRaw.kind == sVoid: none[SExpr]() else: some(hiRaw)
+        result.add RangeSpec(lo: lo, hi: hi, flags: flags)
+      elif item.kind == sList and item.items.len == 0:
+        discard
   else: discard
+
+proc convergeWithRanges*(scanners: var seq[V2Scanner]; specs: seq[RangeSpec]): bool =
+  if not leapConverge(scanners): return false
+  if specs.len == 0: return true
+  if specs.len == 1 and specs[0].flags == -1: return false
+  let maxIter = specs.len + 30
+  for _ in 0..<maxIter:
+    # Peek validation via scanner's validateOrProposeNextElement
+    let (res, propose) = scanners[0].validateOrProposeNextElement(specs)
+    case res:
+    of vrValid:
+      return true
+    of vrAtEnd:
+      return false
+    of vrPropose:
+      if propose.isSome:
+        # Efficient propose via seek (prefix-aware, O(log n))
+        scanners[0].seekToValue(propose.get)
+        if scanners[0].atEnd(): return false
+        # If loOpen and we landed exactly on lo, skip it
+        let loOpenProposed = block:
+          var isOpen = false
+          for spec in specs:
+            if spec.lo.isSome and spec.lo.get == propose.get and (spec.flags and RangeLoOpen) != 0:
+              isOpen = true; break
+          isOpen
+        if loOpenProposed:
+          let cur2 = scanners[0].extractCurrent()
+          if cur2.isSome and cur2.get == propose.get:
+            scanners[0].leapNextAt()
+            if scanners[0].atEnd(): return false
+        if not leapConverge(scanners): return false
+      else:
+        # No specific lo to propose (gap with kind mismatch) — step smallest
+        var minIdx = 0
+        var minVal: Option[SExpr] = none[SExpr]()
+        for i, sc in scanners:
+          let v = sc.extractCurrent()
+          if v.isSome:
+            if minVal.isNone or v.get < minVal.get:
+              minVal = v; minIdx = i
+          else:
+            minIdx = i; break
+        scanners[minIdx].leapNextAt()
+        if scanners[minIdx].atEnd(): return false
+        if not leapConverge(scanners): return false
+  false
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SchemeHostFns
@@ -324,11 +338,8 @@ method scannerLeapInit(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} 
         if aid.isSome:
           sc.setValueAttrType(h.engine.valueTypeFor(aid.get))
 
-    let rawOps = parseRanges(rangesSexpr)
-    let ok = if rawOps.len == 0:
-      leapConverge(scanners)
-    else:
-      applyRanges(scanners, rawOps)
+    let specs = parseRanges(rangesSexpr)
+    let ok = convergeWithRanges(scanners, specs)
     return done(newBool(ok))
 
 method scannerLeapNext(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
@@ -337,7 +348,7 @@ method scannerLeapNext(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} 
       scanners.add h.findScanner(args[i])
     let rangesSexpr = args[^1]
     if scanners.len == 0: return done(newBool(false))
-    let rawOps = parseRanges(rangesSexpr)
+    let specs = parseRanges(rangesSexpr)
 
     var minIdx = 0
     var minVal: Option[SExpr] = none[SExpr]()
@@ -350,9 +361,7 @@ method scannerLeapNext(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} 
 
     scanners[minIdx].leapNextAt()
     if scanners[minIdx].atEnd(): return done(newBool(false))
-    if not leapConverge(scanners):
-      return done(newBool(false))
-    if rawOps.len > 0 and not applyRanges(scanners, rawOps):
+    if not convergeWithRanges(scanners, specs):
       return done(newBool(false))
     return done(newBool(true))
 
@@ -379,8 +388,8 @@ method scannerIterateInit(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe
         if aid.isSome:
           sc.setValueAttrType(h.engine.valueTypeFor(aid.get))
 
-    let rawOps = parseRanges(rangesSexpr)
-    let it = LeapIterator(scanners: scanners, rawOps: rawOps, started: false)
+    let specs = parseRanges(rangesSexpr)
+    let it = LeapIterator(scanners: scanners, specs: specs, started: false)
     let idx = h.leapIters.len
     h.leapIters[idx] = it
     return done(SExpr(kind: sResource, rid: idx))
@@ -394,10 +403,7 @@ method scannerIterateNext(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe
 
     if not iter.started:
       # First call: converge and apply ranges.
-      let ok = if iter.rawOps.len == 0:
-        leapConverge(iter.scanners)
-      else:
-        applyRanges(iter.scanners, iter.rawOps)
+      let ok = convergeWithRanges(iter.scanners, iter.specs)
       if not ok: return done(newVoid())
       iter.started = true
     else:
@@ -413,9 +419,7 @@ method scannerIterateNext(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe
 
       iter.scanners[minIdx].leapNextAt()
       if iter.scanners[minIdx].atEnd(): return done(newVoid())
-      if not leapConverge(iter.scanners):
-        return done(newVoid())
-      if iter.rawOps.len > 0 and not applyRanges(iter.scanners, iter.rawOps):
+      if not convergeWithRanges(iter.scanners, iter.specs):
         return done(newVoid())
 
     let val = iter.scanners[0].extractCurrent()
@@ -534,19 +538,17 @@ method dbgScanners(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     return done(newVoid())
 
 method rangesShow(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
-    let rawOps = parseRanges(args[0])
-    if rawOps.len == 0:
+    let specs = parseRanges(args[0])
+    if specs.len == 0:
       return done(SExpr(kind: sStr, sval: "(-inf, +inf)"))
-    var allIntervals = opsToIntervals(rawOps[0])
-    for i in 1..<rawOps.len:
-      let more = opsToIntervals(rawOps[i])
-      allIntervals.add more
+    if specs.len == 1 and specs[0].flags == -1:
+      return done(SExpr(kind: sStr, sval: "∅ (empty)"))
     var descriptions: seq[string] = @[]
-    for (lo, hi, flags) in allIntervals:
-      let loStr = if lo.isNone: "-inf" else: $lo.get
-      let hiStr = if hi.isNone: "+inf" else: $hi.get
-      let l = if lo.isNone or (flags and RangeLoOpen) != 0: "(" else: "["
-      let r = if hi.isNone or (flags and RangeHiOpen) != 0: ")" else: "]"
+    for spec in specs:
+      let loStr = if spec.lo.isNone: "-inf" else: $spec.lo.get
+      let hiStr = if spec.hi.isNone: "+inf" else: $spec.hi.get
+      let l = if spec.lo.isNone or (spec.flags and RangeLoOpen) != 0: "(" else: "["
+      let r = if spec.hi.isNone or (spec.flags and RangeHiOpen) != 0: ")" else: "]"
       descriptions.add l & loStr & ", " & hiStr & r
     return done(SExpr(kind: sStr, sval: descriptions.join(", ")))
 

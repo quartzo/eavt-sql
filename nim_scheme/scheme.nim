@@ -3,7 +3,7 @@
 ## Port of spier-scheme (~1500 lines Rust → Nim).
 ## Stack-based VM with yield/resume for streaming queries.
 
-import std/[tables, strutils, options, sequtils]
+import std/[tables, strutils, options, sequtils, algorithm]
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SExpr — the universal value type
@@ -57,6 +57,140 @@ proc writeScheme*(program: SchemeProgram): string =
   $program.body
 
 const MAX_WIDTH = 100
+
+const RangeLoOpen = 1'i32
+const RangeHiOpen = 2'i32
+const RangeOpEq = 0'i32
+const RangeOpNeq = 1'i32
+const RangeOpGt = 2'i32
+const RangeOpGte = 3'i32
+const RangeOpLt = 4'i32
+const RangeOpLte = 5'i32
+const RangeOpIn = 6'i32
+
+proc cmpValueS(a, b: SExpr): int =
+  if a.kind != b.kind:
+    return ord(a.kind) - ord(b.kind)
+  case a.kind:
+  of sVoid: 0
+  of sBool: ord(a.bval) - ord(b.bval)
+  of sInt:
+    if a.ival < b.ival: -1 elif a.ival > b.ival: 1 else: 0
+  of sFloat:
+    if a.fval < b.fval: -1 elif a.fval > b.fval: 1 else: 0
+  of sStr: cmp(a.sval, b.sval)
+  of sBytes:
+    if a.bytesval.len < b.bytesval.len: -1
+    elif a.bytesval.len > b.bytesval.len: 1
+    else:
+      for i in 0..<a.bytesval.len:
+        if a.bytesval[i] < b.bytesval[i]: return -1
+        if a.bytesval[i] > b.bytesval[i]: return 1
+      0
+  else: 0
+
+proc mergeIntervalsS(intervals: seq[(Option[SExpr], Option[SExpr], int32)]): seq[(Option[SExpr], Option[SExpr], int32)] =
+  if intervals.len <= 1: return intervals
+  var sorted = intervals
+  sorted.sort(proc(a, b: (Option[SExpr], Option[SExpr], int32)): int =
+    if not a[0].isSome and not b[0].isSome: 0
+    elif not a[0].isSome: -1
+    elif not b[0].isSome: 1
+    else: cmpValueS(a[0].get, b[0].get))
+  result.add sorted[0]
+  for (lo, hi, flags) in sorted[1..^1]:
+    let (prevLo, prevHi, prevFlags) = result[^1]
+    let canMerge =
+      if prevHi.isNone: true
+      elif lo.isSome:
+        let prevHiVal = prevHi.get
+        let loVal = lo.get
+        if loVal.kind != prevHiVal.kind: false
+        elif cmpValueS(loVal, prevHiVal) < 0: true
+        elif cmpValueS(loVal, prevHiVal) == 0:
+          let prevHiClosed = (prevFlags and RangeHiOpen) == 0
+          let loClosed = (flags and RangeLoOpen) == 0
+          prevHiClosed and loClosed
+        else: false
+      else: false
+    if canMerge:
+      let newHi =
+        if prevHi.isNone: hi
+        elif hi.isNone: none[SExpr]()
+        elif cmpValueS(hi.get, prevHi.get) > 0: hi
+        else: prevHi
+      let newHiOpen =
+        if prevHi.isNone: (flags and RangeHiOpen) != 0
+        elif hi.isNone: false
+        elif cmpValueS(hi.get, prevHi.get) > 0: (flags and RangeHiOpen) != 0
+        elif cmpValueS(hi.get, prevHi.get) < 0: (prevFlags and RangeHiOpen) != 0
+        else: (prevFlags and RangeHiOpen) != 0 and (flags and RangeHiOpen) != 0
+      let newFlags = (prevFlags and RangeLoOpen) or (if newHiOpen: RangeHiOpen else: 0'i32)
+      result[^1] = (prevLo, newHi, newFlags)
+    else:
+      result.add (lo, hi, flags)
+
+proc opsToIntervalsS(ops: seq[(int32, SExpr)]): seq[(Option[SExpr], Option[SExpr], int32)] =
+  var neqVals: seq[SExpr] = @[]
+  var rangeOps: seq[(int32, SExpr)] = @[]
+  var inVals: seq[SExpr] = @[]
+  for (op, val) in ops:
+    case op:
+    of RangeOpNeq: neqVals.add val
+    of RangeOpIn: inVals.add val
+    else: rangeOps.add (op, val)
+  if inVals.len > 0 and rangeOps.len == 0 and neqVals.len == 0:
+    var sorted = inVals
+    sorted.sort(proc(a, b: SExpr): int = cmpValueS(a,b))
+    for v in sorted:
+      result.add (some(v), some(v), 0'i32)
+    return mergeIntervalsS(result)
+  var lo: Option[SExpr] = none[SExpr]()
+  var hi: Option[SExpr] = none[SExpr]()
+  var loOpen = false
+  var hiOpen = false
+  for (op, val) in rangeOps:
+    case op:
+    of RangeOpGt, RangeOpGte:
+      if lo.isNone or cmpValueS(val, lo.get) > 0 or (cmpValueS(val, lo.get)==0 and op==RangeOpGt):
+        lo = some(val); loOpen = (op==RangeOpGt)
+    of RangeOpLt, RangeOpLte:
+      if hi.isNone or cmpValueS(val, hi.get) < 0 or (cmpValueS(val, hi.get)==0 and op==RangeOpLt):
+        hi = some(val); hiOpen = (op==RangeOpLt)
+    of RangeOpEq:
+      lo = some(val); hi = some(val); loOpen=false; hiOpen=false
+    else: discard
+  if lo.isSome and hi.isSome and cmpValueS(lo.get, hi.get) > 0:
+    return @[]
+  var flags = 0'i32
+  if loOpen: flags = flags or RangeLoOpen
+  if hiOpen: flags = flags or RangeHiOpen
+  var intervals: seq[(Option[SExpr], Option[SExpr], int32)] = @[(lo, hi, flags)]
+  for nv in neqVals:
+    var newIntervals: seq[(Option[SExpr], Option[SExpr], int32)] = @[]
+    for (ivLo, ivHi, ivFlags) in intervals:
+      var inRange = true
+      if ivLo.isSome:
+        let loOpenI = (ivFlags and RangeLoOpen) != 0
+        if loOpenI:
+          if cmpValueS(nv, ivLo.get) <= 0: inRange = false
+        else:
+          if cmpValueS(nv, ivLo.get) < 0: inRange = false
+      if inRange and ivHi.isSome:
+        let hiOpenI = (ivFlags and RangeHiOpen) != 0
+        if hiOpenI:
+          if cmpValueS(nv, ivHi.get) >= 0: inRange = false
+        else:
+          if cmpValueS(nv, ivHi.get) > 0: inRange = false
+      if not inRange:
+        newIntervals.add (ivLo, ivHi, ivFlags)
+      else:
+        let leftFlags = (ivFlags and (not RangeHiOpen)) or RangeHiOpen
+        newIntervals.add (ivLo, some(nv), leftFlags)
+        let rightFlags = (ivFlags and (not RangeLoOpen)) or RangeLoOpen
+        newIntervals.add (some(nv), ivHi, rightFlags)
+    intervals = newIntervals
+  mergeIntervalsS(intervals)
 
 proc writeSchemePretty*(program: SchemeProgram): string =
   var outStr = ""
@@ -546,34 +680,68 @@ proc evalSpecialForm(name: string; args: SExpr; env: var Environment;
     state.stack.add Frame(kind: fkEval, fexpr: condExpr)
     return done(newVoid())
   of "ranges-create":
-    # (ranges-create expr) → flat list of (op val) pairs with (branch) separators
+    # (ranges-create expr) → list of [lo, hi, flags] triples with open/closed borders.
+    # lo/hi are SExpr values or sVoid for -inf/+inf; flags is int with bit 1=lo open, 2=hi open.
     let inner = if args.items.len >= 2: args.items[1] else: newList(@[])
-    let opMap = {"=": 0'i32, "!=": 1, ">": 2, ">=": 3, "<": 4, "<=": 5}.toTable
-    proc walk(sexpr: SExpr; resultList: var seq[SExpr];
+    let opMap = {"=": 0'i32, "!=": 1, ">": 2, ">=": 3, "<": 4, "<=": 5, "in": 6'i32}.toTable
+    var flat: seq[SExpr] = @[]
+    proc walk(sexpr: SExpr; flat: var seq[SExpr];
               env: var Environment; host: HostFns; state: var YieldState) =
       case sexpr.kind:
       of sList:
         if sexpr.items.len == 0: return
         let head = sexpr.items[0]
         if head.kind == sSymbol and head.symval == "and":
-          for i in 1..<sexpr.items.len: walk(sexpr.items[i], resultList, env, host, state)
+          for i in 1..<sexpr.items.len: walk(sexpr.items[i], flat, env, host, state)
         elif head.kind == sSymbol and head.symval == "or":
           for i in 1..<sexpr.items.len:
-            resultList.add newList(@[newSymbol("branch")])
-            walk(sexpr.items[i], resultList, env, host, state)
+            flat.add newList(@[newSymbol("branch")])
+            walk(sexpr.items[i], flat, env, host, state)
         elif head.kind == sSymbol and head.symval in opMap:
-          if sexpr.items.len >= 2:
-            # Value may be a literal or an expression like (param N) —
-            # evaluate it so runtime refs resolve to actual values.
+          if head.symval == "in":
+            for idx in 1..<sexpr.items.len:
+              let step = evalExpr(sexpr.items[idx], env, host, state)
+              if step.kind == esYield:
+                raise newException(EvalError, "ranges-create: value expression yielded unexpectedly")
+              flat.add newList(@[newInt(RangeOpIn), step.result])
+          elif sexpr.items.len >= 2:
             let step = evalExpr(sexpr.items[1], env, host, state)
             if step.kind == esYield:
-              raise newException(EvalError,
-                "ranges-create: value expression yielded unexpectedly")
-            resultList.add newList(@[newInt(opMap[head.symval]), step.result])
+              raise newException(EvalError, "ranges-create: value expression yielded unexpectedly")
+            flat.add newList(@[newInt(opMap[head.symval]), step.result])
       else: discard
-    var items: seq[SExpr] = @[]
-    walk(inner, items, env, host, state)
-    return done(newList(items))
+    walk(inner, flat, env, host, state)
+    # Parse flat into branches seq[seq[(op,val)]]
+    var branches: seq[seq[(int32, SExpr)]] = @[@[]]
+    for item in flat:
+      if item.kind == sList and item.items.len == 1 and item.items[0].kind == sSymbol and item.items[0].symval == "branch":
+        branches.add @[]
+      elif item.kind == sList and item.items.len >= 2 and item.items[0].kind == sInt:
+        let op = int32(item.items[0].ival)
+        branches[^1].add (op, item.items[1])
+    # Single empty branch (no ops) → no restriction
+    if branches.len == 1 and branches[0].len == 0:
+      return done(newList(@[]))
+    # Remove empty branches from leading branch marker
+    var nonEmpty: seq[seq[(int32, SExpr)]] = @[]
+    for b in branches:
+      if b.len > 0: nonEmpty.add b
+    if nonEmpty.len == 0:
+      return done(newList(@[]))
+    var allIntervals: seq[(Option[SExpr], Option[SExpr], int32)] = @[]
+    for b in nonEmpty:
+      for iv in opsToIntervalsS(b): allIntervals.add iv
+    let merged = mergeIntervalsS(allIntervals)
+    if merged.len == 0:
+      # Empty intervals → unsatisfiable: produce sentinel that host will treat as empty (no rows)
+      # Encode as single triple with lo>hi marker: use flags=-1 to signal empty
+      return done(newList(@[newList(@[newVoid(), newVoid(), newInt(-1)])]))
+    var outItems: seq[SExpr] = @[]
+    for (lo, hi, flags) in merged:
+      let loS = if lo.isSome: lo.get else: newVoid()
+      let hiS = if hi.isSome: hi.get else: newVoid()
+      outItems.add newList(@[loS, hiS, newInt(flags)])
+    return done(newList(outItems))
   of "while":
     if args.items.len < 2:
       raise newException(EvalError, "while: expected (while cond body...)")

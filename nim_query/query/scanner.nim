@@ -6,8 +6,10 @@ import std/[options, tables, strutils]
 import scheme
 import keys
 import cursor
+import types
 export keys.beUint32, keys.beUint64
 export cursor
+export types
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # KeyVsPrefix — result of classify_key
@@ -506,18 +508,12 @@ proc leapNextAt*(sc: V2Scanner) =
     sc.seekPastValueAt()
   sc.advanceToActiveAt()
 
-# ── seek_to_value ──
-
 proc seekToValue*(sc: V2Scanner; value: SExpr) =
+  # Seek to first key >= prefixCache + encode(value) at current position.
+  # Uses prefixCache (authoritative pushed values), not currentActiveKey prefix,
+  # to avoid drift when cursor is polluted by inner range seeks.
   let pn = sc.pos.posName()
-  let key = sc.pos.currentActiveKey
-  if key.isNone:
-    sc.pos.cursor.invalidate()
-    return
-  let k = key.get
-  let vs = sc.valueStart(k)
-  var target = k[0..<vs]
-
+  var target = sc.prefixCache
   case pn:
   of "e":
     target.add keys.encodeEid(value.ival)
@@ -535,10 +531,63 @@ proc seekToValue*(sc: V2Scanner; value: SExpr) =
     else:
       target.add keys.encodeFixed(value)
   else: discard
-
   for _ in 0..7: target.add 0'u8
   sc.pos.cursor.seek(target)
   sc.advanceToActiveAt()
+
+type ValidateResult* = enum vrValid, vrPropose, vrAtEnd
+
+proc validateOrProposeNextElement*(sc: V2Scanner; specs: seq[RangeSpec]): tuple[res: ValidateResult, propose: Option[SExpr]] =
+  ## Peek: validates current value against prefix (via extractCurrent) and specs.
+  ## Returns vrValid if current value is in range, vrPropose with next lo to seek,
+  ## or vrAtEnd if no valid key or past all intervals.
+  let cv = sc.extractCurrent()
+  if cv.isNone:
+    return (vrAtEnd, none[SExpr]())
+  let cur = cv.get
+  if specs.len == 0:
+    return (vrValid, none[SExpr]())
+  if specs.len == 1 and specs[0].flags == -1:
+    return (vrAtEnd, none[SExpr]())
+  # Check valid
+  for spec in specs:
+    if spec.flags == -1: continue
+    if spec.hi.isSome:
+      let hiOpen = (spec.flags and RangeHiOpen) != 0
+      let pastHi = if hiOpen: cur >= spec.hi.get else: cur > spec.hi.get
+      if pastHi: continue
+    if spec.lo.isSome:
+      let loOpen = (spec.flags and RangeLoOpen) != 0
+      let beforeLo = if loOpen: cur <= spec.lo.get else: cur < spec.lo.get
+      if beforeLo: continue
+    # within this spec
+    return (vrValid, none[SExpr]())
+  # Not valid — find next propose lo
+  for spec in specs:
+    if spec.flags == -1: continue
+    if spec.lo.isNone: continue
+    if cur.kind != spec.lo.get.kind: continue
+    let loOpen = (spec.flags and RangeLoOpen) != 0
+    # If cur < lo (or <= for open), propose lo
+    let beforeLo = if loOpen: cur <= spec.lo.get else: cur < spec.lo.get
+    if beforeLo:
+      return (vrPropose, some(spec.lo.get))
+    # If cur >= lo but pastHi was true, we already continued; gap case handled by next spec's beforeLo
+  # Check if cur past all hi
+  var pastAll = true
+  for spec in specs:
+    if spec.hi.isNone:
+      pastAll = false
+      break
+    let hiOpen = (spec.flags and RangeHiOpen) != 0
+    let pastHi = if hiOpen: cur >= spec.hi.get else: cur > spec.hi.get
+    if not pastHi:
+      pastAll = false
+      break
+  if pastAll:
+    return (vrAtEnd, none[SExpr]())
+  # Gap between intervals but no lo proposal found (e.g., kind mismatch) → step one
+  return (vrPropose, none[SExpr]())
 
 # ── attr_id helpers ──
 

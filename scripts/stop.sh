@@ -6,11 +6,12 @@ cd "$(dirname "$0")/.."
 XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 SOCK_DIR="$XDG_RUNTIME_DIR/eavt"
 
-# Kill by binary name (avoids matching the shell itself)
-for name in eavt-sql-transactor eavt-sql-query; do
-  pids=$(pgrep -x "$name" 2>/dev/null || true)
+# Kill by binary path (comm is truncated to 15 chars on Linux, so -x on
+# the full name never matches "eavt-sql-transactor")
+for pat in "build/eavt-sql-transactor" "build/eavt-sql-query"; do
+  pids=$(pgrep -f "$pat" 2>/dev/null || true)
   if [ -n "$pids" ]; then
-    echo "killing $name (pids: $pids)"
+    echo "killing $pat (pids: $pids)"
     echo "$pids" | xargs -r kill 2>/dev/null || true
     sleep 0.3
     echo "$pids" | xargs -r kill -9 2>/dev/null || true

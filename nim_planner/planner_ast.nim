@@ -92,7 +92,7 @@ proc `$`*(t: PlanTrace): string =
     if d.isBlind:
       result.add("\n  depth " & $i & ": " & d.varName & " | blind | est=" & formatFloat(d.estimatedElements, ffDecimal, 1))
     else:
-      result.add("\n  depth " & $i & ": " & d.varName & " | clauses=[" & clauses & "] | est=" & formatFloat(d.estimatedElements, ffDecimal, 1) & " \xd7" & $d.activeClauses.len & "cl = " & formatFloat(d.stepCost, ffDecimal, 1))
+      result.add("\n  depth " & $i & ": " & d.varName & " | clauses=[" & clauses & "] | est=" & formatFloat(d.estimatedElements, ffDecimal, 1) & " \u00d7" & $d.activeClauses.len & "cl = " & formatFloat(d.stepCost, ffDecimal, 1))
 
 proc `$`*(plan: QueryPlanResult): string =
   if plan.orderedVars.len == 0:
