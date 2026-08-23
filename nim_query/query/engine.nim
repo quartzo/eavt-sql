@@ -136,28 +136,14 @@ method openCursor(q: QueryStore; cfId: uint32; prefix: seq[byte]): Cursor =
   let mc = q.kv.openScanCursor(cfId.int)
   mergedCursor(mc)
 
-method saveWithT(q: QueryStore; eid: int64; attr: string; val: SExpr;
-                  t: int64; asOf: int64) =
+proc saveResolved(q: QueryStore; eid: int64; attrId: uint32; vt: uint32;
+                  many, indexed: bool; mode: EncodeMode; val: SExpr; t: int64) =
+  ## Core of saveWithT with attribute metadata pre-resolved — shared by
+  ## save (resolves per datom) and save-many (resolves once per batch).
   q.saveCount += 1
   var t0 = getMonoTime()
 
-  let attrIdOpt = q.eavt.lookupAttr(attr)
-  if attrIdOpt.isNone:
-    raise newException(EvalError, "save to undeclared attr: " & attr)
-  let attrId = attrIdOpt.get
-
-  q.saveLookupAttrNs += (getMonoTime().ticks - t0.ticks)
-  t0 = getMonoTime()
-
-  let vt = q.eavt.valueTypeFor(attrId).get(scanner.DbTypeString)
-  let many = q.eavt.isMany(attrId)
-  let mode = valueTypeToEncodeMode(vt)
-
-  q.saveTypeCheckNs += (getMonoTime().ticks - t0.ticks)
-  t0 = getMonoTime()
-
   let encoded = encodeValue(sexprToValueForType(val, vt), mode, eid)
-  let indexed = q.eavt.resolver.isIndexed(attrId)
 
   q.saveEncodeNs += (getMonoTime().ticks - t0.ticks)
   t0 = getMonoTime()
@@ -198,6 +184,52 @@ method saveWithT(q: QueryStore; eid: int64; attr: string; val: SExpr;
 
   q.saveBatchWriteNs += (getMonoTime().ticks - t0.ticks)
 
+method saveWithT(q: QueryStore; eid: int64; attr: string; val: SExpr;
+                  t: int64; asOf: int64) =
+  var t0 = getMonoTime()
+
+  let attrIdOpt = q.eavt.lookupAttr(attr)
+  if attrIdOpt.isNone:
+    raise newException(EvalError, "save to undeclared attr: " & attr)
+  let attrId = attrIdOpt.get
+
+  q.saveLookupAttrNs += (getMonoTime().ticks - t0.ticks)
+  t0 = getMonoTime()
+
+  let vt = q.eavt.valueTypeFor(attrId).get(scanner.DbTypeString)
+  let many = q.eavt.isMany(attrId)
+  let mode = valueTypeToEncodeMode(vt)
+
+  q.saveTypeCheckNs += (getMonoTime().ticks - t0.ticks)
+
+  let indexed = q.eavt.resolver.isIndexed(attrId)
+  q.saveResolved(eid, attrId, vt, many, indexed, mode, val, t)
+
+method saveManyWithT(q: QueryStore; attr: string; pairs: seq[(int64, SExpr)];
+                     t: int64; asOf: int64) =
+  ## Batched save grouped by one attribute: lookupAttr + metadata resolved
+  ## ONCE for the whole batch (the per-datom win of the aid translation
+  ## without any wire change).
+  var t0 = getMonoTime()
+
+  let attrIdOpt = q.eavt.lookupAttr(attr)
+  if attrIdOpt.isNone:
+    raise newException(EvalError, "save-many to undeclared attr: " & attr)
+  let attrId = attrIdOpt.get
+
+  q.saveLookupAttrNs += (getMonoTime().ticks - t0.ticks)
+  t0 = getMonoTime()
+
+  let vt = q.eavt.valueTypeFor(attrId).get(scanner.DbTypeString)
+  let many = q.eavt.isMany(attrId)
+  let mode = valueTypeToEncodeMode(vt)
+  let indexed = q.eavt.resolver.isIndexed(attrId)
+
+  q.saveTypeCheckNs += (getMonoTime().ticks - t0.ticks)
+
+  for (eid, val) in pairs:
+    q.saveResolved(eid, attrId, vt, many, indexed, mode, val, t)
+
 method retract(q: QueryStore; eid: int64; attr: string; val: SExpr;
                 t: int64; asOf: int64) =
   let attrIdOpt = q.eavt.lookupAttr(attr)
@@ -207,7 +239,7 @@ method retract(q: QueryStore; eid: int64; attr: string; val: SExpr;
   let mode = valueTypeToEncodeMode(vt)
   let encoded = encodeValue(sexprToValueForType(val, vt), mode, eid)
   let indexed = q.eavt.resolver.isIndexed(attrId)
-  let entries = buildEavtEntries(eid, attrId, encoded, t, true, mode, indexed)
+  var entries = buildEavtEntries(eid, attrId, encoded, t, true, mode, indexed)
   q.eavt.batchWrite(entries)
 
 method lookupAttr(q: QueryStore; name: string): Option[uint32] =

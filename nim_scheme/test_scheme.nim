@@ -16,6 +16,32 @@ proc se(expr: SExpr; host: HostFns = nil): SExpr =
 
 proc ses(expr: SExpr; host: HostFns = nil): string = $(se(expr, host))
 
+type
+  SaveManyHost = ref object of HostFns
+    attr: string
+    pairs: seq[(int64, int)]
+
+method saveMany*(h: SaveManyHost; args: seq[SExpr]): EvalStep =
+  h.attr = args[0].sval
+  var i = 1
+  while i < args.len:
+    h.pairs.add((args[i].ival, args[i + 1].ival.int))
+    inc i, 2
+  return done(newVoid())
+
+suite "scheme.save-many":
+  test "flat pairs dispatch to hostfn in one form":
+    let h = SaveManyHost()
+    let prog = "(save-many \"user.name\" 1 10 2 20)"
+    discard se(parse(prog), h)
+    check h.attr == "user.name"
+    check h.pairs == @[(1'i64, 10), (2'i64, 20)]
+  test "single pair":
+    let h = SaveManyHost()
+    let prog2 = "(save-many \"a\" 7 8)"
+    discard se(parse(prog2), h)
+    check h.pairs == @[(7'i64, 8)]
+
 suite "scheme.literals":
   test "void":       check ses(newVoid()) == "#void"
   test "bool true":  check ses(newBool(true)) == "#t"

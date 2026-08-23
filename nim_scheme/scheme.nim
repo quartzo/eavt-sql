@@ -395,6 +395,7 @@ method attrName*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = disc
 method resolveVal*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
 method param*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
 method save*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
+method saveMany*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
 method retract*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
 method allocEntity*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
 method txEntity*(h: HostFns; args: seq[SExpr]): EvalStep {.base, gcsafe.} = discard
@@ -951,6 +952,7 @@ proc evalExpr(expr: SExpr; env: var Environment; host: HostFns;
       of "resolve-val": return host.resolveVal(args)
       of "param": return host.param(args)
       of "save": return host.save(args)
+      of "save-many": return host.saveMany(args)
       of "retract": return host.retract(args)
       of "alloc-entity": return host.allocEntity(args)
       of "tx-entity": return host.txEntity(args)

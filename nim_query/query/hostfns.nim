@@ -72,6 +72,10 @@ method openCursor*(ops: EngineOps; cfId: uint32; prefix: seq[byte]): Cursor {.ba
 method saveWithT*(ops: EngineOps; eid: int64; attr: string; val: SExpr;
                    t: int64; asOf: int64) {.base, gcsafe.} = discard
 
+method saveManyWithT*(ops: EngineOps; attr: string;
+                      pairs: seq[(int64, SExpr)]; t: int64; asOf: int64) {.
+    base, gcsafe.} = discard
+
 method retract*(ops: EngineOps; eid: int64; attr: string; val: SExpr;
                  t: int64; asOf: int64) {.base, gcsafe.} = discard
 
@@ -462,6 +466,22 @@ method save(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     let attr = expectStr(args[1])
     let val = args[2]
     h.engine.saveWithT(eid, attr, val, h.tx, h.asOfTx.get(0))
+    return done(newVoid())
+
+method saveMany(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
+    ## (save-many "attr" eid1 val1 eid2 val2 ...) — batched save grouped by
+    ## attribute: metadata resolved once, ONE vm form instead of N. Flat
+    ## layout because nested data lists are not evaluable program position.
+    if args.len < 3 or (args.len and 1) == 0:
+      raise newException(EvalError,
+        "save-many expects an attribute name followed by eid/value pairs")
+    let attr = expectStr(args[0])
+    var pairs = newSeqOfCap[(int64, SExpr)]((args.len - 1) div 2)
+    var i = 1
+    while i < args.len:
+      pairs.add((expectInt(args[i]), args[i + 1]))
+      inc i, 2
+    h.engine.saveManyWithT(attr, pairs, h.tx, h.asOfTx.get(0))
     return done(newVoid())
 
 method retract(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
