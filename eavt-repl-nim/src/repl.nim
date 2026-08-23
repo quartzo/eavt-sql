@@ -23,7 +23,8 @@ proc parseValue*(raw: string): string =
     of JFloat: return $node.getFloat()
     of JBool: return $node.getBool()
     else: return raw
-  except:
+  except JsonParsingError:
+    # Not JSON — the raw text IS the value. Grammar dispatch, not an error.
     return raw
 
 # ── command handlers ─────────────────────────────────────────────────

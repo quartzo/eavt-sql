@@ -29,6 +29,7 @@ import eavt_transactor_nim/protocol except readMsg, writeMsg
 import shared
 import downstream
 import frontend
+import logutil
 import explain
 import ast as sql_ast
 import parser as sql_parser
@@ -340,5 +341,6 @@ proc serveGatewayConnection*(gw: GatewayState; transp: StreamTransport) {.
             await transp.writeErrorAsync("unknown request type: " & t)
       except CatchableError as e:
         await transp.writeErrorAsync(e.msg)
-  except CatchableError:
-    discard  # client disconnected mid-frame
+  except CatchableError as e:
+    # Expected: client disconnected mid-frame.
+    logDebug("query", "client handler ended (" & excMsg(e) & ")")

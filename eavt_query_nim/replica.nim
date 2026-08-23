@@ -15,6 +15,7 @@ import msgpack4nim
 import kvstore, eavt, engine
 import stats
 import msgpack_scan
+import logutil
 
 type
   ReplicaEngine* = ref object
@@ -47,13 +48,17 @@ proc applySnapshot*(r: ReplicaEngine; sealed: seq[string]; openTail: seq[byte];
     try:
       let data = await readFileBytesAsync(segPath)  # seq[byte], async
       r.kv.applyJournalRecords(data)
-    except CatchableError:
-      discard  # missing/torn segment — stream has what's needed
+    except CatchableError as e:
+      # Tolerant by design (stream has what's needed) but durability-relevant.
+      logWarn("replica", "snapshot: segment unreadable " & segPath & " (" &
+        excMsg(e) & ")")
   if openTail.len > 0:
     r.kv.applyJournalRecords(openTail)
   if rootName.len > 0:
     try: r.kv.publishRoot(rootName)
-    except Exception: discard  # blobstore raises Exception per base trait
+    except Exception as e:
+      logDebug("replica", "snapshot root not publishable (" & excMsg(e) &
+        "); stream will deliver a newer one")
   r.connected = true
 
 proc applyWal*(r: ReplicaEngine; data: seq[byte]) =
@@ -69,8 +74,9 @@ proc applyRoot*(r: ReplicaEngine; rootName: string) =
   ## Root event: load the new pagestore root, discard the pending treap.
   try:
     r.kv.publishRoot(rootName)
-  except Exception:
-    discard  # stale/missing root; stream will deliver a newer one
+  except Exception as e:
+    logDebug("replica", "stale/missing root " & rootName & " (" & excMsg(e) &
+      "); stream will deliver a newer one")
 
 proc getStats*(r: ReplicaEngine): stats.CompileStats =
   ## Build compile stats from the current replica state.
@@ -79,8 +85,9 @@ proc getStats*(r: ReplicaEngine): stats.CompileStats =
   ## stream, and the query server's own invalidation must see them immediately.
   try:
     r.store.eavt.bootstrapResolver()
-  except Exception:
-    discard  # resolver re-scan is best-effort; stats may be stale
+  except Exception as e:
+    logWarn("replica", "resolver re-scan failed, stats may be stale (" &
+      excMsg(e) & ")")
   r.store.eavt.cachedStatsTime = 0.0  # force rebuild past the engine TTL
   r.store.eavt.buildCompileStats()
 
@@ -130,8 +137,8 @@ proc onReplicationEvent*(r: ReplicaEngine; frame: string) {.gcsafe, raises: [].}
       echo "Replication: snapshot received (",
            sealedCount, " segments, root=",
            getTopStr(frame, "root"), ")"
-    except CatchableError:
-      discard
+    except CatchableError as e:
+      logError("replica", "snapshot event dispatch failed (" & excMsg(e) & ")")
   of "wal":
     var data: seq[byte] = @[]
     let (df, ds, de) = topValue(frame, "data")

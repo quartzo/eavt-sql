@@ -41,7 +41,7 @@ proc initSharedEngine*(cfg: Table[string, string]): SharedEngine =
         try:
           stderr.writeLine("auto-flush failed: " & fut.error().msg)
         except CatchableError:
-          discard
+          discard  # whitelisted: reporting failure of the report itself
   kv.onFlushRequest = proc() {.gcsafe.} = armFlush(eng)
   return eng
 

@@ -26,6 +26,7 @@ import chronos
 import std/streams
 import msgpack4nim
 import msgpack_scan
+import logutil
 
 type
   PendingReq = ref object
@@ -120,8 +121,9 @@ proc readerLoop(conn: MultiplexedConn) {.async.} =
       if p != nil:
         try:
           await p.transp.writeFrameAsync(body)
-        except CatchableError:
-          discard  # client gone — pending will be cleaned up
+        except CatchableError as e:
+          # Expected: client disconnected while its response was in flight.
+          logDebug("downstream", "relay to client failed (" & excMsg(e) & ")")
         if not getTopBool(body, "more"):
           p.fut.complete()
           conn.pending.del(id)
@@ -148,13 +150,16 @@ proc connectLoop(conn: MultiplexedConn) {.async.} =
       await conn.sendReplicate()
       conn.connected = true
       await conn.readerLoop()
-    except CatchableError:
-      discard
+    except CatchableError as e:
+      # Reconnect cycle: normal operation, visible only at debug.
+      logDebug("downstream", "connection to transactor lost (" &
+        excMsg(e) & "); retrying in 1s")
     conn.connected = false
     conn.failAllPending()
     if conn.transp != nil:
       try: await conn.transp.closeWait()
-      except CatchableError: discard
+      except CatchableError as e:
+        logDebug("downstream", "closeWait failed (" & excMsg(e) & ")")
     await sleepAsync(1000.milliseconds)
 
 # ── Public API ──────────────────────────────────────────────────────────────
@@ -222,8 +227,8 @@ proc close*(conn: MultiplexedConn) {.async: (raises: []).} =
   try:
     if conn.transp != nil and not conn.transp.closed:
       await conn.transp.closeWait()
-  except CatchableError:
-    discard
+  except CatchableError as e:
+    logDebug("downstream", "close failed (" & excMsg(e) & ")")
 
 proc downstreamSocketPath*(): string =
   ## Default transactor socket path.

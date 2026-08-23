@@ -292,9 +292,10 @@ proc parseAtom(input: string; pos: var int): SExpr =
   if s == "#t": return newBool(true)
   if s == "#f": return newBool(false)
   try: return newInt(parseBiggestInt(s))
-  except:
+  except ValueError:
+    # Grammar dispatch: int → float → symbol. Not an error path.
     try: return newFloat(parseFloat(s))
-    except: return newSymbol(s)
+    except ValueError: return newSymbol(s)
 
 proc parseStr(input: string; pos: var int): SExpr =
   inc pos # skip opening "

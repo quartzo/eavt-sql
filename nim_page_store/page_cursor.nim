@@ -11,6 +11,7 @@
 
 import std/[options, strutils, sequtils]
 import page_store
+import logutil
 
 type
   IndexPos = object
@@ -50,8 +51,9 @@ proc loadIndexPage(s: var PageStoreInner; uuid: array[16, byte]): seq[(seq[byte]
       var dump = "/tmp/opencode/receita_bench/badpage_" & hex & ".bin"
       writeFile(dump, raw)
       stderr.writeLine("pagestore: dumped raw to " & dump)
-    except CatchableError:
-      discard
+    except CatchableError as e:
+      # Diagnostic dump only — the real error is re-raised below.
+      logDebug("pagestore", "bad-page dump failed (" & excMsg(e) & ")")
     raise
 
 proc loadLeaf(c: PageStoreCursor; uuid: array[16, byte]) =

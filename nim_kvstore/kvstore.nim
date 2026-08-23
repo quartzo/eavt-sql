@@ -12,6 +12,7 @@ import std/[tables, strutils, os, options, times, random, algorithm, monotimes]
 import std/[osproc, exitprocs]
 import std/syncio
 import page_store
+import logutil
 
 import std/atomics
 
@@ -194,7 +195,9 @@ proc newKVStore*(config: Table[string, string]): KVStore =
         if kind == pcFile and base.startsWith("journal."):
           try:
             segs.add((parseInt(base[8..^1]), name))
-          except ValueError: discard
+          except ValueError:
+            # Non-numeric entry in journal dir — filter, not an error.
+            logDebug("kvstore", "skipping non-segment file " & base)
     segs.sort(proc(a, b: tuple[idx: int, path: string]): int = cmp(a.idx, b.idx))
     for s in segs: files.add(s.path)
     var entries: seq[mt_be.CfKey] = @[]
@@ -203,7 +206,11 @@ proc newKVStore*(config: Table[string, string]): KVStore =
         let data = readFile(jf)
         if data.len > 0:
           entries.add parseJournalRecords(cast[seq[byte]](data))
-      except CatchableError: discard
+      except CatchableError as e:
+        # Tolerant replay (decided): keep opening, but the skipped segment
+        # is durability-relevant and MUST be visible.
+        logError("kvstore", "journal replay skipped " & jf & " (" &
+          excMsg(e) & "); data in this segment may be missing")
     if entries.len > 0: result.mtSize = result.mt.batch(entries)
 
 proc journalDeliver*(kv: KVStore; entries: seq[mt_be.CfKey]) {.gcsafe.} =
@@ -228,7 +235,11 @@ proc journalDeliver*(kv: KVStore; entries: seq[mt_be.CfKey]) {.gcsafe.} =
       hdr[5+klen] = 0; hdr[6+klen] = 0; hdr[7+klen] = 0; hdr[8+klen] = 1; hdr[9+klen] = 0
       discard f.writeBytes(hdr, 0, hdr.len)
     f.close()
-  except: discard
+  except CatchableError as e:
+    # Durability path: a failed journal append means those entries are NOT
+    # crash-safe — this must never be silent.
+    logError("kvstore", "legacy journal append failed (" & excMsg(e) &
+      "); " & $entries.len & " entries not durable")
 
 proc journaling(kv: KVStore): bool {.inline.} =
   kv.path.len > 0 and not kv.readOnly
@@ -240,7 +251,10 @@ proc journaling(kv: KVStore): bool {.inline.} =
 var gTempDirsStr {.threadvar.}: seq[string]
 addExitProc proc() {.gcsafe.} =
   for d in gTempDirsStr:
-    try: removeDir(d) except CatchableError: discard
+    try: removeDir(d)
+    except CatchableError as e:
+      logWarn("kvstore", "temp dir sweep failed for " & d & " (" &
+        excMsg(e) & ")")
 
 proc close*(kv: KVStore) {.gcsafe.} =
   if kv != nil:
@@ -250,8 +264,9 @@ proc close*(kv: KVStore) {.gcsafe.} =
       if idx >= 0: gTempDirsStr.delete(idx)
       try:
         removeDir(kv.path)
-      except CatchableError:
-        discard
+      except CatchableError as e:
+        logWarn("kvstore", "temp dir removal failed for " & kv.path & " (" &
+          excMsg(e) & ")")
 
 proc newTempFileKVStore*(extra: Table[string, string] = initTable[string, string]()): KVStore =
   ## KVStore on a fresh temp directory (mkdtemp-style), removed on close()
@@ -320,7 +335,10 @@ proc putKv*(kv: KVStore; cf: int; key, value: openArray[byte]) {.gcsafe.} =
         var f = open(journalPath, fmAppend)
         discard f.writeBytes(hdr, 0, hdr.len)
         f.close()
-      except: discard
+      except CatchableError as e:
+        # Durability path: this put is NOT crash-safe — never silent.
+        logError("kvstore", "legacy journal append failed on put (" &
+          excMsg(e) & ")")
   if needsFlush: kv.requestFlush()
 
 proc getKv*(kv: KVStore; cf: int; key: openArray[byte]): Option[seq[byte]] {.gcsafe.} =
@@ -366,7 +384,10 @@ proc deleteKv*(kv: KVStore; cf: int; key: openArray[byte]) {.gcsafe.} =
         var f = open(journalPath, fmAppend)
         discard f.writeBytes(hdr, 0, hdr.len)
         f.close()
-      except: discard
+      except CatchableError as e:
+        # Durability path: this tombstone is NOT crash-safe — never silent.
+        logError("kvstore", "legacy journal append failed on delete (" &
+          excMsg(e) & ")")
 
 proc flush*(kv: KVStore) {.gcsafe.} =
   if kv.readOnly: return

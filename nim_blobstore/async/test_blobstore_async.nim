@@ -272,6 +272,7 @@ proc cleanupAll() =
   ## Last test's dir is cleaned here (earlier ones are removed as their own
   ## exit hook inside newCtx below).
   for p in gStores:
+    # Test teardown — best-effort removal, failure harmless.
     try: removeDir(p) except CatchableError: discard
 
 test "workspace cleanup":

@@ -16,7 +16,7 @@
 ## check and, when roots/blobs are past the retention window, a full pass —
 ## the original Rust poller semantics, minus the thread.
 
-import std/[options, sets, tables]
+import std/[options, sets, tables, strutils]
 import std/atomics
 import chronos
 import common
@@ -24,6 +24,7 @@ import blobstore_async
 import page_store
 import pages
 import kvstore
+import logutil
 import nim_memtable/treap_backend as mt_be
 import treap_cursor
 
@@ -470,18 +471,19 @@ proc gcFullAsync*(pool: BlobPool; s: ptr PageStoreInner; maxAgeSecs: uint64;
                                                    maxRootCount)
   let live = new(HashSet[array[16, byte]])
   live[] = initHashSet[array[16, byte]]()
+  # Fail-stop: any failure while building the live-set aborts the pass BEFORE
+  # a single blob is deleted — a hole in `live` would delete live data.
   for name in rootsToKeep:
-    try:
-      let data = await getRootAsync(pool, s[].blobs, name)
-      for tree in deserializeRoot(data):
-        await collectTreeUuidsA(pool, s, tree, live)
-    except CatchableError:
-      continue
+    let data = await getRootAsync(pool, s[].blobs, name)
+    for tree in deserializeRoot(data):
+      await collectTreeUuidsA(pool, s, tree, live)
   let rootsRemoved = rootsToRemove.len
   if not dryRun:
     for name in rootsToRemove:
       try: await deleteRootAsync(pool, s[].blobs, name)
-      except CatchableError: discard
+      except CatchableError as e:
+        logWarn("gc", "deleteRoot " & name & " failed (" & excMsg(e) &
+                "); retried next pass")
   let allBlobs = await listAsync(pool, s[].blobs)
   let blobsScanned = allBlobs.len
   var blobsRemoved = 0
@@ -489,8 +491,13 @@ proc gcFullAsync*(pool: BlobPool; s: ptr PageStoreInner; maxAgeSecs: uint64;
     if id notin live[]:
       if not dryRun:
         try: await deleteAsync(pool, s[].blobs, id)
-        except CatchableError: discard
-      inc blobsRemoved
+        except CatchableError as e:
+          var hex = ""
+          for b in id: hex.add toHex(b)
+          logWarn("gc", "blob " & hex & " delete failed (" &
+                  excMsg(e) & "); retried next pass")
+          continue
+        inc blobsRemoved
   let liveCount = live[].len
   result = newSeqOfCap[byte](41)
   let rs = cast[uint64](rootsScanned)
@@ -585,8 +592,8 @@ proc runner(f: AsyncFlusher) {.async: (raises: []).} =
           f.lastGcReport = await gcFullAsync(f.pool, f.kv.ps,
                                              f.kv.gcMaxAgeSecs,
                                              f.kv.gcMaxRootCount, false)
-      except CatchableError:
-        discard
+      except CatchableError as e:
+        logError("gc", "auto-GC pass failed, skipped (" & excMsg(e) & ")")
     if doGc:
       try:
         f.lastGcReport = await gcFullAsync(f.pool, f.kv.ps,

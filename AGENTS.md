@@ -155,6 +155,33 @@ Re-bootstrap is prevented by scanning for existing `db.ident` datom (aid=1).
 - Attribute names: mandatory dot notation (`company.name`)
 - Binary formats: big-endian
 
+### Exception Handling Rules
+
+**Every `except` clause either logs or interrupts — silently ignored
+exceptions are forbidden.** Three treatments:
+
+1. **Fail-stop** — errors that decide over live data abort before any
+   destructive step: a GC pass whose live-set walk fails must raise BEFORE
+   deleting anything (`gcFull`/`gcFullAsync`); reads that would silently
+   truncate results raise (`prefix scan`, missing index/leaf pages);
+   unencodable values raise instead of encoding 0; a writable store fails
+   to open if its journal/blob-dir cannot be created.
+2. **Log + continue** (`logWarn`/`logError`) — recoverable best-effort work:
+   GC deletes (retry next pass), journal replay of a corrupt segment,
+   legacy journal appends (durability-relevant → `logError`).
+3. **Log-debug + continue** — expected control flow: client disconnects,
+   filename filters in WAL/journal dirs.
+
+Grammar dispatch (parse int → float → symbol/fallback) is exempt from
+logging but must type its exception (`except ValueError:`).
+
+- Bare `except:` is **banned** (catches `Defect`). Always type it.
+- Logging via `nim_logutil/logutil`: `logDebug/logInfo/logWarn/logError`,
+  threshold from `EAVT_LOG` (default info). All helpers are gcsafe and
+  raises:[], safe inside server callbacks.
+- Whitelisted swallows (must carry an explicit comment): the logger's own
+  stderr write, test teardown cleanup.
+
 ### Threading Rules
 
 **Threading model per process:**

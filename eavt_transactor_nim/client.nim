@@ -1,5 +1,6 @@
 import std/[nativesockets, posix, json, os, strutils, streams]
 import msgpack4nim, msgpack4nim/msgpack2json
+import logutil
 
 type
   ServerDisconnectedError* = object of IOError
@@ -150,7 +151,8 @@ proc admin*(c: var EavtClient; command: string): string =
   try:
     let node = toJsonNode(resp)
     if node.hasKey("output"): return node["output"].getStr
-  except: discard
+  except CatchableError as e:
+    logWarn("client", "admin: malformed response (" & excMsg(e) & ")")
   return ""
 
 proc dump*(c: var EavtClient; index: string = "EAVT"): seq[SqlResult] =
@@ -199,7 +201,8 @@ proc kvPut*(c: var EavtClient; cf: int; key, value: string): string =
     let n = toJsonNode(resp)
     if n.hasKey("error") and n["error"].getStr.len > 0:
       return "error: " & n["error"].getStr
-  except: discard
+  except CatchableError as e:
+    logWarn("client", "kvPut: malformed response (" & excMsg(e) & ")")
   return "ok"
 
 proc kvGet*(c: var EavtClient; cf: int; key: string): string =
@@ -228,7 +231,8 @@ proc kvGet*(c: var EavtClient; cf: int; key: string): string =
           if bs.len > 0: copyMem(addr s[0], addr bs[0], bs.len)
           return s
         return $row[0]
-  except: discard
+  except CatchableError as e:
+    logWarn("client", "kvGet: malformed response (" & excMsg(e) & ")")
   return "(none)"
 
 proc kvDelete*(c: var EavtClient; cf: int; key: string): string =
@@ -245,7 +249,8 @@ proc kvDelete*(c: var EavtClient; cf: int; key: string): string =
     let n = toJsonNode(resp)
     if n.hasKey("error") and n["error"].getStr.len > 0:
       return "error: " & n["error"].getStr
-  except: discard
+  except CatchableError as e:
+    logWarn("client", "kvDelete: malformed response (" & excMsg(e) & ")")
   return "ok"
 
 proc kvScan*(c: var EavtClient; cf: int): seq[SqlResult] =

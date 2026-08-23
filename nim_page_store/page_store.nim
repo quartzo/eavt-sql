@@ -4,6 +4,7 @@
 
 import std/[tables, sets, hashes, strformat, strutils, times, monotimes, options, os]
 import pages
+import logutil
 
 import blobstore
 import file/file_backend as fil_be
@@ -179,7 +180,8 @@ proc parseRootUs(name: string): int64 =
     let bits = parseHexInt(name[5..^1])
     let neg = cast[int64](bits)
     return -neg
-  except:
+  except ValueError:
+    # Not a hex root name — treated as oldest (0). Filter, not an error.
     return 0
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -293,7 +295,8 @@ proc blobPutRoot(blobs: BlobStore; name: string; data: openArray[byte]): bool =
   try:
     blobs.putRoot(name, compress(data))
     return true
-  except:
+  except CatchableError as e:
+    logError("pagestore", "putRoot " & name & " failed (" & excMsg(e) & ")")
     return false
 
 proc blobGetRoot(blobs: BlobStore; name: string): Option[seq[byte]] =
@@ -342,7 +345,12 @@ proc loadLeafKeysNoput(s: var PageStoreInner; uuid: array[16, byte]): seq[seq[by
 proc collectKeysFromIndex(s: var PageStoreInner; pageUuid: array[16, byte];
                            height: uint8; prefix: seq[byte]): seq[seq[byte]] =
   let data = blobGet(s.blobs, pageUuid)
-  if data.isNone: return @[]
+  if data.isNone:
+    # Fail-stop: a missing index page would silently truncate results.
+    var hex = ""
+    for b in pageUuid: hex.add toHex(b)
+    raise newException(IOError,
+      "prefix scan: index page " & hex & " unreadable")
   let entries = deserializeIndexPage(data.get)
   let (start, endIdx) = findPrefixRange(entries, prefix)
   for i in start..<endIdx:
@@ -398,7 +406,12 @@ proc getPairsInPrefix*(s: var PageStoreInner; cf: int; prefix: seq[byte]): seq[(
         result.add (k, v)
   else:
     let data = blobGet(s.blobs, tree.rootUuid)
-    if data.isNone: return @[]
+    if data.isNone:
+      # Fail-stop: a missing root index page would silently truncate results.
+      var hex = ""
+      for b in tree.rootUuid: hex.add toHex(b)
+      raise newException(IOError,
+        "prefix scan: root index page " & hex & " unreadable")
     let entries = deserializeIndexPage(data.get)
     let (start, endIdx) = findPrefixRange(entries, prefix)
     for i in start..<endIdx:
@@ -414,7 +427,13 @@ proc getPairsInPrefix*(s: var PageStoreInner; cf: int; prefix: seq[byte]): seq[(
         while stack.len > 0:
           let (uuid, h) = stack.pop()
           let d = blobGet(s.blobs, uuid)
-          if d.isNone: continue
+          if d.isNone:
+            # Fail-stop: skipping a missing subtree would silently return
+            # incomplete results.
+            var hex = ""
+            for b in uuid: hex.add toHex(b)
+            raise newException(IOError,
+              "prefix scan: child page " & hex & " unreadable")
           let ents = deserializeIndexPage(d.get)
           let (s2, e2) = findPrefixRange(ents, prefix)
           for j in s2..<e2:
@@ -790,9 +809,13 @@ proc gcFull*(s: var PageStoreInner; maxAgeSecs: uint64; maxRootCount: int;
   let rootsScanned = roots.len
   let (rootsToKeep, rootsToRemove) = classifyRoots(roots, maxAgeSecs, maxRootCount)
   var liveUuids: HashSet[array[16, byte]]
+  # Fail-stop: any failure while building the live-set aborts the pass BEFORE
+  # a single blob is deleted — a hole in `liveUuids` would delete live data.
   for name in rootsToKeep:
     let data = blobGetRoot(s.blobs, name)
-    if data.isNone: continue
+    if data.isNone:
+      raise newException(IOError, "gcFull: root " & name &
+        " unreadable while building live-set")
     let trees = deserializeRoot(data.get)
     for tree in trees:
       collectTreeUuids(s, tree, liveUuids)
@@ -800,7 +823,9 @@ proc gcFull*(s: var PageStoreInner; maxAgeSecs: uint64; maxRootCount: int;
   if not dryRun:
     for name in rootsToRemove:
       try: s.blobs.deleteRoot(name)
-      except: discard
+      except CatchableError as e:
+        logWarn("gc", "deleteRoot " & name & " failed (" & excMsg(e) &
+          "); retried next pass")
   let allBlobs = blobList(s.blobs)
   let blobsScanned = allBlobs.len
   var blobsRemoved = 0
@@ -808,8 +833,11 @@ proc gcFull*(s: var PageStoreInner; maxAgeSecs: uint64; maxRootCount: int;
     if id notin liveUuids:
       if not dryRun:
         try: s.blobs.delete(id)
-        except: discard
-      inc blobsRemoved
+        except CatchableError as e:
+          logWarn("gc", "blob delete failed (" & excMsg(e) &
+            "); retried next pass")
+          continue
+        inc blobsRemoved
   let liveCount = liveUuids.len
   result = newSeqOfCap[byte](41)
   let rs = cast[uint64](rootsScanned)
@@ -860,11 +888,11 @@ proc newPageStore*(config: Table[string, string]): ptr PageStoreInner =
   if blobs == nil:
     return nil
 
-  let journal =
-    try:
-      jou_be.newJournal(path)
-    except:
-      nil
+  # Durability contract: a writable store MUST have its journal. Silently
+  # running journalless would lose the crash-safety guarantee without a trace.
+  var journal: Journal = nil
+  if not readOnly:
+    journal = jou_be.newJournal(path)  # raises on failure — fail open
 
   result = cast[ptr PageStoreInner](allocShared0(sizeof(PageStoreInner)))
   result.blobs = blobs
@@ -907,6 +935,7 @@ proc closePageStore*(ps: ptr PageStoreInner) =
   if owns and path.len > 0:
     try:
       removeDir(path)
-    except CatchableError:
-      discard
+    except CatchableError as e:
+      logWarn("pagestore", "temp dir removal failed for " & path & " (" &
+        excMsg(e) & ")")
 

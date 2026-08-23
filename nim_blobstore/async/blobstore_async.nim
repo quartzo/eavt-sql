@@ -27,6 +27,7 @@ import chronos
 import chronos/threadsync
 import blobstore
 import common
+import logutil
 import zstd_worker
 
 when defined(nimdoc):
@@ -381,11 +382,16 @@ proc completionDispatcher(pool: ptr BlobPoolObj) {.async: (raises: []).} =
       except CatchableError:
         if pool.stopping.load(moAcquire): return
         drainCompletions(pool)
-        try: await sleepAsync(1.milliseconds) except CatchableError: discard
+        # Plain await: sleepAsync only raises CancelledError, which must
+        # propagate — swallowing it here would wedge the loop's cancellation.
+        await sleepAsync(1.milliseconds)
         continue
       if pool.stopping.load(moAcquire): return
       drainCompletions(pool)
-    except CatchableError:
+    except CatchableError as e:
+      # The dispatcher dying silently would leave every in-flight job's
+      # future unsettled forever — at minimum this must be visible.
+      logError("blobpool", "completion dispatcher stopped (" & excMsg(e) & ")")
       return
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -19,6 +19,7 @@ import chronos
 import kvstore
 import common
 import wire
+import logutil
 
 # ── Subscriber ──────────────────────────────────────────────────────────────
 
@@ -57,7 +58,9 @@ proc collectSnapshot*(dir: string; rootName: string): seq[string] =
       if kind == pcFile and base.startsWith("journal."):
         try:
           segs.add((parseInt(base[8..^1]), name))
-        except ValueError: discard
+        except ValueError:
+          # Non-numeric entry in journal dir — filter, not an error.
+          logDebug("replication", "skipping non-segment file " & base)
   segs.sort(proc(a, b: tuple[idx: int, path: string]): int = cmp(a.idx, b.idx))
   for s in segs: result.add(s.path)
 
@@ -156,8 +159,9 @@ proc subscriberLoop*(kv: KVStore; s: Subscriber; hub: ptr ReplicationHub) {.asyn
       await s.drain(kv)
       if s.closed: break
       await sleepAsync(2.milliseconds)
-  except CatchableError:
-    discard
+  except CatchableError as e:
+    # Expected: replica socket closed mid-drain.
+    logDebug("replication", "subscriber loop ended (" & excMsg(e) & ")")
   finally:
     s.closed = true
     hub[].remove(s)

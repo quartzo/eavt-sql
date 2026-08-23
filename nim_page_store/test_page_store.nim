@@ -254,3 +254,46 @@ suite "page_store: GC":
     check s[].hasOldRoots(43200, 10)   # 12 roots > count window
     check not s[].hasOldRoots(43200, 0)  # 0 = unlimited count
     check s[].hasOldRoots(0, 0)        # age 0: any older-than-latest root
+
+  test "gcFull fail-stop: unreadable kept root aborts pass without deletions":
+    let dbPath = getTempDir() / "eavt_ps_test_" & $getCurrentProcessId() & "_" &
+                   $epochTime().uint64 & "_" & $rand(high(int))
+    createDir(dbPath)
+    var cfg = {"backend": "file", "owns_path": "true", "path": dbPath}.toTable
+    let s = newPageStore(cfg)
+    defer: closePageStore(s)
+    commitKeys(s[], 0, bigKeys(10, 0))
+    commitKeys(s[], 0, bigKeys(10, 1))
+    let roots = s[].blobs.listRoots()  # newest-first
+    check roots.len == 3               # initial root + 2 commits
+    let before = s[].blobs.list().len
+    check before >= 2
+    # Corrupt one KEPT root record (large age window keeps every listed
+    # root): the live-set walk must fail loudly, not skip silently.
+    writeFile(dbPath / "blobs" / roots[1], "\x00\x01\x02corrupt")
+    var raised = false
+    try:
+      discard s[].gcFull(3_600'u64, 10, false)
+    except CatchableError:
+      raised = true
+    check raised
+    # Fail-stop contract: a hole in the live-set must never reach the delete
+    # phase — zero blobs removed on an aborted pass.
+    check s[].blobs.list().len == before
+
+suite "page_store: fail-stop reads":
+  test "prefix scan raises when a leaf blob is missing":
+    let s = newMemStore()
+    defer: closePageStore(s)
+    # Enough keys to span multiple leaves (MaxRawSize = 256 KiB per page).
+    commitKeys(s[], 0, bigKeys(12000, 7))
+    let tree = s[].trees[0]
+    check tree.height >= 1
+    let dataOpt = blobGet(s[].blobs, tree.rootUuid)
+    check dataOpt.isSome
+    let entries = deserializeIndexPage(dataOpt.get)
+    check entries.len >= 2
+    # Remove the first leaf's blob — a silent scan would truncate results.
+    s[].blobs.delete(entries[0][1])
+    expect IOError:
+      discard getKeysInPrefix(s[], 0, @[byte(7)])

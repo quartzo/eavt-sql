@@ -54,7 +54,7 @@ proc executeCommands(client: var EavtClient; commands: string): int =
         if parts.len < 4:
           stderr.writeLine "Usage: .kv-put <cf> <key> <value>"
           return 1
-        let cf = try: parseInt(parts[1]) except: -1
+        let cf = try: parseInt(parts[1]) except ValueError: -1
         if cf < 10:
           stderr.writeLine "Error: cf must be >= 10"
           return 1
@@ -64,7 +64,7 @@ proc executeCommands(client: var EavtClient; commands: string): int =
         if parts.len < 3:
           stderr.writeLine "Usage: .kv-get <cf> <key>"
           return 1
-        let cf = try: parseInt(parts[1]) except: -1
+        let cf = try: parseInt(parts[1]) except ValueError: -1
         if cf < 10:
           stderr.writeLine "Error: cf must be >= 10"
           return 1
@@ -74,7 +74,7 @@ proc executeCommands(client: var EavtClient; commands: string): int =
         if parts.len < 2:
           stderr.writeLine "Usage: .kv-scan <cf>"
           return 1
-        let cf = try: parseInt(parts[1]) except: -1
+        let cf = try: parseInt(parts[1]) except ValueError: -1
         if cf < 10:
           stderr.writeLine "Error: cf must be >= 10"
           return 1
@@ -89,7 +89,7 @@ proc executeCommands(client: var EavtClient; commands: string): int =
         if parts.len < 3:
           stderr.writeLine "Usage: .kv-delete <cf> <key>"
           return 1
-        let cf = try: parseInt(parts[1]) except: -1
+        let cf = try: parseInt(parts[1]) except ValueError: -1
         if cf < 10:
           stderr.writeLine "Error: cf must be >= 10"
           return 1
@@ -100,7 +100,7 @@ proc executeCommands(client: var EavtClient; commands: string): int =
         if cmd == ".dump":
           let parts = stripped.splitWhitespace()
           let arg = if parts.len > 1: parts[1] else: "EAVT"
-          let cfNum = try: parseInt(arg) except: -1
+          let cfNum = try: parseInt(arg) except ValueError: -1
           if cfNum >= 10:
             for chunk in client.kvScan(cfNum):
               if chunk.error.len > 0:

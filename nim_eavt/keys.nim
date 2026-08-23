@@ -88,17 +88,23 @@ proc encodeValue*(v: string; mode: EncodeMode; refEid: int64 = 0): seq[byte] =
   of emVariable: return encodeVariable(v)
   of emBlob: return encodeVariableUnordered(v.toOpenArrayByte(0, v.len - 1))
   of emFixed:
+    # Canonical boolean spellings (SExpr sBool renders as "true"/"false").
+    if v == "true": return encodeInt(1)
+    if v == "false": return encodeInt(0)
     # Try to parse as int64
     try:
       let n = parseInt(v)
       return encodeInt(n)
-    except:
+    except ValueError:
       # Try float
       try:
         let f = parseFloat(v)
         return encodeFloat(f)
-      except:
-        return encodeInt(0)
+      except ValueError:
+        # Interrupt: silently encoding unparseable values as 0 corrupted
+        # data without a trace — a type mismatch must be loud.
+        raise newException(ValueError,
+          "cannot encode fixed value (not int/float): \"" & v & "\"")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # EAVT entry builder — generates keys for all 4 CFs

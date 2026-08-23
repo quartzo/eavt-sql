@@ -4,6 +4,7 @@
 ## Manages attribute registry, partition counters, and schema metadata.
 
 import std/[tables, sets, strutils, options]
+import logutil
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Constants (from resolver_consts.rs)
@@ -215,7 +216,11 @@ proc lookupAttr*(r: var Resolver; name: string): Option[uint32] =
   try:
     let n = normalizeAttr(name)
     if n in r.attrs: return some(r.attrs[n])
-  except: discard
+  except ValueError:
+    # Malformed name in a lookup = "not found", not an error — but visible
+    # at debug level per the no-silent-except rule.
+    logDebug("resolver", "lookupAttr rejected malformed name \"" & name & "\"")
+    return none(uint32)
 
 proc isDeclared*(r: var Resolver; aid: uint32): bool = aid in r.declared
 

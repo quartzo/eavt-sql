@@ -145,6 +145,8 @@ suite "kvstore_async: flush":
       for k in keys:
         if not sPut(ctx.kv, 2, k): return false
         if not sPut(kvS, 2, k): return false
+      # Test helper: any failure means the scenario check fails.
+      # (flush()'s inferred raises is Exception — see note above.)
       try: kvS.flush() except Exception: return false
       await ctx.flusher.requestFlushAsync()
       result = scanKeys(ctx.kv, 2) == scanKeys(kvS, 2)
@@ -237,6 +239,34 @@ suite "kvstore_async: GC":
     # server's correct pattern).
     discard
 
+  test "gcFullAsync fail-stop: unreadable kept root aborts pass without deletions":
+    let ctx = newCtx()
+    proc scenario(ctx: Ctx): Future[bool] {.async.} =
+      if not sPut(ctx.kv, 0, @[byte(1)]): return false
+      await ctx.flusher.requestFlushAsync()
+      if not sPut(ctx.kv, 0, @[byte(2)]): return false
+      await ctx.flusher.requestFlushAsync()
+      let roots = await listRootsAsync(ctx.pool, ctx.kv.ps[].blobs)
+      if roots.len != 3: return false  # initial root + 2 flushes
+      # Corrupt one KEPT root record (large age window keeps all listed):
+      # the walk must fail loudly instead of silently skipping the subtree.
+      try:
+        writeFile(ctx.kv.path / "blobs" / roots[1], "\x00\x01\x02corrupt")
+      except Exception:
+        return false
+      let before = (await listAsync(ctx.pool, ctx.kv.ps[].blobs)).len
+      var raised = false
+      try:
+        discard await gcFullAsync(ctx.pool, ctx.kv.ps, 3_600'u64, 10, false)
+      except CatchableError:
+        raised = true
+      if not raised: return false
+      # Fail-stop contract: an aborted pass deletes nothing.
+      result = (await listAsync(ctx.pool, ctx.kv.ps[].blobs)).len == before
+    check waitFor scenario(ctx)
+    closeCtx(ctx)
+
 test "workspace cleanup":
   for d in gDirs:
-    try: removeDir(d) except Exception: discard
+    # Test teardown — best-effort removal, failure harmless.
+    try: removeDir(d) except CatchableError: discard

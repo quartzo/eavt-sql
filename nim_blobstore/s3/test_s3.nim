@@ -39,6 +39,7 @@ proc startServer() =
         ready = true
         break
     except OSError, IOError:
+      # Server not up yet — retry until the attempt budget is exhausted.
       discard
   if not ready:
     gServer.terminate()
@@ -46,10 +47,9 @@ proc startServer() =
 
 proc stopServer() =
   if gServer != nil:
-    try: gServer.terminate()
-    except: discard
-    try: gServer.close()
-    except: discard
+    # Test teardown — best-effort process shutdown, failure harmless.
+    try: gServer.terminate() except CatchableError: discard
+    try: gServer.close() except CatchableError: discard
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 

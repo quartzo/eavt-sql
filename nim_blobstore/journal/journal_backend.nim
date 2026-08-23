@@ -7,6 +7,7 @@
 ##   [u32 klen][key bytes][u32 vlen][value bytes]
 
 import std/os
+import logutil
 
 type
   Journal* = ref object
@@ -105,5 +106,6 @@ proc len*(j: Journal): uint64 =
   if not fileExists(j.fullPath()): return 0
   try:
     return cast[uint64](getFileSize(j.fullPath()))
-  except CatchableError:
+  except CatchableError as e:
+    logWarn("journal", "stat failed on " & j.fullPath() & " (" & excMsg(e) & ")")
     return 0

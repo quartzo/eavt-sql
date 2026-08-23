@@ -24,6 +24,7 @@ import kvstore_async
 import shared_engine
 import protocol
 import replication
+import logutil
 import wire
 
 proc writeFrameAsync(transp: StreamTransport; body: string) {.async.} =
@@ -301,8 +302,10 @@ proc processFrame(eng: SharedEngine; raw: string; id: string;
   except CatchableError as e:
     try:
       await transp.writeErrorAsync(e.msg, id)
-    except CatchableError:
-      discard
+    except CatchableError as e2:
+      # Expected: client already gone when the error frame is written.
+      logDebug("transactor", "error frame delivery failed (" & excMsg(e2) &
+        "); original error: " & excMsg(e))
 
 # ── Main connection loop ────────────────────────────────────────────────────
 
@@ -345,7 +348,9 @@ proc serveConnection*(eng: SharedEngine; transp: StreamTransport) {.
           await sub.sendSnapshot(sealed, tail, rootName, eng.kv.path)
           # Spawn the drain loop — runs forever, pushes events.
           asyncSpawn subscriberLoop(eng.kv, sub, addr eng.hub)
-        except CatchableError:
+        except CatchableError as e:
+          logDebug("transactor", "replication snapshot failed (" & excMsg(e) &
+            "); subscriber removed")
           sub.closed = true
           eng.hub.remove(sub)
         continue  # back to read loop (pipelined)

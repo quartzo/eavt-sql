@@ -85,8 +85,9 @@ proc newFileBlobStore*(path: string; readOnly = false): FileBlobStore =
     readOnly: readOnly,
   )
   if not readOnly:
-    try: createDir(result.base.get())
-    except OSError: discard
+    # Fail open: a writable store whose blob dir cannot be created would only
+    # surface as confusing per-write errors later.
+    createDir(result.base.get())
 
 proc failReadOnly(s: FileBlobStore): bool =
   if s.readOnly:

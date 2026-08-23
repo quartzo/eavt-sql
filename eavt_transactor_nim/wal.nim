@@ -29,6 +29,7 @@
 import std/[os, strutils, algorithm, atomics]
 import chronos
 import chronos_file
+import logutil
 import kvstore
 import nim_memtable/treap_backend
 
@@ -70,8 +71,9 @@ proc openSeg(w: WalWriter; idx: int): AsyncFile {.raises: [AsyncFileError].} =
   try:
     if not fileExists(p):
       writeFile(p, "")
-  except CatchableError:
-    discard  # openAsync below surfaces a real error
+  except CatchableError as e:
+    # Best-effort pre-create; openAsync below surfaces a real error.
+    logDebug("wal", "segment pre-create failed (" & excMsg(e) & ")")
   result = openAsync(p, fmReadWriteExisting)  # never O_TRUNC
 
 proc sink(w: WalWriter; entries: seq[CfKey]) {.gcsafe, raises: [].} =
@@ -212,7 +214,9 @@ proc attachWal*(kv: KVStore; dbPath: string): Future[WalWriter] {.async.} =
       try:
         let idx = parseInt(base[SegPrefix.len..^1])
         if idx > maxIdx: maxIdx = idx
-      except ValueError: discard
+      except ValueError:
+        # Non-numeric entry in WAL dir — filter, not an error.
+        logDebug("wal", "skipping non-segment file " & base)
   w.segIdx = maxIdx + 1
   w.f = openSeg(w, w.segIdx)
   w.offset = int64(getFileSize(segPath(w.dir, w.segIdx)))
