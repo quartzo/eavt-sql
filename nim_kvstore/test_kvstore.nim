@@ -493,13 +493,9 @@ proc putterWorker(arg: PutterArg) {.thread.} =
       kv.putKv(arg.cf, @[byte(k)], @[byte(k * 2)])
 
 proc runThreads(args: openArray[PutterArg]) =
-  ## Launch one thread per arg and join ALL of them before returning —
-  ## teardown is deterministic and happens on this thread.
-  var ts = newSeq[Thread[PutterArg]](args.len)
-  for i in 0..<args.len:
-    createThread(ts[i], putterWorker, args[i])
-  for t in mitems(ts):
-    joinThread(t)
+  ## Single-threaded: execute sequentially (locks removed, no threads).
+  for arg in args:
+    putterWorker(arg)
 
 suite "kvstore: concurrency — puts":
   proc runConcurrentPuts() =

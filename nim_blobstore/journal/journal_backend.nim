@@ -6,12 +6,11 @@
 ## Frame format (big-endian, matching the Rust `JournalFile`):
 ##   [u32 klen][key bytes][u32 vlen][value bytes]
 
-import std/[os, locks]
+import std/os
 
 type
   Journal* = ref object
     path*: string
-    lock*: Lock
 
 proc fullPath(j: Journal): string =
   j.path / "journal" / "journal"
@@ -19,8 +18,7 @@ proc fullPath(j: Journal): string =
 proc newJournal*(path: string): Journal =
   if path.len == 0:
     raise newException(IOError, "journal path is empty")
-  result = Journal(path: path, lock: Lock())
-  initLock(result.lock)
+  result = Journal(path: path)
   try:
     createDir(result.fullPath().parentDir())
   except CatchableError:
@@ -28,40 +26,38 @@ proc newJournal*(path: string): Journal =
 
 proc close*(j: Journal) =
   if j != nil:
-    deinitLock(j.lock)
     j.path = ""
 
 proc append*(j: Journal, key, value: openArray[byte]) =
   if j == nil:
     raise newException(IOError, "journal not open")
-  j.lock.withLock:
-    var f: File
+  var f: File
+  if not open(f, j.fullPath(), fmAppend):
+    try:
+      createDir(j.fullPath().parentDir())
+    except CatchableError:
+      raise newException(IOError, "journal append: cannot create dir")
     if not open(f, j.fullPath(), fmAppend):
-      try:
-        createDir(j.fullPath().parentDir())
-      except CatchableError:
-        raise newException(IOError, "journal append: cannot create dir")
-      if not open(f, j.fullPath(), fmAppend):
-        raise newException(IOError, "journal append: cannot open file")
-    defer: f.close()
-    var klenBuf: array[4, byte]
-    let klen = key.len
-    klenBuf[0] = byte((klen shr 24) and 0xFF)
-    klenBuf[1] = byte((klen shr 16) and 0xFF)
-    klenBuf[2] = byte((klen shr 8) and 0xFF)
-    klenBuf[3] = byte(klen and 0xFF)
-    discard f.writeBuffer(addr klenBuf[0], 4)
-    if klen > 0:
-      discard f.writeBuffer(unsafeAddr key[0], klen)
-    var vlenBuf: array[4, byte]
-    let vlen = value.len
-    vlenBuf[0] = byte((vlen shr 24) and 0xFF)
-    vlenBuf[1] = byte((vlen shr 16) and 0xFF)
-    vlenBuf[2] = byte((vlen shr 8) and 0xFF)
-    vlenBuf[3] = byte(vlen and 0xFF)
-    discard f.writeBuffer(addr vlenBuf[0], 4)
-    if vlen > 0:
-      discard f.writeBuffer(unsafeAddr value[0], vlen)
+      raise newException(IOError, "journal append: cannot open file")
+  defer: f.close()
+  var klenBuf: array[4, byte]
+  let klen = key.len
+  klenBuf[0] = byte((klen shr 24) and 0xFF)
+  klenBuf[1] = byte((klen shr 16) and 0xFF)
+  klenBuf[2] = byte((klen shr 8) and 0xFF)
+  klenBuf[3] = byte(klen and 0xFF)
+  discard f.writeBuffer(addr klenBuf[0], 4)
+  if klen > 0:
+    discard f.writeBuffer(unsafeAddr key[0], klen)
+  var vlenBuf: array[4, byte]
+  let vlen = value.len
+  vlenBuf[0] = byte((vlen shr 24) and 0xFF)
+  vlenBuf[1] = byte((vlen shr 16) and 0xFF)
+  vlenBuf[2] = byte((vlen shr 8) and 0xFF)
+  vlenBuf[3] = byte(vlen and 0xFF)
+  discard f.writeBuffer(addr vlenBuf[0], 4)
+  if vlen > 0:
+    discard f.writeBuffer(unsafeAddr value[0], vlen)
 
 proc readAll*(j: Journal): seq[(seq[byte], seq[byte])] =
   if not fileExists(j.fullPath()):
@@ -99,12 +95,11 @@ proc readAll*(j: Journal): seq[(seq[byte], seq[byte])] =
 
 proc truncate*(j: Journal) =
   if j == nil: return
-  j.lock.withLock:
-    if fileExists(j.fullPath()):
-      try:
-        removeFile(j.fullPath())
-      except CatchableError:
-        raise newException(IOError, "journal truncate: cannot remove file")
+  if fileExists(j.fullPath()):
+    try:
+      removeFile(j.fullPath())
+    except CatchableError:
+      raise newException(IOError, "journal truncate: cannot remove file")
 
 proc len*(j: Journal): uint64 =
   if not fileExists(j.fullPath()): return 0

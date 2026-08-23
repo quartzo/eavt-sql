@@ -14,7 +14,6 @@ import query/cursor   # treapCursor constructor
 import nim_memtable/treap_backend
 import scheme
 import stats
-import std/locks
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Value type mapping
@@ -55,7 +54,6 @@ type
   EavtEngine* = ref object
     kv*: KVStore                  # Nim ref — no C-ABI vtable
     resolver*: Resolver
-    lock: Lock
     cachedStats*: CompileStats
     cachedStatsTime*: float64
     # Reusable cursor for scanPrefix (single-threaded event loop — no races)
@@ -75,7 +73,6 @@ type
 
 proc newEavtEngine*(kv: KVStore): EavtEngine =
   result = EavtEngine(kv: kv, resolver: newResolver())
-  initLock(result.lock)
   # bootstrap called after construction (avoids forward ref)
 
 # ── Batch write helper ──
@@ -96,8 +93,7 @@ proc scanPrefix*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byte]] =
   # Read current roots
   var psSnap: PageStoreSnapshot
   var flushRoot, liveRoot: TreapNode
-  var tree: CfTree
-  eng.kv.ps[].lock.withLock: tree = eng.kv.ps[].trees[cf]
+  var tree = eng.kv.ps[].trees[cf]
   psSnap = PageStoreSnapshot(rootUuid: tree.rootUuid, height: tree.height)
   if eng.kv.flushRoots.len > 0:
     flushRoot = eng.kv.flushRoots[cf]
@@ -136,8 +132,7 @@ proc scanPrefixActive*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byt
   ## skips sort when only live treap has data.
   var psSnap: PageStoreSnapshot
   var flushRoot, liveRoot: TreapNode
-  var tree: CfTree
-  eng.kv.ps[].lock.withLock: tree = eng.kv.ps[].trees[cf]
+  var tree = eng.kv.ps[].trees[cf]
   psSnap = PageStoreSnapshot(rootUuid: tree.rootUuid, height: tree.height)
   if eng.kv.flushRoots.len > 0:
     flushRoot = eng.kv.flushRoots[cf]
@@ -375,20 +370,19 @@ proc seedPartitionCounters*(eng: EavtEngine) =
   let mc = eng.kv.openScanCursor(0)
   let targets = eng.resolver.knownPartitions()
   var covered: HashSet[uint64] = initHashSet[uint64]()
-  eng.lock.withLock:
-    while true:
-      let k = mc.next()
-      if k.isNone: break
-      let key = k.get
-      if key.len < 8: continue
-      let sf = beUint64(key, key.len - 8)
-      if (sf and 1) == 1: continue
-      let e = decodeEid(beUint64(key, 0))
-      let p = partitionOf(e)
-      if p in targets:
-        eng.resolver.advancePast(e)
-        covered.incl p
-      if covered.len >= targets.len: break
+  while true:
+    let k = mc.next()
+    if k.isNone: break
+    let key = k.get
+    if key.len < 8: continue
+    let sf = beUint64(key, key.len - 8)
+    if (sf and 1) == 1: continue
+    let e = decodeEid(beUint64(key, 0))
+    let p = partitionOf(e)
+    if p in targets:
+      eng.resolver.advancePast(e)
+      covered.incl p
+    if covered.len >= targets.len: break
 
 # ── Bootstrap: scan KV for existing schema ──
 
@@ -444,38 +438,36 @@ proc bootstrapResolver*(eng: EavtEngine) =
 
 proc eavtSave*(eng: EavtEngine; eid: int64; attrName: string;
                 value: string; t: int64): int64 {.discardable.} =
-  eng.lock.withLock:
-    let attrId = eng.resolver.internAttr(attrName)
-    let vt = eng.resolver.valueTypeFor(attrId).get(DbTypeString)
-    let many = eng.resolver.isMany(attrId)
-    let mode = valueTypeToEncodeMode(vt)
-    let encoded = encodeValue(value, mode, 0)
-    let indexed = eng.resolver.isIndexed(attrId)
-    if not many:
-      # Retract any existing active datoms for this eid+attr.
-      var ePrefix = encodeEid(eid)
-      ePrefix.add byte(attrId shr 24); ePrefix.add byte((attrId shr 16) and 0xFF)
-      ePrefix.add byte((attrId shr 8) and 0xFF); ePrefix.add byte(attrId and 0xFF)
-      for ek in eng.scanPrefix(0, ePrefix):
-        if ek.len < 20: continue
-        let esf = beUint64(ek, ek.len - 8)
-        if (esf and 1) != 0: continue
-        var retEntries = buildEavtEntries(eid, attrId, ek[12 ..< ek.len - 8], t, true, mode, indexed)
-        eng.batchWrite(retEntries)
-    let entries = buildEavtEntries(eid, attrId, encoded, t, false, mode, indexed)
-    eng.batchWrite(entries)
-    return eid
+  let attrId = eng.resolver.internAttr(attrName)
+  let vt = eng.resolver.valueTypeFor(attrId).get(DbTypeString)
+  let many = eng.resolver.isMany(attrId)
+  let mode = valueTypeToEncodeMode(vt)
+  let encoded = encodeValue(value, mode, 0)
+  let indexed = eng.resolver.isIndexed(attrId)
+  if not many:
+    # Retract any existing active datoms for this eid+attr.
+    var ePrefix = encodeEid(eid)
+    ePrefix.add byte(attrId shr 24); ePrefix.add byte((attrId shr 16) and 0xFF)
+    ePrefix.add byte((attrId shr 8) and 0xFF); ePrefix.add byte(attrId and 0xFF)
+    for ek in eng.scanPrefix(0, ePrefix):
+      if ek.len < 20: continue
+      let esf = beUint64(ek, ek.len - 8)
+      if (esf and 1) != 0: continue
+      var retEntries = buildEavtEntries(eid, attrId, ek[12 ..< ek.len - 8], t, true, mode, indexed)
+      eng.batchWrite(retEntries)
+  let entries = buildEavtEntries(eid, attrId, encoded, t, false, mode, indexed)
+  eng.batchWrite(entries)
+  return eid
 
 proc eavtRetract*(eng: EavtEngine; eid: int64; attrName: string;
                    value: string; t: int64) =
-  eng.lock.withLock:
-    let attrId = eng.resolver.internAttr(attrName)
-    let vt = eng.resolver.valueTypeFor(attrId).get(DbTypeString)
-    let mode = valueTypeToEncodeMode(vt)
-    let encoded = encodeValue(value, mode, 0)
-    let indexed = eng.resolver.isIndexed(attrId)
-    let entries = buildEavtEntries(eid, attrId, encoded, t, true, mode, indexed)
-    eng.batchWrite(entries)
+  let attrId = eng.resolver.internAttr(attrName)
+  let vt = eng.resolver.valueTypeFor(attrId).get(DbTypeString)
+  let mode = valueTypeToEncodeMode(vt)
+  let encoded = encodeValue(value, mode, 0)
+  let indexed = eng.resolver.isIndexed(attrId)
+  let entries = buildEavtEntries(eid, attrId, encoded, t, true, mode, indexed)
+  eng.batchWrite(entries)
 
 # ── Tx allocation + as-of resolution ──
 
@@ -486,13 +478,12 @@ proc nowMicros(): uint64 =
 proc allocateTAndWriteTx*(eng: EavtEngine): int64 =
   ## Allocate a fresh tx entity and write its db.txInstant datom.
   ## Port of Rust EavtEngine::allocate_t_and_write_tx.
-  eng.lock.withLock:
-    let txEid = eng.resolver.allocateInPartition(PartTx)
-    let encoded = encodeValue($nowMicros(), emFixed, 0)
-    let entries = buildEavtEntries(txEid, DbTxInstantAid, encoded, txEid,
-                                    false, emFixed, false)
-    eng.batchWrite(entries)
-    return txEid
+  let txEid = eng.resolver.allocateInPartition(PartTx)
+  let encoded = encodeValue($nowMicros(), emFixed, 0)
+  let entries = buildEavtEntries(txEid, DbTxInstantAid, encoded, txEid,
+                                  false, emFixed, false)
+  eng.batchWrite(entries)
+  return txEid
 
 proc resolveAsOfTx*(eng: EavtEngine; asOfUs: uint64): Option[uint64] =
   ## Resolve an as-of timestamp (micros) to the newest tx entity whose
@@ -520,25 +511,24 @@ proc resolveAsOfTx*(eng: EavtEngine; asOfUs: uint64): Option[uint64] =
 
 proc eavtDeclareAttr*(eng: EavtEngine; name: string; valueType: uint32;
                        many: bool; unique: bool = false): (uint32, bool) =
-  eng.lock.withLock:
-    let (aid, isNew) = eng.resolver.declareAttr(name, valueType, many)
-    if unique: eng.resolver.setUnique(aid, true)
-    if isNew:
-      eng.cachedStatsTime = 0  # invalidate cache
-      # Persist schema as db.* datoms (Rust declare_attr_with_t).
-      let t = eng.resolver.allocateInPartition(PartTx)
-      let e = aid.int64
-      eng.batchWrite(buildEavtEntries(e, DbIdentAid,
-        encodeValue(name, emVariable, 0), e, false, emVariable, true))
-      eng.batchWrite(buildEavtEntries(e, DbValueTypeAid,
-        encodeValue($valueType, emFixed, 0), t, false, emFixed, true))
-      let cardId = if many: DbCardinalityManyAid else: DbCardinalityOneAid
-      eng.batchWrite(buildEavtEntries(e, DbCardinalityAid,
-        encodeValue($cardId, emFixed, 0), t, false, emFixed, true))
-      if unique:
-        eng.batchWrite(buildEavtEntries(e, DbUniqueAid,
-          encodeValue($DbUniqueIdentityAid, emFixed, 0), t, false, emFixed, true))
-    return (aid, isNew)
+  let (aid, isNew) = eng.resolver.declareAttr(name, valueType, many)
+  if unique: eng.resolver.setUnique(aid, true)
+  if isNew:
+    eng.cachedStatsTime = 0  # invalidate cache
+    # Persist schema as db.* datoms (Rust declare_attr_with_t).
+    let t = eng.resolver.allocateInPartition(PartTx)
+    let e = aid.int64
+    eng.batchWrite(buildEavtEntries(e, DbIdentAid,
+      encodeValue(name, emVariable, 0), e, false, emVariable, true))
+    eng.batchWrite(buildEavtEntries(e, DbValueTypeAid,
+      encodeValue($valueType, emFixed, 0), t, false, emFixed, true))
+    let cardId = if many: DbCardinalityManyAid else: DbCardinalityOneAid
+    eng.batchWrite(buildEavtEntries(e, DbCardinalityAid,
+      encodeValue($cardId, emFixed, 0), t, false, emFixed, true))
+    if unique:
+      eng.batchWrite(buildEavtEntries(e, DbUniqueAid,
+        encodeValue($DbUniqueIdentityAid, emFixed, 0), t, false, emFixed, true))
+  return (aid, isNew)
 
 proc bootstrapSystemAttrs*(eng: EavtEngine) =
   ## Write EAVT datoms for all built-in schema attributes if not already done.
@@ -583,34 +573,34 @@ proc bootstrapSystemAttrs*(eng: EavtEngine) =
 # ── Resolver accessors ──
 
 proc lookupAttr*(eng: EavtEngine; name: string): Option[uint32] =
-  eng.lock.withLock: return eng.resolver.lookupAttr(name)
+  eng.resolver.lookupAttr(name)
 
 proc attrName*(eng: EavtEngine; aid: uint32): string =
-  eng.lock.withLock: return eng.resolver.attrName(aid)
+  eng.resolver.attrName(aid)
 
 proc allocateEntityId*(eng: EavtEngine): int64 =
-  eng.lock.withLock: return eng.resolver.allocateEntityId()
+  eng.resolver.allocateEntityId()
 
 proc isDeclared*(eng: EavtEngine; aid: uint32): bool =
-  eng.lock.withLock: return eng.resolver.isDeclared(aid)
+  eng.resolver.isDeclared(aid)
 
 proc isMany*(eng: EavtEngine; aid: uint32): bool =
-  eng.lock.withLock: return eng.resolver.isMany(aid)
+  eng.resolver.isMany(aid)
 
 proc isUnique*(eng: EavtEngine; aid: uint32): bool =
-  eng.lock.withLock: return eng.resolver.isUnique(aid)
+  eng.resolver.isUnique(aid)
 
 proc valueTypeFor*(eng: EavtEngine; aid: uint32): Option[uint32] =
-  eng.lock.withLock: return eng.resolver.valueTypeFor(aid)
+  eng.resolver.valueTypeFor(aid)
 
 proc allocateInPartition*(eng: EavtEngine; pid: uint64): int64 =
-  eng.lock.withLock: return eng.resolver.allocateInPartition(pid)
+  eng.resolver.allocateInPartition(pid)
 
 proc declarePartition*(eng: EavtEngine; name: string): uint64 =
-  eng.lock.withLock: return eng.resolver.declarePartition(name)
+  eng.resolver.declarePartition(name)
 
 proc partitionIdFor*(eng: EavtEngine; name: string): Option[uint64] =
-  eng.lock.withLock: return eng.resolver.partitionIdFor(name)
+  eng.resolver.partitionIdFor(name)
 
 proc defaultUserPartition*(eng: EavtEngine): uint64 =
   PartUser

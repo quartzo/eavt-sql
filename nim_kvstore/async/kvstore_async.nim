@@ -17,7 +17,7 @@
 ## the original Rust poller semantics, minus the thread.
 
 import std/[options, sets, tables]
-import std/[locks, atomics]
+import std/atomics
 import chronos
 import common
 import blobstore_async
@@ -222,13 +222,11 @@ proc commitMergeAsync*(pool: BlobPool; s: ptr PageStoreInner;
                                                      tree.height)
           let numLeaves = await countSubtreeLeavesA(pool, s, root, height)
           CfTree(rootUuid: root, height: height, numLeaves: numLeaves)
-    s[].lock.withLock:
-      s[].trees[cf] = newTree
+    s[].trees[cf] = newTree
   let newRoot = makeRootName()
   let rootData = serializeRoot(s[].trees)
   await putRootAsync(pool, s[].blobs, newRoot, rootData)
-  s[].lock.withLock:
-    s[].currentRoot = newRoot
+  s[].currentRoot = newRoot
   if clearJournal:
     journalTruncate(s[])
 
@@ -281,8 +279,7 @@ proc commitMergeKvAsync*(pool: BlobPool; s: ptr PageStoreInner;
     for (k, v) in allPairs:
       if k notin delSet: livePairs.add((k, v))
     if livePairs.len == 0:
-      s[].lock.withLock:
-        s[].trees[cf] = CfTree(rootUuid: default(array[16, byte]), height: 0,
+      s[].trees[cf] = CfTree(rootUuid: default(array[16, byte]), height: 0,
                                numLeaves: 0)
       continue
     let pageList = buildPagesKv(livePairs)
@@ -293,12 +290,11 @@ proc commitMergeKvAsync*(pool: BlobPool; s: ptr PageStoreInner;
       entries.add (boundary, uuid)
     let numLeaves = entries.len.uint32
     var (root, height) = await buildIndexTreeA(pool, s, entries, 0)
-    s[].lock.withLock:
-      if height == 0:
-        s[].trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: 0)
-      else:
-        s[].trees[cf] = CfTree(rootUuid: root, height: height,
-                               numLeaves: numLeaves)
+    if height == 0:
+      s[].trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: 0)
+    else:
+      s[].trees[cf] = CfTree(rootUuid: root, height: height,
+                             numLeaves: numLeaves)
 
   for (cf, sortedPairs) in pairsByCf:
     if cf >= s[].numCf or sortedPairs.len == 0: continue
@@ -318,12 +314,11 @@ proc commitMergeKvAsync*(pool: BlobPool; s: ptr PageStoreInner;
         entries.add (boundary, uuid)
       let numLeaves = entries.len.uint32
       var (root, height) = await buildIndexTreeA(pool, s, entries, 0)
-      s[].lock.withLock:
-        if height == 0:
-          s[].trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: 0)
-        else:
-          s[].trees[cf] = CfTree(rootUuid: root, height: height,
-                                 numLeaves: numLeaves)
+      if height == 0:
+        s[].trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: 0)
+      else:
+        s[].trees[cf] = CfTree(rootUuid: root, height: height,
+                               numLeaves: numLeaves)
     else:
       let allPairs = await getPairsFullA(pool, s, tree)
       var livePairs: seq[(seq[byte], seq[byte])] = @[]
@@ -349,9 +344,8 @@ proc commitMergeKvAsync*(pool: BlobPool; s: ptr PageStoreInner;
         if sortedPairs[bi][0] notin delSet: merged.add sortedPairs[bi]
         inc bi
       if merged.len == 0:
-        s[].lock.withLock:
-          s[].trees[cf] = CfTree(rootUuid: default(array[16, byte]), height: 0,
-                                 numLeaves: 0)
+        s[].trees[cf] = CfTree(rootUuid: default(array[16, byte]), height: 0,
+                               numLeaves: 0)
         continue
       let pageList = buildPagesKv(merged)
       var entries: seq[(seq[byte], array[16, byte])] = @[]
@@ -361,17 +355,15 @@ proc commitMergeKvAsync*(pool: BlobPool; s: ptr PageStoreInner;
         entries.add (boundary, uuid)
       let numLeaves = entries.len.uint32
       var (root, height) = await buildIndexTreeA(pool, s, entries, 0)
-      s[].lock.withLock:
-        if height == 0:
-          s[].trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: 0)
-        else:
-          s[].trees[cf] = CfTree(rootUuid: root, height: height,
-                                 numLeaves: numLeaves)
+      if height == 0:
+        s[].trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: 0)
+      else:
+        s[].trees[cf] = CfTree(rootUuid: root, height: height,
+                               numLeaves: numLeaves)
   let newRoot = makeRootName()
   let rootData = serializeRoot(s[].trees)
   await putRootAsync(pool, s[].blobs, newRoot, rootData)
-  s[].lock.withLock:
-    s[].currentRoot = newRoot
+  s[].currentRoot = newRoot
   if clearJournal:
     journalTruncate(s[])
 
@@ -532,23 +524,22 @@ type
     lastGcReport*: seq[byte]
 
 proc flushNowAsync*(f: AsyncFlusher): Future[void] {.async.} =
-  ## One flush pass: capture (kv.lock) → chunked drain → async commit →
-  ## publish (kv.lock). Same capture/publish semantics as kvstore.flush().
+  ## One flush pass: capture → chunked drain → async commit → publish.
+  ## Same capture/publish semantics as kvstore.flush().
   let kv = f.kv
   if kv.readOnly: return
   var roots: seq[mt_be.TreapNode]
   var sealBoundary: int64 = -1
   var captured = false
-  kv.lock.withLock:
-    if kv.flushRoots.len == 0:
-      roots = kv.mt.hnd.live
-      kv.mt.clear(); kv.mtSize = 0
-      kv.flushRoots = roots
-      captured = true
-      # Seal the WAL segment at the capture boundary (same contract as the
-      # sync flush; on the loop this is called directly, still under lock).
-      if kv.journalSeal != nil:
-        sealBoundary = kv.journalSeal()
+  if kv.flushRoots.len == 0:
+    roots = kv.mt.hnd.live
+    kv.mt.clear(); kv.mtSize = 0
+    kv.flushRoots = roots
+    captured = true
+    # Seal the WAL segment at the capture boundary (same contract as the
+    # sync flush).
+    if kv.journalSeal != nil:
+      sealBoundary = kv.journalSeal()
   if not captured:
     # Another flush holds the captured window (sync flush() ran mid-flight).
     # It publishes our writes only if they were captured by it; writes after
@@ -560,12 +551,12 @@ proc flushNowAsync*(f: AsyncFlusher): Future[void] {.async.} =
   if drained.pairsByCf.len > 0 or drained.deletedByCf.len > 0:
     await commitMergeKvAsync(f.pool, kv.ps, drained.pairsByCf,
                              drained.deletedByCf, true)
-  kv.lock.withLock:
-    kv.flushRoots = @[]; kv.mtSize = 0
-    # Publish done: everything before the seal boundary is durable in the
-    # PageStore — the sealed WAL segment may be deleted on the next WAL cycle.
-    if sealBoundary >= 0:
-      kv.walDurableUpTo.store(sealBoundary, moRelease)
+  # Single-threaded publish.
+  kv.flushRoots = @[]; kv.mtSize = 0
+  # Publish done: everything before the seal boundary is durable in the
+  # PageStore — the sealed WAL segment may be deleted on the next WAL cycle.
+  if sealBoundary >= 0:
+    kv.walDurableUpTo.store(sealBoundary, moRelease)
 
 proc runner(f: AsyncFlusher) {.async: (raises: []).} =
   ## Drives flush/GC passes while work is requested. Each iteration:

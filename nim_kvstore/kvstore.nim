@@ -13,7 +13,6 @@ import std/[osproc, exitprocs]
 import std/syncio
 import page_store
 
-import std/locks
 import std/atomics
 
 import nim_memtable/treap_backend as mt_be
@@ -31,10 +30,6 @@ type
     mt*: mt_be.MemTable
     mtSize*: uint64
     flushRoots*: seq[mt_be.TreapNode]
-    ## Guards capture/publish critical sections (kept explicit even though
-    ## the owner is single-threaded; pairs with PageStore tree swaps — see
-    ## openScanCursor). Exported for the async twin in async/kvstore_async.
-    lock*: Lock
     config*: Table[string, string]
     path*: string
     readOnly*: bool
@@ -42,33 +37,31 @@ type
     flushThreshold*: uint64
     gcMaxAgeSecs*: uint64
     gcMaxRootCount*: int
-    ## Flush arming hook: called (on the owner thread, OUTSIDE `kv.lock`)
-    ## when a write crosses flushThreshold and by requestFlush(). The async
-    ## server installs a proc that schedules flushAsync on its event loop;
-    ## nil (tests, sync callers) means "no background flusher" — call
-    ## flush()/flushSync() explicitly.
+    ## Flush arming hook: called when a write crosses flushThreshold and by
+    ## requestFlush(). The async server installs a proc that schedules
+    ## flushAsync on its event loop; nil (tests, sync callers) means "no
+    ## background flusher" — call flush()/flushSync() explicitly.
     onFlushRequest*: proc () {.gcsafe.}
     ## When set, journal entries are handed to this sink instead of being
     ## written to the journal file inline — the sink serializes them directly
-    ## into the WAL buffer. Called under `kv.lock`.
+    ## into the WAL buffer.
     journalSink*: proc (entries: seq[mt_be.CfKey]) {.gcsafe, raises: [].}
     ## When true, close() removes the whole data directory (tests use it for
     ## their tempdir-per-store pattern).
     ownsPath*: bool
     ## WAL rotation hooks (server with journalSink installed).
-    ## journalSeal is called by flush() at capture time (under kv.lock, on
-    ## the flushing context — the loop thread): it seals the current WAL
-    ## segment at the logical byte boundary of the capture — writes arriving
-    ## after the seal land in the NEXT segment. Returns the boundary.
+    ## journalSeal is called by flush() at capture time: it seals the current
+    ## WAL segment at the logical byte boundary of the capture — writes
+    ## arriving after the seal land in the NEXT segment. Returns the boundary.
     journalSeal*: proc (): int64 {.gcsafe, raises: [].}
     ## Set by flush() after commitMerge published the new root: every record
     ## with logical position < walDurableUpTo is durable in the PageStore, so
     ## the sealed segment covering it may be deleted. The WAL writer polls
     ## this on its cycle.
     walDurableUpTo*: Atomic[int64]
-    ## Called under kv.lock after flush publishes a new root (i.e., the root
-    ## name just committed to PageStore). The replication hub uses it to
-    ## broadcast the new root to replicas. Only memcpy work in the callback.
+    ## Called after flush publishes a new root (i.e., the root name just
+    ## committed to PageStore). The replication hub uses it to broadcast the
+    ## new root to replicas. Only memcpy work in the callback.
     onFlushPublish*: proc (rootName: string) {.gcsafe, raises: [].}
     # perf counters for batchWrite
     bwCount*: int64
@@ -134,23 +127,19 @@ proc applyJournalRecords*(kv: KVStore; data: openArray[byte]) {.gcsafe.} =
   ## Apply journal-format records directly to the memtable (batch apply).
   ## Used by the replication replica: the WAL stream arrives as journal-format
   ## bytes and is applied to the live treap without re-journaling.
-  ## Must NOT be called under kv.lock — the mt.batch call below acquires its
-  ## own internal lock.
   if data.len == 0: return
   let entries = parseJournalRecords(data)
   if entries.len > 0:
-    kv.lock.withLock:
-      kv.mtSize = kv.mt.batch(entries)
+    kv.mtSize = kv.mt.batch(entries)
 
 proc sealLiveToFlush*(kv: KVStore) {.gcsafe.} =
   ## Seal the live memtable into flushRoots (the first half of kv.flush).
   ## Used by the replication replica when the server signals a seal event:
   ## the current live treap becomes the "pending" treap (will be discarded
   ## when the next root publish arrives) and a fresh live treap takes over.
-  kv.lock.withLock:
-    kv.flushRoots = kv.mt.hnd.live
-    kv.mt.clear()
-    kv.mtSize = 0
+  kv.flushRoots = kv.mt.hnd.live
+  kv.mt.clear()
+  kv.mtSize = 0
 
 
 proc publishRoot*(kv: KVStore; rootName: string) {.gcsafe.} =
@@ -159,9 +148,8 @@ proc publishRoot*(kv: KVStore; rootName: string) {.gcsafe.} =
   ## ps.trees and discards the pending treap.
   let loaded = loadRoot(kv.ps[], rootName)
   if loaded:
-    kv.lock.withLock:
-      kv.flushRoots = @[]
-      kv.mtSize = 0
+    kv.flushRoots = @[]
+    kv.mtSize = 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -187,7 +175,6 @@ proc newKVStore*(config: Table[string, string]): KVStore =
   result.flushThreshold = parseUInt(config.getOrDefault("flush_threshold", "67108864")).uint64
   result.gcMaxAgeSecs = parseUInt(config.getOrDefault("gc_max_age_secs", "43200")).uint64
   result.gcMaxRootCount = parseInt(config.getOrDefault("gc_root_count", "10"))
-  initLock(result.lock)
   result.walDurableUpTo.store(-1'i64, moRelaxed)
   # Replay journal: legacy single file first (pre-rotation format), then
   # segments in numeric order (later segments win — newer records overwrite
@@ -221,7 +208,7 @@ proc newKVStore*(config: Table[string, string]): KVStore =
 
 proc journalDeliver*(kv: KVStore; entries: seq[mt_be.CfKey]) {.gcsafe.} =
   ## Journal entries to the sink when installed, else best-effort append
-  ## to the journal file (legacy fallback, serializes here). Called under `kv.lock`.
+  ## to the journal file (legacy fallback, serializes here).
   if kv.journalSink != nil:
     kv.journalSink(entries)
     return
@@ -257,8 +244,7 @@ addExitProc proc() {.gcsafe.} =
 
 proc close*(kv: KVStore) {.gcsafe.} =
   if kv != nil:
-    kv.lock.withLock:
-      if kv.ps != nil: closePageStore(kv.ps); kv.ps = nil
+    if kv.ps != nil: closePageStore(kv.ps); kv.ps = nil
     if kv.ownsPath and kv.path.len > 0:
       let idx = gTempDirsStr.find(kv.path)
       if idx >= 0: gTempDirsStr.delete(idx)
@@ -285,21 +271,19 @@ proc put*(kv: KVStore; cf: int; key: openArray[byte]) {.gcsafe.} =
   var k = newSeq[byte](key.len)
   if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
   var needsFlush = false
-  kv.lock.withLock:
-    kv.mtSize = kv.mt.put(cf, k)
-    if kv.mtSize >= kv.flushThreshold: needsFlush = true
-    if journaling(kv):
-      kv.journalDeliver(@[mt_be.CfKey(cf: cf.uint8, key: k)])
+  kv.mtSize = kv.mt.put(cf, k)
+  if kv.mtSize >= kv.flushThreshold: needsFlush = true
+  if journaling(kv):
+    kv.journalDeliver(@[mt_be.CfKey(cf: cf.uint8, key: k)])
   if needsFlush: kv.requestFlush()
 
 proc get*(kv: KVStore; cf: int; key: openArray[byte]): bool {.gcsafe.} =
   var k = newSeq[byte](key.len)
   if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
-  var liveRoot, flushRoot: mt_be.TreapNode
-  kv.lock.withLock:
-    liveRoot = kv.mt.hnd.live[cf]
-    if kv.flushRoots.len > 0:
-      flushRoot = kv.flushRoots[cf]
+  var liveRoot = kv.mt.hnd.live[cf]
+  var flushRoot: mt_be.TreapNode
+  if kv.flushRoots.len > 0:
+    flushRoot = kv.flushRoots[cf]
   if liveRoot != nil and mt_be.containsKey(liveRoot, k): return true
   if flushRoot != nil and mt_be.containsKey(flushRoot, k): return true
   keyExists(kv.ps[], cf, k)
@@ -310,44 +294,42 @@ proc putKv*(kv: KVStore; cf: int; key, value: openArray[byte]) {.gcsafe.} =
   var v = newSeq[byte](value.len)
   if value.len > 0: copyMem(addr v[0], unsafeAddr value[0], value.len)
   var needsFlush = false
-  kv.lock.withLock:
-    kv.mtSize = kv.mt.putKv(cf, k, v)
-    if kv.mtSize >= kv.flushThreshold: needsFlush = true
-    if journaling(kv):
-      # Key-value journal format: [totKlen:4B][cf+key][vlen:4B][value]
-      var jk = newSeq[byte](1 + key.len)
-      jk[0] = byte(cf)
-      if key.len > 0: copyMem(addr jk[1], unsafeAddr key[0], key.len)
-      let totKlen = 1 + key.len
-      var hdr = newSeq[byte](4 + totKlen + 4 + value.len + 1)
-      hdr[0] = byte((totKlen shr 24) and 0xFF); hdr[1] = byte((totKlen shr 16) and 0xFF)
-      hdr[2] = byte((totKlen shr 8) and 0xFF); hdr[3] = byte(totKlen and 0xFF)
-      copyMem(addr hdr[4], addr jk[0], totKlen)
-      let vlen = value.len
-      hdr[4 + totKlen] = byte((vlen shr 24) and 0xFF)
-      hdr[5 + totKlen] = byte((vlen shr 16) and 0xFF)
-      hdr[6 + totKlen] = byte((vlen shr 8) and 0xFF)
-      hdr[7 + totKlen] = byte(vlen and 0xFF)
-      if value.len > 0: copyMem(addr hdr[8 + totKlen], addr v[0], value.len)
-      hdr[8 + totKlen + value.len] = 0
-      if kv.journalSink == nil:
-        try:
-          let journalPath = kv.path / "journal" / "journal"
-          createDir(parentDir(journalPath))
-          var f = open(journalPath, fmAppend)
-          discard f.writeBytes(hdr, 0, hdr.len)
-          f.close()
-        except: discard
+  kv.mtSize = kv.mt.putKv(cf, k, v)
+  if kv.mtSize >= kv.flushThreshold: needsFlush = true
+  if journaling(kv):
+    # Key-value journal format: [totKlen:4B][cf+key][vlen:4B][value]
+    var jk = newSeq[byte](1 + key.len)
+    jk[0] = byte(cf)
+    if key.len > 0: copyMem(addr jk[1], unsafeAddr key[0], key.len)
+    let totKlen = 1 + key.len
+    var hdr = newSeq[byte](4 + totKlen + 4 + value.len + 1)
+    hdr[0] = byte((totKlen shr 24) and 0xFF); hdr[1] = byte((totKlen shr 16) and 0xFF)
+    hdr[2] = byte((totKlen shr 8) and 0xFF); hdr[3] = byte(totKlen and 0xFF)
+    copyMem(addr hdr[4], addr jk[0], totKlen)
+    let vlen = value.len
+    hdr[4 + totKlen] = byte((vlen shr 24) and 0xFF)
+    hdr[5 + totKlen] = byte((vlen shr 16) and 0xFF)
+    hdr[6 + totKlen] = byte((vlen shr 8) and 0xFF)
+    hdr[7 + totKlen] = byte(vlen and 0xFF)
+    if value.len > 0: copyMem(addr hdr[8 + totKlen], addr v[0], value.len)
+    hdr[8 + totKlen + value.len] = 0
+    if kv.journalSink == nil:
+      try:
+        let journalPath = kv.path / "journal" / "journal"
+        createDir(parentDir(journalPath))
+        var f = open(journalPath, fmAppend)
+        discard f.writeBytes(hdr, 0, hdr.len)
+        f.close()
+      except: discard
   if needsFlush: kv.requestFlush()
 
 proc getKv*(kv: KVStore; cf: int; key: openArray[byte]): Option[seq[byte]] {.gcsafe.} =
   var k = newSeq[byte](key.len)
   if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
-  var liveRoot, flushRoot: mt_be.TreapNode
-  kv.lock.withLock:
-    liveRoot = kv.mt.hnd.live[cf]
-    if kv.flushRoots.len > 0:
-      flushRoot = kv.flushRoots[cf]
+  var liveRoot = kv.mt.hnd.live[cf]
+  var flushRoot: mt_be.TreapNode
+  if kv.flushRoots.len > 0:
+    flushRoot = kv.flushRoots[cf]
   if liveRoot != nil:
     let v = mt_be.getValue(liveRoot, k)
     if v.isSome: return v
@@ -390,16 +372,16 @@ proc flush*(kv: KVStore) {.gcsafe.} =
   if kv.readOnly: return
   var roots: seq[mt_be.TreapNode]
   var sealBoundary: int64 = -1
-  kv.lock.withLock:
-    if kv.flushRoots.len > 0: return
-    roots = kv.mt.hnd.live
-    kv.mt.clear(); kv.mtSize = 0
-    kv.flushRoots = roots
-    # Seal the WAL segment at the capture boundary: records applied after
-    # this point (concurrent writes) land in the NEXT segment and survive
-    # until their own flush publishes.
-    if kv.journalSeal != nil:
-      sealBoundary = kv.journalSeal()
+  # Single-threaded: capture runs atomically before next await.
+  if kv.flushRoots.len > 0: return
+  roots = kv.mt.hnd.live
+  kv.mt.clear(); kv.mtSize = 0
+  kv.flushRoots = roots
+  # Seal the WAL segment at the capture boundary: records applied after
+  # this point land in the NEXT segment and survive until their own flush
+  # publishes.
+  if kv.journalSeal != nil:
+    sealBoundary = kv.journalSeal()
   var keysByCf: seq[(int, seq[seq[byte]])] = @[]
   var pairsByCf: seq[(int, seq[(seq[byte], seq[byte])])] = @[]
   var deletedByCf: seq[(int, seq[seq[byte]])] = @[]
@@ -431,15 +413,15 @@ proc flush*(kv: KVStore) {.gcsafe.} =
   if keysByCf.len > 0: commitMerge(kv.ps[], keysByCf, true)
   if pairsByCf.len > 0 or deletedByCf.len > 0:
     commitMergeKv(kv.ps[], pairsByCf, deletedByCf, true)
-  kv.lock.withLock:
-    kv.flushRoots = @[]; kv.mtSize = 0
-    # Publish done: everything before the seal boundary is durable in the
-    # PageStore — the sealed WAL segment may be deleted on the next WAL cycle.
-    if sealBoundary >= 0:
-      kv.walDurableUpTo.store(sealBoundary, moRelease)
-    # Notify the replication hub (if installed) of the newly published root.
-    if kv.onFlushPublish != nil:
-      kv.onFlushPublish(kv.ps[].currentRoot)
+  # Single-threaded publish — runs atomically before next await.
+  kv.flushRoots = @[]; kv.mtSize = 0
+  # Publish done: everything before the seal boundary is durable in the
+  # PageStore — the sealed WAL segment may be deleted on the next WAL cycle.
+  if sealBoundary >= 0:
+    kv.walDurableUpTo.store(sealBoundary, moRelease)
+  # Notify the replication hub (if installed) of the newly published root.
+  if kv.onFlushPublish != nil:
+    kv.onFlushPublish(kv.ps[].currentRoot)
 
 # ── Flush arming ──
 #
@@ -504,8 +486,7 @@ proc openScanCursor*(kv: KVStore; cf: int): MergedCursor {.gcsafe.} =
   var psSnap: PageStoreSnapshot
   var flushRoot, liveRoot: mt_be.TreapNode
 
-  var tree: CfTree
-  kv.ps[].lock.withLock: tree = kv.ps[].trees[cf]
+  var tree = kv.ps[].trees[cf]
   psSnap = PageStoreSnapshot(rootUuid: tree.rootUuid, height: tree.height)
   if kv.flushRoots.len > 0:
     flushRoot = kv.flushRoots[cf]
@@ -538,9 +519,7 @@ proc openScanCursorKv*(kv: KVStore; cf: int): MergedCursor {.gcsafe.} =
   var psSnap: PageStoreSnapshot
   var flushRoot, liveRoot: mt_be.TreapNode
 
-  # Single-threaded event loop — no lock needed.
-  var tree: CfTree
-  kv.ps[].lock.withLock: tree = kv.ps[].trees[cf]
+  var tree = kv.ps[].trees[cf]
   psSnap = PageStoreSnapshot(rootUuid: tree.rootUuid, height: tree.height)
   if kv.flushRoots.len > 0:
     flushRoot = kv.flushRoots[cf]
