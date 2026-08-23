@@ -47,6 +47,19 @@ proc loadIndexPage(s: var PageStoreInner; uuid: array[16, byte]): seq[(seq[byte]
     for b in uuid: hex.add toHex(b)
     stderr.writeLine("pagestore: bad index page uuid=" & hex &
       " rawLen=" & $raw.len & " err=" & e.msg)
+    # Lineage snapshot: per-CF root/height so a read-side height mismatch
+    # (e.g. leaf wired into an index level) is visible at the failure site.
+    try:
+      for cf, t in s.trees:
+        if t.rootUuid == default(array[16, byte]): continue
+        var rh = ""
+        for b in t.rootUuid: rh.add toHex(b)
+        let mark = if cmpIgnoreCase(rh, hex) == 0:
+          "  <<< requested uuid IS this root" else: ""
+        stderr.writeLine("trees[", cf, "] h=", t.height,
+                         " leaves=", t.numLeaves, " root=", rh, mark)
+    except CatchableError:
+      discard
     try:
       var dump = "/tmp/opencode/receita_bench/badpage_" & hex & ".bin"
       writeFile(dump, raw)
@@ -106,13 +119,20 @@ proc advanceToNextLeaf(c: PageStoreCursor) =
     inc top.pos
     if top.pos < top.entries.len:
       var curUuid = top.entries[top.pos][1]
-      while true:
-        let entries = loadIndexPage(c.s[], curUuid)
-        if entries.len > 0:
-          c.indexStack.add IndexPos(entries: entries, pos: 0)
-          curUuid = entries[0][1]
-        else: break
-      loadLeaf(c, curUuid)
+      if c.height == 1 and c.indexStack.len == 1:
+        # Root is a single index whose DIRECT children are leaves — the
+        # sibling is a leaf, not a subtree. Loading it as an index either
+        # raises "truncated index entry" or (worse) misparses leaf bytes as
+        # bogus entries and navigates into phantom pointers.
+        loadLeaf(c, curUuid)
+      else:
+        while true:
+          let entries = loadIndexPage(c.s[], curUuid)
+          if entries.len > 0:
+            c.indexStack.add IndexPos(entries: entries, pos: 0)
+            curUuid = entries[0][1]
+          else: break
+        loadLeaf(c, curUuid)
       return
     c.indexStack.setLen(c.indexStack.len - 1)
   c.atEnd = true

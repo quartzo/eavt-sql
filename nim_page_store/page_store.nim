@@ -50,7 +50,7 @@ proc compress(data: openArray[byte]): seq[byte] =
     raise newException(IOError, "zstd compress failed")
   result.setLen(rc.int)
 
-proc decompress(data: openArray[byte]): seq[byte] =
+proc decompress*(data: openArray[byte]): seq[byte] =
   const ZstdMagic = [0x28'u8, 0xB5'u8, 0x2F'u8, 0xFD'u8]
   if data.len < 4 or data[0..3] != ZstdMagic:
     return @data

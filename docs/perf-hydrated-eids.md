@@ -146,27 +146,53 @@ orçamento default 1 GiB. Mesmas sondas, seeds e tamanhos do baseline.
 - Carga: tempo total estatisticamente igual (~180–190s); o espelho CF-0 em
   `batchWrite` não adicionou custo mensurável.
 
-## Instabilidade observada (pré-existente, fora deste escopo)
+## Instabilidade observada — CAUSA-RAIZ ENCONTRADA E CORRIGIDA
 
-Durante as cargas maiores ocorreu 3× `RuntimeError: truncated index entry`
-(no estágio sócios @5k uma vez, @50k três vezes — determinístico nesse ponto
-com pool padrão; passou com retry em 5k). Evidência coletada:
+Durante as cargas maiores ocorriam `RuntimeError: truncated index entry`
+(estágio sócios @50k, ~determinístico no código pré-hidratação).
 
-- Páginas "ruins" dumpadas em `/tmp/opencode/receita_bench/badpage_*.bin`;
-  conteúdo é página de folha válida sendo lida como página de índice
-  (header count = nº de chaves de folha)
-- Não reproduziu em `nim_page_store/repro_merge.nim` (40 rodadas × 25k chaves,
-  upsert-overlap em espaço limitado de eids, scans intercalados)
-- Persiste com blob pool de **1 worker** (não é corrida multi-worker do pool)
-- Backend file usa escrita atômica temp+rename e uuid aleatório — sem colisão
-- Suspeito principal: corrida GC↔flush em `collectTreeUuidsA`
-  (nim_kvstore/async/kvstore_async.nim:438) — a lista de raízes é capturada
-  antes dos awaits; um flush que publique geração nova durante o walk tem seus
-  blobs ausentes do conjunto live. Explicaria deleção de blobs vivos; o mecanismo
-  exato até conteúdo-trocado segue aberto.
+### Causa-raiz (page_cursor.nim::advanceToNextLeaf)
 
-Status: arquivado para investigação futura; não bloqueia a hidratação
-(falhas contornáveis com retry; DBs são descartáveis no bench).
+Em árvores de **altura 1** (raiz = único índice cujos filhos são folhas),
+ao esgotar uma folha o cursor avançava para a irmã chamando
+`loadIndexPage(sibling)` incondicionalmente — mas a irmã é uma **FOLHA**.
+Dependendo dos bytes, isso explode com `truncated index entry` ou, pior,
+"parseia" a folha como índice com entradas falsas e navega por ponteiros
+fantasmas (`leaf blob not found`). Para níveis internos de árvores h ≥ 2 o
+código estava correto; só o nível raiz→folhas estava quebrado.
+
+Gatilho raro e dependente de dados: um seek que caia perto do fim de uma
+folha e precise cruzar a borda adiante. A carga da Receita em 50k com a
+tempestade de `get-or-create-entity` de sócios acertava essa janela
+sistematicamente. Fix: quando `height == 1` e o topo da pilha é a raiz,
+a irmã é folha → `loadLeaf` direto. Testes de regressão:
+`test_page_store.nim` "leaf-boundary crossing on h=1 tree" (walk completo +
+seek na última chave de uma folha atravessando a borda).
+
+### Matriz A/B/C (binários por commit via worktrees; 50k completo, DB fresco)
+
+| Braço | Commit | Sem fix do cursor | Com fix |
+|---|---|---|---|
+| pré-hidratação | `bab2cc7` | **FAIL** (1/1 tentado; historicamente ~100%) | **PASS 2/2** |
+| + hidratação | `c5ac9fe` | PASS 3/3 (mascarado) | — |
+| HEAD | `60f7d4f`+ | PASS 4/4 (mascarado) | suíte 620/620 |
+
+### Hipóteses descartadas no caminho (com evidência)
+
+- *GC deletando blobs vivos*: retenção default (12 h / 10 roots) nunca dispara
+  em runs de minutos — o GC **nunca executou** nos benches; e o "blob ausente"
+  era artefato do wipe do `start.sh` entre runs.
+- *Colisão de uuid*: CSPRNG (`urandom`) desde `39b0de4`, anterior às falhas.
+- *Corrida multi-worker do pool*: persistiu com pool = 1 worker.
+- *Merge montando árvore inválida*: validador pós-merge (`validateTreeA`)
+  caminhou a árvore recém-publicada sem jamais falhar — a estrutura escrita
+  sempre esteve correta; quem errava era a **navegação** do leitor.
+
+### Instrumentação deixada para trás
+
+- `page_cursor.nim`: bad-page dump + lineage snapshot das trees no erro.
+- `kvstore_async.nim::putPageA`: write-log uuid+kind por página atrás de
+  `-d:eavtPageWriteLog` (off por padrão).
 
 ## Reprodução
 

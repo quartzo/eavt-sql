@@ -297,3 +297,66 @@ suite "page_store: fail-stop reads":
     s[].blobs.delete(entries[0][1])
     expect IOError:
       discard getKeysInPrefix(s[], 0, @[byte(7)])
+
+# ── Regression: advanceToNextLeaf on height-1 trees ──────────────────────────
+# Root is a single index whose children are leaves; crossing a leaf boundary
+# used to load the SIBLING LEAF as an index page (phantom navigation or
+# "truncated index entry" / "leaf blob not found").
+
+suite "page_cursor: leaf-boundary crossing on h=1 tree":
+
+  test "forward walk crosses every leaf boundary":
+    let s = newMemStore()
+    defer: closePageStore(s)
+    var keys: seq[seq[byte]]
+    # ~200-byte keys -> handful of keys per leaf -> multi-leaf at once
+    for i in 0..<4000:
+      var k = newSeq[byte](200)
+      k[0] = byte((i shr 16) and 0xFF)
+      k[1] = byte((i shr 8) and 0xFF)
+      k[2] = byte(i and 0xFF)
+      for j in 4..<200: k[j] = byte('x')
+      keys.add k
+    commitKeys(s[], 0, keys)
+    let t = s[].trees[0]
+    check t.height == 1          # precondition: single index over leaves
+    check t.numLeaves > 2        # precondition: boundaries exist
+
+    let c = PageStoreCursor(s: s, cf: 0, rootUuid: t.rootUuid,
+                            height: t.height)
+    c.seek(keys[0])
+    var count = 0
+    var prev = -1
+    while not c.atEnd:
+      let k = c.next()
+      if k.isNone: break
+      # keys are strictly ascending by construction
+      let idx = (int(k.get[0]) shl 16) or (int(k.get[1]) shl 8) or int(k.get[2])
+      check idx > prev
+      prev = idx
+      inc count
+    check count == keys.len      # walked ALL leaves without error
+
+  test "seek near end-of-leaf then cross forward":
+    let s = newMemStore()
+    defer: closePageStore(s)
+    var keys: seq[seq[byte]]
+    for i in 0..<4000:
+      var k = newSeq[byte](200)
+      k[0] = byte((i shr 16) and 0xFF)
+      k[1] = byte((i shr 8) and 0xFF)
+      k[2] = byte(i and 0xFF)
+      for j in 4..<200: k[j] = byte('x')
+      keys.add k
+    commitKeys(s[], 0, keys)
+    let t = s[].trees[0]
+    # land on the LAST key of some leaf and walk past the boundary
+    let boundary = 4000 div 2
+    let c = PageStoreCursor(s: s, cf: 0, rootUuid: t.rootUuid,
+                            height: t.height)
+    c.seek(keys[boundary - 1])
+    var seen = 0
+    while not c.atEnd:
+      discard c.next()
+      inc seen
+    check seen == keys.len - boundary + 1

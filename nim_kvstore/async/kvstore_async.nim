@@ -16,7 +16,7 @@
 ## check and, when roots/blobs are past the retention window, a full pass —
 ## the original Rust poller semantics, minus the thread.
 
-import std/[options, sets, tables, strutils]
+import std/[options, sets, tables, strutils, os]
 import std/atomics
 import chronos
 import common
@@ -34,7 +34,43 @@ import treap_cursor
 
 proc putPageA(pool: BlobPool; s: ptr PageStoreInner;
               data: sink seq[byte]): Future[ByteArr16] =
-  putPageAsync(pool, s[].blobs, data)
+  # DIAGNOSTIC (truncated-index-entry hunt): log uuid + content kind per put.
+  # Kind 'I': bytes parse as a well-formed index page (count entries walk);
+  # anything else logs 'L'. Remove with the investigation.
+  when defined(eavtPageWriteLog):
+    var kind = 'L'
+    block classify:
+      if data.len >= 2:
+        let cnt = (int(data[0]) shl 8) or int(data[1])
+        var off = 2
+        var ok = cnt > 0
+        for _ in 0..<cnt:
+          if off >= data.len: ok = false; break
+          var plen: int
+          (plen, off) = readVarint(data, off)
+          discard plen
+          if off >= data.len: ok = false; break
+          var slen: int
+          (slen, off) = readVarint(data, off)
+          if slen < 0 or off + slen + 16 > data.len: ok = false; break
+          off += slen + 16
+        if ok: kind = 'I'
+    let fut = putPageAsync(pool, s[].blobs, data)
+    fut.callback = proc(udata: pointer) {.gcsafe.} =
+      if fut.failed(): return
+      try:
+        var hex = ""
+        let id = fut.read()
+        for b in id: hex.add toHex(b)
+        let fh = open(getEnv("EAVT_PAGE_WRITE_LOG",
+                             "/tmp/opencode/receita_bench/writelog.tsv"), fmAppend)
+        fh.writeLine($kind & "\t" & $data.len & "\t" & hex)
+        fh.close()
+      except CatchableError:
+        discard
+    return fut
+  else:
+    return putPageAsync(pool, s[].blobs, data)
 
 proc getPageA(pool: BlobPool; s: ptr PageStoreInner;
               id: ByteArr16): Future[seq[byte]] =
