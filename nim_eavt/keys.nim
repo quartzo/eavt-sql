@@ -186,14 +186,30 @@ proc buildVaetKey*(valueEncoded: openArray[byte]; attr: uint32; eid: int64;
 # Value encoding
 # ═══════════════════════════════════════════════════════════════════════════════
 
+proc cat4*(a, b, c, d: openArray[byte]): seq[byte] =
+  ## Single-allocation concatenation of four key pieces — the hot path of
+  ## buildEavtEntries previously chained `&` (one alloc+copy per piece).
+  result = newSeqOfCap[byte](a.len + b.len + c.len + d.len)
+  if a.len > 0:
+    result.setLen(a.len); copyMem(addr result[0], unsafeAddr a[0], a.len)
+  if b.len > 0:
+    let o = result.len; result.setLen(o + b.len)
+    copyMem(addr result[o], unsafeAddr b[0], b.len)
+  if c.len > 0:
+    let o = result.len; result.setLen(o + c.len)
+    copyMem(addr result[o], unsafeAddr c[0], c.len)
+  if d.len > 0:
+    let o = result.len; result.setLen(o + d.len)
+    copyMem(addr result[o], unsafeAddr d[0], d.len)
+
 proc buildEavtEntries*(eid: int64; attr: uint32; encodedValue: seq[byte];
                         t: int64; retracted: bool; mode: EncodeMode;
                         indexed: bool): seq[EavtEntry] =
   let sf = encodeSuffix(t, retracted)
+  var eBytes = encodeEid(eid)
   var aBytes = newSeq[byte](4)
   aBytes[0] = byte(attr shr 24); aBytes[1] = byte((attr shr 16) and 0xFF)
   aBytes[2] = byte((attr shr 8) and 0xFF); aBytes[3] = byte(attr and 0xFF)
-  var eBytes = encodeEid(eid)
   var sfBytes = newSeq[byte](8)
   sfBytes[0] = byte(sf shr 56); sfBytes[1] = byte((sf shr 48) and 0xFF)
   sfBytes[2] = byte((sf shr 40) and 0xFF); sfBytes[3] = byte((sf shr 32) and 0xFF)
@@ -201,19 +217,19 @@ proc buildEavtEntries*(eid: int64; attr: uint32; encodedValue: seq[byte];
   sfBytes[6] = byte((sf shr 8) and 0xFF); sfBytes[7] = byte(sf and 0xFF)
 
   # CF 0: eavt [eid][attr][val][sf]
-  result.add EavtEntry(cf: 0, key: eBytes & aBytes & encodedValue & sfBytes)
+  result.add EavtEntry(cf: 0, key: cat4(eBytes, aBytes, encodedValue, sfBytes))
   # CF 1: aevt [attr][eid][val][sf]
-  result.add EavtEntry(cf: 1, key: aBytes & eBytes & encodedValue & sfBytes)
+  result.add EavtEntry(cf: 1, key: cat4(aBytes, eBytes, encodedValue, sfBytes))
 
   if mode == emRef:
     # CF 3: vaet [val][attr][eid][sf]
-    result.add EavtEntry(cf: 3, key: encodedValue & aBytes & eBytes & sfBytes)
+    result.add EavtEntry(cf: 3, key: cat4(encodedValue, aBytes, eBytes, sfBytes))
     if indexed:
       # CF 2: avet [attr][val][eid][sf]
-      result.add EavtEntry(cf: 2, key: aBytes & encodedValue & eBytes & sfBytes)
+      result.add EavtEntry(cf: 2, key: cat4(aBytes, encodedValue, eBytes, sfBytes))
   else:
     if indexed:
-      result.add EavtEntry(cf: 2, key: aBytes & encodedValue & eBytes & sfBytes)
+      result.add EavtEntry(cf: 2, key: cat4(aBytes, encodedValue, eBytes, sfBytes))
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Decoding (used by query engine scanner)

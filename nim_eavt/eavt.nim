@@ -98,18 +98,21 @@ proc newEavtEngine*(kv: KVStore): EavtEngine =
 
 # ── Batch write helper ──
 
-proc batchWrite*(eng: EavtEngine; entries: seq[EavtEntry]) =
+proc batchWrite*(eng: EavtEngine; entries: var seq[EavtEntry]) =
+  ## Consumes the entries: keys are MOVED into CfKey (one copy saved per
+  ## datom — the treap leaf copies again anyway).
   if entries.len == 0: return
-  var cfs: seq[CfKey] = newSeq[CfKey](entries.len)
-  for i, e in entries:
-    cfs[i] = CfKey(cf: e.cf, key: e.key)
-  eng.kv.batchWrite(cfs)
-  # Mirror CF-0 datoms into the hydrated source (no-op for non-member eids).
-  # Keeps hydrated entries current — the read-your-writes guarantee.
+  # Mirror CF-0 datoms into the hydrated source BEFORE stealing keys
+  # (no-op for non-member eids). Keeps hydrated entries current — the
+  # read-your-writes guarantee.
   if eng.hydEnabled:
     for e in entries:
       if e.cf == 0:
         eng.hyd.applyKey(e.key)
+  var cfs = newSeq[CfKey](entries.len)
+  for i in 0..<entries.len:
+    cfs[i] = CfKey(cf: entries[i].cf, key: system.move(entries[i].key))
+  eng.kv.batchWrite(cfs)
 
 proc scanPrefix*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byte]] =
   ## Scan keys in CF matching prefix. Reuses cursor from previous call —
@@ -495,7 +498,7 @@ proc eavtSave*(eng: EavtEngine; eid: int64; attrName: string;
       if (esf and 1) != 0: continue
       var retEntries = buildEavtEntries(eid, attrId, ek[12 ..< ek.len - 8], t, true, mode, indexed)
       eng.batchWrite(retEntries)
-  let entries = buildEavtEntries(eid, attrId, encoded, t, false, mode, indexed)
+  var entries = buildEavtEntries(eid, attrId, encoded, t, false, mode, indexed)
   eng.batchWrite(entries)
   return eid
 
@@ -506,7 +509,7 @@ proc eavtRetract*(eng: EavtEngine; eid: int64; attrName: string;
   let mode = valueTypeToEncodeMode(vt)
   let encoded = encodeValue(value, mode, 0)
   let indexed = eng.resolver.isIndexed(attrId)
-  let entries = buildEavtEntries(eid, attrId, encoded, t, true, mode, indexed)
+  var entries = buildEavtEntries(eid, attrId, encoded, t, true, mode, indexed)
   eng.batchWrite(entries)
 
 # ── Tx allocation + as-of resolution ──
@@ -520,7 +523,7 @@ proc allocateTAndWriteTx*(eng: EavtEngine): int64 =
   ## Port of Rust EavtEngine::allocate_t_and_write_tx.
   let txEid = eng.resolver.allocateInPartition(PartTx)
   let encoded = encodeValue($nowMicros(), emFixed, 0)
-  let entries = buildEavtEntries(txEid, DbTxInstantAid, encoded, txEid,
+  var entries = buildEavtEntries(txEid, DbTxInstantAid, encoded, txEid,
                                   false, emFixed, false)
   eng.batchWrite(entries)
   return txEid
@@ -558,16 +561,20 @@ proc eavtDeclareAttr*(eng: EavtEngine; name: string; valueType: uint32;
     # Persist schema as db.* datoms (Rust declare_attr_with_t).
     let t = eng.resolver.allocateInPartition(PartTx)
     let e = aid.int64
-    eng.batchWrite(buildEavtEntries(e, DbIdentAid,
-      encodeValue(name, emVariable, 0), e, false, emVariable, true))
-    eng.batchWrite(buildEavtEntries(e, DbValueTypeAid,
-      encodeValue($valueType, emFixed, 0), t, false, emFixed, true))
+    var bwTmp1 = buildEavtEntries(e, DbIdentAid,
+      encodeValue(name, emVariable, 0), e, false, emVariable, true)
+    eng.batchWrite(bwTmp1)
+    var bwTmp2 = buildEavtEntries(e, DbValueTypeAid,
+      encodeValue($valueType, emFixed, 0), t, false, emFixed, true)
+    eng.batchWrite(bwTmp2)
     let cardId = if many: DbCardinalityManyAid else: DbCardinalityOneAid
-    eng.batchWrite(buildEavtEntries(e, DbCardinalityAid,
-      encodeValue($cardId, emFixed, 0), t, false, emFixed, true))
+    var bwTmp3 = buildEavtEntries(e, DbCardinalityAid,
+      encodeValue($cardId, emFixed, 0), t, false, emFixed, true)
+    eng.batchWrite(bwTmp3)
     if unique:
-      eng.batchWrite(buildEavtEntries(e, DbUniqueAid,
-        encodeValue($DbUniqueIdentityAid, emFixed, 0), t, false, emFixed, true))
+      var bwTmp4 = buildEavtEntries(e, DbUniqueAid,
+        encodeValue($DbUniqueIdentityAid, emFixed, 0), t, false, emFixed, true)
+      eng.batchWrite(bwTmp4)
   return (aid, isNew)
 
 proc bootstrapSystemAttrs*(eng: EavtEngine) =
@@ -600,15 +607,19 @@ proc bootstrapSystemAttrs*(eng: EavtEngine) =
   for (name, aid) in BootstrapSchema:
     let (vt, cardId, uniqueId) = meta(name)
     let e = aid.int64
-    eng.batchWrite(buildEavtEntries(e, DbIdentAid,
-      encodeValue(name, emVariable, 0), tx, false, emVariable, true))
-    eng.batchWrite(buildEavtEntries(e, DbValueTypeAid,
-      encodeValue("", emRef, vt.int64), tx, false, emRef, true))
-    eng.batchWrite(buildEavtEntries(e, DbCardinalityAid,
-      encodeValue("", emRef, cardId.int64), tx, false, emRef, true))
+    var bwTmp5 = buildEavtEntries(e, DbIdentAid,
+      encodeValue(name, emVariable, 0), tx, false, emVariable, true)
+    eng.batchWrite(bwTmp5)
+    var bwTmp6 = buildEavtEntries(e, DbValueTypeAid,
+      encodeValue("", emRef, vt.int64), tx, false, emRef, true)
+    eng.batchWrite(bwTmp6)
+    var bwTmp7 = buildEavtEntries(e, DbCardinalityAid,
+      encodeValue("", emRef, cardId.int64), tx, false, emRef, true)
+    eng.batchWrite(bwTmp7)
     if uniqueId != 0:
-      eng.batchWrite(buildEavtEntries(e, DbUniqueAid,
-        encodeValue("", emRef, uniqueId.int64), tx, false, emRef, true))
+      var bwTmp8 = buildEavtEntries(e, DbUniqueAid,
+        encodeValue("", emRef, uniqueId.int64), tx, false, emRef, true)
+      eng.batchWrite(bwTmp8)
 
 # ── Resolver accessors ──
 
