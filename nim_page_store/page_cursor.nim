@@ -9,7 +9,7 @@
 ## flush/commitMerge installs a new root in trees[cf] but does not mutate
 ## the old one, so this cursor continues to see a consistent snapshot.
 
-import std/[options]
+import std/[options, strutils, sequtils]
 import page_store
 
 type
@@ -39,7 +39,20 @@ type
 
 proc loadIndexPage(s: var PageStoreInner; uuid: array[16, byte]): seq[(seq[byte], array[16, byte])] =
   let raw = loadLeafRaw(s, uuid)
-  deserializeIndexPage(raw)
+  try:
+    result = deserializeIndexPage(raw)
+  except ValueError as e:
+    var hex = ""
+    for b in uuid: hex.add toHex(b)
+    stderr.writeLine("pagestore: bad index page uuid=" & hex &
+      " rawLen=" & $raw.len & " err=" & e.msg)
+    try:
+      var dump = "/tmp/opencode/receita_bench/badpage_" & hex & ".bin"
+      writeFile(dump, raw)
+      stderr.writeLine("pagestore: dumped raw to " & dump)
+    except CatchableError:
+      discard
+    raise
 
 proc loadLeaf(c: PageStoreCursor; uuid: array[16, byte]) =
   if c.isKv:

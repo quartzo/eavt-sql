@@ -253,6 +253,9 @@ method lookupEntity(q: QueryStore; attrName: string; value: SExpr): Option[int64
     let k = scanRes[0]
     if k.len >= 20:
       found = some(decodeEid(beUint64(k, k.len - 16)))
+      # Hydrate the resolved entity: its EAVT datoms become the fast path
+      # for follow-up lookups (get-or-create hit pattern).
+      q.eavt.hydrateEid(found.get)
   q.lookupNs += getMonoTime().ticks - t0
   inc q.lookupCount
   return found
@@ -269,9 +272,10 @@ method lookupValue(q: QueryStore; eid: int64; attrName: string): Option[SExpr] =
   let k = scanRes[0]
   if k.len < 20: return none[SExpr]()
   let vt = q.eavt.valueTypeFor(aid).get(resolver.DbTypeString)
-  return some(keys.decodeStoredValue(k[12 ..< k.len - 8], vt))
-
-# ═══════════════════════════════════════════════════════════════════════════════
+  # First touch of this eid (slow-path answer) → hydrate its full CF-0 set
+  # so subsequent lookups hit the in-memory fast path.
+  q.eavt.hydrateEid(eid)
+  return some(keys.decodeStoredValue(k[12 ..< k.len - 8], vt))# ═══════════════════════════════════════════════════════════════════════════════
 # QuerySession — runs compiled Scheme programs
 # ═══════════════════════════════════════════════════════════════════════════════
 

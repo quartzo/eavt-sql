@@ -11,6 +11,7 @@ import resolver
 import hostfns
 import engine
 import scheme
+import hydrated
 
 proc newTestEngine(): EavtEngine =
   let kv = newTempFileKVStore()
@@ -252,3 +253,84 @@ proc runJobs(jobs: openArray[EavtJob]) =
 
 # Concurrency tests removed — project is async single-threaded, not concurrent.
 # Raw Thread[T] tests don't apply to production code.
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Hydrated-eid source (CF 0 fast path)
+# ══════════════════════════════════════════════════════════════════════════════
+
+suite "eavt: hydrated eid source":
+
+  test "allocateInPartition marks the entity hydrated":
+    let eng = newTestEngine()
+    let eid = eng.allocateEntityId()
+    check eng.hyd.contains(eid)
+    check eng.hyd.probe(eid)
+
+  test "save mirrors into hydrated entry (read-your-writes)":
+    let eng = newTestEngine()
+    discard eng.eavtDeclareAttr("hyd.name", DbTypeString, false)
+    let eid = eng.allocateEntityId()
+    # allocate marked it; save must mirror through batchWrite
+    discard eng.eavtSave(eid, "hyd.name", "alice", 10)
+    check eng.hyd.probe(eid)
+    let ks = eng.scanPrefixActive(0, encodeEid(eid))
+    check ks.len == 1            # served from RAM, complete
+
+  test "retract via eavtRetract removes from hydrated entry":
+    let eng = newTestEngine()
+    discard eng.eavtDeclareAttr("hyd.flag", DbTypeString, false)
+    let eid = eng.allocateEntityId()
+    discard eng.eavtSave(eid, "hyd.flag", "on", 1)
+    check eng.scanPrefixActive(0, encodeEid(eid)).len == 1
+    eng.eavtRetract(eid, "hyd.flag", "on", 2)
+    check eng.scanPrefixActive(0, encodeEid(eid)).len == 0
+
+  test "hydrateEid on first read installs the full set":
+    let eng = newTestEngine()
+    discard eng.eavtDeclareAttr("hyd.late", DbTypeString, true)  # MANY
+    # bypass allocation marking: simulate pre-existing entity
+    let eid = eng.allocateInPartition(4)
+    eng.hyd.evictEid(eid)
+    check not eng.hyd.contains(eid)
+    discard eng.eavtSave(eid, "hyd.late", "x", 1)
+    discard eng.eavtSave(eid, "hyd.late", "y", 2)
+    eng.hydrateEid(eid)
+    check eng.hyd.contains(eid)
+    check eng.hyd.lookupRange(eid, encodeEid(eid)).len == 2
+    # subsequent scans are served from the fast path and stay correct
+    check eng.scanPrefixActive(0, encodeEid(eid)).len == 2
+
+  test "flush between save and lookup keeps hydrated view consistent":
+    let eng = newTestEngine()
+    discard eng.eavtDeclareAttr("hyd.persist", DbTypeString, true)  # MANY
+    let eid = eng.allocateEntityId()
+    discard eng.eavtSave(eid, "hyd.persist", "survives", 5)
+    eng.kv.flush()               # live treap → pagestore; hydrated untouched
+    check eng.scanPrefixActive(0, encodeEid(eid)).len == 1
+    # write AFTER flush: mirror still lands in the hydrated entry
+    discard eng.eavtSave(eid, "hyd.persist", "v2", 6)
+    check eng.scanPrefixActive(0, encodeEid(eid)).len == 2
+
+  test "eviction falls back to slow path with correct results":
+    let eng = newTestEngine()
+    discard eng.eavtDeclareAttr("hyd.evict", DbTypeString, false)
+    let eid = eng.allocateEntityId()
+    discard eng.eavtSave(eid, "hyd.evict", "data", 1)
+    check eng.scanPrefixActive(0, encodeEid(eid)).len == 1
+    eng.hyd.evictEid(eid)
+    check not eng.hyd.contains(eid)
+    # slow path answers identically
+    check eng.scanPrefixActive(0, encodeEid(eid)).len == 1
+    # re-hydration on demand restores membership
+    eng.hydrateEid(eid)
+    check eng.hyd.contains(eid)
+
+  test "disabled hydration never populates the set":
+    let kv = newTempFileKVStore()
+    var cfg = initTable[string, string]()
+    cfg["hydrated_enabled"] = "false"
+    let eng = newEavtEngine(kv, cfg)
+    eng.bootstrapResolver()
+    let eid = eng.allocateEntityId()
+    check not eng.hyd.contains(eid)
+    check eng.scanPrefixActive(0, encodeEid(eid)).len == 0

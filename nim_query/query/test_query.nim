@@ -12,6 +12,7 @@ import scheme
 import keys
 import kvstore
 import eavt
+import hydrated
 import codec
 import types
 import scanner
@@ -2734,3 +2735,82 @@ suite "engine: value filters on non-indexed attrs":
     check runSql(qU, "SELECT d1.eid WHERE d1.uq.i IN (1, 5, 9)").len == 3
 
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Hydrated-eid fast path (QueryStore level)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+suite "engine: hydrated eid fast path":
+
+  test "lookupValue hydrates; second read hits the in-memory source":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    q.declareAttrFromSql("hyd.attr", ":db.type/string", false, false, 1)
+    let eid = q.allocateInPartition(4)
+    q.saveWithT(eid, "hyd.attr", SExpr(kind: sStr, sval: "v1"), 1, 0)
+    # allocation marked it; drop to simulate a cold (pre-existing) entity
+    q.eavt.hyd.evictEid(eid)
+    let missesBefore = q.eavt.hyd.misses
+
+    let v1 = q.lookupValue(eid, "hyd.attr")   # slow path + hydrate
+    check v1.isSome and v1.get.sval == "v1"
+    check q.eavt.hyd.contains(eid)
+
+    # second read served from the hydrated source
+    let hitsBefore = q.eavt.hyd.hits
+    let v2 = q.lookupValue(eid, "hyd.attr")
+    check v2.isSome and v2.get.sval == "v1"
+    check q.eavt.hyd.hits == hitsBefore + 1
+    # two misses on first touch: the answer scan + the hydration scan itself
+    check q.eavt.hyd.misses == missesBefore + 2
+
+  test "lookupEntity hit hydrates the resolved entity":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    q.declareAttrFromSql("hyd.email", ":db.type/string", false, true, 1)
+    q.declareAttrFromSql("hyd.name", ":db.type/string", false, false, 1)
+    let eid = q.allocateInPartition(4)
+    q.saveWithT(eid, "hyd.email", SExpr(kind: sStr, sval: "a@b.c"), 1, 0)
+    q.saveWithT(eid, "hyd.name", SExpr(kind: sStr, sval: "Ann"), 1, 0)
+    q.eavt.hyd.evictEid(eid)
+
+    let found = q.lookupEntity("hyd.email", SExpr(kind: sStr, sval: "a@b.c"))
+    check found.isSome
+    check q.eavt.hyd.contains(found.get)     # hydrated by the AVET hit
+
+    # follow-up EAVT lookup is now a fast-path hit with correct data
+    let val = q.lookupValue(found.get, "hyd.name")
+    check val.isSome and val.get.sval == "Ann"
+
+  test "card-one re-save retract-scan sees the hydrated entry (read-your-writes)":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    q.declareAttrFromSql("hyd.cap", ":db.type/float", false, false, 1)
+    let eid = q.allocateInPartition(4)
+    q.saveWithT(eid, "hyd.cap", SExpr(kind: sFloat, fval: 10.0), 1, 0)
+    check q.eavt.hyd.contains(eid)           # allocation marked it
+
+    # overwrite card-ONE: the internal retract-scan must observe the old
+    # datom through the hydrated source and retire it
+    q.saveWithT(eid, "hyd.cap", SExpr(kind: sFloat, fval: 20.0), 2, 0)
+    check q.eavt.hyd.lookupRange(eid, keys.encodeEid(eid)).len == 1
+    let val = q.lookupValue(eid, "hyd.cap")
+    check val.isSome and val.get.fval == 20.0
+
+  test "retract removes from hydrated entry; scan stays correct":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    q.declareAttrFromSql("hyd.tmp", ":db.type/string", false, false, 1)
+    let eid = q.allocateInPartition(4)
+    q.saveWithT(eid, "hyd.tmp", SExpr(kind: sStr, sval: "bye"), 1, 0)
+    q.retract(eid, "hyd.tmp", SExpr(kind: sStr, sval: "bye"), 2, 0)
+    check q.eavt.hyd.lookupRange(eid, keys.encodeEid(eid)).len == 0
+    check q.lookupValue(eid, "hyd.tmp").isNone

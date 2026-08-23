@@ -14,6 +14,7 @@ import query/cursor   # treapCursor constructor
 import nim_memtable/treap_backend
 import scheme
 import stats
+import hydrated
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Value type mapping
@@ -70,10 +71,30 @@ type
     spSeekNs*: int64
     spIterateNs*: int64
     spKeysReturned*: int64
+    # Hydrated-eid source (CF 0 fast path) — see hydrated.nim
+    hydEnabled*: bool
+    hyd*: HydratedSet
+
+const
+  DefaultHydratedMaxBytes = DefaultMaxBytes  # 1 GiB
+
+proc newEavtEngine*(kv: KVStore; cfg: Table[string, string]): EavtEngine =
+  ## cfg keys: `hydrated_enabled` ("true"/"false", default true),
+  ## `hydrated_max_bytes` (bytes, default 1 GiB).
+  let enabled = cfg.getOrDefault("hydrated_enabled", "true") != "false"
+  let maxBytes = block:
+    let v = cfg.getOrDefault("hydrated_max_bytes", "")
+    if v.len > 0: parseInt(v) else: DefaultHydratedMaxBytes
+  result = EavtEngine(
+    kv: kv,
+    resolver: newResolver(),
+    hydEnabled: enabled,
+    hyd: newHydratedSet(maxBytes),
+  )
+  # bootstrap called after construction (avoids forward ref)
 
 proc newEavtEngine*(kv: KVStore): EavtEngine =
-  result = EavtEngine(kv: kv, resolver: newResolver())
-  # bootstrap called after construction (avoids forward ref)
+  newEavtEngine(kv, initTable[string, string]())
 
 # ── Batch write helper ──
 
@@ -83,6 +104,12 @@ proc batchWrite*(eng: EavtEngine; entries: seq[EavtEntry]) =
   for i, e in entries:
     cfs[i] = CfKey(cf: e.cf, key: e.key)
   eng.kv.batchWrite(cfs)
+  # Mirror CF-0 datoms into the hydrated source (no-op for non-member eids).
+  # Keeps hydrated entries current — the read-your-writes guarantee.
+  if eng.hydEnabled:
+    for e in entries:
+      if e.cf == 0:
+        eng.hyd.applyKey(e.key)
 
 proc scanPrefix*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byte]] =
   ## Scan keys in CF matching prefix. Reuses cursor from previous call —
@@ -130,6 +157,15 @@ proc scanPrefixActive*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byt
   ## Scan keys in CF matching prefix. Returns only active (non-retracted) datoms.
   ## Reuses cursors from previous call (update in-place). Single source fast path
   ## skips sort when only live treap has data.
+  ##
+  ## Hydrated fast path: CF-0 scans anchored at a hydrated eid are answered
+  ## entirely from the in-memory key set (complete + current by invariant —
+  ## see hydrated.nim). No PageStore descent, no merge.
+  if eng.hydEnabled and cf == 0 and prefix.len >= 8:
+    let eid = decodeEid(beUint64(prefix, 0))
+    if eng.hyd.probe(eid):
+      return eng.hyd.lookupRange(eid, prefix)
+
   var psSnap: PageStoreSnapshot
   var flushRoot, liveRoot: TreapNode
   var tree = eng.kv.ps[].trees[cf]
@@ -188,7 +224,9 @@ proc scanPrefixActive*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byt
       if key.len < prefix.len or key[0..<prefix.len] != prefix: break
       sourceKeys.add key
       discard eng.saLive.next()
-    # Dedup backward by key-prefix, filter retracted
+    # Dedup backward by key-prefix (newest version wins), filter retracted,
+    # then emit ASCENDING — same contract as the multi-source path below.
+    var kept: seq[seq[byte]] = @[]
     var lastPrefix: seq[byte] = @[]
     for j in countdown(sourceKeys.len - 1, 0):
       let key = sourceKeys[j]
@@ -196,8 +234,10 @@ proc scanPrefixActive*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byt
       if keyPrefix != lastPrefix:
         let sf = beUint64(key, key.len - 8)
         if (sf and 1) == 0:  # not retracted
-          result.add key
+          kept.add key
         lastPrefix = keyPrefix
+    for j in countdown(kept.len - 1, 0):
+      result.add kept[j]
     return
 
   # ── Multi-source path ──
@@ -579,7 +619,11 @@ proc attrName*(eng: EavtEngine; aid: uint32): string =
   eng.resolver.attrName(aid)
 
 proc allocateEntityId*(eng: EavtEngine): int64 =
-  eng.resolver.allocateEntityId()
+  let eid = eng.resolver.allocateInPartition(PartUser)
+  # Mark hydrated (same contract as allocateInPartition below).
+  if eng.hydEnabled:
+    eng.hyd.hydrateEmpty(eid)
+  eid
 
 proc isDeclared*(eng: EavtEngine; aid: uint32): bool =
   eng.resolver.isDeclared(aid)
@@ -594,7 +638,25 @@ proc valueTypeFor*(eng: EavtEngine; aid: uint32): Option[uint32] =
   eng.resolver.valueTypeFor(aid)
 
 proc allocateInPartition*(eng: EavtEngine; pid: uint64): int64 =
-  eng.resolver.allocateInPartition(pid)
+  let eid = eng.resolver.allocateInPartition(pid)
+  # New entity starts hydrated (empty): its first saves mirror into the
+  # source via batchWrite, so every later lookup hits the fast path.
+  if eng.hydEnabled:
+    eng.hyd.hydrateEmpty(eid)
+  eid
+
+proc hydrateEid*(eng: EavtEngine; eid: int64) =
+  ## Read-time hydration: install the full active CF-0 key set for `eid`.
+  ## No-op when disabled or already hydrated. The scan itself runs the normal
+  ## multi-source path — the eid is not a member yet, so the fast path skips.
+  ## Entities with no datoms are left unhydrated (don't spend budget on
+  ## phantoms); empty-by-construction entities created via allocateInPartition
+  ## are members already.
+  if not eng.hydEnabled: return
+  if eng.hyd.contains(eid): return
+  let ks = eng.scanPrefixActive(0, keys.encodeEid(eid))
+  if ks.len > 0:
+    eng.hyd.hydrate(eid, ks)
 
 proc declarePartition*(eng: EavtEngine; name: string): uint64 =
   eng.resolver.declarePartition(name)
