@@ -162,6 +162,8 @@ proc execScheme(eng: SharedEngine; req: Request; transp: StreamTransport) {.asyn
     eng.store.eavt.resetSpCounters()
     eng.store.kv.printBwPerf()
     eng.store.kv.resetBwCounters()
+    eng.store.decodeNs = 0
+    eng.store.decodeCount = 0
     if r.kind == sList and r.items.len >= 2 and r.items[0].kind == sSymbol and
        r.items[0].symval == "result":
       await writeResponseAsync(transp, @[], @[r.items[1..^1]], false, id = req.id)
@@ -292,7 +294,10 @@ proc processFrame(eng: SharedEngine; raw: string; id: string;
   ## Errors are written back as response frames (tagged with the request's
   ## correlation id) — nothing escapes this proc.
   try:
+    let tDecode = getMonoTime().ticks
     var req = parseRequest(raw)
+    eng.store.decodeNs += getMonoTime().ticks - tDecode
+    inc eng.store.decodeCount
     req.id = id  # id from the outer frame header (already parsed)
     case req.kind
     of rkScheme: await execScheme(eng, req, transp)

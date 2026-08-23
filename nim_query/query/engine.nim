@@ -41,6 +41,10 @@ type
     # scheme exec request counters (set by the transactor connection loop)
     execCount*: int64
     execWallNs*: int64           # executeProgram wall per exec request
+    # wire decode counter (set by the transactor connection loop): msgpack →
+    # SExpr per request, split from "rest (VM/allocs)" in the exec report
+    decodeNs*: int64
+    decodeCount*: int64
 
 proc newQueryStore*(kv: KVStore): QueryStore =
   let eng = newEavtEngine(kv)
@@ -89,12 +93,14 @@ proc printSavePerf*(q: QueryStore) =
     let wall = q.execWallNs.float
     template wpct(ns: int64): string = formatFloat(ns.float / wall * 100, ffDecimal, 1)
     echo "=== exec perf (", q.execCount, " requests) ==="
-    echo "  exec wall:      ", ms(q.execWallNs), " ms  (avg ",
+    echo "  exec wall:      ", ms(q.execWallNs), " ms (avg ",
       formatFloat(wall / q.execCount.float / 1_000_000, ffDecimal, 3), " ms/request)"
     echo "  saveWithT:      ", ms(total), " ms  (", wpct(total), "% of wall)"
     echo "  entity lookups: ", ms(q.lookupNs), " ms  (", wpct(q.lookupNs), "% of wall; ",
       q.lookupCount, " lookups)"
     echo "    scan portion: ", ms(q.lookupScanNs), " ms"
+    echo "  wire decode:    ", ms(q.decodeNs), " ms  (", wpct(q.decodeNs), "% of wall; ",
+      q.decodeCount, " decodes)"
     echo "  rest (VM/allocs): ", ms(q.execWallNs - total - q.lookupNs), " ms  (",
       wpct(q.execWallNs - total - q.lookupNs), "% of wall)"
 

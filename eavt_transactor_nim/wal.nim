@@ -78,53 +78,35 @@ proc openSeg(w: WalWriter; idx: int): AsyncFile {.raises: [AsyncFileError].} =
 
 proc sink(w: WalWriter; entries: seq[CfKey]) {.gcsafe, raises: [].} =
   ## Called under kv.lock on the loop thread — serializes entries directly
-  ## into the WAL buffer (w.buf) without intermediate allocations.
+  ## into the WAL buffer without intermediate allocations: one sizing pass,
+  ## one setLen, then copyMem per key.
   if w.stopped: return
+  var totalBytes = 0
+  for e in entries: totalBytes += 4 + 1 + e.key.len + 4 + 1
+  let base = w.buf.len
+  w.buf.setLen(base + totalBytes)
+  var pos = base
   for e in entries:
     let klen = e.key.len
     let totKlen = 1 + klen
-    w.buf.add(byte((totKlen shr 24) and 0xFF))
-    w.buf.add(byte((totKlen shr 16) and 0xFF))
-    w.buf.add(byte((totKlen shr 8) and 0xFF))
-    w.buf.add(byte(totKlen and 0xFF))
-    w.buf.add(e.cf)
+    w.buf[pos] = byte((totKlen shr 24) and 0xFF)
+    w.buf[pos+1] = byte((totKlen shr 16) and 0xFF)
+    w.buf[pos+2] = byte((totKlen shr 8) and 0xFF)
+    w.buf[pos+3] = byte(totKlen and 0xFF)
+    w.buf[pos+4] = e.cf
     if klen > 0:
-      # Add key bytes one by one (avoid copyMem into seq)
-      for i in 0 ..< klen:
-        w.buf.add(e.key[i])
-    w.buf.add(0'u8)  # vlen byte 3
-    w.buf.add(0'u8)  # vlen byte 2
-    w.buf.add(0'u8)  # vlen byte 1
-    w.buf.add(1'u8)  # vlen byte 0 = 1
-    w.buf.add(0'u8)  # value = 0x00
-  let totalBytes = block:
-    var s = 0
-    for e in entries: s += 4 + 1 + e.key.len + 4 + 1
-    s
+      copyMem(addr w.buf[pos+5], unsafeAddr e.key[0], klen)
+    w.buf[pos+5+klen] = 0  # vlen byte 3
+    w.buf[pos+6+klen] = 0  # vlen byte 2
+    w.buf[pos+7+klen] = 0  # vlen byte 1
+    w.buf[pos+8+klen] = 1  # vlen byte 0 = 1
+    w.buf[pos+9+klen] = 0  # value = 0x00
+    pos += 10 + klen
   w.logicalEnd.inc(int64(totalBytes))
   if w.onWal != nil:
-    # Legacy callback — needs serialized bytes. Build a single buffer for it.
-    # This path is only used by replication; if it becomes a bottleneck,
-    # the callback should accept CfKey entries too.
-    var tmp = newSeq[byte](totalBytes)
-    var pos = 0
-    for e in entries:
-      let klen = e.key.len
-      let totKlen = 1 + klen
-      tmp[pos] = byte((totKlen shr 24) and 0xFF)
-      tmp[pos+1] = byte((totKlen shr 16) and 0xFF)
-      tmp[pos+2] = byte((totKlen shr 8) and 0xFF)
-      tmp[pos+3] = byte(totKlen and 0xFF)
-      tmp[pos+4] = e.cf
-      if klen > 0:
-        copyMem(addr tmp[pos+5], unsafeAddr e.key[0], klen)
-      tmp[pos+5+klen] = 0
-      tmp[pos+6+klen] = 0
-      tmp[pos+7+klen] = 0
-      tmp[pos+8+klen] = 1
-      tmp[pos+9+klen] = 0
-      pos += 10 + klen
-    w.onWal(tmp)
+    # Legacy callback — needs serialized bytes. The slice is exactly what we
+    # just wrote into w.buf; one copy beats re-serializing field by field.
+    w.onWal(w.buf[base ..< pos])
 
 proc seal(w: WalWriter): int64 =
   ## Called by flush() at capture time, under kv.lock (flush thread). Returns
