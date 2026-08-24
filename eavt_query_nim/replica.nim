@@ -19,6 +19,10 @@ import logutil
 
 type
   ReplicaEngine* = ref object
+    evWalCount*: int64
+    evWalBytes*: int64
+    evSealCount*: int64
+    evRootCount*: int64
     kv*: KVStore
     store*: QueryStore
     connected*: bool
@@ -63,15 +67,24 @@ proc applySnapshot*(r: ReplicaEngine; sealed: seq[string]; openTail: seq[byte];
 
 proc applyWal*(r: ReplicaEngine; data: seq[byte]) =
   ## Apply incoming WAL records to the live treap.
+  inc r.evWalCount
+  r.evWalBytes += data.len
+  if r.evWalCount mod 100 == 0:
+    logInfo("replica", "wal aplicado: " & $r.evWalCount & " frames / " &
+      $r.evWalBytes & " bytes")
   r.kv.applyJournalRecords(data)
 
 proc applySeal*(r: ReplicaEngine) =
+  inc r.evSealCount
+  logInfo("replica", "seal #" & $r.evSealCount)
   ## Seal event: promote the live treap to flushRoots (pending treap),
   ## clear the live treap.
   r.kv.sealLiveToFlush()
 
 proc applyRoot*(r: ReplicaEngine; rootName: string) =
   ## Root event: load the new pagestore root, discard the pending treap.
+  inc r.evRootCount
+  logInfo("replica", "root #" & $r.evRootCount & ": " & rootName)
   try:
     r.kv.publishRoot(rootName)
   except Exception as e:

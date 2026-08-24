@@ -203,7 +203,10 @@ proc broadcastRoot*(hub: ptr ReplicationHub; rootName: string) =
 proc drain*(s: Subscriber; kv: KVStore) {.async.} =
   ## Emite UM frame POR evento na ordem de enfileiramento — wal agrega
   ## apenas bytes entre marcadores, nunca atravessando seal/root.
+  ## O buf pendente vira evento aqui: cargas SEM flush algum (nenhum
+  ## marcador) precisam fluir também.
   if s.closed: return
+  s.flushBuf()
   for body in collectOutgoing(s):
     await s.sendEvent(body)
 

@@ -110,10 +110,21 @@ def run_variant(name: str, flush, rows, batch: int) -> float:
     # sanity: valor pousou no lugar certo (param é var-posicional: string
     # direta, sem lista; ver client.execute/​sql)
     probe = rows[len(rows) // 2][1]
-    got = client.execute(
-        "SELECT d1.empresa.capital_social WHERE d1.empresa.cnpj_base = %1", probe)
-    assert got and abs(float(got[0][0]) - rows[len(rows) // 2][4]) < 1e-6, \
-        f"{name}: probe falhou para {probe}: {got}"
+    try:
+        got = client.execute(
+            "SELECT d1.empresa.capital_social WHERE d1.empresa.cnpj_base = %1", probe)
+        ok = bool(got) and abs(float(got[0][0]) - rows[len(rows) // 2][4]) < 1e-6
+    except RuntimeError as e:
+        ok = False
+        print(f"  [{name}] SQL FALHOU: {e}", flush=True)
+    if not ok:
+        # Armadilha de diagnóstico: captura o estado do snapshot na falha
+        sch = client.schema()
+        ids = sch.get("attrIds", {})
+        print(f"  [{name}] SNAPSHOT attrs={len(ids)} "
+              f"cnpj_base={ids.get('empresa.cnpj_base')} "
+              f"capital={ids.get('empresa.capital_social')}", flush=True)
+        raise SystemExit(2)
     print(f"  {name:<10} declare={t_decl:5.1f}s  load={dt:6.2f}s  "
           f"({len(rows) / dt:,.0f} empresas/s, {len(rows) * 4 / dt:,.0f} saves/s)",
           flush=True)
