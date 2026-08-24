@@ -12,6 +12,7 @@
 import std/[options, strutils, sequtils, monotimes]
 import page_store
 import logutil
+import pages
 
 type
   IndexPos = object
@@ -27,8 +28,8 @@ type
     cf*: int
     atEnd*: bool
     indexStack: seq[IndexPos]
-    leafKeys*: seq[seq[byte]]
-    leafPairs*: seq[(seq[byte], seq[byte])]  ## used when cf >= 10
+    flatKeys*: FlatLeafKeys                    ## cf < 10 (arena plana)
+    flatKV*: FlatLeafKV                        ## cf >= 10 (arena plana)
     leafIdx*: int
     curKey*: Option[seq[byte]]
     curPair*: Option[(seq[byte], seq[byte])]
@@ -79,11 +80,39 @@ proc loadIndexPage(s: var PageStoreInner; uuid: array[16, byte]): seq[(seq[byte]
   s.cache.putIndex(uuid, result)
 
 proc loadLeaf(c: PageStoreCursor; uuid: array[16, byte]) =
+  ## Pega a folha MATERIALIZADA (arena plana) direto do cache — sem passar
+  ## pela API aninhada, que reconstrói seq[seq[byte]] e devolve o churn.
   if c.isKv:
-    c.leafPairs = loadLeafPairs(c.s[], uuid)
+    let cached = c.s[].cache.getLeafKV(uuid)
+    if cached.isSome: c.flatKV = cached.get
+    else:
+      let raw = loadLeafRaw(c.s[], uuid)
+      c.flatKV = toFlat(deserializePageKv(raw))
   else:
-    c.leafKeys = loadLeafKeys(c.s[], uuid)
+    let cached = c.s[].cache.getLeafKeys(uuid)
+    if cached.isSome: c.flatKeys = cached.get
+    else:
+      let raw = loadLeafRaw(c.s[], uuid)
+      c.flatKeys = toFlat(deserializePage(raw))
+      c.s[].cache.putLeafKeys(uuid, c.flatKeys)
   c.leafIdx = -1
+
+proc keyCount(c: PageStoreCursor): int {.inline.} =
+  if c.isKv: flatCount(c.flatKV) else: flatCount(c.flatKeys)
+
+## Comparação sem alocação da chave i da folha vs alvo.
+proc cmpKeyAt(c: PageStoreCursor; i: int; target: openArray[byte]): int {.
+    inline.} =
+  if c.isKv:
+    cmpSlice(c.flatKV.kbuf, c.flatKV.koffs[i].int,
+             c.flatKV.koffs[i + 1].int, target)
+  else:
+    cmpSlice(c.flatKeys.buf, c.flatKeys.offs[i].int,
+             c.flatKeys.offs[i + 1].int, target)
+
+proc firstKeyAt(c: PageStoreCursor; i: int): seq[byte] {.inline.} =
+  if c.isKv: c.flatKV.kbuf[c.flatKV.koffs[i].int ..< c.flatKV.koffs[i + 1].int]
+  else: c.flatKeys.buf[c.flatKeys.offs[i].int ..< c.flatKeys.offs[i + 1].int]
 
 # ── Navigation ──
 
@@ -167,13 +196,14 @@ proc advance(c: PageStoreCursor) =
   while true:
     inc c.leafIdx
     if c.isKv:
-      if c.leafIdx < c.leafPairs.len:
-        c.curPair = some(c.leafPairs[c.leafIdx])
-        c.curKey = some(c.leafPairs[c.leafIdx][0])
+      if c.leafIdx < flatCount(c.flatKV):
+        let (k, v) = flatKVAt(c.flatKV, c.leafIdx)
+        c.curPair = some((k, v))
+        c.curKey = some(k)
         return
     else:
-      if c.leafIdx < c.leafKeys.len:
-        c.curKey = some(c.leafKeys[c.leafIdx])
+      if c.leafIdx < flatCount(c.flatKeys):
+        c.curKey = some(flatKey(c.flatKeys, c.leafIdx))
         return
     if c.indexStack.len > 0:
       advanceToNextLeaf(c)
@@ -186,7 +216,7 @@ proc ensure(c: PageStoreCursor) =
   if c.curKey.isNone and not c.atEnd:
     if c.rootUuid == default(array[16, byte]):
       c.atEnd = true; return
-    if c.leafKeys.len == 0 and c.indexStack.len == 0:
+    if c.keyCount() == 0 and c.indexStack.len == 0:
       if c.height == 0: loadLeaf(c, c.rootUuid)
       else: descendToFirstLeaf(c, c.rootUuid, c.height)
     c.advance()
@@ -216,20 +246,16 @@ proc seek*(c: PageStoreCursor; target: seq[byte]) =
   when defined(eavtSeekDiag):
     let tDesc0 = getMonoTime().ticks
 
-  # Fast-path: if the current leaf already contains target (its first key
-  # <= target <= its last key), binary-search within leafKeys/leafPairs — no descent,
-  # no page loads.
-  let keyCount = if c.isKv: c.leafPairs.len else: c.leafKeys.len
+  # Fast-path: se a folha corrente já contém o alvo (primeira <= alvo <=
+  # última), busca binária por fatias da arena — sem descida, sem página.
+  let keyCount = c.keyCount()
   if keyCount > 0:
-    let firstKey = if c.isKv: c.leafPairs[0][0] else: c.leafKeys[0]
-    let lastKey = if c.isKv: c.leafPairs[^1][0] else: c.leafKeys[^1]
-    if cmpSeq(firstKey, target) <= 0 and cmpSeq(lastKey, target) >= 0:
+    if c.cmpKeyAt(0, target) <= 0 and c.cmpKeyAt(keyCount - 1, target) >= 0:
       var lo = 0
       var hi = keyCount
       while lo < hi:
         let mid = (lo + hi) shr 1
-        let midKey = if c.isKv: c.leafPairs[mid][0] else: c.leafKeys[mid]
-        if cmpSeq(midKey, target) < 0: lo = mid + 1
+        if c.cmpKeyAt(mid, target) < 0: lo = mid + 1
         else: hi = mid
       c.leafIdx = lo - 1
       c.curKey = none(seq[byte])
@@ -248,13 +274,12 @@ proc seek*(c: PageStoreCursor; target: seq[byte]) =
     c.lastSeekDescendNs = getMonoTime().ticks - tDesc0
     let tCross0 = getMonoTime().ticks
   block positionInLeaf:
-    let keyCount = if c.isKv: c.leafPairs.len else: c.leafKeys.len
+    let keyCount = c.keyCount()
     var lo = 0
     var hi = keyCount
     while lo < hi:
       let mid = (lo + hi) shr 1
-      let midKey = if c.isKv: c.leafPairs[mid][0] else: c.leafKeys[mid]
-      if cmpSeq(midKey, target) < 0: lo = mid + 1
+      if c.cmpKeyAt(mid, target) < 0: lo = mid + 1
       else: hi = mid
     c.leafIdx = lo - 1          # primeira chave >= target fica em lo
   c.curKey = none(seq[byte])
@@ -276,8 +301,8 @@ proc update*(c: PageStoreCursor; rootUuid: array[16, byte]; height: uint8) =
   c.rootUuid = rootUuid
   c.height = height
   c.indexStack.setLen(0)
-  c.leafKeys.setLen(0)
-  c.leafPairs.setLen(0)
+  c.flatKeys = default(FlatLeafKeys)
+  c.flatKV = default(FlatLeafKV)
   c.leafIdx = 0
   c.curKey = none(seq[byte])
   c.curPair = none((seq[byte], seq[byte]))

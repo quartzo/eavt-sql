@@ -4,6 +4,7 @@
 
 import std/[tables, sets, hashes, strformat, strutils, times, monotimes, options, os]
 import pages
+import std/syncio
 import logutil
 
 import blobstore
@@ -231,12 +232,96 @@ proc findPrefixRange*(entries: seq[(seq[byte], array[16, byte])];
 type
   PagePayloadKind* = enum ppBytes, ppIndex, ppLeafKeys, ppLeafKV
 
+  ## Folha materializada em ARENA PLANA: um buffer de bytes + offsets, em vez
+  ## de seq[seq[byte]]. A versão aninhada custava ~270µs de churn de alocador
+  ## por troca de folha (liberar/criar milhares de strings pequenas via malloc
+  ## a cada seek). Páginas são imutáveis sob COW — a arena vale até a evicção.
+  FlatLeafKeys* = object
+    buf*: seq[byte]        ## chaves concatenadas
+    offs*: seq[int32]      ## n+1 offsets; chave i = buf[offs[i] ..< offs[i+1]]
+
+  FlatLeafKV* = object
+    kbuf*: seq[byte]       ## chaves concatenadas
+    vbuf*: seq[byte]       ## valores concatenados
+    koffs*: seq[int32]     ## n+1 offsets das CHAVES
+    voffs*: seq[int32]     ## n+1 offsets dos VALORES
+
+proc flatCount*(f: FlatLeafKeys | FlatLeafKV): int {.inline.} =
+  when f is FlatLeafKeys: max(f.offs.len - 1, 0)
+  else: max(f.koffs.len - 1, 0)
+
+proc flatBytes(f: FlatLeafKeys): int {.inline.} =
+  f.buf.len + f.offs.len * 4 + 48
+
+proc flatBytes(f: FlatLeafKV): int {.inline.} =
+  f.kbuf.len + f.vbuf.len + (f.koffs.len + f.voffs.len) * 4 + 64
+
+proc toFlat*(keys: seq[seq[byte]]): FlatLeafKeys =
+  var n = keys.len
+  result.offs = newSeq[int32](n + 1)
+  var total = 0
+  for k in keys: total += k.len
+  result.buf = newSeqOfCap[byte](total)
+  for i, k in keys:
+    result.offs[i] = int32(result.buf.len)
+    result.buf.add k
+  result.offs[n] = int32(result.buf.len)
+
+proc toFlat*(pairs: seq[(seq[byte], seq[byte])]): FlatLeafKV =
+  let n = pairs.len
+  result.koffs = newSeq[int32](n + 1)
+  result.voffs = newSeq[int32](n + 1)
+  var tk = 0
+  var tv = 0
+  for (k, v) in pairs:
+    tk += k.len; tv += v.len
+  result.kbuf = newSeqOfCap[byte](tk)
+  result.vbuf = newSeqOfCap[byte](tv)
+  for i, (k, v) in pairs:
+    result.koffs[i] = int32(result.kbuf.len)
+    result.voffs[i] = int32(result.vbuf.len)
+    result.kbuf.add k
+    result.vbuf.add v
+  result.koffs[n] = int32(result.kbuf.len)
+  result.voffs[n] = int32(result.vbuf.len)
+
+proc flatKey*(f: FlatLeafKeys; i: int): seq[byte] =
+  let o = f.offs[i].int
+  let e = f.offs[i + 1].int
+  result = newSeqOfCap[byte](e - o)
+  result.add f.buf[o ..< e]
+
+proc flatKVAt*(f: FlatLeafKV; i: int): (seq[byte], seq[byte]) =
+  let ko = f.koffs[i].int
+  let ke = f.koffs[i + 1].int
+  var kk = newSeqOfCap[byte](ke - ko)
+  kk.add f.kbuf[ko ..< ke]
+  let vo = f.voffs[i].int
+  let ve = f.voffs[i + 1].int
+  var vv = newSeqOfCap[byte](ve - vo)
+  vv.add f.vbuf[vo ..< ve]
+  (kk, vv)
+
+## Comparação sem alocação: fatia da arena vs alvo. <0/0/>0 como cmpSeq.
+proc cmpSlice*(buf: seq[byte]; start, stop: int; target: openArray[byte]): int =
+  let len = stop - start
+  let n = min(len, target.len)
+  var i = 0
+  while i < n:
+    if buf[start + i] != target[i]:
+      return (if buf[start + i] < target[i]: -1 else: 1)
+    inc i
+  if len < target.len: return -1
+  if len > target.len: return 1
+  return 0
+
+type
   CacheEntry = object
     kind: PagePayloadKind
     data: seq[byte]          ## ppBytes: página folha descomprimida (raw prefixado)
     entries: seq[(seq[byte], array[16, byte])]  ## ppIndex: índice decodificado
-    leafKeys*: seq[seq[byte]]                   ## ppLeafKeys
-    leafPairs*: seq[(seq[byte], seq[byte])]     ## ppLeafKV
+    leafKeys*: FlatLeafKeys                   ## ppLeafKeys (arena plana)
+    leafPairs*: FlatLeafKV                    ## ppLeafKV (arena plana)
     bytes: int               ## contabilidade (payload materializado)
     accessOrder: int64
 
@@ -313,7 +398,7 @@ proc putIndex*(cc: var PageCache; uuid: array[16, byte];
                             accessOrder: cc.nextOrder)
   inc cc.nextOrder
 
-proc getLeafKeys*(cc: var PageCache; uuid: array[16, byte]): Option[seq[seq[byte]]] =
+proc getLeafKeys*(cc: var PageCache; uuid: array[16, byte]): Option[FlatLeafKeys] =
   if not (uuid in cc.map and cc.map[uuid].kind == ppLeafKeys):
     inc cc.misses; inc cc.kindMisses[2]
   if uuid in cc.map and cc.map[uuid].kind == ppLeafKeys:
@@ -321,20 +406,18 @@ proc getLeafKeys*(cc: var PageCache; uuid: array[16, byte]): Option[seq[seq[byte
     cc.map[uuid].accessOrder = cc.nextOrder
     inc cc.nextOrder
     return some(cc.map[uuid].leafKeys)
-  return none(seq[seq[byte]])
+  return none(FlatLeafKeys)
 
 proc putLeafKeys*(cc: var PageCache; uuid: array[16, byte];
-                  keys: seq[seq[byte]]) =
-  var sz = 0
-  for k in keys: sz += k.len + 32
+                  flat: FlatLeafKeys) =
+  let sz = flatBytes(flat)
   if not cc.slotFor(uuid, sz): return
   cc.currentBytes += sz
-  cc.map[uuid] = CacheEntry(kind: ppLeafKeys, leafKeys: keys, bytes: sz,
+  cc.map[uuid] = CacheEntry(kind: ppLeafKeys, leafKeys: flat, bytes: sz,
                             accessOrder: cc.nextOrder)
   inc cc.nextOrder
 
-proc getLeafKV*(cc: var PageCache; uuid: array[16, byte]): Option[
-    seq[(seq[byte], seq[byte])]] =
+proc getLeafKV*(cc: var PageCache; uuid: array[16, byte]): Option[FlatLeafKV] =
   if not (uuid in cc.map and cc.map[uuid].kind == ppLeafKV):
     inc cc.misses; inc cc.kindMisses[3]
   if uuid in cc.map and cc.map[uuid].kind == ppLeafKV:
@@ -342,15 +425,14 @@ proc getLeafKV*(cc: var PageCache; uuid: array[16, byte]): Option[
     cc.map[uuid].accessOrder = cc.nextOrder
     inc cc.nextOrder
     return some(cc.map[uuid].leafPairs)
-  return none(seq[(seq[byte], seq[byte])])
+  return none(FlatLeafKV)
 
 proc putLeafKV*(cc: var PageCache; uuid: array[16, byte];
-                pairs: seq[(seq[byte], seq[byte])]) =
-  var sz = 0
-  for (k, v) in pairs: sz += k.len + v.len + 48
+                flat: FlatLeafKV) =
+  let sz = flatBytes(flat)
   if not cc.slotFor(uuid, sz): return
   cc.currentBytes += sz
-  cc.map[uuid] = CacheEntry(kind: ppLeafKV, leafPairs: pairs, bytes: sz,
+  cc.map[uuid] = CacheEntry(kind: ppLeafKV, leafPairs: flat, bytes: sz,
                             accessOrder: cc.nextOrder)
   inc cc.nextOrder
 
@@ -430,10 +512,14 @@ proc loadLeafKeys*(s: var PageStoreInner; uuid: array[16, byte]): seq[seq[byte]]
   ## dominante de seeks repetidos com alvos distintos.
   let cached = s.cache.getLeafKeys(uuid)
   if cached.isSome:
-    return cached.get
+    let f = cached.get
+    result = newSeqOfCap[seq[byte]](flatCount(f))
+    for i in 0 ..< flatCount(f):
+      result.add flatKey(f, i)
+    return
   let raw = loadLeafRaw(s, uuid)
   result = deserializePage(raw)
-  s.cache.putLeafKeys(uuid, result)
+  s.cache.putLeafKeys(uuid, toFlat(result))
 
 proc loadLeafKeysNoput(s: var PageStoreInner; uuid: array[16, byte]): seq[seq[byte]] =
   ## Load leaf keys from blobstore without putting into cache (used by COW merge).
@@ -488,10 +574,14 @@ proc keyExists*(s: var PageStoreInner; cf: int; key: seq[byte]): bool =
 proc loadLeafPairs*(s: var PageStoreInner; uuid: array[16, byte]): seq[(seq[byte], seq[byte])] =
   let cached = s.cache.getLeafKV(uuid)
   if cached.isSome:
-    return cached.get
+    let f = cached.get
+    result = newSeqOfCap[(seq[byte], seq[byte])](flatCount(f))
+    for i in 0 ..< flatCount(f):
+      result.add flatKVAt(f, i)
+    return
   let raw = loadLeafRaw(s, uuid)
   result = deserializePageKv(raw)
-  s.cache.putLeafKV(uuid, result)
+  s.cache.putLeafKV(uuid, toFlat(result))
 
 proc loadLeafPairsNoput(s: var PageStoreInner; uuid: array[16, byte]): seq[(seq[byte], seq[byte])] =
   let compressed = s.blobs.get(uuid)

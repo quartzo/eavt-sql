@@ -166,14 +166,15 @@ suite "page_cursor: seek":
     # Land somewhere in the middle.
     c.seek(keys[1000])
     check not c.atEnd
-    let leafBefore = c.leafKeys
+    let leafBefore = c.flatKeys
     let idxBefore = c.leafIdx
     check idxBefore >= 0
     # Seek to a key that is within the same leaf (a few positions ahead).
     # We don't know the leaf boundary, so seek to the current key's
     # neighbor and assert we stayed on the same leaf object.
     c.seek(keys[1000])
-    check c.leafKeys == leafBefore
+    check c.flatKeys.buf == leafBefore.buf
+    check c.flatKeys.offs == leafBefore.offs
     check not c.atEnd
     check c.peek().get == keys[1000]
 
