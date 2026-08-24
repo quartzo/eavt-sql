@@ -1097,6 +1097,10 @@ proc newPageStore*(config: Table[string, string]): ptr PageStoreInner =
   result.backendType = backend
   result.dbPath = path
   result.ownsPath = config.getOrDefault("owns_path", "false") == "true"
+  logInfo("pagestore", "aberto backend=" & backend & " path=" & path &
+    " readOnly=" & $readOnly & " numCf=" & $numCf &
+    " pageCache=" & $pageCacheSize & "B idxCache=" &
+    $parseInt(config.getOrDefault("index_cache_bytes", "33554432")) & "B")
 
   let roots = blobListRoots(blobs)
   if roots.len > 0:

@@ -76,6 +76,11 @@ proc main() {.async.} =
   cfg["backend"] = backend
   cfg["path"] = dbPath
 
+  # Ajustes finos do page store via flag/env (ex.: experimentos de LRU):
+  let pcs = flagOrEnv(args, "--page-cache-size", "EAVT_PAGE_CACHE_SIZE")
+  if pcs.found:
+    cfg["page_cache_size"] = pcs.val
+
   if backend == "s3":
     let endpoint = flagOrEnv(args, "--s3-endpoint", "EAVT_S3_ENDPOINT")
     let bucket = flagOrEnv(args, "--s3-bucket", "EAVT_S3_BUCKET")
