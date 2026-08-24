@@ -224,6 +224,60 @@ proc getValue*(node: TreapNode; key: openArray[byte]): Option[Value] =
     else: n = n.right
   return none(Value)
 
+proc insertOwned(node: TreapNode, key: var seq[byte];
+                 value: Option[Value] = none(Value);
+                 deleted: bool = false; mutable: bool = false): (TreapNode, bool) =
+  ## Variante zero-copy: a chave é CONSUMIDA na criação da folha (move),
+  ## eliminando a cópia por inserção do caminho de carga.
+  if node == nil:
+    return (newLeaf(system.move(key), value, deleted), true)
+  let c = cmpKey(key, node.key)
+  if c < 0:
+    let (nl, wasNew) = insertOwned(node.left, key, value, deleted, mutable)
+    if mutable:
+      node.left = nl
+      if node.left != nil and node.left.prio > node.prio:
+        return (rotateRightMut(node), wasNew)
+      return (node, wasNew)
+    else:
+      var nn = TreapNode(key: node.key, value: node.value, deleted: node.deleted,
+                         prio: node.prio, left: nl, right: node.right)
+      if nn.left != nil and nn.left.prio > node.prio:
+        return (rotateRight(nn), wasNew)
+      return (nn, wasNew)
+  elif c > 0:
+    let (nr, wasNew) = insertOwned(node.right, key, value, deleted, mutable)
+    if mutable:
+      node.right = nr
+      if node.right != nil and node.right.prio > node.prio:
+        return (rotateLeftMut(node), wasNew)
+      return (node, wasNew)
+    else:
+      var nn = TreapNode(key: node.key, value: node.value, deleted: node.deleted,
+                         prio: node.prio, left: node.left, right: nr)
+      if nn.right != nil and nn.right.prio > node.prio:
+        return (rotateLeft(nn), wasNew)
+      return (nn, wasNew)
+  else:
+    # chave existente: atualiza valor em-place quando mutável
+    if mutable and not node.deleted:
+      node.value = value
+      node.deleted = deleted
+    return (node, false)
+
+proc batchMove*(mt: MemTable; entries: var seq[CfKey]): uint64 =
+  ## Consome as chaves de `entries` (move até o nó) — chamador não reutiliza.
+  for i in 0 ..< entries.len:
+    let cf = entries[i].cf.int
+    if cf < 0 or cf >= mt.numCf: continue
+    let root = mt.hnd.live[cf]
+    let mutable = root == nil or root.readerCount == 0
+    var k = system.move(entries[i].key)
+    let (newRoot, wasNew) = insertOwned(root, k, none(Value), false, mutable)
+    mt.hnd.live[cf] = newRoot
+    if wasNew: mt.hnd.cfSize[cf] += k.len
+  mt.size()
+
 proc batch*(mt: MemTable; entries: seq[CfKey]): uint64 =
   for e in entries:
     let cf = e.cf.int

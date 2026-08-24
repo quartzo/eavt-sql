@@ -489,7 +489,8 @@ proc batchWrite*(kv: KVStore; entries: seq[mt_be.CfKey]) {.gcsafe.} =
     kv.journalDeliver(entries)
   kv.bwJournalNs += (getMonoTime().ticks - t0.ticks)
   let t1 = getMonoTime()
-  kv.mtSize = kv.mt.batch(entries)
+  var entries = entries            # consome as chaves (move até o nó)
+  kv.mtSize = kv.mt.batchMove(entries)
   kv.bwTreapNs += (getMonoTime().ticks - t1.ticks)
   if kv.mtSize >= kv.flushThreshold: needsFlush = true
   kv.bwTotalNs += (getMonoTime().ticks - t0.ticks)
