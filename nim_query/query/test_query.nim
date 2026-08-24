@@ -725,6 +725,24 @@ suite "engine: save + lookup":
     check found.isSome
     check found.get == eidAlvo
 
+  test "virgin-eid skip: overwrite e retract permanecem corretos":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+    q.declareAttrFromSql("user.score", ":db.type/string", false, false, 1)
+
+    let eid = q.allocateInPartition(4)
+    # 1º save sobre eid virgem: retract-scan é PROVADAMENTE desnecessário
+    q.saveWithT(eid, "user.score", SExpr(kind: sStr, sval: "v1"), 1, 0)
+    check q.lookupValue(eid, "user.score").get.sval == "v1"
+
+    # 2º save: agora existe datom ativo → scan roda e retrai v1
+    q.saveWithT(eid, "user.score", SExpr(kind: sStr, sval: "v2"), 2, 0)
+    check q.lookupValue(eid, "user.score").get.sval == "v2"
+
+    q.retract(eid, "user.score", SExpr(kind: sStr, sval: "v2"), 3, 0)
+    check q.lookupValue(eid, "user.score").isNone
+
   test "lookupAttr after declare":
     let kv = newMemoryKVStore()
     defer: kv.close()

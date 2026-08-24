@@ -108,6 +108,13 @@ proc entryBytes*(h: HydratedSet; eid: int64): int =
 
 # ── Reads ─────────────────────────────────────────────────────────────────────
 
+proc keyCount*(h: HydratedSet; eid: int64): int {.inline.} =
+  ## Nº de chaves CF-0 ativas conhecidas para o eid (0 quando ausente).
+  ## Autoritativo enquanto a entrada estiver hidratada (invariante
+  ## complete+current — ver cabeçalho do módulo).
+  if eid notin h.index: return 0
+  h.index[eid].keys.len
+
 proc lookupRange*(h: HydratedSet; eid: int64; prefix: seq[byte]): seq[seq[byte]] =
   ## All stored keys starting with `prefix`, ascending. The caller has already
   ## probed membership for the eid anchored at prefix[0..<8].

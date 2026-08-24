@@ -7,6 +7,7 @@ import scheme
 import kvstore
 import eavt
 import keys
+import hydrated
 import resolver
 import types
 import scanner
@@ -149,28 +150,38 @@ proc saveResolved(q: QueryStore; eid: int64; attrId: uint32; vt: uint32;
   t0 = getMonoTime()
 
   if not many:
-    var tPrefix = getMonoTime()
-    var ePrefix = keys.encodeEid(eid)
-    ePrefix.add byte(attrId shr 24); ePrefix.add byte((attrId shr 16) and 0xFF)
-    ePrefix.add byte((attrId shr 8) and 0xFF); ePrefix.add byte(attrId and 0xFF)
-    q.saveRetractPrefixNs += (getMonoTime().ticks - tPrefix.ticks)
+    # Skip provado: eid HIDRATADO com zero chaves CF-0 ativas conhecidas não
+    # tem o que retrair — a entrada hidratada é autoritativa (invariante
+    # complete+current). Cobre toda entidade nascida de alloc-entity na
+    # própria carga (o caso bulk), eliminando a leitura-pré-escrita.
+    let needsRetractScan = not (
+      q.eavt.hydEnabled and q.eavt.hyd.probe(eid) and
+      q.eavt.hyd.keyCount(eid) == 0)
+    if needsRetractScan:
+      var tPrefix = getMonoTime()
+      var ePrefix = keys.encodeEid(eid)
+      ePrefix.add byte(attrId shr 24); ePrefix.add byte((attrId shr 16) and 0xFF)
+      ePrefix.add byte((attrId shr 8) and 0xFF); ePrefix.add byte(attrId and 0xFF)
+      q.saveRetractPrefixNs += (getMonoTime().ticks - tPrefix.ticks)
 
-    var tScan = getMonoTime()
-    var foundKeys: seq[seq[byte]] = @[]
-    for ek in q.eavt.scanPrefixActive(0, ePrefix):
-      foundKeys.add(ek)
-    q.saveRetractSeekNs += (getMonoTime().ticks - tScan.ticks)
+      var tScan = getMonoTime()
+      var foundKeys: seq[seq[byte]] = @[]
+      for ek in q.eavt.scanPrefixActive(0, ePrefix):
+        foundKeys.add(ek)
+      q.saveRetractSeekNs += (getMonoTime().ticks - tScan.ticks)
 
-    tScan = getMonoTime()
-    var retracted = 0
-    for ek in foundKeys:
-      if ek.len < 20: continue
-      var retEntries = buildEavtEntries(eid, attrId, ek[12 ..< ek.len - 8], t, true, mode, indexed)
-      q.eavt.batchWrite(retEntries)
-      retracted += 1
-    q.saveRetractApplyNs += (getMonoTime().ticks - tScan.ticks)
-    q.saveRetractCount += retracted
-    q.saveRetractScans += 1
+      tScan = getMonoTime()
+      var retracted = 0
+      for ek in foundKeys:
+        if ek.len < 20: continue
+        var retEntries = buildEavtEntries(eid, attrId, ek[12 ..< ek.len - 8], t, true, mode, indexed)
+        q.eavt.batchWrite(retEntries)
+        retracted += 1
+      q.saveRetractApplyNs += (getMonoTime().ticks - tScan.ticks)
+      q.saveRetractCount += retracted
+      q.saveRetractScans += 1
+    else:
+      q.saveRetractScans += 1
 
   q.saveRetractScanNs += (getMonoTime().ticks - t0.ticks)
   t0 = getMonoTime()
