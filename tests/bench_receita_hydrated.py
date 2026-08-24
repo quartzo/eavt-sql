@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """bench_receita_hydrated.py — Receita Federal load + point-lookup benchmark.
 
+Modo padrão: carga DESSINCRONIZADA via get-or-create-entity. Cada estágio lê
+apenas as primeiras linhas do arquivo (proporcionais ao tamanho do exercício,
+sem filtro de membros): a ordem do arquivo é irrelevante porque cada linha
+ancora sua entidade por atributo único no servidor.
+
+Mede taxa de escrita por estágio e extrapola a carga completa
+(FULL_ROWS / taxa) ao final do sweep.
+
 Measures the paths targeted by the hydrated-eid cache (docs/perf-hydrated-eids.md):
 
   eid_lookup     AVET point lookup  (control — should not change post-hydration)
@@ -10,7 +18,8 @@ Measures the paths targeted by the hydrated-eid cache (docs/perf-hydrated-eids.m
   sql_point      end-to-end SQL reference (planner + scanner)
 
 Orchestration per size: scripts/stop.sh + scripts/start.sh (fresh DB),
-full partial Receita load, then timed probes on a seed-fixed sample.
+partial Receita load, then timed probes on a seed-fixed sample.
+--legacy-filter preserva o modo antigo (varredura nacional com membership).
 
 Usage:
     uv run python tests/bench_receita_hydrated.py --label baseline
@@ -77,7 +86,136 @@ def connect(timeout: float = 20.0) -> EavtClient:
     raise RuntimeError(f"query server not reachable at {sp}: {last_err}")
 
 
-# ── Filtered bulk loads (membership-checked against loaded empresas) ─────────
+# ── Carga dessincronizada (goc) — padrão novo do exercício ────────────────────
+#
+# Cada estágio lê apenas as PRIMEIRAS max_rows linhas do arquivo, SEM filtro de
+# membros: cada linha ancora sua entidade via get-or-create-entity, então a
+# ordem do arquivo é irrelevante e não existe match/conjunto de membros.
+# Linhas cuja empresa-mãe não foi carregada explicitamente criam um stub (+1
+# datom na criação; idêntico ao full load dali em diante).
+#
+# O modo filtrado antigo (--legacy-filter) varre os arquivos nacionais inteiros
+# aplicando membership — mantido apenas para comparação.
+
+SIMPLES_ZIP = "Simples__20260809T1834.zip"
+
+# razões aproximadas da base completa vs empresas (para dimensionar subsets)
+RATIO_ESTABS = 1.3
+RATIO_SIMPLES = 1.1
+RATIO_SOCIOS = 0.5
+
+# universo completo usado na extrapolação (linhas por conjunto)
+FULL_ROWS = {"empresas": 46_000_000, "estabs": 73_000_000,
+             "simples": 50_000_000, "socios": 28_000_000}
+
+
+def merge_simples_goc(client: EavtClient, data_dir: Path,
+                      max_rows: int, batch_size: int) -> tuple[int, int]:
+    """Primeiras max_rows linhas do Simples sem filtro; goc ancora a empresa."""
+    zpath = data_dir / SIMPLES_ZIP
+    processed = scanned = 0
+    batch_body: list[list] = []
+    t0 = time.perf_counter()
+
+    def flush():
+        nonlocal batch_body, processed
+        if not batch_body:
+            return
+        batch_body.append(L.WForm(L.RESULT, L.E_SYM, L.WInt(len(batch_body))))
+        client.scheme_wire(L.WForm(L.BEGIN, *batch_body), mode="exec")
+        batch_body = []
+
+    for row in L.rows_from_zip(zpath):
+        scanned += 1
+        if len(row) < 7:
+            continue
+        sets = []
+        if row[1]:
+            sets.append(("empresa.optante_simples", row[1]))
+        if row[2] and row[2] != L.ZERO_DATE:
+            sets.append(("empresa.data_opcao_simples", row[2]))
+        if row[3] and row[3] != L.ZERO_DATE:
+            sets.append(("empresa.data_exclusao_simples", row[3]))
+        if row[4]:
+            sets.append(("empresa.optante_mei", row[4]))
+        if row[5] and row[5] != L.ZERO_DATE:
+            sets.append(("empresa.data_opcao_mei", row[5]))
+        if row[6] and row[6] != L.ZERO_DATE:
+            sets.append(("empresa.data_exclusao_mei", row[6]))
+        if not sets:
+            continue
+
+        batch_body.append(L.WForm(L.SETBANG, L.E_SYM,
+                                  L.goc("empresa.cnpj_base", row[0])))
+        for attr, val in sets:
+            batch_body.append(L.WForm(L.WHEN, L.E_SYM,
+                                      L.WForm(L.SAVE, L.E_SYM,
+                                              L.WAttr(attr), L.WStr(val))))
+        processed += 1
+        if len(batch_body) >= batch_size * 2:
+            flush()
+        if processed >= max_rows:
+            break
+    flush()
+    print(f"  simples(goc): {processed:,} linhas gravadas "
+          f"(scanned {scanned:,}) in {time.perf_counter() - t0:.1f}s", flush=True)
+    return processed, scanned
+
+
+def load_estabs_goc(client: EavtClient, data_dir: Path,
+                    max_rows: int, batch_size: int) -> tuple[int, int]:
+    """Primeiras max_rows linhas de Estabelecimentos0 sem filtro; a empresa-mãe
+    é ancorada por goc dentro de _flush_estab_batch."""
+    zpath = L.find_zip(data_dir, "Estabelecimentos0")
+    batch: list[list[str]] = []
+    saved = scanned = 0
+    t0 = time.perf_counter()
+    for row in L.rows_from_zip(zpath):
+        scanned += 1
+        if len(row) < 30 or len(row[0]) != 8 or not row[0].isdigit():
+            continue
+        batch.append(row)
+        if len(batch) >= batch_size:
+            L._flush_estab_batch(client, batch)
+            saved += len(batch)
+            batch = []
+            if saved >= max_rows:
+                break
+    if batch and saved < max_rows:
+        L._flush_estab_batch(client, batch)
+        saved += len(batch)
+    print(f"  estabs(goc): {saved:,} linhas gravadas "
+          f"(scanned {scanned:,}) in {time.perf_counter() - t0:.1f}s", flush=True)
+    return saved, scanned
+
+
+def load_socios_goc(client: EavtClient, data_dir: Path,
+                    max_rows: int, batch_size: int) -> tuple[int, int]:
+    """Primeiras max_rows linhas de Socios0 sem filtro; goc ancora a empresa."""
+    zpath = L.find_zip(data_dir, "Socios0")
+    batch: list[list[str]] = []
+    saved = scanned = 0
+    t0 = time.perf_counter()
+    for row in L.rows_from_zip(zpath):
+        scanned += 1
+        if len(row) < 11 or len(row[0]) != 8 or not row[0].isdigit():
+            continue
+        batch.append(row)
+        if len(batch) >= batch_size:
+            L._flush_socio_batch(client, batch)
+            saved += len(batch)
+            batch = []
+            if saved >= max_rows:
+                break
+    if batch and saved < max_rows:
+        L._flush_socio_batch(client, batch)
+        saved += len(batch)
+    print(f"  socios(goc): {saved:,} linhas gravadas "
+          f"(scanned {scanned:,}) in {time.perf_counter() - t0:.1f}s", flush=True)
+    return saved, scanned
+
+
+# ── Carga filtrada legada ─────────────────────────────────────────────────────
 
 def merge_simples_filtered(client: EavtClient, data_dir: Path,
                            members: set[str], batch_size: int) -> tuple[int, int]:
@@ -274,7 +412,9 @@ def first_n_cnpjs(data_dir: Path, n: int) -> list[str]:
 
 
 def run_size(client_holder: list, n: int, args, results: dict) -> None:
-    print(f"\n{'=' * 70}\n== SIZE {n:,} ==\n{'=' * 70}", flush=True)
+    print(f"\n{'=' * 70}\n== SIZE {n:,} ==\n"
+          f"== modo: {'legacy-filtrado' if args.legacy_filter else 'goc dessincronizado'} ==\n"
+          f"{'=' * 70}", flush=True)
 
     print("-- restarting stack (fresh DB) --", flush=True)
     restart_stack()
@@ -282,6 +422,7 @@ def run_size(client_holder: list, n: int, args, results: dict) -> None:
     client = client_holder[0]
 
     stage_secs: dict[str, float] = {}
+    stage_rows: dict[str, int] = {}
     t0 = time.perf_counter()
     L.declare_schema(client)
     stage_secs["declare"] = time.perf_counter() - t0
@@ -293,32 +434,72 @@ def run_size(client_holder: list, n: int, args, results: dict) -> None:
     t0 = time.perf_counter()
     loaded = L.load_empresas(client, args.data_dir, n, args.batch)
     stage_secs["empresas"] = time.perf_counter() - t0
+    stage_rows["empresas"] = loaded
 
     cnpjs = first_n_cnpjs(args.data_dir, n)
-    members = set(cnpjs)
 
-    if not args.skip_simples:
-        try:
+    if args.legacy_filter:
+        members = set(cnpjs)
+
+        if not args.skip_simples:
+            try:
+                t0 = time.perf_counter()
+                merge_simples_filtered(client, args.data_dir, members, args.batch)
+                stage_secs["simples"] = time.perf_counter() - t0
+            except FileNotFoundError as e:
+                print(f"  simples skipped: {e}")
+
+        if not args.skip_estabs:
             t0 = time.perf_counter()
-            merge_simples_filtered(client, args.data_dir, members, args.batch)
-            stage_secs["simples"] = time.perf_counter() - t0
-        except FileNotFoundError as e:
-            print(f"  simples skipped: {e}")
+            load_estabs_filtered(client, args.data_dir, members, args.batch)
+            stage_secs["estabs"] = time.perf_counter() - t0
 
-    if not args.skip_estabs:
-        t0 = time.perf_counter()
-        load_estabs_filtered(client, args.data_dir, members, args.batch)
-        stage_secs["estabs"] = time.perf_counter() - t0
+        if not args.skip_socios:
+            t0 = time.perf_counter()
+            load_socios_filtered(client, args.data_dir, members, args.batch)
+            stage_secs["socios"] = time.perf_counter() - t0
+    else:
+        # subsets proporcionais às razões reais da base completa
+        estab_rows = int(n * RATIO_ESTABS)
+        simples_rows = int(n * RATIO_SIMPLES)
+        socios_rows = int(n * RATIO_SOCIOS)
 
-    if not args.skip_socios:
-        t0 = time.perf_counter()
-        load_socios_filtered(client, args.data_dir, members, args.batch)
-        stage_secs["socios"] = time.perf_counter() - t0
+        if not args.skip_simples:
+            try:
+                t0 = time.perf_counter()
+                pr, _ = merge_simples_goc(client, args.data_dir,
+                                          simples_rows, args.batch)
+                stage_secs["simples"] = time.perf_counter() - t0
+                stage_rows["simples"] = pr
+            except FileNotFoundError as e:
+                print(f"  simples skipped: {e}")
+
+        if not args.skip_estabs:
+            t0 = time.perf_counter()
+            sr, _ = load_estabs_goc(client, args.data_dir,
+                                    estab_rows, args.batch)
+            stage_secs["estabs"] = time.perf_counter() - t0
+            stage_rows["estabs"] = sr
+
+        if not args.skip_socios:
+            t0 = time.perf_counter()
+            jr, _ = load_socios_goc(client, args.data_dir,
+                                    socios_rows, args.batch)
+            stage_secs["socios"] = time.perf_counter() - t0
+            stage_rows["socios"] = jr
 
     total_load = sum(stage_secs.values())
     stages = " ".join(f"{k} {v:.1f}s" for k, v in stage_secs.items())
     print(f"-- load complete: {loaded:,} empresas, {total_load:.1f}s ({stages})",
           flush=True)
+
+    # taxa de escrita por estágio (linhas gravadas / tempo)
+    rates = {k: stage_rows[k] / stage_secs[k]
+             for k in stage_rows if stage_secs.get(k)}
+    if rates:
+        print("-- write rates: " +
+              "  ".join(f"{k} {v:,.0f} rows/s" for k, v in sorted(rates.items())),
+              flush=True)
 
     # Sample: seed-fixed, same cnpjs across labels for identical methodology
     rng = random.Random(42)
@@ -370,11 +551,41 @@ def run_size(client_holder: list, n: int, args, results: dict) -> None:
         "sample_k": len(paired),
         "load_total_secs": round(total_load, 1),
         "load_stages_secs": {k2: round(v, 1) for k2, v in stage_secs.items()},
+        "write_rates": {k2: round(v) for k2, v in rates.items()},
         "probes": probes,
     }
     results["runs"].append({"n": n, **entry})
     dump_results(results, args.label)
     print(f"-- checkpoint recorded (n={n}) --", flush=True)
+
+
+def extrapolate(results: dict) -> None:
+    """Estimativa de carga completa a partir das taxas do maior tamanho medido.
+
+    full_stage_secs = FULL_ROWS[stage] / rate[stage]; total soma os estágios
+    com taxa medida + declare/lookups escalados pelo maior n (custo fixo)."""
+    runs = [r for r in results["runs"] if r.get("write_rates")]
+    if not runs:
+        return
+    best = max(runs, key=lambda r: r["n"])
+    print(f"\n=== EXTRAPOLAÇÃO CARGA COMPLETA "
+          f"(taxas @ n={best['n']:,}) ===")
+    total_fixed = sum(v for k, v in best["load_stages_secs"].items()
+                      if k in ("declare", "lookups"))
+    est_secs: dict[str, float] = {}
+    for stage, full_rows in FULL_ROWS.items():
+        rate = best["write_rates"].get(stage)
+        if not rate:
+            continue
+        est_secs[stage] = full_rows / rate
+    for stage, secs in sorted(est_secs.items()):
+        print(f"  {stage:<9} {FULL_ROWS[stage]:>12,} linhas / "
+              f"{best['write_rates'][stage]:>10,.0f} rows/s "
+              f"→ {secs/3600:5.2f} h")
+    hours = (sum(est_secs.values()) + total_fixed) / 3600
+    print(f"  TOTAL estimado ≈ {hours:.1f} h "
+          f"(+{total_fixed:.0f}s fixos; sem varredura-filtro, que no full load "
+          f"é absorvida pela própria escrita)")
 
 
 def dump_results(results: dict, label: str) -> None:
@@ -400,6 +611,9 @@ def main() -> int:
     ap.add_argument("--skip-simples", action="store_true")
     ap.add_argument("--skip-estabs", action="store_true")
     ap.add_argument("--skip-socios", action="store_true")
+    ap.add_argument("--legacy-filter", action="store_true",
+                    help="modo antigo: varre arquivos nacionais filtrando "
+                         "pelo conjunto de membros (lento; comparação)")
     args = ap.parse_args()
 
     results = {
@@ -438,6 +652,11 @@ def main() -> int:
         for name, st in run["probes"].items():
             print(f"{name}: p50={st['p50_us']}µs  ", end="")
         print()
+        if run.get("write_rates"):
+            print("   rates: " + "  ".join(
+                f"{k}={v:,.0f}/s" for k, v in sorted(run["write_rates"].items())))
+    if not args.legacy_filter:
+        extrapolate(results)
     return 0
 
 
