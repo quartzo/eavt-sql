@@ -178,11 +178,15 @@ proc remove*(hub: ReplicationHub; s: Subscriber) =
   let idx = hub.subscribers.find(s)
   if idx >= 0: hub.subscribers.delete(idx)
 
-proc broadcastWal*(hub: ptr ReplicationHub; data: seq[byte]) =
-  ## Called under kv.lock on the loop thread (journal sink).  Only memcpy.
-  if hub == nil or hub.subscribers.len == 0: return
+proc broadcastWal*(hub: ptr ReplicationHub; p: ptr byte; len: int) =
+  ## Called under kv.lock on the loop thread (journal sink).  Uma única
+  ## cópia (para o buffer do subscriber) direto da view do w.buf.
+  if hub == nil or hub.subscribers.len == 0 or len <= 0: return
   for s in hub.subscribers.items:
-    if not s.closed: s.buf.add(data)
+    if not s.closed:
+      let old = s.buf.len
+      s.buf.setLen(old + len)
+      copyMem(addr s.buf[old], p, len)
 
 proc broadcastSeal*(hub: ptr ReplicationHub; segIdx: int) =
   if hub == nil or hub.subscribers.len == 0: return

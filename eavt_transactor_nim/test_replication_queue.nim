@@ -16,9 +16,13 @@ suite "replication: ordem da fila de eventos":
     let s = Subscriber()
     hub.register(s)
 
-    broadcastWal(addr hub, @[byte(1), byte(2)])
+    block:
+      var d = @[byte(1), byte(2)]
+      broadcastWal(addr hub, addr d[0], d.len)
     broadcastSeal(addr hub, 7)
-    broadcastWal(addr hub, @[byte(3)])
+    block:
+      var d = @[byte(3)]
+      broadcastWal(addr hub, addr d[0], d.len)
     broadcastRoot(addr hub, "root_x")
 
     let frames = s.collectOutgoing()
@@ -36,8 +40,11 @@ suite "replication: ordem da fila de eventos":
     let s = Subscriber()
     hub.register(s)
 
-    broadcastWal(addr hub, @[byte(1)])
-    broadcastWal(addr hub, @[byte(2)])   # sem marcador no meio → agrega
+    block:
+      var d = @[byte(1)]
+      broadcastWal(addr hub, addr d[0], d.len)
+    var d2 = @[byte(2)]
+    broadcastWal(addr hub, addr d2[0], d2.len)  # sem marcador no meio → agrega
     broadcastSeal(addr hub, 3)
 
     let frames = s.collectOutgoing()
@@ -47,7 +54,8 @@ suite "replication: ordem da fila de eventos":
     let hub = initReplicationHub("/tmp/nonexistent")
     let s = Subscriber()
     hub.register(s)
-    broadcastWal(addr hub, @[])
+    var dz: seq[byte] = @[]
+    broadcastWal(addr hub, if dz.len > 0: addr dz[0] else: nil, 0)
     broadcastRoot(addr hub, "r")
     let frames = s.collectOutgoing()
     check frames.len == 1

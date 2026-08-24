@@ -61,7 +61,7 @@ type
     ## Called from the sink (under kv.lock, loop thread) for every journal
     ## record group. The replication hub broadcasts to subscribers here —
     ## memcpy only, same discipline as the sink itself.
-    onWal*: proc (data: seq[byte]) {.gcsafe, raises: [].}
+    onWal*: proc (p: ptr byte; len: int) {.gcsafe, raises: [].}
 
 proc segPath(dir: string; idx: int): string =
   dir / (SegPrefix & align($idx, SegDigits, '0'))
@@ -104,9 +104,9 @@ proc sink(w: WalWriter; entries: seq[CfKey]) {.gcsafe, raises: [].} =
     pos += 10 + klen
   w.logicalEnd.inc(int64(totalBytes))
   if w.onWal != nil:
-    # Legacy callback — needs serialized bytes. The slice is exactly what we
-    # just wrote into w.buf; one copy beats re-serializing field by field.
-    w.onWal(w.buf[base ..< pos])
+    # Legacy callback — recebe VIEW (ptr,len) dos bytes já escritos em w.buf:
+    # zero cópias aqui; quem precisa materializar copia UMA vez.
+    w.onWal(addr w.buf[base], pos - base)
 
 proc seal(w: WalWriter): int64 =
   ## Called by flush() at capture time, under kv.lock (flush thread). Returns

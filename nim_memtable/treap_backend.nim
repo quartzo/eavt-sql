@@ -224,12 +224,18 @@ proc getValue*(node: TreapNode; key: openArray[byte]): Option[Value] =
     else: n = n.right
   return none(Value)
 
+# Contadores de diagnóstico do insert (custo ~0; print periódico em batchMove).
+var gInsNew* = 0'i64
+var gInsExisting* = 0'i64
+var gInsKeyBytes* = 0'i64
+
 proc insertOwned(node: TreapNode, key: var seq[byte];
                  value: Option[Value] = none(Value);
                  deleted: bool = false; mutable: bool = false): (TreapNode, bool) =
   ## Variante zero-copy: a chave é CONSUMIDA na criação da folha (move),
   ## eliminando a cópia por inserção do caminho de carga.
   if node == nil:
+    inc gInsNew; gInsKeyBytes += key.len
     return (newLeaf(system.move(key), value, deleted), true)
   let c = cmpKey(key, node.key)
   if c < 0:
@@ -259,13 +265,21 @@ proc insertOwned(node: TreapNode, key: var seq[byte];
         return (rotateLeft(nn), wasNew)
       return (nn, wasNew)
   else:
+    inc gInsExisting
     # chave existente: atualiza valor em-place quando mutável
     if mutable and not node.deleted:
       node.value = value
       node.deleted = deleted
     return (node, false)
 
+proc printInsertDiag() =
+    stderr.writeLine("insdiag: new=", gInsNew, " existing=", gInsExisting,
+                     " keyBytes=", gInsKeyBytes,
+                     " bytes/new=", (if gInsNew > 0: gInsKeyBytes div gInsNew else: 0))
+
 proc batchMove*(mt: MemTable; entries: var seq[CfKey]): uint64 =
+  if entries.len > 0 and gInsNew mod 100_000 < entries.len:
+    printInsertDiag()
   ## Consome as chaves de `entries` (move até o nó) — chamador não reutiliza.
   for i in 0 ..< entries.len:
     let cf = entries[i].cf.int
