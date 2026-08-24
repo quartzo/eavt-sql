@@ -24,12 +24,32 @@ import logutil
 # ── Subscriber ──────────────────────────────────────────────────────────────
 
 type
+  EvKind* = enum evWal, evSeal, evRoot
+
+  Ev = object
+    case kind: EvKind
+    of evWal: data: seq[byte]
+    of evSeal: idx: int
+    of evRoot: name: string
+
   Subscriber* = ref object
     transp*: StreamTransport
-    buf*: seq[byte]      # wal bytes to send
-    seals*: seq[int]     # segment indices to send
-    roots*: seq[string]  # root names to send
+    ## Ordenação de geração à prova de batching: wal acumula em `buf` (append
+    ## quente, um memcpy); ao ENFILEIRAR um marcador (seal/root), o buf
+    ## pendente é descarregado na fila ANTES do marcador — um frame wal nunca
+    ## atravessa uma fronteira de geração. As três filas paralelas antigas
+    ## drenavam buf-primeiro invertendo essa fronteira quando escritas
+    ## pós-captura entravam antes do tick (réplica selava pós-seal junto com
+    ## pré-seal; o root descartava a diferença → perda intermitente de db.*).
+    buf: seq[byte]
+    queue: seq[Ev]
     closed*: bool
+
+proc flushBuf(s: Subscriber) =
+  ## Descarrega wal pendente como evento ANTES do marcador seguinte.
+  if s.buf.len > 0:
+    s.queue.add Ev(kind: evWal, data: s.buf)
+    s.buf = @[]
 
 proc sendFrame(s: Subscriber; body: string) {.async.} =
   if s.closed: return
@@ -45,6 +65,58 @@ proc sendFrame(s: Subscriber; body: string) {.async.} =
 
 proc sendEvent(s: Subscriber; body: string) {.async.} =
   await s.sendFrame(body)
+
+# ── Frame builders (puros — testáveis sem socket) ───────────────────────────
+
+proc walFrame*(data: seq[byte]): string =
+  var ms = MsgStream.init(64 + data.len)
+  ms.pack_map(2)
+  ms.pack("ev"); ms.pack("wal")
+  ms.pack("data")
+  ms.pack_bin(data.len)
+  if data.len > 0:
+    var tmp = newString(data.len)
+    copyMem(addr tmp[0], unsafeAddr data[0], data.len)
+    appendRaw(ms, tmp)
+  ms.data
+
+proc sealFrame*(idx: int): string =
+  var ms = MsgStream.init(32)
+  ms.pack_map(2)
+  ms.pack("ev"); ms.pack("seal")
+  ms.pack("idx"); ms.pack(idx)
+  ms.data
+
+proc rootFrame*(name: string): string =
+  var ms = MsgStream.init(64)
+  ms.pack_map(2)
+  ms.pack("ev"); ms.pack("root")
+  ms.pack("name"); ms.pack(name)
+  ms.data
+
+## Monta os frames SAÍDA na ordem exata da fila — sem tocar socket.
+proc collectOutgoing*(s: Subscriber): seq[string] =
+  ## Eventos wal CONSECUTIVOS agregam-se num único frame (como no formato
+  ## antigo); o marcador seal/root sempre fecha o frame corrente — uma
+  ## fronteira de geração nunca é atravessada por bytes de outra geração.
+  result = @[]
+  var i = 0
+  while i < s.queue.len:
+    let ev = s.queue[i]
+    inc i
+    case ev.kind
+    of evWal:
+      var data = ev.data
+      while i < s.queue.len and s.queue[i].kind == evWal:
+        data.add s.queue[i].data
+        inc i
+      if data.len > 0:
+        result.add walFrame(data)
+    of evSeal:
+      result.add sealFrame(ev.idx)
+    of evRoot:
+      result.add rootFrame(ev.name)
+  s.queue.setLen(0)
 
 # ── Snapshot construction ───────────────────────────────────────────────────
 
@@ -115,43 +187,25 @@ proc broadcastWal*(hub: ptr ReplicationHub; data: seq[byte]) =
 proc broadcastSeal*(hub: ptr ReplicationHub; segIdx: int) =
   if hub == nil or hub.subscribers.len == 0: return
   for s in hub.subscribers.items:
-    if not s.closed: s.seals.add(segIdx)
+    if not s.closed:
+      s.flushBuf()
+      s.queue.add Ev(kind: evSeal, idx: segIdx)
 
 proc broadcastRoot*(hub: ptr ReplicationHub; rootName: string) =
   if hub == nil or hub.subscribers.len == 0: return
   for s in hub.subscribers.items:
-    if not s.closed: s.roots.add(rootName)
+    if not s.closed:
+      s.flushBuf()
+      s.queue.add Ev(kind: evRoot, name: rootName)
 
 # ── Subscriber drain loop ───────────────────────────────────────────────────
 
 proc drain*(s: Subscriber; kv: KVStore) {.async.} =
+  ## Emite UM frame POR evento na ordem de enfileiramento — wal agrega
+  ## apenas bytes entre marcadores, nunca atravessando seal/root.
   if s.closed: return
-  if s.buf.len > 0:
-    let data = s.buf; s.buf = @[]
-    var ms = MsgStream.init(64 + data.len)
-    ms.pack_map(2)
-    ms.pack("ev"); ms.pack("wal")
-    ms.pack("data")
-    ms.pack_bin(data.len)
-    if data.len > 0:
-      var tmp = newString(data.len)
-      copyMem(addr tmp[0], unsafeAddr data[0], data.len)
-      appendRaw(ms, tmp)
-    await s.sendEvent(ms.data)
-  while s.seals.len > 0:
-    let idx = s.seals[0]; s.seals.delete(0)
-    var ms = MsgStream.init(32)
-    ms.pack_map(2)
-    ms.pack("ev"); ms.pack("seal")
-    ms.pack("idx"); ms.pack(idx)
-    await s.sendEvent(ms.data)
-  while s.roots.len > 0:
-    let name = s.roots[0]; s.roots.delete(0)
-    var ms = MsgStream.init(64)
-    ms.pack_map(2)
-    ms.pack("ev"); ms.pack("root")
-    ms.pack("name"); ms.pack(name)
-    await s.sendEvent(ms.data)
+  for body in collectOutgoing(s):
+    await s.sendEvent(body)
 
 proc subscriberLoop*(kv: KVStore; s: Subscriber; hub: ptr ReplicationHub) {.async.} =
   try:
