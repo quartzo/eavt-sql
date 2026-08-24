@@ -75,8 +75,10 @@ proc applyRoot*(r: ReplicaEngine; rootName: string) =
   try:
     r.kv.publishRoot(rootName)
   except Exception as e:
-    logDebug("replica", "stale/missing root " & rootName & " (" & excMsg(e) &
-      "); stream will deliver a newer one")
+    # Falha ao publicar raiz NÃO é operação esperada: a réplica fica presa
+    # numa geração antiga (leituras por índice erram pós-flush).
+    logWarn("replica", "publishRoot " & rootName & " failed (" & excMsg(e) &
+      "); replica pagestore stale")
 
 proc getStats*(r: ReplicaEngine): stats.CompileStats =
   ## Build compile stats from the current replica state.

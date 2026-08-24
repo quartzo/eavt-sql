@@ -653,11 +653,77 @@ suite "engine: save + lookup":
     expect EvalError:
       q.saveWithT(1, "no.such.attr", SExpr(kind: sStr, sval: "x"), 1, 0)
 
+  test "save-many batches saves on one attr":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    q.declareAttrFromSql("user.name", ":db.type/string", false, false, 1)
+
+    var pairs: seq[(int64, SExpr)] = @[]
+    for i in 1 ..< 5:
+      pairs.add((int64(i), SExpr(kind: sStr, sval: "user" & $i)))
+    q.saveManyWithT("user.name", pairs, 1, 0)
+
+    # All values readable; saveCount accounted per datom.
+    for i in 1 ..< 5:
+      let val = q.lookupValue(int64(i), "user.name")
+      check val.isSome
+      check val.get.sval == "user" & $i
+    check q.saveCount == 4
+
+  test "save-many overwrites with one cardinality":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    q.declareAttrFromSql("user.name", ":db.type/string", false, false, 1)
+    let eid = q.allocateInPartition(4)
+
+    q.saveManyWithT("user.name", @[(eid, SExpr(kind: sStr, sval: "Alice")),
+                                   (eid, SExpr(kind: sStr, sval: "Bob"))], 2, 0)
+    check q.lookupValue(eid, "user.name").get.sval == "Bob"
+
+  test "save-many to undeclared attr raises":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    expect EvalError:
+      q.saveManyWithT("no.such.attr",
+                      @[(1'i64, SExpr(kind: sStr, sval: "x"))], 1, 0)
+
   test "retract on undeclared attr is no-op":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
     q.retract(1, "no.such.attr", SExpr(kind: sStr, sval: "x"), 1, 0)
+
+  test "lookupEntity finds entity after first flush (lazy pagestore cursor)":
+    ## Regressão: a 1ª chamada de lookup-entity numa store sem root de CF2
+    ## cria cursor de pagestore NIL; o flush publica a raiz e o caminho de
+    ## reuso nunca criava o cursor — todo seek pós-flush errava.
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    q.declareAttrFromSql("user.email", ":db.type/string", false, true, 1)
+
+    # dispara scanPrefixActive(2) com CF2 ainda vazio (raiz default)
+    check q.lookupEntity("user.email", SExpr(kind: sStr, sval: "cold@x")).isNone
+
+    var eidAlvo: int64 = 0
+    for i in 1..50:
+      let eid = q.allocateInPartition(4)
+      q.saveWithT(eid, "user.email", SExpr(kind: sStr, sval: "u" & $i & "@x"),
+                  int64(i), 0)
+      if i == 7: eidAlvo = eid
+
+    q.kv.flush()  # primeiro commitMerge: CF2 ganha raiz; memtable limpa
+
+    let found = q.lookupEntity("user.email", SExpr(kind: sStr, sval: "u7@x"))
+    check found.isSome
+    check found.get == eidAlvo
 
   test "lookupAttr after declare":
     let kv = newMemoryKVStore()

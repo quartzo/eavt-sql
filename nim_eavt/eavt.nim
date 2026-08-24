@@ -3,7 +3,8 @@
 ## Port of spier-transactor/src/eavt.rs (~1099 lines Rust → Nim).
 ## Coordinates Resolver + KVStore for entity-attribute-value-time operations.
 
-import std/[tables, strutils, options, times, sets, monotimes, algorithm]
+import std/[tables, strutils, options, times, sets, monotimes, algorithm, syncio]
+import logutil
 import resolver
 import keys
 import kvstore
@@ -74,6 +75,12 @@ type
     # Hydrated-eid source (CF 0 fast path) — see hydrated.nim
     hydEnabled*: bool
     hyd*: HydratedSet
+    # TEMP scan diagnostics (-d:eavtScanDiag)
+    diagSeekNs*: int64
+    diagIterNs*: int64
+    diagCalls*: int64
+    diagDescendNs*: int64
+    diagCrossNs*: int64
 
 const
   DefaultHydratedMaxBytes = DefaultMaxBytes  # 1 GiB
@@ -177,11 +184,30 @@ proc scanPrefixActive*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byt
     flushRoot = eng.kv.flushRoots[cf]
   liveRoot = eng.kv.mt.hnd.live[cf]
 
+  # TEMP diagnostics: where do cf≠0 scans spend time post-flush?
+
   # Reuse or create cursors
   if eng.saCf == cf and eng.saLive != nil:
-    # Same CF — update in-place
-    if eng.saPs != nil: eng.saPs.update(psSnap.rootUuid, psSnap.height)
-    if eng.saFlush != nil: eng.saFlush.update(flushRoot)
+    # Same CF — update in-place. NOTE: pagestore/flush cursors must be CREATED
+    # lazily here too: a CF scanned before its first commitMerge has a default
+    # root (no saPs); after the flush publishes a root, the cached-cursor path
+    # must pick it up — otherwise every seek misses forever (sourceCount 0).
+    if psSnap.rootUuid != default(array[16, byte]):
+      if eng.saPs != nil:
+        eng.saPs.update(psSnap.rootUuid, psSnap.height)
+      else:
+        eng.saPs = PageStoreCursor(
+          s: eng.kv.ps, cf: cf, rootUuid: psSnap.rootUuid, height: psSnap.height,
+          isKv: cf >= 10)
+    else:
+      eng.saPs = nil
+    if flushRoot != nil:
+      if eng.saFlush != nil:
+        eng.saFlush.update(flushRoot)
+      else:
+        eng.saFlush = newTreapCursor(flushRoot)
+    else:
+      eng.saFlush = nil
     eng.saLive.update(liveRoot)
   else:
     # Different CF or first call — create new cursors
@@ -251,8 +277,14 @@ proc scanPrefixActive*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byt
     of skTreap: tc: TreapCursor
 
   var sources: seq[Src] = @[]
+  when defined(eavtScanDiag):
+    let tSeek = getMonoTime().ticks
   if eng.saPs != nil and psSnap.rootUuid != default(array[16, byte]):
     eng.saPs.seek(prefix)
+    when defined(eavtScanDiag):
+      if cf != 0:
+        eng.diagDescendNs += eng.saPs.lastSeekDescendNs
+        eng.diagCrossNs += eng.saPs.lastSeekCrossNs
     sources.add Src(kind: skPageStore, ps: eng.saPs)
   if eng.saFlush != nil and flushRoot != nil:
     eng.saFlush.seek(prefix)
@@ -260,6 +292,29 @@ proc scanPrefixActive*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byt
   if eng.saLive != nil and liveRoot != nil:
     eng.saLive.seek(prefix)
     sources.add Src(kind: skTreap, tc: eng.saLive)
+  when defined(eavtScanDiag):
+    if cf != 0: eng.diagSeekNs += getMonoTime().ticks - tSeek
+    let tIter = getMonoTime().ticks
+  when defined(eavtScanDiag):
+    if cf != 0:
+      inc eng.diagCalls
+      defer:
+        eng.diagIterNs += getMonoTime().ticks - tIter
+        if eng.diagCalls mod 2000 == 0:
+          let cache = eng.kv.ps[].cache
+          stderr.writeLine("scandiag cf=", cf,
+            ": calls=", eng.diagCalls,
+            " seekUs=", eng.diagSeekNs div max(eng.diagCalls, 1) div 1000,
+            " [descend=", eng.diagDescendNs div max(eng.diagCalls, 1) div 1000,
+            " cross=", eng.diagCrossNs div max(eng.diagCalls, 1) div 1000, "]",
+            " iterUs=", eng.diagIterNs div max(eng.diagCalls, 1) div 1000,
+            " idxPages=", eng.kv.ps[].indexPageLoads,
+            " descend: idx=", page_cursor.gDiagIdxNs div max(page_cursor.gDiagDescends,1) div 1000,
+            "us bin=", page_cursor.gDiagBinNs div max(page_cursor.gDiagDescends,1) div 1000,
+            "us leaf=", page_cursor.gDiagLeafNs div max(page_cursor.gDiagDescends,1) div 1000,
+            " n=", page_cursor.gDiagDescends,
+            " cacheHits=", cache.hits, " misses=", cache.misses,
+            " kindMisses=", cache.kindMisses)
 
   if sources.len == 0: return
 
@@ -474,6 +529,8 @@ proc bootstrapResolver*(eng: EavtEngine) =
     let many = cardMap.getOrDefault(e, false)
     let unique = e in uniqueSet
     eng.resolver.loadUserAttr(name, e, vt, many, unique, false)
+  logInfo("resolver", "bootstrap: " & $identMap.len & " user attrs, " &
+    $uniqueSet.len & " unique")
 
   seedPartitionCounters(eng)
 
