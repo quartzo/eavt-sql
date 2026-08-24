@@ -15,6 +15,8 @@ declare -a term_pids=() kill_pids=()
 for pid in $(pgrep -f eavt-sql || true); do
   [ "$pid" = "$$" ] && continue
   exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || continue
+  # binário substituído em disco enquanto o processo roda → sufixo do kernel
+  exe="${exe% (deleted)}"
   case "$exe" in
     */build/eavt-sql-transactor|*/build/eavt-sql-query)
       term_pids+=("$pid")

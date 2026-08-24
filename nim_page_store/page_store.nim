@@ -221,11 +221,23 @@ proc findPrefixRange*(entries: seq[(seq[byte], array[16, byte])];
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PageCache — simple LRU via access-order counter.
-# Stores decompressed page bytes to avoid repeated decompress on cache hits.
+# Payload variante por forma da página:
+#   * folha → bytes descomprimidos (evita re-decompress no scan);
+#   * índice → entradas JÁ DECODIFICADAS (evita re-parse do prefix-compression
+#     a cada seek — o parse é o custo dominante de lookup-entity pós-flush).
+# Páginas são imutáveis sob COW: um uuid só ocorre numa forma, e o conteúdo
+# em cache permanece válido até a evicção. Orçamento único em bytes.
 
 type
+  PagePayloadKind* = enum ppBytes, ppIndex, ppLeafKeys, ppLeafKV
+
   CacheEntry = object
-    data: seq[byte]          ## decompressed page bytes
+    kind: PagePayloadKind
+    data: seq[byte]          ## ppBytes: página folha descomprimida (raw prefixado)
+    entries: seq[(seq[byte], array[16, byte])]  ## ppIndex: índice decodificado
+    leafKeys*: seq[seq[byte]]                   ## ppLeafKeys
+    leafPairs*: seq[(seq[byte], seq[byte])]     ## ppLeafKV
+    bytes: int               ## contabilidade (payload materializado)
     accessOrder: int64
 
   PageCache = object
@@ -233,33 +245,114 @@ type
     maxBytes: int
     currentBytes: int
     nextOrder: int64
+    hits*: int64
+    misses*: int64
+    kindHits*: array[4, int64]
+    kindMisses*: array[4, int64]
 
 proc initCache(maxBytes: int): PageCache =
   result = PageCache(maxBytes: maxBytes, currentBytes: 0, nextOrder: 1)
 
-proc get(cc: var PageCache; uuid: array[16, byte]): Option[seq[byte]] =
-  if uuid in cc.map:
-    cc.map[uuid].accessOrder = cc.nextOrder
-    inc cc.nextOrder
-    return some(cc.map[uuid].data)
-  return none(seq[byte])
-
-proc put(cc: var PageCache; uuid: array[16, byte]; data: seq[byte]) =
-  if uuid in cc.map: return
-  let sz = data.len
-  while cc.currentBytes + sz > cc.maxBytes and cc.map.len > 0:
+proc evictToBudget(cc: var PageCache; incoming: int) =
+  while cc.currentBytes + incoming > cc.maxBytes and cc.map.len > 0:
     var minKey: array[16, byte]
     var minOrder = high(int64)
     for k, v in cc.map:
       if v.accessOrder < minOrder:
         minOrder = v.accessOrder
         minKey = k
-    cc.currentBytes -= cc.map[minKey].data.len
+    cc.currentBytes -= cc.map[minKey].bytes
     cc.map.del(minKey)
-  if sz <= cc.maxBytes:
-    cc.currentBytes += sz
-    cc.map[uuid] = CacheEntry(data: data, accessOrder: cc.nextOrder)
+
+proc slotFor(cc: var PageCache; uuid: array[16, byte]; sz: int): bool =
+  ## Upsert: substitui payload anterior do uuid (a forma materializada
+  ## substitui o raw quando a página é decodificada). False se não couber.
+  if uuid in cc.map:
+    cc.currentBytes -= cc.map[uuid].bytes
+    cc.map.del(uuid)
+  cc.evictToBudget(sz)
+  return sz <= cc.maxBytes
+
+proc get(cc: var PageCache; uuid: array[16, byte]): Option[seq[byte]] =
+  if not (uuid in cc.map and cc.map[uuid].kind == ppBytes):
+    inc cc.misses; inc cc.kindMisses[0]
+  if uuid in cc.map and cc.map[uuid].kind == ppBytes:
+    inc cc.hits; inc cc.kindHits[0]
+    cc.map[uuid].accessOrder = cc.nextOrder
     inc cc.nextOrder
+    return some(cc.map[uuid].data)
+  return none(seq[byte])
+
+proc put(cc: var PageCache; uuid: array[16, byte]; data: seq[byte]) =
+  let sz = data.len
+  if not cc.slotFor(uuid, sz): return
+  cc.currentBytes += sz
+  cc.map[uuid] = CacheEntry(kind: ppBytes, data: data, bytes: sz,
+                            accessOrder: cc.nextOrder)
+  inc cc.nextOrder
+
+proc getIndex*(cc: var PageCache; uuid: array[16, byte]): Option[
+    seq[(seq[byte], array[16, byte])]] =
+  if not (uuid in cc.map and cc.map[uuid].kind == ppIndex):
+    inc cc.misses; inc cc.kindMisses[1]
+  if uuid in cc.map and cc.map[uuid].kind == ppIndex:
+    inc cc.hits; inc cc.kindHits[1]
+    cc.map[uuid].accessOrder = cc.nextOrder
+    inc cc.nextOrder
+    return some(cc.map[uuid].entries)
+  return none(seq[(seq[byte], array[16, byte])])
+
+proc putIndex*(cc: var PageCache; uuid: array[16, byte];
+              entries: seq[(seq[byte], array[16, byte])]) =
+  var sz = 0
+  for (k, _) in entries:
+    sz += k.len + 16 + 32   # chave + uuid + overhead de seq/tupla
+  if not cc.slotFor(uuid, sz): return
+  cc.currentBytes += sz
+  cc.map[uuid] = CacheEntry(kind: ppIndex, entries: entries, bytes: sz,
+                            accessOrder: cc.nextOrder)
+  inc cc.nextOrder
+
+proc getLeafKeys*(cc: var PageCache; uuid: array[16, byte]): Option[seq[seq[byte]]] =
+  if not (uuid in cc.map and cc.map[uuid].kind == ppLeafKeys):
+    inc cc.misses; inc cc.kindMisses[2]
+  if uuid in cc.map and cc.map[uuid].kind == ppLeafKeys:
+    inc cc.hits; inc cc.kindHits[2]
+    cc.map[uuid].accessOrder = cc.nextOrder
+    inc cc.nextOrder
+    return some(cc.map[uuid].leafKeys)
+  return none(seq[seq[byte]])
+
+proc putLeafKeys*(cc: var PageCache; uuid: array[16, byte];
+                  keys: seq[seq[byte]]) =
+  var sz = 0
+  for k in keys: sz += k.len + 32
+  if not cc.slotFor(uuid, sz): return
+  cc.currentBytes += sz
+  cc.map[uuid] = CacheEntry(kind: ppLeafKeys, leafKeys: keys, bytes: sz,
+                            accessOrder: cc.nextOrder)
+  inc cc.nextOrder
+
+proc getLeafKV*(cc: var PageCache; uuid: array[16, byte]): Option[
+    seq[(seq[byte], seq[byte])]] =
+  if not (uuid in cc.map and cc.map[uuid].kind == ppLeafKV):
+    inc cc.misses; inc cc.kindMisses[3]
+  if uuid in cc.map and cc.map[uuid].kind == ppLeafKV:
+    inc cc.hits; inc cc.kindHits[3]
+    cc.map[uuid].accessOrder = cc.nextOrder
+    inc cc.nextOrder
+    return some(cc.map[uuid].leafPairs)
+  return none(seq[(seq[byte], seq[byte])])
+
+proc putLeafKV*(cc: var PageCache; uuid: array[16, byte];
+                pairs: seq[(seq[byte], seq[byte])]) =
+  var sz = 0
+  for (k, v) in pairs: sz += k.len + v.len + 48
+  if not cc.slotFor(uuid, sz): return
+  cc.currentBytes += sz
+  cc.map[uuid] = CacheEntry(kind: ppLeafKV, leafPairs: pairs, bytes: sz,
+                            accessOrder: cc.nextOrder)
+  inc cc.nextOrder
 
 
 
@@ -272,6 +365,7 @@ type
     readOnly*: bool
     currentRoot*: string
     cache*: PageCache
+    indexPageLoads*: int64
     backendType*: string
     ## Directory holding blobs/journal; closePageStore removes it when ownsPath
     ## is set (tests' tempdir-per-store pattern).
@@ -332,8 +426,14 @@ proc loadLeafRaw*(s: var PageStoreInner; uuid: array[16, byte]): seq[byte] =
   return decompressed
 
 proc loadLeafKeys*(s: var PageStoreInner; uuid: array[16, byte]): seq[seq[byte]] =
+  ## Folha materializada no LRU: o parse do prefix-compression é o custo
+  ## dominante de seeks repetidos com alvos distintos.
+  let cached = s.cache.getLeafKeys(uuid)
+  if cached.isSome:
+    return cached.get
   let raw = loadLeafRaw(s, uuid)
-  deserializePage(raw)
+  result = deserializePage(raw)
+  s.cache.putLeafKeys(uuid, result)
 
 proc loadLeafKeysNoput(s: var PageStoreInner; uuid: array[16, byte]): seq[seq[byte]] =
   ## Load leaf keys from blobstore without putting into cache (used by COW merge).
@@ -386,8 +486,12 @@ proc keyExists*(s: var PageStoreInner; cf: int; key: seq[byte]): bool =
 # ══════════════════════════════════════════════════════════════════════════════
 
 proc loadLeafPairs*(s: var PageStoreInner; uuid: array[16, byte]): seq[(seq[byte], seq[byte])] =
+  let cached = s.cache.getLeafKV(uuid)
+  if cached.isSome:
+    return cached.get
   let raw = loadLeafRaw(s, uuid)
-  deserializePageKv(raw)
+  result = deserializePageKv(raw)
+  s.cache.putLeafKV(uuid, result)
 
 proc loadLeafPairsNoput(s: var PageStoreInner; uuid: array[16, byte]): seq[(seq[byte], seq[byte])] =
   let compressed = s.blobs.get(uuid)

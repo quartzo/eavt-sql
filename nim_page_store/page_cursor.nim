@@ -9,7 +9,7 @@
 ## flush/commitMerge installs a new root in trees[cf] but does not mutate
 ## the old one, so this cursor continues to see a consistent snapshot.
 
-import std/[options, strutils, sequtils]
+import std/[options, strutils, sequtils, monotimes]
 import page_store
 import logutil
 
@@ -35,10 +35,20 @@ type
     rootUuid*: array[16, byte]
     height*: uint8
     isKv*: bool  ## true if this cursor reads key-value leaf pages
+    when defined(eavtSeekDiag):
+      lastSeekDescendNs*: int64
+      lastSeekCrossNs*: int64
 
 # ── Helpers ──
 
 proc loadIndexPage(s: var PageStoreInner; uuid: array[16, byte]): seq[(seq[byte], array[16, byte])] =
+  ## Parsed-index cache: pages are immutable under COW, so the expensive
+  ## deserialize happens once per uuid (seeks repeat it otherwise — hot on
+  ## goc/lookup-entity workloads after the first flush publishes CF roots).
+  let cached = s.cache.getIndex(uuid)
+  if cached.isSome:
+    return cached.get
+  inc s.indexPageLoads
   let raw = loadLeafRaw(s, uuid)
   try:
     result = deserializeIndexPage(raw)
@@ -47,8 +57,6 @@ proc loadIndexPage(s: var PageStoreInner; uuid: array[16, byte]): seq[(seq[byte]
     for b in uuid: hex.add toHex(b)
     stderr.writeLine("pagestore: bad index page uuid=" & hex &
       " rawLen=" & $raw.len & " err=" & e.msg)
-    # Lineage snapshot: per-CF root/height so a read-side height mismatch
-    # (e.g. leaf wired into an index level) is visible at the failure site.
     try:
       for cf, t in s.trees:
         if t.rootUuid == default(array[16, byte]): continue
@@ -68,6 +76,7 @@ proc loadIndexPage(s: var PageStoreInner; uuid: array[16, byte]): seq[(seq[byte]
       # Diagnostic dump only — the real error is re-raised below.
       logDebug("pagestore", "bad-page dump failed (" & excMsg(e) & ")")
     raise
+  s.cache.putIndex(uuid, result)
 
 proc loadLeaf(c: PageStoreCursor; uuid: array[16, byte]) =
   if c.isKv:
@@ -77,6 +86,11 @@ proc loadLeaf(c: PageStoreCursor; uuid: array[16, byte]) =
   c.leafIdx = -1
 
 # ── Navigation ──
+
+var gDiagIdxNs* = 0'i64      # loadIndexPage acumulado
+var gDiagBinNs* = 0'i64      # busca binária acumulada
+var gDiagLeafNs* = 0'i64     # loadLeaf acumulado
+var gDiagDescends* = 0'i64
 
 proc descendToFirstLeaf(c: PageStoreCursor; uuid: array[16, byte]; height: uint8) =
   var curUuid = uuid
@@ -98,9 +112,13 @@ proc descendToLeafAt(c: PageStoreCursor; uuid: array[16, byte]; height: uint8;
   var curUuid = uuid
   var h = height
   c.indexStack = @[]
+  inc gDiagDescends
   while h > 0:
+    let t0 = getMonoTime().ticks
     let entries = loadIndexPage(c.s[], curUuid)
+    gDiagIdxNs += getMonoTime().ticks - t0
     # Rightmost entry whose boundary key is <= target.
+    let t1 = getMonoTime().ticks
     var lo = 0
     var hi = entries.len
     while lo < hi:
@@ -108,10 +126,13 @@ proc descendToLeafAt(c: PageStoreCursor; uuid: array[16, byte]; height: uint8;
       if cmpSeq(entries[mid][0], target) <= 0: lo = mid + 1
       else: hi = mid
     let pos = if lo > 0: lo - 1 else: 0
+    gDiagBinNs += getMonoTime().ticks - t1
     c.indexStack.add IndexPos(entries: entries, pos: pos)
     curUuid = entries[pos][1]
     dec h
+  let t2 = getMonoTime().ticks
   loadLeaf(c, curUuid)
+  gDiagLeafNs += getMonoTime().ticks - t2
 
 proc advanceToNextLeaf(c: PageStoreCursor) =
   while c.indexStack.len > 0:
@@ -192,6 +213,8 @@ proc nextKv*(c: PageStoreCursor): Option[(seq[byte], seq[byte])] =
 
 proc seek*(c: PageStoreCursor; target: seq[byte]) =
   if c.rootUuid == default(array[16, byte]): c.atEnd = true; return
+  when defined(eavtSeekDiag):
+    let tDesc0 = getMonoTime().ticks
 
   # Fast-path: if the current leaf already contains target (its first key
   # <= target <= its last key), binary-search within leafKeys/leafPairs — no descent,
@@ -216,14 +239,35 @@ proc seek*(c: PageStoreCursor; target: seq[byte]) =
       return
 
   # Slow path: descend from the pinned root to the leaf that should hold
-  # target (binary search per index level), then scan forward within the
-  # leaf (and across subsequent leaves) until key >= target.
+  # target, POSITION directly via binary search inside that leaf (a linear
+  # advance() walk from the leaf start cost up to a full leaf — ~ms when the
+  # target sat near its end), then cross forward only while keys < target.
   if c.height == 0: loadLeaf(c, c.rootUuid)
   else: descendToLeafAt(c, c.rootUuid, c.height, target)
+  when defined(eavtSeekDiag):
+    c.lastSeekDescendNs = getMonoTime().ticks - tDesc0
+    let tCross0 = getMonoTime().ticks
+  block positionInLeaf:
+    let keyCount = if c.isKv: c.leafPairs.len else: c.leafKeys.len
+    var lo = 0
+    var hi = keyCount
+    while lo < hi:
+      let mid = (lo + hi) shr 1
+      let midKey = if c.isKv: c.leafPairs[mid][0] else: c.leafKeys[mid]
+      if cmpSeq(midKey, target) < 0: lo = mid + 1
+      else: hi = mid
+    c.leafIdx = lo - 1          # primeira chave >= target fica em lo
+  c.curKey = none(seq[byte])
+  c.curPair = none((seq[byte], seq[byte]))
   c.atEnd = false
   while not c.atEnd:
     c.advance()
-    if c.curKey.isSome and cmpSeq(c.curKey.get, target) >= 0: return
+    if c.curKey.isSome and cmpSeq(c.curKey.get, target) >= 0:
+      when defined(eavtSeekDiag):
+        c.lastSeekCrossNs = getMonoTime().ticks - tCross0
+      return
+  when defined(eavtSeekDiag):
+    c.lastSeekCrossNs = getMonoTime().ticks - tCross0
   c.atEnd = true
 
 proc update*(c: PageStoreCursor; rootUuid: array[16, byte]; height: uint8) =
