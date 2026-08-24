@@ -49,7 +49,7 @@ TOTAL ≈ 5,3 h
 
 | Knob | Default | Quando mexer |
 |---|---|---|
-| `EAVT_PAGE_CACHE_SIZE` / `--page-cache-size` | 64 MB | Neutro no exercício @≤50k (working set cabe). **Carga completa**: working set materializado ultrapassa 64MB — recomendado 512MB–1GB |
+| `EAVT_PAGE_CACHE_SIZE` / `--page-cache-size` | **512 MB** | Neutro no exercício @≤50k. Default elevado pós-experimento: carga completa tem working set materializado >> 64MB |
 | `index_cache_bytes` | 32 MB | Índices parseados; acompanhar com page_cache |
 | `hydrated_max_bytes` | 1 GiB | Fast path CF-0; aumentar se entidades quentes > budget |
 | `gc_max_age_secs` / `gc_root_count` | 12 h / 10 | Retenção antes do GC; réplica consome raizes com lag |

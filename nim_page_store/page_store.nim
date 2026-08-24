@@ -1067,7 +1067,7 @@ proc newPageStore*(config: Table[string, string]): ptr PageStoreInner =
   let backend = config.getOrDefault("backend", "file")
   let readOnly = config.getOrDefault("read_only", "false") == "true"
   let path = config.getOrDefault("path", "")
-  let pageCacheSize = parseInt(config.getOrDefault("page_cache_size", "67108864"))
+  let pageCacheSize = parseInt(config.getOrDefault("page_cache_size", "536870912"))  # 512 MB
   let numCf = parseInt(config.getOrDefault("num_cf", "64"))
 
   if path.len == 0:
