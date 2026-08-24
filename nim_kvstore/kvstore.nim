@@ -43,6 +43,9 @@ type
     ## flushAsync on its event loop; nil (tests, sync callers) means "no
     ## background flusher" — call flush()/flushSync() explicitly.
     onFlushRequest*: proc () {.gcsafe.}
+    ## Sinaliza CAPTURA de flush na réplica: fronteira de geração — todo wal
+    ## entregue depois pertence à geração nova. Deve sair ANTES do root.
+    onFlushSeal*: proc () {.gcsafe, raises: [].}
     ## When set, journal entries are handed to this sink instead of being
     ## written to the journal file inline — the sink serializes them directly
     ## into the WAL buffer.
@@ -148,6 +151,17 @@ proc publishRoot*(kv: KVStore; rootName: string) {.gcsafe.} =
   ## The server already committed the root to disk; this loads it into
   ## ps.trees and discards the pending treap.
   let loaded = loadRoot(kv.ps[], rootName)
+  block diag:
+    var snap = ""
+    for cf in 0..<min(4, kv.ps[].trees.len):
+      let t = kv.ps[].trees[cf]
+      var hex = ""
+      for b in t.rootUuid: hex.add toHex(b)
+      snap.add " cf" & $cf & "=h" & $t.height & "/" & hex[0 ..< 8]
+    if loaded:
+      logInfo("replica-root", rootName & snap)
+    else:
+      logWarn("replica-root", rootName & " LOAD FAILED")
   if loaded:
     kv.flushRoots = @[]
     kv.mtSize = 0
@@ -403,6 +417,7 @@ proc flush*(kv: KVStore) {.gcsafe.} =
   # publishes.
   if kv.journalSeal != nil:
     sealBoundary = kv.journalSeal()
+    if kv.onFlushSeal != nil: kv.onFlushSeal()
   var keysByCf: seq[(int, seq[seq[byte]])] = @[]
   var pairsByCf: seq[(int, seq[(seq[byte], seq[byte])])] = @[]
   var deletedByCf: seq[(int, seq[seq[byte]])] = @[]

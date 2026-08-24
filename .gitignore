@@ -10,3 +10,4 @@ nim_*/*/test_*
 nim_query/query/test_query
 __pycache__/
 eavt_*/server
+eavt_transactor_nim/test_replication_queue

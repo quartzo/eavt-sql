@@ -42,7 +42,7 @@ type
   WalWriter* = ref object
     kv: KVStore                  # polls walDurableUpTo for segment deletion
     dir: string                  # <db>/journal
-    segIdx: int                  # current segment number
+    segIdx*: int                 # current segment number
     f: AsyncFile                 # current segment (append; never truncated)
     offset: int64                # write position within the current segment
     buf*: seq[byte]               # pending bytes; buf[0] is logical pos bufPos

@@ -583,6 +583,7 @@ proc flushNowAsync*(f: AsyncFlusher): Future[void] {.async.} =
     # sync flush).
     if kv.journalSeal != nil:
       sealBoundary = kv.journalSeal()
+      if kv.onFlushSeal != nil: kv.onFlushSeal()
   if not captured:
     # Another flush holds the captured window (sync flush() ran mid-flight).
     # It publishes our writes only if they were captured by it; writes after
@@ -600,6 +601,11 @@ proc flushNowAsync*(f: AsyncFlusher): Future[void] {.async.} =
   # PageStore — the sealed WAL segment may be deleted on the next WAL cycle.
   if sealBoundary >= 0:
     kv.walDurableUpTo.store(sealBoundary, moRelease)
+  # Notify the replication hub of the newly published root — SAME contract
+  # as the sync flush path. Sem este broadcast a réplica nunca avança o
+  # pagestore (ficava presa no root vazio inicial e perdia gerações).
+  if kv.onFlushPublish != nil:
+    kv.onFlushPublish(kv.ps[].currentRoot)
 
 proc runner(f: AsyncFlusher) {.async: (raises: []).} =
   ## Drives flush/GC passes while work is requested. Each iteration:

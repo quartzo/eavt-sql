@@ -119,8 +119,13 @@ proc main() {.async.} =
   var walw: WalWriter = nil
   walw = await attachWal(eng.kv, dbPath)
   eng.walw = walw
+  # seal = fronteira de geração: sai na CAPTURA do flush (não na rotação
+  # assíncrona do segmento — que chegava até ~100ms tarde, depois dos frames
+  # wal pós-captura, invertendo a atribuição de treap na réplica).
   walw.onSeal = proc(segIdx: int) {.gcsafe.} =
-    broadcastSeal(addr eng.hub, segIdx)
+    discard
+  eng.kv.onFlushSeal = proc() {.gcsafe, raises: [].} =
+    broadcastSeal(addr eng.hub, walw.segIdx)
   walw.onWal = proc(data: seq[byte]) {.gcsafe.} =
     broadcastWal(addr eng.hub, data)
   eng.kv.onFlushPublish = proc(rootName: string) {.gcsafe.} =

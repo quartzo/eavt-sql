@@ -529,8 +529,15 @@ proc bootstrapResolver*(eng: EavtEngine) =
     let many = cardMap.getOrDefault(e, false)
     let unique = e in uniqueSet
     eng.resolver.loadUserAttr(name, e, vt, many, unique, false)
+  var cf1snap = ""
+  if eng.kv.ps != nil and eng.kv.ps[].trees.len > 1:
+    let t = eng.kv.ps[].trees[1]
+    var hex = ""
+    for b in t.rootUuid: hex.add toHex(b)
+    cf1snap = " cf1=h" & $t.height & "/" & hex[0 ..< 8] &
+              " leaves=" & $t.numLeaves
   logInfo("resolver", "bootstrap: " & $identMap.len & " user attrs, " &
-    $uniqueSet.len & " unique")
+    $uniqueSet.len & " unique" & cf1snap)
 
   seedPartitionCounters(eng)
 
