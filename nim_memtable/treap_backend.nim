@@ -287,9 +287,10 @@ proc batchMove*(mt: MemTable; entries: var seq[CfKey]): uint64 =
     let root = mt.hnd.live[cf]
     let mutable = root == nil or root.readerCount == 0
     var k = system.move(entries[i].key)
+    let klen = k.len
     let (newRoot, wasNew) = insertOwned(root, k, none(Value), false, mutable)
     mt.hnd.live[cf] = newRoot
-    if wasNew: mt.hnd.cfSize[cf] += k.len
+    if wasNew: mt.hnd.cfSize[cf] += klen
   mt.size()
 
 proc batch*(mt: MemTable; entries: seq[CfKey]): uint64 =
