@@ -239,3 +239,17 @@ the main thread. See `test_kvstore.nim` `PutterArg`/`runThreads` and
 finite parallelism (where its `awaitAll` barrier and bounded pool are a feature).
 Do not use it for the server's connection loop or for flush.
 
+## Known Issues / Open Questions
+
+- **Replication race on `ATTRIBUTE ... UNIQUE`** (não resolvido — pesquisar).
+  O `declare-attr`/`ATTRIBUTE` é um write que vai ao transactor; a réplica
+  (query server) só recebe a declaração quando a atualização do memtable replica
+  via WAL. Uma consulta que depende da unicidade (`lookup-entity` / `eid()`,
+  e por tabela o planejador do SQL `WHERE unique_attr = valor`) respondida pela
+  réplica **antes** da replicação alcançar o `declare-attr` vê o resolver stale
+  e falha com `lookup-entity: attribute is not UNIQUE`. Repro mínimo: declara o
+  attr UNIQUE, `save`, e consulta `eid()` imediatamente sem `flush`+espera —
+  falha; após `flush` + sleep, funciona. Candidatos de correção: responder
+  leituras no transactor (não na réplica), ou a réplica bloquear/sincronizar até
+  a geração da declaração, ou deferir o check de unicidade para o transactor.
+
