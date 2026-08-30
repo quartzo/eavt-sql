@@ -174,7 +174,7 @@ proc saveResolved(q: QueryStore; eid: int64; attrId: uint32; vt: uint32;
       var retracted = 0
       for ek in foundKeys:
         if ek.len < 20: continue
-        var retEntries = buildEavtEntries(eid, attrId, ek[12 ..< ek.len - 8], t, true, mode, indexed)
+        var retEntries = buildEavtEntries(q.eavt.kv.mt.hnd.arena, eid, attrId, ek[12 ..< ek.len - 8], t, true, mode, indexed)
         q.eavt.batchWrite(retEntries)
         retracted += 1
       q.saveRetractApplyNs += (getMonoTime().ticks - tScan.ticks)
@@ -186,7 +186,7 @@ proc saveResolved(q: QueryStore; eid: int64; attrId: uint32; vt: uint32;
   q.saveRetractScanNs += (getMonoTime().ticks - t0.ticks)
   t0 = getMonoTime()
 
-  var entries = buildEavtEntries(eid, attrId, encoded, t, false, mode, indexed)
+  var entries = buildEavtEntries(q.eavt.kv.mt.hnd.arena, eid, attrId, encoded, t, false, mode, indexed)
 
   q.saveBuildEntriesNs += (getMonoTime().ticks - t0.ticks)
   t0 = getMonoTime()
@@ -250,7 +250,7 @@ method retract(q: QueryStore; eid: int64; attr: string; val: SExpr;
   let mode = valueTypeToEncodeMode(vt)
   let encoded = encodeValue(sexprToValueForType(val, vt), mode, eid)
   let indexed = q.eavt.resolver.isIndexed(attrId)
-  var entries = buildEavtEntries(eid, attrId, encoded, t, true, mode, indexed)
+  var entries = buildEavtEntries(q.eavt.kv.mt.hnd.arena, eid, attrId, encoded, t, true, mode, indexed)
   q.eavt.batchWrite(entries)
 
 method lookupAttr(q: QueryStore; name: string): Option[uint32] =

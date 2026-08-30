@@ -1,57 +1,200 @@
 ## backend.nim (memtable backend)
 ##
-## Persistent treap (COW) per CF. No snapshot registry — cursors hold
-## TreapNode refs directly (ARC manages lifetime). No lock — KVStore
-## serializes all writes.
+## Persistent treap (COW) per CF. Nodes and key/value bytes live in a
+## per-memtable arena (bulk allocation, freed once per flush generation).
+## No snapshot registry — cursors hold TreapNode pointers directly. No lock —
+## KVStore serializes all writes.
 
 import std/[random, algorithm, sets, options]
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Persistent treap node
+# Arena allocation (nodes + key/value bytes)
 # ══════════════════════════════════════════════════════════════════════════════
 
+const
+  NodeBlockSize* = 1000                ## nodes per node-arena block
+  KeyBlockSize* = 16 * 1024            ## bytes per key-arena block
+
 type
+  TreapNodeObj* = object
+    keyPtr*: ptr UncheckedArray[byte]      ## inline key bytes (key arena)
+    valuePtr*: ptr UncheckedArray[byte]    ## inline value bytes (key arena); nil = none
+    left*: ptr TreapNodeObj
+    right*: ptr TreapNodeObj
+    readerCount*: int                      ## cursors holding a ref to this root; 0 = mutate in-place
+    keyLen*: uint32
+    valueLen*: uint32
+    prio*: uint32
+    deleted*: bool                         ## tombstone marker (all CFs)
+
+  TreapNode* = ptr TreapNodeObj
+
+  ArenaObj* = object
+    nodeBlocks*: seq[ptr UncheckedArray[TreapNodeObj]]
+    nodeBump*: int
+    keyBlocks*: seq[ptr UncheckedArray[byte]]
+    keyBump*: int
+    large*: seq[ptr UncheckedArray[byte]]  ## keys larger than KeyBlockSize
+
+  Arena* = ref ArenaObj
+
   Key* = seq[byte]
   Value* = seq[byte]
+
+  KeyRef* = object
+    ## Borrowed key bytes: pointer + length. Points into the arena (hot path,
+    ## written by buildEavtEntries) or into a caller-owned buffer (journal
+    ## replay, which copies into the arena immediately).
+    p*: ptr UncheckedArray[byte]
+    len*: int
 
   CfKey* = object
     ## Write command: column family + key bytes.
     cf*: uint8
-    key*: seq[byte]
-
-  TreapNode* {.acyclic.} = ref object
-    key*: Key
-    value*: Option[Value]   ## none for key-only CFs (0-3), some for key-value CFs (>=10)
-    deleted*: bool          ## tombstone marker (all CFs)
-    prio*: uint32
-    left*: TreapNode
-    right*: TreapNode
-    readerCount*: int       ## cursors holding a ref to this root; 0 = safe to mutate in-place
+    key*: KeyRef
 
   MemTableHandle* = object
     live*: seq[TreapNode]
-    cfSize: seq[int]           ## key bytes per CF
+    cfSize*: seq[int]             ## key bytes per CF
+    arena*: Arena                 ## current generation's arena (all CFs share it)
+
+  MemTable* = ref object
+    hnd*: MemTableHandle
+    numCf*: int
+
+proc `=destroy`(a: var ArenaObj) =
+  ## Free every block owned by the arena when its refcount drops to zero.
+  ## Coarse lifetime: no per-node free — the whole generation dies at once.
+  for b in a.nodeBlocks: deallocShared(b)
+  for b in a.keyBlocks: deallocShared(b)
+  for b in a.large: deallocShared(b)
+  a.nodeBlocks = @[]; a.keyBlocks = @[]; a.large = @[]
+
+# ── Arena allocator ──
+
+proc allocNode*(a: Arena): TreapNode =
+  if a.nodeBlocks.len == 0 or a.nodeBump >= NodeBlockSize:
+    let b = cast[ptr UncheckedArray[TreapNodeObj]](
+      allocShared0(NodeBlockSize * sizeof(TreapNodeObj)))
+    a.nodeBlocks.add(b)
+    a.nodeBump = 0
+  result = cast[TreapNode](addr a.nodeBlocks[^1][a.nodeBump])
+  zeroMem(result, sizeof(TreapNodeObj))
+  inc a.nodeBump
+
+proc allocKeyBytes*(a: Arena; len: int): ptr UncheckedArray[byte] =
+  ## Reserve `len` bytes in the key arena. Keys larger than a block get their
+  ## own allocation (tracked in `large`, freed with the arena).
+  if len <= 0: return nil
+  if len > KeyBlockSize:
+    let p = cast[ptr UncheckedArray[byte]](allocShared0(len))
+    a.large.add(p)
+    return p
+  if a.keyBlocks.len == 0 or a.keyBump + len > KeyBlockSize:
+    let b = cast[ptr UncheckedArray[byte]](allocShared0(KeyBlockSize))
+    a.keyBlocks.add(b)
+    a.keyBump = 0
+  result = cast[ptr UncheckedArray[byte]](addr a.keyBlocks[^1][a.keyBump])
+  inc a.keyBump, len
+
+proc newArena*(): Arena =
+  Arena(nodeBlocks: @[], nodeBump: 0, keyBlocks: @[], keyBump: 0, large: @[])
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Treap helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-proc cmpKey*(a, b: openArray[byte]): int =
-  let n = min(a.len, b.len)
+proc cmpKey*(np: ptr UncheckedArray[byte]; nlen: int; other: openArray[byte]): int =
+  ## Compare a node's inline key (ptr, len) with `other`. -1/0/1.
+  let n = min(nlen, other.len)
   for i in 0 ..< n:
-    if a[i] < b[i]: return -1
-    if a[i] > b[i]: return 1
-  if a.len < b.len: return -1
-  if a.len > b.len: return 1
-  return 0
+    if np[i] < other[i]: return -1
+    if np[i] > other[i]: return 1
+  if nlen < other.len: return -1
+  if nlen > other.len: return 1
+  0
 
-proc newLeaf(key: Key; value: Option[Value] = none(Value); deleted: bool = false): TreapNode =
-  TreapNode(key: key, value: value, deleted: deleted, prio: cast[uint32](rand(int.high)))
+proc cmpKeyOpen*(key: openArray[byte]; np: ptr UncheckedArray[byte]; nlen: int): int =
+  ## Compare `key` (openArray) with a node's inline key (ptr, len). -1/0/1.
+  let n = min(key.len, nlen)
+  for i in 0 ..< n:
+    if key[i] < np[i]: return -1
+    if key[i] > np[i]: return 1
+  if key.len < nlen: return -1
+  if key.len > nlen: return 1
+  0
+
+proc cmpKeyRef*(key: KeyRef; np: ptr UncheckedArray[byte]; nlen: int): int =
+  ## Compare `key` (KeyRef) with a node's inline key (ptr, len). -1/0/1.
+  let n = min(key.len, nlen)
+  for i in 0 ..< n:
+    if key.p[i] < np[i]: return -1
+    if key.p[i] > np[i]: return 1
+  if key.len < nlen: return -1
+  if key.len > nlen: return 1
+  0
+
+proc toKeyRef*(key: openArray[byte]): KeyRef =
+  if key.len > 0:
+    KeyRef(p: cast[ptr UncheckedArray[byte]](unsafeAddr key[0]), len: key.len)
+  else:
+    KeyRef(p: nil, len: 0)
+
+proc toSeq*(k: KeyRef): seq[byte] =
+  ## Owned copy of a borrowed key (journal replay, hydrated set, etc.).
+  if k.len > 0:
+    result = newSeq[byte](k.len)
+    copyMem(addr result[0], k.p, k.len)
+  else:
+    result = @[]
+
+proc newLeaf(a: Arena; key: KeyRef; value: Option[Value] = none(Value);
+             deleted: bool = false; copyKey: bool = false): TreapNode =
+  result = allocNode(a)
+  result.keyLen = key.len.uint32
+  if key.len > 0:
+    if copyKey:
+      result.keyPtr = allocKeyBytes(a, key.len)
+      copyMem(result.keyPtr, key.p, key.len)
+    else:
+      result.keyPtr = key.p
+  result.deleted = deleted
+  result.prio = cast[uint32](rand(int.high))
+  if value.isSome:
+    let v = value.get
+    result.valueLen = v.len.uint32
+    if v.len > 0:
+      result.valuePtr = allocKeyBytes(a, v.len)
+      copyMem(result.valuePtr, unsafeAddr v[0], v.len)
+
+proc copyNode(a: Arena; n: TreapNode): TreapNode =
+  ## Path-copy clone: shares key/value bytes (same arena ptrs), fresh node.
+  result = allocNode(a)
+  result.keyPtr = n.keyPtr
+  result.keyLen = n.keyLen
+  result.valuePtr = n.valuePtr
+  result.valueLen = n.valueLen
+  result.deleted = n.deleted
+  result.prio = n.prio
+  result.left = n.left
+  result.right = n.right
+
+proc setNodeValue(a: Arena; n: TreapNode; v: Value) =
+  n.valueLen = v.len.uint32
+  if v.len > 0:
+    n.valuePtr = allocKeyBytes(a, v.len)
+    copyMem(n.valuePtr, unsafeAddr v[0], v.len)
+  else:
+    n.valuePtr = nil
+
+proc clearNodeValue(n: TreapNode) =
+  n.valuePtr = nil
+  n.valueLen = 0
 
 proc containsKey*(node: TreapNode; key: openArray[byte]): bool =
   var n = node
   while n != nil:
-    let c = cmpKey(key, n.key)
+    let c = cmpKeyOpen(key, n.keyPtr, n.keyLen.int)
     if c == 0: return not n.deleted
     elif c < 0: n = n.left
     else: n = n.right
@@ -59,8 +202,8 @@ proc containsKey*(node: TreapNode; key: openArray[byte]): bool =
 
 proc countInRange(node: TreapNode, lo, hi: Key): int =
   if node == nil: return 0
-  let cl = cmpKey(node.key, lo)
-  let ch = cmpKey(node.key, hi)
+  let cl = cmpKey(node.keyPtr, node.keyLen.int, lo)
+  let ch = cmpKey(node.keyPtr, node.keyLen.int, hi)
   result = 0
   if cl >= 0 and ch < 0: result += 1
   if cl > 0: result += countInRange(node.left, lo, hi)
@@ -73,17 +216,23 @@ proc countAll(node: TreapNode): int =
 proc prefixUpperBound(prefix: Key): Key =
   result = prefix & @[byte(0xFF), 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
 
-proc rotateRight(n: TreapNode): TreapNode =
+proc rotateRight(a: Arena; n: TreapNode): TreapNode =
   let l = n.left
-  result = l
-  var nn = TreapNode(key: n.key, value: n.value, deleted: n.deleted, prio: n.prio, left: l.right, right: n.right)
-  result = TreapNode(key: l.key, value: l.value, deleted: l.deleted, prio: l.prio, left: l.left, right: nn)
+  var nn = copyNode(a, n)
+  nn.left = l.right
+  nn.right = n.right
+  result = copyNode(a, l)
+  result.left = l.left
+  result.right = nn
 
-proc rotateLeft(n: TreapNode): TreapNode =
+proc rotateLeft(a: Arena; n: TreapNode): TreapNode =
   let r = n.right
-  result = r
-  var nn = TreapNode(key: n.key, value: n.value, deleted: n.deleted, prio: n.prio, left: n.left, right: r.left)
-  result = TreapNode(key: r.key, value: r.value, deleted: r.deleted, prio: r.prio, left: nn, right: r.right)
+  var nn = copyNode(a, n)
+  nn.left = n.left
+  nn.right = r.left
+  result = copyNode(a, r)
+  result.left = nn
+  result.right = r.right
 
 proc rotateRightMut(n: TreapNode): TreapNode =
   ## In-place right rotation. Returns new root (the left child).
@@ -99,68 +248,61 @@ proc rotateLeftMut(n: TreapNode): TreapNode =
   r.left = n
   return r
 
-proc insert(node: TreapNode, key: openArray[byte]; value: Option[Value] = none(Value);
-             deleted: bool = false; mutable: bool = false): (TreapNode, bool) =
+proc insert(a: Arena; node: TreapNode; key: KeyRef;
+            value: Option[Value] = none(Value);
+            deleted: bool = false; mutable: bool = false): (TreapNode, bool) =
   if node == nil:
-    # Copy key into owned seq[byte] for storage in the node
-    var k = newSeq[byte](key.len)
-    if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
-    return (newLeaf(k, value, deleted), true)
-  let c = cmpKey(key, node.key)
+    return (newLeaf(a, key, value, deleted, copyKey=true), true)
+  let c = cmpKeyRef(key, node.keyPtr, node.keyLen.int)
   if c < 0:
-    let (nl, wasNew) = insert(node.left, key, value, deleted, mutable)
+    let (nl, wasNew) = insert(a, node.left, key, value, deleted, mutable)
     if mutable:
       node.left = nl
       if node.left != nil and node.left.prio > node.prio:
         return (rotateRightMut(node), wasNew)
       return (node, wasNew)
     else:
-      var nn = TreapNode(key: node.key, value: node.value, deleted: node.deleted,
-                         prio: node.prio, left: nl, right: node.right)
-      if nn.left != nil and nn.left.prio > nn.prio: return (rotateRight(nn), wasNew)
+      var nn = copyNode(a, node)
+      nn.left = nl
+      if nn.left != nil and nn.left.prio > nn.prio:
+        return (rotateRight(a, nn), wasNew)
       return (nn, wasNew)
   elif c > 0:
-    let (nr, wasNew) = insert(node.right, key, value, deleted, mutable)
+    let (nr, wasNew) = insert(a, node.right, key, value, deleted, mutable)
     if mutable:
       node.right = nr
       if node.right != nil and node.right.prio > node.prio:
         return (rotateLeftMut(node), wasNew)
       return (node, wasNew)
     else:
-      var nn = TreapNode(key: node.key, value: node.value, deleted: node.deleted,
-                         prio: node.prio, left: node.left, right: nr)
-      if nn.right != nil and nn.right.prio > nn.prio: return (rotateLeft(nn), wasNew)
+      var nn = copyNode(a, node)
+      nn.right = nr
+      if nn.right != nil and nn.right.prio > nn.prio:
+        return (rotateLeft(a, nn), wasNew)
       return (nn, wasNew)
   else:
     # Key exists: update value and/or deleted flag.
     # When deleted, clear the value so tombstone detection works.
     if mutable:
       if deleted:
-        node.value = none(Value)
+        clearNodeValue(node)
         node.deleted = true
       elif value.isSome:
-        node.value = value
+        setNodeValue(a, node, value.get)
         node.deleted = false
       return (node, false)
     else:
-      let newVal = if deleted: none(Value)
-                   elif value.isSome: value
-                   else: node.value
-      return (TreapNode(key: node.key, value: newVal, deleted: deleted,
-                        prio: node.prio, left: node.left, right: node.right), false)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ══════════════════════════════════════════════════════════════════════════════
-
+      var nn = copyNode(a, node)
+      if deleted:
+        clearNodeValue(nn)
+      elif value.isSome:
+        setNodeValue(a, nn, value.get)
+      nn.deleted = deleted
+      return (nn, false)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Nim-native MemTable
 # ══════════════════════════════════════════════════════════════════════════════
-
-type
-  MemTable* = ref object
-    hnd*: MemTableHandle
-    numCf*: int
 
 proc newMemTable*(numCf: int): MemTable =
   if numCf <= 0: raise newException(ValueError, "numCf must be > 0")
@@ -168,6 +310,7 @@ proc newMemTable*(numCf: int): MemTable =
   result.hnd = MemTableHandle(
     live: newSeq[TreapNode](numCf),
     cfSize: newSeq[int](numCf),
+    arena: newArena(),
   )
   randomize()
 
@@ -180,7 +323,8 @@ proc put*(mt: MemTable; cf: int; key: openArray[byte]): uint64 =
   if cf < 0 or cf >= mt.numCf: raise newException(ValueError, "invalid cf")
   let root = mt.hnd.live[cf]
   let mutable = root == nil or root.readerCount == 0
-  let (newRoot, wasNew) = insert(root, key, mutable = mutable)
+  let kref = toKeyRef(key)
+  let (newRoot, wasNew) = insert(mt.hnd.arena, root, kref, mutable = mutable)
   mt.hnd.live[cf] = newRoot
   if wasNew: mt.hnd.cfSize[cf] += key.len
   mt.size()
@@ -191,7 +335,8 @@ proc putKv*(mt: MemTable; cf: int; key, value: openArray[byte]): uint64 =
   if value.len > 0: copyMem(addr v[0], unsafeAddr value[0], value.len)
   let root = mt.hnd.live[cf]
   let mutable = root == nil or root.readerCount == 0
-  let (newRoot, wasNew) = insert(root, key, some(v), mutable = mutable)
+  let kref = toKeyRef(key)
+  let (newRoot, wasNew) = insert(mt.hnd.arena, root, kref, some(v), mutable = mutable)
   mt.hnd.live[cf] = newRoot
   if wasNew: mt.hnd.cfSize[cf] += key.len + v.len
   mt.size()
@@ -202,14 +347,19 @@ proc deleteKv*(mt: MemTable; cf: int; key: openArray[byte]) =
   if cf < 0 or cf >= mt.numCf: raise newException(ValueError, "invalid cf")
   let root = mt.hnd.live[cf]
   let mutable = root == nil or root.readerCount == 0
-  mt.hnd.live[cf] = insert(root, key, none(Value), deleted=true, mutable = mutable)[0]
+  let kref = toKeyRef(key)
+  mt.hnd.live[cf] = insert(mt.hnd.arena, root, kref, none(Value), deleted=true, mutable = mutable)[0]
 
 proc getValue*(mt: MemTable; cf: int; key: openArray[byte]): Option[Value] =
   if cf < 0 or cf >= mt.hnd.live.len: return none(Value)
   var n = mt.hnd.live[cf]
   while n != nil:
-    let c = cmpKey(key, n.key)
-    if c == 0: return if n.deleted: none(Value) else: n.value
+    let c = cmpKeyOpen(key, n.keyPtr, n.keyLen.int)
+    if c == 0:
+      if n.deleted: return none(Value)
+      var v = newSeq[byte](n.valueLen.int)
+      if n.valueLen > 0: copyMem(addr v[0], n.valuePtr, n.valueLen.int)
+      return some(v)
     elif c < 0: n = n.left
     else: n = n.right
   return none(Value)
@@ -218,8 +368,12 @@ proc getValue*(node: TreapNode; key: openArray[byte]): Option[Value] =
   ## Search a specific TreapNode root for a key, returning its value.
   var n = node
   while n != nil:
-    let c = cmpKey(key, n.key)
-    if c == 0: return if n.deleted: none(Value) else: n.value
+    let c = cmpKeyOpen(key, n.keyPtr, n.keyLen.int)
+    if c == 0:
+      if n.deleted: return none(Value)
+      var v = newSeq[byte](n.valueLen.int)
+      if n.valueLen > 0: copyMem(addr v[0], n.valuePtr, n.valueLen.int)
+      return some(v)
     elif c < 0: n = n.left
     else: n = n.right
   return none(Value)
@@ -229,46 +383,46 @@ var gInsNew* = 0'i64
 var gInsExisting* = 0'i64
 var gInsKeyBytes* = 0'i64
 
-proc insertOwned(node: TreapNode, key: var seq[byte];
+proc insertOwned(a: Arena; node: TreapNode; key: KeyRef;
                  value: Option[Value] = none(Value);
                  deleted: bool = false; mutable: bool = false): (TreapNode, bool) =
-  ## Variante zero-copy: a chave é CONSUMIDA na criação da folha (move),
-  ## eliminando a cópia por inserção do caminho de carga.
+  ## Load-path variant: the key is ALREADY in the arena (written by
+  ## buildEavtEntries), so the leaf references it — no copy.
   if node == nil:
     inc gInsNew; gInsKeyBytes += key.len
-    return (newLeaf(system.move(key), value, deleted), true)
-  let c = cmpKey(key, node.key)
+    return (newLeaf(a, key, value, deleted, copyKey=false), true)
+  let c = cmpKeyRef(key, node.keyPtr, node.keyLen.int)
   if c < 0:
-    let (nl, wasNew) = insertOwned(node.left, key, value, deleted, mutable)
+    let (nl, wasNew) = insertOwned(a, node.left, key, value, deleted, mutable)
     if mutable:
       node.left = nl
       if node.left != nil and node.left.prio > node.prio:
         return (rotateRightMut(node), wasNew)
       return (node, wasNew)
     else:
-      var nn = TreapNode(key: node.key, value: node.value, deleted: node.deleted,
-                         prio: node.prio, left: nl, right: node.right)
-      if nn.left != nil and nn.left.prio > node.prio:
-        return (rotateRight(nn), wasNew)
+      var nn = copyNode(a, node)
+      nn.left = nl
+      if nn.left != nil and nn.left.prio > nn.prio:
+        return (rotateRight(a, nn), wasNew)
       return (nn, wasNew)
   elif c > 0:
-    let (nr, wasNew) = insertOwned(node.right, key, value, deleted, mutable)
+    let (nr, wasNew) = insertOwned(a, node.right, key, value, deleted, mutable)
     if mutable:
       node.right = nr
       if node.right != nil and node.right.prio > node.prio:
         return (rotateLeftMut(node), wasNew)
       return (node, wasNew)
     else:
-      var nn = TreapNode(key: node.key, value: node.value, deleted: node.deleted,
-                         prio: node.prio, left: node.left, right: nr)
-      if nn.right != nil and nn.right.prio > node.prio:
-        return (rotateLeft(nn), wasNew)
+      var nn = copyNode(a, node)
+      nn.right = nr
+      if nn.right != nil and nn.right.prio > nn.prio:
+        return (rotateLeft(a, nn), wasNew)
       return (nn, wasNew)
   else:
     inc gInsExisting
-    # chave existente: atualiza valor em-place quando mutável
     if mutable and not node.deleted:
-      node.value = value
+      if value.isSome: setNodeValue(a, node, value.get)
+      else: clearNodeValue(node)
       node.deleted = deleted
     return (node, false)
 
@@ -280,15 +434,14 @@ proc printInsertDiag() =
 proc batchMove*(mt: MemTable; entries: var seq[CfKey]): uint64 =
   if entries.len > 0 and gInsNew mod 100_000 < entries.len:
     printInsertDiag()
-  ## Consome as chaves de `entries` (move até o nó) — chamador não reutiliza.
+  ## References the key bytes (already in the arena, written by the caller).
   for i in 0 ..< entries.len:
     let cf = entries[i].cf.int
     if cf < 0 or cf >= mt.numCf: continue
     let root = mt.hnd.live[cf]
     let mutable = root == nil or root.readerCount == 0
-    var k = system.move(entries[i].key)
-    let klen = k.len
-    let (newRoot, wasNew) = insertOwned(root, k, none(Value), false, mutable)
+    let klen = entries[i].key.len
+    let (newRoot, wasNew) = insertOwned(mt.hnd.arena, root, entries[i].key, none(Value), false, mutable)
     mt.hnd.live[cf] = newRoot
     if wasNew: mt.hnd.cfSize[cf] += klen
   mt.size()
@@ -299,12 +452,14 @@ proc batch*(mt: MemTable; entries: seq[CfKey]): uint64 =
     if cf < 0 or cf >= mt.numCf: continue
     let root = mt.hnd.live[cf]
     let mutable = root == nil or root.readerCount == 0
-    let (newRoot, wasNew) = insert(root, e.key, mutable = mutable)
+    let (newRoot, wasNew) = insert(mt.hnd.arena, root, e.key, mutable = mutable)
     mt.hnd.live[cf] = newRoot
     if wasNew: mt.hnd.cfSize[cf] += e.key.len
   mt.size()
 
 proc clear*(mt: MemTable) =
+  ## Nil the live roots. The arena is NOT freed here — it is freed once by
+  ## the flush after the captured roots have been drained (see freeArena).
   for i in 0 ..< mt.hnd.live.len:
     mt.hnd.live[i] = nil
     mt.hnd.cfSize[i] = 0
@@ -321,8 +476,6 @@ proc countPrefix*(mt: MemTable; cf: int; prefix: openArray[byte]): uint64 =
   if root == nil: return 0
   if prefix.len == 0:
     return cast[uint64](countAll(root))
-  # Build upper bound from prefix for range count
   var pfx = newSeq[byte](prefix.len)
   if prefix.len > 0: copyMem(addr pfx[0], unsafeAddr prefix[0], prefix.len)
   result = cast[uint64](countInRange(root, pfx, prefixUpperBound(pfx)))
-

@@ -31,6 +31,7 @@ type
     mt*: mt_be.MemTable
     mtSize*: uint64
     flushRoots*: seq[mt_be.TreapNode]
+    flushArena*: mt_be.Arena   ## captured arena held alive during the drain
     config*: Table[string, string]
     path*: string
     readOnly*: bool
@@ -113,11 +114,14 @@ proc parseJournalRecords*(data: openArray[byte]): seq[mt_be.CfKey] =
     if pos + vlen > data.len: break
     pos += vlen
     if klen >= 1 and cf <= 3'u8:
-      var key = newSeq[byte](klen - 1)
       let keyStart = pos - 4 - vlen - klen + 1
-      for i in 0 ..< klen - 1:
-        key[i] = byte(data[keyStart + i])
-      result.add(mt_be.CfKey(cf: cf, key: key))
+      let keyLen = klen - 1
+      # Borrowed ptr into `data` — the caller copies into the arena (batch)
+      # before `data` is released.
+      result.add(mt_be.CfKey(cf: cf,
+        key: mt_be.KeyRef(
+          p: cast[ptr UncheckedArray[byte]](unsafeAddr data[keyStart]),
+          len: keyLen)))
 
 proc parseJournalFile*(path: string): seq[mt_be.CfKey] =
   ## Parse a single journal file (used by replay at open).
@@ -141,6 +145,8 @@ proc sealLiveToFlush*(kv: KVStore) {.gcsafe.} =
   ## Used by the replication replica when the server signals a seal event:
   ## the current live treap becomes the "pending" treap (will be discarded
   ## when the next root publish arrives) and a fresh live treap takes over.
+  kv.flushArena = kv.mt.hnd.arena
+  kv.mt.hnd.arena = mt_be.newArena()
   kv.flushRoots = kv.mt.hnd.live
   kv.mt.clear()
   kv.mtSize = 0
@@ -164,6 +170,7 @@ proc publishRoot*(kv: KVStore; rootName: string) {.gcsafe.} =
       logWarn("replica-root", rootName & " LOAD FAILED")
   if loaded:
     kv.flushRoots = @[]
+    kv.flushArena = nil
     kv.mtSize = 0
 
 
@@ -214,18 +221,20 @@ proc newKVStore*(config: Table[string, string]): KVStore =
             logDebug("kvstore", "skipping non-segment file " & base)
     segs.sort(proc(a, b: tuple[idx: int, path: string]): int = cmp(a.idx, b.idx))
     for s in segs: files.add(s.path)
-    var entries: seq[mt_be.CfKey] = @[]
     for jf in files:
       try:
         let data = readFile(jf)
         if data.len > 0:
-          entries.add parseJournalRecords(cast[seq[byte]](data))
+          # Batch per-file: the entries borrow pointers into `data`, which
+          # must stay alive until the batch copies them into the arena.
+          let fileEntries = parseJournalRecords(cast[seq[byte]](data))
+          if fileEntries.len > 0:
+            result.mtSize = result.mt.batch(fileEntries)
       except CatchableError as e:
         # Tolerant replay (decided): keep opening, but the skipped segment
         # is durability-relevant and MUST be visible.
         logError("kvstore", "journal replay skipped " & jf & " (" &
           excMsg(e) & "); data in this segment may be missing")
-    if entries.len > 0: result.mtSize = result.mt.batch(entries)
 
 proc journalDeliver*(kv: KVStore; entries: seq[mt_be.CfKey]) {.gcsafe.} =
   ## Journal entries to the sink when installed, else best-effort append
@@ -245,7 +254,7 @@ proc journalDeliver*(kv: KVStore; entries: seq[mt_be.CfKey]) {.gcsafe.} =
       hdr[0] = byte((totKlen shr 24) and 0xFF); hdr[1] = byte((totKlen shr 16) and 0xFF)
       hdr[2] = byte((totKlen shr 8) and 0xFF); hdr[3] = byte(totKlen and 0xFF)
       hdr[4] = e.cf
-      if klen > 0: copyMem(addr hdr[5], unsafeAddr e.key[0], klen)
+      if klen > 0: copyMem(addr hdr[5], e.key.p, klen)
       hdr[5+klen] = 0; hdr[6+klen] = 0; hdr[7+klen] = 0; hdr[8+klen] = 1; hdr[9+klen] = 0
       discard f.writeBytes(hdr, 0, hdr.len)
     f.close()
@@ -303,7 +312,7 @@ proc put*(kv: KVStore; cf: int; key: openArray[byte]) {.gcsafe.} =
   kv.mtSize = kv.mt.put(cf, k)
   if kv.mtSize >= kv.flushThreshold: needsFlush = true
   if journaling(kv):
-    kv.journalDeliver(@[mt_be.CfKey(cf: cf.uint8, key: k)])
+    kv.journalDeliver(@[mt_be.CfKey(cf: cf.uint8, key: mt_be.toKeyRef(k))])
   if needsFlush: kv.requestFlush()
 
 proc get*(kv: KVStore; cf: int; key: openArray[byte]): bool {.gcsafe.} =
@@ -410,6 +419,8 @@ proc flush*(kv: KVStore) {.gcsafe.} =
   # Single-threaded: capture runs atomically before next await.
   if kv.flushRoots.len > 0: return
   roots = kv.mt.hnd.live
+  kv.flushArena = kv.mt.hnd.arena
+  kv.mt.hnd.arena = mt_be.newArena()
   kv.mt.clear(); kv.mtSize = 0
   kv.flushRoots = roots
   # Seal the WAL segment at the capture boundary: records applied after
@@ -426,14 +437,14 @@ proc flush*(kv: KVStore) {.gcsafe.} =
       if cf >= 10:
         var pairs: seq[(seq[byte], seq[byte])] = @[]
         var deleted: seq[seq[byte]] = @[]
-        let tc = newTreapCursor(roots[cf])
+        let tc = newTreapCursor(roots[cf], kv.flushArena)
         while not tc.atEnd:
           let kvp = tc.nextKv()
           if kvp.isSome:
             let (key, val) = kvp.get
             pairs.add (key, val)
         # Collect tombstones from the same treap
-        let tc2 = newTreapCursor(roots[cf])
+        let tc2 = newTreapCursor(roots[cf], kv.flushArena)
         while not tc2.atEnd:
           let dk = tc2.nextDeleted()
           if dk.isSome: deleted.add(dk.get)
@@ -441,7 +452,7 @@ proc flush*(kv: KVStore) {.gcsafe.} =
         if deleted.len > 0: deletedByCf.add (cf, deleted)
       else:
         var keys: seq[seq[byte]] = @[]
-        let tc = newTreapCursor(roots[cf])
+        let tc = newTreapCursor(roots[cf], kv.flushArena)
         while not tc.atEnd:
           let k = tc.next()
           if k.isSome: keys.add(k.get)
@@ -450,7 +461,7 @@ proc flush*(kv: KVStore) {.gcsafe.} =
   if pairsByCf.len > 0 or deletedByCf.len > 0:
     commitMergeKv(kv.ps[], pairsByCf, deletedByCf, true)
   # Single-threaded publish — runs atomically before next await.
-  kv.flushRoots = @[]; kv.mtSize = 0
+  kv.flushRoots = @[]; kv.flushArena = nil; kv.mtSize = 0
   # Publish done: everything before the seal boundary is durable in the
   # PageStore — the sealed WAL segment may be deleted on the next WAL cycle.
   if sealBoundary >= 0:
@@ -534,8 +545,8 @@ proc openScanCursor*(kv: KVStore; cf: int): MergedCursor {.gcsafe.} =
   sources.add pageStoreCursor(PageStoreCursor(
     s: kv.ps, cf: cf, rootUuid: psSnap.rootUuid, height: psSnap.height,
     isKv: cf >= 10))
-  sources.add treapCursor(newTreapCursor(flushRoot))
-  sources.add treapCursor(newTreapCursor(liveRoot))
+  sources.add treapCursor(newTreapCursor(flushRoot, kv.flushArena))
+  sources.add treapCursor(newTreapCursor(liveRoot, kv.mt.hnd.arena))
 
   result = newMergedCursor(sources)
   result.cf = cf
@@ -569,13 +580,13 @@ proc openScanCursorKv*(kv: KVStore; cf: int): MergedCursor {.gcsafe.} =
     sources.add pageStoreCursor(psc)
 
   if flushRoot != nil:
-    let tc = newTreapCursor(flushRoot)
+    let tc = newTreapCursor(flushRoot, kv.flushArena)
     if not tc.atEnd:
       # Wrap in a cursor that filters tombstones via peekKv/nextKv
       sources.add treapKvCursor(tc)
 
   if liveRoot != nil:
-    let tc = newTreapCursor(liveRoot)
+    let tc = newTreapCursor(liveRoot, kv.mt.hnd.arena)
     if not tc.atEnd:
       sources.add treapKvCursor(tc)
 

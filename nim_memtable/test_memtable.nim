@@ -49,17 +49,19 @@ suite "memtable: put + size":
 suite "memtable: batch":
   test "batch of 3 keys increases size":
     let mt = newMemTable(1)
+    let k1 = @[byte(1)]; let k2 = @[byte(2)]; let k3 = @[byte(3)]
     let entries = @[
-      CfKey(cf: 0, key: @[byte(1)]),
-      CfKey(cf: 0, key: @[byte(2)]),
-      CfKey(cf: 0, key: @[byte(3)]),
+      CfKey(cf: 0, key: toKeyRef(k1)),
+      CfKey(cf: 0, key: toKeyRef(k2)),
+      CfKey(cf: 0, key: toKeyRef(k3)),
     ]
     let sz = mt.batch(entries)
     check sz > 0
 
   test "batch with duplicate key is idempotent":
     let mt = newMemTable(1)
-    let entries = @[CfKey(cf: 0, key: @[byte(7)])]
+    let k = @[byte(7)]
+    let entries = @[CfKey(cf: 0, key: toKeyRef(k))]
     let sz1 = mt.batch(entries)
     let sz2 = mt.batch(entries)
     check sz1 == sz2

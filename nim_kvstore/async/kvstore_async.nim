@@ -428,7 +428,7 @@ proc drainTreapAsync(kv: KVStore;
       var pairs: seq[(seq[byte], seq[byte])] = @[]
       var deleted: seq[seq[byte]] = @[]
       var budget = 0
-      let tc = newTreapCursor(roots[cf])
+      let tc = newTreapCursor(roots[cf], kv.flushArena)
       while not tc.atEnd:
         let kvp = tc.nextKv()
         if kvp.isSome:
@@ -438,7 +438,7 @@ proc drainTreapAsync(kv: KVStore;
           if budget >= DrainChunkBytes:
             budget = 0
             await sleepAsync(chronos.milliseconds(0))
-      let tc2 = newTreapCursor(roots[cf])
+      let tc2 = newTreapCursor(roots[cf], kv.flushArena)
       while not tc2.atEnd:
         let dk = tc2.nextDeleted()
         if dk.isSome:
@@ -452,7 +452,7 @@ proc drainTreapAsync(kv: KVStore;
     else:
       var keys: seq[seq[byte]] = @[]
       var budget = 0
-      let tc = newTreapCursor(roots[cf])
+      let tc = newTreapCursor(roots[cf], kv.flushArena)
       while not tc.atEnd:
         let k = tc.next()
         if k.isSome:
@@ -576,6 +576,8 @@ proc flushNowAsync*(f: AsyncFlusher): Future[void] {.async.} =
   var captured = false
   if kv.flushRoots.len == 0:
     roots = kv.mt.hnd.live
+    kv.flushArena = kv.mt.hnd.arena
+    kv.mt.hnd.arena = mt_be.newArena()
     kv.mt.clear(); kv.mtSize = 0
     kv.flushRoots = roots
     captured = true
@@ -596,7 +598,7 @@ proc flushNowAsync*(f: AsyncFlusher): Future[void] {.async.} =
     await commitMergeKvAsync(f.pool, kv.ps, drained.pairsByCf,
                              drained.deletedByCf, true)
   # Single-threaded publish.
-  kv.flushRoots = @[]; kv.mtSize = 0
+  kv.flushRoots = @[]; kv.flushArena = nil; kv.mtSize = 0
   # Publish done: everything before the seal boundary is durable in the
   # PageStore — the sealed WAL segment may be deleted on the next WAL cycle.
   if sealBoundary >= 0:

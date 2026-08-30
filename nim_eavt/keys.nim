@@ -5,6 +5,7 @@
 import std/[strutils]
 import resolver
 import scheme  # for PartDb, PartUser, PartTx, partitionOf, makeEntityId
+import nim_memtable/treap_backend  # Arena, KeyRef, allocKeyBytes
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Encode mode
@@ -113,7 +114,7 @@ proc encodeValue*(v: string; mode: EncodeMode; refEid: int64 = 0): seq[byte] =
 type
   EavtEntry* = object
     cf*: uint8
-    key*: seq[byte]
+    key*: KeyRef
 proc buildEavtKey*(eid: int64; attr: uint32; valueEncoded: openArray[byte];
                     t: int64; retracted: bool): seq[byte] =
   let sf = encodeSuffix(t, retracted)
@@ -186,23 +187,23 @@ proc buildVaetKey*(valueEncoded: openArray[byte]; attr: uint32; eid: int64;
 # Value encoding
 # ═══════════════════════════════════════════════════════════════════════════════
 
-proc cat4*(a, b, c, d: openArray[byte]): seq[byte] =
-  ## Single-allocation concatenation of four key pieces — the hot path of
-  ## buildEavtEntries previously chained `&` (one alloc+copy per piece).
-  result = newSeqOfCap[byte](a.len + b.len + c.len + d.len)
+proc cat4IntoArena(arena: Arena; a, b, c, d: openArray[byte]): KeyRef =
+  ## Reserve the concatenation of four pieces in the key arena and write them
+  ## directly — the key is written ONCE, no intermediate seq allocation.
+  let total = a.len + b.len + c.len + d.len
+  let p = allocKeyBytes(arena, total)
+  var off = 0
   if a.len > 0:
-    result.setLen(a.len); copyMem(addr result[0], unsafeAddr a[0], a.len)
+    copyMem(addr p[off], unsafeAddr a[0], a.len); off += a.len
   if b.len > 0:
-    let o = result.len; result.setLen(o + b.len)
-    copyMem(addr result[o], unsafeAddr b[0], b.len)
+    copyMem(addr p[off], unsafeAddr b[0], b.len); off += b.len
   if c.len > 0:
-    let o = result.len; result.setLen(o + c.len)
-    copyMem(addr result[o], unsafeAddr c[0], c.len)
+    copyMem(addr p[off], unsafeAddr c[0], c.len); off += c.len
   if d.len > 0:
-    let o = result.len; result.setLen(o + d.len)
-    copyMem(addr result[o], unsafeAddr d[0], d.len)
+    copyMem(addr p[off], unsafeAddr d[0], d.len); off += d.len
+  KeyRef(p: p, len: total)
 
-proc buildEavtEntries*(eid: int64; attr: uint32; encodedValue: seq[byte];
+proc buildEavtEntries*(arena: Arena; eid: int64; attr: uint32; encodedValue: seq[byte];
                         t: int64; retracted: bool; mode: EncodeMode;
                         indexed: bool): seq[EavtEntry] =
   let sf = encodeSuffix(t, retracted)
@@ -217,19 +218,19 @@ proc buildEavtEntries*(eid: int64; attr: uint32; encodedValue: seq[byte];
   sfBytes[6] = byte((sf shr 8) and 0xFF); sfBytes[7] = byte(sf and 0xFF)
 
   # CF 0: eavt [eid][attr][val][sf]
-  result.add EavtEntry(cf: 0, key: cat4(eBytes, aBytes, encodedValue, sfBytes))
+  result.add EavtEntry(cf: 0, key: cat4IntoArena(arena, eBytes, aBytes, encodedValue, sfBytes))
   # CF 1: aevt [attr][eid][val][sf]
-  result.add EavtEntry(cf: 1, key: cat4(aBytes, eBytes, encodedValue, sfBytes))
+  result.add EavtEntry(cf: 1, key: cat4IntoArena(arena, aBytes, eBytes, encodedValue, sfBytes))
 
   if mode == emRef:
     # CF 3: vaet [val][attr][eid][sf]
-    result.add EavtEntry(cf: 3, key: cat4(encodedValue, aBytes, eBytes, sfBytes))
+    result.add EavtEntry(cf: 3, key: cat4IntoArena(arena, encodedValue, aBytes, eBytes, sfBytes))
     if indexed:
       # CF 2: avet [attr][val][eid][sf]
-      result.add EavtEntry(cf: 2, key: cat4(aBytes, encodedValue, eBytes, sfBytes))
+      result.add EavtEntry(cf: 2, key: cat4IntoArena(arena, aBytes, encodedValue, eBytes, sfBytes))
   else:
     if indexed:
-      result.add EavtEntry(cf: 2, key: cat4(aBytes, encodedValue, eBytes, sfBytes))
+      result.add EavtEntry(cf: 2, key: cat4IntoArena(arena, aBytes, encodedValue, eBytes, sfBytes))
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Decoding (used by query engine scanner)

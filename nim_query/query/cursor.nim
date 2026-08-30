@@ -182,7 +182,8 @@ proc seek*(mc: MergedCursor; target: seq[byte]) {.gcsafe.} =
   mc.advance()
 
 proc update*(mc: MergedCursor; psRootUuid: array[16, byte]; psHeight: uint8;
-             flushRoot, liveRoot: TreapNode) {.gcsafe.} =
+             flushRoot: TreapNode; flushArena: Arena;
+             liveRoot: TreapNode; liveArena: Arena) {.gcsafe.} =
   ## Update cursor in-place to reflect new roots. Same semantics as creating
   ## a new cursor: reset to initial state, ready to read first element.
   ## Caller must seek() before iterating. Zero allocations when roots unchanged.
@@ -195,11 +196,11 @@ proc update*(mc: MergedCursor; psRootUuid: array[16, byte]; psHeight: uint8;
   # Source 1: flush treap
   if mc.sources.len > 1 and mc.sources[1].kind == ckTreap:
     if mc.flushRoot != flushRoot:
-      mc.sources[1].tc.update(flushRoot)
+      mc.sources[1].tc.update(flushRoot, flushArena)
       mc.flushRoot = flushRoot
   # Source 2: live treap — always changes (new datoms written)
   if mc.sources.len > 2 and mc.sources[2].kind == ckTreap:
-    mc.sources[2].tc.update(liveRoot)
+    mc.sources[2].tc.update(liveRoot, liveArena)
     mc.liveRoot = liveRoot
   # Reset to initial state — same as newMergedCursor
   mc.heap.data.setLen(0)

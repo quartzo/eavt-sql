@@ -95,7 +95,7 @@ proc sink(w: WalWriter; entries: seq[CfKey]) {.gcsafe, raises: [].} =
     w.buf[pos+3] = byte(totKlen and 0xFF)
     w.buf[pos+4] = e.cf
     if klen > 0:
-      copyMem(addr w.buf[pos+5], unsafeAddr e.key[0], klen)
+      copyMem(addr w.buf[pos+5], e.key.p, klen)
     w.buf[pos+5+klen] = 0  # vlen byte 3
     w.buf[pos+6+klen] = 0  # vlen byte 2
     w.buf[pos+7+klen] = 0  # vlen byte 1
