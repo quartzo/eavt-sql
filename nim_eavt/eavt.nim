@@ -115,7 +115,7 @@ proc batchWrite*(eng: EavtEngine; entries: var seq[EavtEntry]) =
   if eng.hydEnabled:
     for e in entries:
       if e.cf == 0:
-        eng.hyd.applyKey(toSeq(e.key))
+        eng.hyd.applyKey(e.key)
   var cfs = newSeq[CfKey](entries.len)
   for i in 0..<entries.len:
     cfs[i] = CfKey(cf: entries[i].cf, key: entries[i].key)

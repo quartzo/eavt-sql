@@ -14,6 +14,10 @@
 ## Therefore an entry always reflects the latest active state of its eid;
 ## dropping the whole entry at any time just falls back to the slow path.
 ##
+## Storage is a flat byte buffer per entry (concatenated keys) + an offset
+## array — no per-key seq allocation, and every comparison is a zero-alloc
+## openArray view into the buffer.
+##
 ## Admission: the only criterion is fit — an entry must fit within
 ## `maxBytes` after LRU-evicting older entries. There are no punitive guards:
 ## large hot entities are hydrated like any other (their absolute win per
@@ -26,26 +30,16 @@
 
 import std/[tables]
 import keys
+import nim_memtable/treap_backend  # KeyRef
 
 const DefaultMaxBytes* = 1 shl 30          ## 1 GiB — cfg `hydrated_max_bytes`
-
-proc cmpBytes(a, b: openArray[byte]): int =
-  ## Lexicographic byte comparison (local twin of page_store.cmpSeq).
-  let n = min(a.len, b.len)
-  var i = 0
-  while i < n:
-    if a[i] != b[i]:
-      return if a[i] < b[i]: -1 else: 1
-    inc i
-  if a.len < b.len: -1
-  elif a.len > b.len: 1
-  else: 0
 
 type
   HydratedEntry = ref object
     eid: int64                ## owning entity (O(1) LRU victim removal)
-    keys: seq[seq[byte]]      ## ACTIVE CF-0 keys of this eid, ascending
-    bytes: int                ## sum of len(keys[])
+    buf: seq[byte]            ## concatenated ACTIVE CF-0 keys, ascending
+    offs: seq[int32]          ## start offset of each key (len = nº de chaves)
+    bytes: int                ## == buf.len
     prev, next: HydratedEntry ## intrusive LRU (sentinel-headed)
 
   HydratedSet* = ref object
@@ -62,8 +56,8 @@ type
 proc newHydratedSet*(maxBytes: int = DefaultMaxBytes): HydratedSet =
   result = HydratedSet(
     maxBytes: maxBytes,
-    head: HydratedEntry(keys: @[], bytes: 0),
-    tail: HydratedEntry(keys: @[], bytes: 0),
+    head: HydratedEntry(eid: 0, bytes: 0),
+    tail: HydratedEntry(eid: 0, bytes: 0),
   )
   result.head.next = result.tail
   result.tail.prev = result.head
@@ -106,6 +100,96 @@ proc entryBytes*(h: HydratedSet; eid: int64): int =
   ## Diagnostics: byte size of one hydrated entry (0 when absent).
   if eid in h.index: h.index[eid].bytes else: 0
 
+# ── Flat-buffer helpers ───────────────────────────────────────────────────────
+
+proc keyStart(e: HydratedEntry; i: int): int {.inline.} = e.offs[i].int
+
+proc keyEnd(e: HydratedEntry; i: int): int {.inline.} =
+  if i + 1 < e.offs.len: e.offs[i + 1].int else: e.buf.len
+
+proc keyLenAt(e: HydratedEntry; i: int): int {.inline.} =
+  keyEnd(e, i) - keyStart(e, i)
+
+proc cmpFullAt(e: HydratedEntry; i: int; key: openArray[byte]): int =
+  ## Lexicographic comparison of the full stored key at `i` with `key`.
+  let start = keyStart(e, i)
+  let klen = keyLenAt(e, i)
+  let n = min(klen, key.len)
+  var j = 0
+  while j < n:
+    if e.buf[start + j] != key[j]:
+      return if e.buf[start + j] < key[j]: -1 else: 1
+    inc j
+  if klen < key.len: -1
+  elif klen > key.len: 1
+  else: 0
+
+proc cmpPrefixAt(e: HydratedEntry; i: int; key: openArray[byte]): int =
+  ## Compare the stored key's datom-prefix (all but the last 8 suffix bytes)
+  ## with `key`'s datom-prefix. Zero-allocation.
+  let start = keyStart(e, i)
+  let klen = keyLenAt(e, i)
+  let alen = klen - 8
+  let blen = key.len - 8
+  let n = min(alen, blen)
+  var j = 0
+  while j < n:
+    if e.buf[start + j] != key[j]:
+      return if e.buf[start + j] < key[j]: -1 else: 1
+    inc j
+  if alen < blen: -1
+  elif alen > blen: 1
+  else: 0
+
+proc findKeyPos(e: HydratedEntry; key: openArray[byte]): int =
+  ## Index of the stored key whose datom-prefix equals `key`'s, or -1.
+  var lo = 0
+  var hi = e.offs.len
+  while lo < hi:
+    let mid = (lo + hi) shr 1
+    if cmpPrefixAt(e, mid, key) < 0: lo = mid + 1
+    else: hi = mid
+  if lo < e.offs.len and cmpPrefixAt(e, lo, key) == 0: lo
+  else: -1
+
+proc replaceKeyAt(e: HydratedEntry; pos: int; key: ptr UncheckedArray[byte];
+                  klen: int) =
+  let start = keyStart(e, pos)
+  let next = keyEnd(e, pos)
+  let delta = klen - (next - start)
+  if delta != 0:
+    let tail = e.buf.len - next
+    if delta > 0: e.buf.setLen(e.buf.len + delta)
+    if tail > 0: moveMem(addr e.buf[next + delta], addr e.buf[next], tail)
+    if delta < 0: e.buf.setLen(e.buf.len + delta)
+    for j in (pos + 1) ..< e.offs.len:
+      e.offs[j] = (e.offs[j].int + delta).int32
+  copyMem(addr e.buf[start], key, klen)
+
+proc insertKeyAt(e: HydratedEntry; idx: int; key: ptr UncheckedArray[byte];
+                 klen: int) =
+  let ins = (if idx < e.offs.len: keyStart(e, idx) else: e.buf.len)
+  e.buf.setLen(e.buf.len + klen)
+  let tail = e.buf.len - ins - klen
+  if tail > 0: moveMem(addr e.buf[ins + klen], addr e.buf[ins], tail)
+  copyMem(addr e.buf[ins], key, klen)
+  e.offs.insert(ins.int32, idx)
+  for j in (idx + 1) ..< e.offs.len:
+    e.offs[j] = (e.offs[j].int + klen).int32
+
+proc removeKeyAt(e: HydratedEntry; pos: int): int =
+  ## Remove the key at pos; returns its byte length.
+  let start = keyStart(e, pos)
+  let next = keyEnd(e, pos)
+  let oldLen = next - start
+  let tail = e.buf.len - next
+  if tail > 0: moveMem(addr e.buf[start], addr e.buf[next], tail)
+  e.buf.setLen(e.buf.len - oldLen)
+  e.offs.delete(pos)
+  for j in pos ..< e.offs.len:
+    e.offs[j] = (e.offs[j].int - oldLen).int32
+  oldLen
+
 # ── Reads ─────────────────────────────────────────────────────────────────────
 
 proc keyCount*(h: HydratedSet; eid: int64): int {.inline.} =
@@ -113,82 +197,64 @@ proc keyCount*(h: HydratedSet; eid: int64): int {.inline.} =
   ## Autoritativo enquanto a entrada estiver hidratada (invariante
   ## complete+current — ver cabeçalho do módulo).
   if eid notin h.index: return 0
-  h.index[eid].keys.len
+  h.index[eid].offs.len
 
 proc lookupRange*(h: HydratedSet; eid: int64; prefix: seq[byte]): seq[seq[byte]] =
   ## All stored keys starting with `prefix`, ascending. The caller has already
   ## probed membership for the eid anchored at prefix[0..<8].
   if eid notin h.index: return
-  let ks = h.index[eid].keys
-  # lower bound: first index with keys[i] >= prefix
+  let e = h.index[eid]
   var lo = 0
-  var hi = ks.len
+  var hi = e.offs.len
   while lo < hi:
     let mid = (lo + hi) shr 1
-    if cmpBytes(ks[mid], prefix) < 0: lo = mid + 1
+    if cmpFullAt(e, mid, prefix) < 0: lo = mid + 1
     else: hi = mid
   var i = lo
-  while i < ks.len and ks[i].len >= prefix.len and
-        ks[i][0 ..< prefix.len] == prefix:
-    result.add ks[i]
+  while i < e.offs.len:
+    let start = keyStart(e, i)
+    let klen = keyLenAt(e, i)
+    if klen < prefix.len: break
+    var matches = true
+    for j in 0 ..< prefix.len:
+      if e.buf[start + j] != prefix[j]:
+        matches = false
+        break
+    if not matches: break
+    result.add(e.buf[start ..< start + klen])
     inc i
 
 # ── Writes (mirror path) ──────────────────────────────────────────────────────
 
-proc cmpPrefix(a, b: openArray[byte]): int =
-  ## Compare the datom-prefix (all but the last 8 suffix bytes) of `a` and `b`.
-  ## Zero-allocation — avoids the `[0 ..< len-8]` slice that was the hot spot.
-  let alen = a.len - 8
-  let blen = b.len - 8
-  let n = min(alen, blen)
-  var i = 0
-  while i < n:
-    if a[i] != b[i]:
-      return if a[i] < b[i]: -1 else: 1
-    inc i
-  if alen < blen: -1
-  elif alen > blen: 1
-  else: 0
-
-proc findKeyPos(ks: seq[seq[byte]]; key: seq[byte]): int =
-  ## Index of the stored key whose datom-prefix equals `key`'s, or -1.
-  var lo = 0
-  var hi = ks.len
-  while lo < hi:
-    let mid = (lo + hi) shr 1
-    if cmpPrefix(ks[mid], key) < 0: lo = mid + 1
-    else: hi = mid
-  if lo < ks.len and cmpPrefix(ks[lo], key) == 0: lo
-  else: -1
-
-proc applyKey*(h: HydratedSet; key: seq[byte]) =
+proc applyKey*(h: HydratedSet; key: KeyRef) =
   ## Mirror one CF-0 write (already filtered by the caller). No-op when the
   ## eid is not hydrated. Active suffix → upsert; retracted → remove.
   if key.len < 20 or h.index.len == 0: return
-  let eid = decodeEid(beUint64(key, 0))
+  let klen = key.len
+  let eid = decodeEid(beUint64(key.p.toOpenArray(0, klen - 1), 0))
   if eid notin h.index: return
   let e = h.index[eid]
-  let sf = beUint64(key, key.len - 8)
-  let pos = findKeyPos(e.keys, key)
+  let sf = beUint64(key.p.toOpenArray(0, klen - 1), klen - 8)
+  let pos = findKeyPos(e, key.p.toOpenArray(0, klen - 1))
   if (sf and 1) == 0:
     # active: replace in place (new version) or insert sorted
     if pos >= 0:
-      dec h.curBytes, e.keys[pos].len
-      dec e.bytes, e.keys[pos].len
-      e.keys[pos] = key
-      inc h.curBytes, key.len
-      inc e.bytes, key.len
+      let oldLen = keyLenAt(e, pos)
+      replaceKeyAt(e, pos, key.p, klen)
+      let delta = klen - oldLen
+      h.curBytes += delta
+      e.bytes += delta
     else:
-      var idx = e.keys.len
-      while idx > 0 and cmpBytes(e.keys[idx - 1], key) > 0: dec idx
-      e.keys.insert(key, idx)
-      inc h.curBytes, key.len
-      inc e.bytes, key.len
+      var idx = e.offs.len
+      while idx > 0 and cmpFullAt(e, idx - 1, key.p.toOpenArray(0, klen - 1)) > 0: dec idx
+      insertKeyAt(e, idx, key.p, klen)
+      h.curBytes += klen
+      e.bytes += klen
   else:
     if pos >= 0:
-      dec h.curBytes, e.keys[pos].len
-      dec e.bytes, e.keys[pos].len
-      e.keys.delete(pos)
+      let oldLen = removeKeyAt(e, pos)
+      h.curBytes -= oldLen
+      e.bytes -= oldLen
 
 # ── Insertion / eviction ──────────────────────────────────────────────────────
 
@@ -203,7 +269,7 @@ proc evictLruUntilFits(h: HydratedSet; incomingBytes: int) =
   ## (caller rejects that case beforehand).
   while h.curBytes + incomingBytes > h.maxBytes and h.index.len > 0:
     let victim = h.tail.prev
-    if victim.eid == 0 and victim.keys.len == 0: break  # safety: sentinel/empty
+    if victim.eid == 0 and victim.offs.len == 0: break  # safety: sentinel/empty
     h.drop(victim.eid, victim)
     inc h.evictions
 
@@ -212,7 +278,7 @@ proc hydrateEmpty*(h: HydratedSet; eid: int64) =
   if eid in h.index:
     h.touch(h.index[eid])
     return
-  let e = HydratedEntry(eid: eid, keys: @[], bytes: 0)
+  let e = HydratedEntry(eid: eid, bytes: 0)
   h.index[eid] = e
   h.pushFront(e)
 
@@ -229,7 +295,10 @@ proc hydrate*(h: HydratedSet; eid: int64; keys: seq[seq[byte]]) =
     inc h.rejected
     return
   h.evictLruUntilFits(total)
-  let e = HydratedEntry(eid: eid, keys: keys, bytes: total)
+  let e = HydratedEntry(eid: eid, bytes: total)
+  for k in keys:
+    e.offs.add(e.buf.len.int32)
+    e.buf.add(k)
   h.index[eid] = e
   h.pushFront(e)
   inc h.curBytes, total

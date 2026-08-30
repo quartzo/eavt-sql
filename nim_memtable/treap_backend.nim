@@ -143,7 +143,8 @@ proc toKeyRef*(key: openArray[byte]): KeyRef =
 proc toSeq*(k: KeyRef): seq[byte] =
   ## Owned copy of a borrowed key (journal replay, hydrated set, etc.).
   if k.len > 0:
-    result = newSeq[byte](k.len)
+    result = newSeqOfCap[byte](k.len)
+    result.setLen(k.len)
     copyMem(addr result[0], k.p, k.len)
   else:
     result = @[]
