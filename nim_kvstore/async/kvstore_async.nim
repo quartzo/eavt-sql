@@ -209,15 +209,6 @@ proc mergeSubtreeA(pool: BlobPool; s: ptr PageStoreInner;
   if not changed: return none(seq[(seq[byte], array[16, byte])])
   return some(await writeIndexLevelA(pool, s, newEntries))
 
-proc countSubtreeLeavesA(pool: BlobPool; s: ptr PageStoreInner;
-                         uuid: array[16, byte]; height: uint8): Future[uint32] {.
-    async.} =
-  if height == 0: return 1
-  let data = await getPageA(pool, s, uuid)
-  let entries = deserializeIndexPage(data)
-  for (_, childUuid) in entries:
-    result += await countSubtreeLeavesA(pool, s, childUuid, height - 1)
-
 proc commitMergeAsync*(pool: BlobPool; s: ptr PageStoreInner;
                        keysByCf: seq[(int, seq[seq[byte]])];
                        clearJournal: bool) {.async.} =
@@ -251,15 +242,13 @@ proc commitMergeAsync*(pool: BlobPool; s: ptr PageStoreInner;
           tree
         elif mergeRes.get.len == 1:
           let newUuid = mergeRes.get[0][1]
-          let numLeaves = if tree.height == 0: 1'u32
-                          else: await countSubtreeLeavesA(pool, s, newUuid,
-                                                          tree.height)
-          CfTree(rootUuid: newUuid, height: tree.height, numLeaves: numLeaves)
+          # numLeaves is metadata-only (serialized + diagnostic); keep the
+          # prior value instead of an O(total-tree) leaf recount.
+          CfTree(rootUuid: newUuid, height: tree.height, numLeaves: tree.numLeaves)
         else:
           var (root, height) = await buildIndexTreeA(pool, s, mergeRes.get,
                                                      tree.height)
-          let numLeaves = await countSubtreeLeavesA(pool, s, root, height)
-          CfTree(rootUuid: root, height: height, numLeaves: numLeaves)
+          CfTree(rootUuid: root, height: height, numLeaves: tree.numLeaves)
     s[].trees[cf] = newTree
   let newRoot = makeRootName()
   let rootData = serializeRoot(s[].trees)

@@ -729,15 +729,6 @@ proc buildIndexTree(blobs: BlobStore;
     levelEntries = nextLevel
     inc height
 
-proc countSubtreeLeaves(blobs: BlobStore; uuid: array[16, byte];
-                         height: uint8): uint32 =
-  if height == 0: return 1
-  let data = blobGet(blobs, uuid)
-  if data.isNone: return 0
-  let entries = deserializeIndexPage(data.get)
-  for (_, childUuid) in entries:
-    result += countSubtreeLeaves(blobs, childUuid, height - 1)
-
 proc mergeLeaf(blobs: BlobStore; leafUuid: array[16, byte];
                 rangeEnd: Option[seq[byte]];
                 newKeys: var seq[seq[byte]]; idx: var int): Option[seq[(seq[byte], array[16, byte])]] =
@@ -827,13 +818,12 @@ proc commitMergeCore*(blobs: BlobStore; trees: ptr UncheckedArray[CfTree]; numCf
           tree
         elif result.get.len == 1:
           let newUuid = result.get[0][1]
-          let numLeaves = if tree.height == 0: 1'u32
-                          else: countSubtreeLeaves(blobs, newUuid, tree.height)
-          CfTree(rootUuid: newUuid, height: tree.height, numLeaves: numLeaves)
+          # numLeaves is metadata-only (serialized + diagnostic); keep the
+          # prior value instead of an O(total-tree) leaf recount.
+          CfTree(rootUuid: newUuid, height: tree.height, numLeaves: tree.numLeaves)
         else:
           var (root, height) = buildIndexTree(blobs, result.get, tree.height)
-          let numLeaves = countSubtreeLeaves(blobs, root, height)
-          CfTree(rootUuid: root, height: height, numLeaves: numLeaves)
+          CfTree(rootUuid: root, height: height, numLeaves: tree.numLeaves)
     trees[cf] = newTree
   let newRoot = makeRootName()
   discard blobPutRoot(blobs, newRoot, serializeRootP(trees, numCf))
