@@ -27,6 +27,7 @@ import kvstore
 import logutil
 import nim_memtable/treap_backend as mt_be
 import treap_cursor
+import flush_worker
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Pool-backed blob helpers
@@ -100,7 +101,7 @@ proc writeIndexLevelA(pool: BlobPool; s: ptr PageStoreInner;
   if ser.len <= IndexPageMaxSize or entries.len <= 1:
     let uuid = await putPageA(pool, s, ser)
     return @[(entries[0][0], uuid)]
-  let pages = splitIndexEntries(s[], entries)
+  let pages = splitIndexEntries(entries)
   for pageData in pages:
     let pageEntries = deserializeIndexPage(pageData)
     if pageEntries.len > 0:
@@ -116,7 +117,7 @@ proc buildIndexTreeA(pool: BlobPool; s: ptr PageStoreInner;
   if ser.len <= IndexPageMaxSize:
     let uuid = await putPageA(pool, s, ser)
     return (uuid, childHeight + 1)
-  let pages = splitIndexEntries(s[], entries)
+  let pages = splitIndexEntries(entries)
   if pages.len == 1:
     let uuid = await putPageA(pool, s, pages[0])
     return (uuid, childHeight + 1)
@@ -132,7 +133,7 @@ proc buildIndexTreeA(pool: BlobPool; s: ptr PageStoreInner;
     if ser2.len <= IndexPageMaxSize:
       let uuid = await putPageA(pool, s, ser2)
       return (uuid, height)
-    let pages2 = splitIndexEntries(s[], levelEntries)
+    let pages2 = splitIndexEntries(levelEntries)
     if pages2.len == levelEntries.len:
       let uuid = await putPageA(pool, s, ser2)
       return (uuid, height)
@@ -556,6 +557,7 @@ type
   AsyncFlusher* = ref object
     kv*: KVStore
     pool*: BlobPool
+    worker*: FlushWorker
     ## Waiter queue: loop-thread only (no atomics — exactly one thread).
     waiters: seq[Future[void]]
     active: bool
@@ -591,12 +593,28 @@ proc flushNowAsync*(f: AsyncFlusher): Future[void] {.async.} =
     # It publishes our writes only if they were captured by it; writes after
     # ITS capture need another pass — the runner re-iterates, so just return.
     return
-  let drained = await drainTreapAsync(kv, roots)
-  if drained.keysByCf.len > 0:
-    await commitMergeAsync(f.pool, kv.ps, drained.keysByCf, true)
-  if drained.pairsByCf.len > 0 or drained.deletedByCf.len > 0:
-    await commitMergeKvAsync(f.pool, kv.ps, drained.pairsByCf,
-                             drained.deletedByCf, true)
+  # Route: pure key-only flushes (no live KV roots) run drain+commit on the
+  # flush worker thread; anything with KV data stays on the loop (the worker
+  # writes the root once, so it must not race a KV commit's root write).
+  var hasKv = false
+  for cf in 10 ..< kv.numCf:
+    if roots[cf] != nil: hasKv = true; break
+  if hasKv:
+    let drained = await drainTreapAsync(kv, roots)
+    if drained.keysByCf.len > 0:
+      await commitMergeAsync(f.pool, kv.ps, drained.keysByCf, true)
+    if drained.pairsByCf.len > 0 or drained.deletedByCf.len > 0:
+      await commitMergeKvAsync(f.pool, kv.ps, drained.pairsByCf,
+                               drained.deletedByCf, true)
+  else:
+    let res = await f.worker.runFlush(kv.numCf, roots, kv.ps[].trees,
+                                      kv.ps[].blobs, kv.flushArena)
+    if res.ok:
+      kv.ps[].trees = res.trees
+      kv.ps[].currentRoot = res.rootName
+      journalTruncate(kv.ps[])
+    else:
+      raise newException(IOError, "flush worker failed")
   # Single-threaded publish.
   kv.flushRoots = @[]; kv.flushArena = nil; kv.mtSize = 0
   # Publish done: everything before the seal boundary is durable in the
@@ -684,4 +702,4 @@ proc requestGcAsync*(f: AsyncFlusher; dryRun: bool): Future[void] =
   w
 
 proc newAsyncFlusher*(kv: KVStore; pool: BlobPool): AsyncFlusher =
-  AsyncFlusher(kv: kv, pool: pool)
+  AsyncFlusher(kv: kv, pool: pool, worker: startFlushWorker())

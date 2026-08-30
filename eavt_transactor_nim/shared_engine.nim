@@ -3,6 +3,7 @@ import chronos
 import blobstore_async
 import kvstore, eavt, engine
 import kvstore_async
+import flush_worker
 import replication
 import wal
 
@@ -49,5 +50,6 @@ proc close*(eng: SharedEngine) {.async.} =
   ## Drain the flusher's pending work, stop the pool workers, close the
   ## store. Call on the loop, after the WAL writer stopped.
   eng.kv.onFlushRequest = nil
+  await eng.flusher.worker.closeFlushWorker()
   await eng.pool.closeBlobPool()
   eng.kv.close()

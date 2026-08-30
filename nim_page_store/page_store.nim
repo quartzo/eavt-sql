@@ -100,6 +100,26 @@ proc serializeRoot*(trees: seq[CfTree]): seq[byte] =
     result.add byte((nl shr 8) and 0xFF)
     result.add byte(nl and 0xFF)
 
+proc serializeRootP*(trees: ptr UncheckedArray[CfTree]; numCf: int): seq[byte] =
+  ## POD variant of serializeRoot — serializes a raw CfTree array (the flush
+  ## worker passes its out-buffer directly, no seq).
+  result = newSeqOfCap[byte](8 + numCf * 21)
+  result.add RootMagic
+  result.add byte(RootVersion shr 8)
+  result.add byte(RootVersion and 0xFF)
+  let nc = numCf.uint16
+  result.add byte(nc shr 8)
+  result.add byte(nc and 0xFF)
+  for i in 0 ..< numCf:
+    let tree = trees[i]
+    result.add tree.rootUuid
+    result.add tree.height
+    let nl = tree.numLeaves
+    result.add byte(nl shr 24)
+    result.add byte((nl shr 16) and 0xFF)
+    result.add byte((nl shr 8) and 0xFF)
+    result.add byte(nl and 0xFF)
+
 proc deserializeRoot*(data: openArray[byte]): seq[CfTree] =
   if data.len < 8 or data[0..3] != RootMagic:
     raise newException(ValueError, "invalid root magic")
@@ -521,12 +541,12 @@ proc loadLeafKeys*(s: var PageStoreInner; uuid: array[16, byte]): seq[seq[byte]]
   result = deserializePage(raw)
   s.cache.putLeafKeys(uuid, toFlat(result))
 
-proc loadLeafKeysNoput(s: var PageStoreInner; uuid: array[16, byte]): seq[seq[byte]] =
+proc loadLeafKeysNoput(blobs: BlobStore; uuid: array[16, byte]): seq[seq[byte]] =
   ## Load leaf keys from blobstore without putting into cache (used by COW merge).
-  let compressed = s.blobs.get(uuid)
-  if compressed.isNone:
+  let data = blobGet(blobs, uuid)
+  if data.isNone:
     raise newException(IOError, "leaf blob not found")
-  deserializePage(decompress(compressed.get))
+  deserializePage(data.get)
 
 proc collectKeysFromIndex(s: var PageStoreInner; pageUuid: array[16, byte];
                            height: uint8; prefix: seq[byte]): seq[seq[byte]] =
@@ -650,79 +670,78 @@ proc keyExistsKv*(s: var PageStoreInner; cf: int; key: seq[byte]): Option[seq[by
 # COW recursive merge
 # ══════════════════════════════════════════════════════════════════════════════
 
-proc splitIndexEntries*(s: var PageStoreInner;
-                        entries: openArray[(seq[byte], array[16, byte])]): seq[seq[byte]] =
+proc splitIndexEntries*(entries: openArray[(seq[byte], array[16, byte])]): seq[seq[byte]] =
   if entries.len == 0: return @[]
   let total = serializeIndexPage(@entries)
   if total.len <= IndexPageMaxSize or entries.len == 1:
     return @[serializeIndexPage(@entries)]
   let mid = entries.len div 2
-  result = splitIndexEntries(s, entries[0..<mid])
-  result.add splitIndexEntries(s, entries[mid..^1])
+  result = splitIndexEntries(entries[0..<mid])
+  result.add splitIndexEntries(entries[mid..^1])
 
-proc writeIndexLevel(s: var PageStoreInner;
+proc writeIndexLevel(blobs: BlobStore;
                       entries: openArray[(seq[byte], array[16, byte])]): seq[(seq[byte], array[16, byte])] =
   let ser = serializeIndexPage(@entries)
   if ser.len <= IndexPageMaxSize or entries.len <= 1:
-    let uuid = blobPut(s.blobs, ser)
+    let uuid = blobPut(blobs, ser)
     return @[(entries[0][0], uuid)]
-  let pages = splitIndexEntries(s, entries)
+  let pages = splitIndexEntries(entries)
   for pageData in pages:
     let pageEntries = deserializeIndexPage(pageData)
     if pageEntries.len > 0:
-      let uuid = blobPut(s.blobs, pageData)
+      let uuid = blobPut(blobs, pageData)
       result.add (pageEntries[0][0], uuid)
 
-proc buildIndexTree(s: var PageStoreInner;
+proc buildIndexTree(blobs: BlobStore;
                      entries: seq[(seq[byte], array[16, byte])];
                      childHeight: uint8): (array[16, byte], uint8) =
   if entries.len == 0: return (default(array[16, byte]), 0'u8)
   let ser = serializeIndexPage(entries)
   if ser.len <= IndexPageMaxSize:
-    let uuid = blobPut(s.blobs, ser)
+    let uuid = blobPut(blobs, ser)
     return (uuid, childHeight + 1)
-  let pages = splitIndexEntries(s, entries)
+  let pages = splitIndexEntries(entries)
   if pages.len == 1:
-    let uuid = blobPut(s.blobs, pages[0])
+    let uuid = blobPut(blobs, pages[0])
     return (uuid, childHeight + 1)
   var levelEntries: seq[(seq[byte], array[16, byte])] = @[]
   for pageData in pages:
     let pageEntries = deserializeIndexPage(pageData)
     if pageEntries.len > 0:
-      let uuid = blobPut(s.blobs, pageData)
+      let uuid = blobPut(blobs, pageData)
       levelEntries.add (pageEntries[0][0], uuid)
   var height = childHeight + 2
   while true:
     let ser2 = serializeIndexPage(levelEntries)
     if ser2.len <= IndexPageMaxSize:
-      let uuid = blobPut(s.blobs, ser2)
+      let uuid = blobPut(blobs, ser2)
       return (uuid, height)
-    let pages2 = splitIndexEntries(s, levelEntries)
+    let pages2 = splitIndexEntries(levelEntries)
     if pages2.len == levelEntries.len:
-      let uuid = blobPut(s.blobs, ser2)
+      let uuid = blobPut(blobs, ser2)
       return (uuid, height)
     var nextLevel: seq[(seq[byte], array[16, byte])] = @[]
     for pageData in pages2:
       let pageEntries = deserializeIndexPage(pageData)
       if pageEntries.len > 0:
-        let uuid = blobPut(s.blobs, pageData)
+        let uuid = blobPut(blobs, pageData)
         nextLevel.add (pageEntries[0][0], uuid)
     levelEntries = nextLevel
     inc height
 
-proc countSubtreeLeaves(s: var PageStoreInner; uuid: array[16, byte];
+proc countSubtreeLeaves(blobs: BlobStore; uuid: array[16, byte];
                          height: uint8): uint32 =
   if height == 0: return 1
-  let data = blobGet(s.blobs, uuid)
+  let data = blobGet(blobs, uuid)
   if data.isNone: return 0
   let entries = deserializeIndexPage(data.get)
   for (_, childUuid) in entries:
-    result += countSubtreeLeaves(s, childUuid, height - 1)
+    result += countSubtreeLeaves(blobs, childUuid, height - 1)
 
-proc mergeLeaf(s: var PageStoreInner; leafUuid: array[16, byte];
+proc mergeLeaf(blobs: BlobStore; leafUuid: array[16, byte];
                 rangeEnd: Option[seq[byte]];
                 newKeys: var seq[seq[byte]]; idx: var int): Option[seq[(seq[byte], array[16, byte])]] =
-  let existing = loadLeafKeysNoput(s, leafUuid)
+  let existing = loadLeafKeysNoput(blobs, leafUuid)
   var toMerge: seq[seq[byte]] = @[]
   while idx < newKeys.len:
     if rangeEnd.isSome and cmpSeq(newKeys[idx], rangeEnd.get) >= 0:
@@ -747,16 +766,16 @@ proc mergeLeaf(s: var PageStoreInner; leafUuid: array[16, byte];
   var entries: seq[(seq[byte], array[16, byte])] = @[]
   for (boundary, pageData) in pageList:
     discard deserializePage(pageData)  # round-trip validation
-    let uuid = blobPut(s.blobs, pageData)
+    let uuid = blobPut(blobs, pageData)
     entries.add (boundary, uuid)
   return some(entries)
 
-proc mergeSubtree(s: var PageStoreInner; nodeUuid: array[16, byte];
+proc mergeSubtree(blobs: BlobStore; nodeUuid: array[16, byte];
                    height: uint8; rangeEnd: Option[seq[byte]];
                    newKeys: var seq[seq[byte]]; idx: var int): Option[seq[(seq[byte], array[16, byte])]] =
   if height == 0:
-    return mergeLeaf(s, nodeUuid, rangeEnd, newKeys, idx)
-  let data = blobGet(s.blobs, nodeUuid)
+    return mergeLeaf(blobs, nodeUuid, rangeEnd, newKeys, idx)
+  let data = blobGet(blobs, nodeUuid)
   if data.isNone: return none(seq[(seq[byte], array[16, byte])])
   let entries = deserializeIndexPage(data.get)
   var newEntries: seq[(seq[byte], array[16, byte])] = @[]
@@ -768,23 +787,24 @@ proc mergeSubtree(s: var PageStoreInner; nodeUuid: array[16, byte];
     if not hasKeys:
       newEntries.add (boundary, childUuid)
       continue
-    let childResult = mergeSubtree(s, childUuid, height - 1, childEnd, newKeys, idx)
+    let childResult = mergeSubtree(blobs, childUuid, height - 1, childEnd, newKeys, idx)
     if childResult.isNone:
       newEntries.add (boundary, childUuid)
     else:
       changed = true
       newEntries.add childResult.get
   if not changed: return none(seq[(seq[byte], array[16, byte])])
-  return some(writeIndexLevel(s, newEntries))
+  return some(writeIndexLevel(blobs, newEntries))
 
-proc commitMerge*(s: var PageStoreInner; keysByCf: seq[(int, seq[seq[byte]])];
-                  clearJournal: bool) =
-  if s.readOnly:
-    raise newException(IOError, "read-only")
+proc commitMergeCore*(blobs: BlobStore; trees: ptr UncheckedArray[CfTree]; numCf: int;
+                      keysByCf: seq[(int, seq[seq[byte]])]): string =
+  ## Merge key-only CFs in-place on a raw CfTree buffer, write the new root,
+  ## return its name. Pure over the blobstore trait + a POD buffer — no
+  ## PageStoreInner — so it can run on the flush worker thread.
   for (cf, sortedKeysIn) in keysByCf:
-    if cf >= s.numCf or sortedKeysIn.len == 0: continue
+    if cf >= numCf or sortedKeysIn.len == 0: continue
     var sortedKeys = sortedKeysIn
-    let tree = s.trees[cf]
+    let tree = trees[cf]
     var idx = 0
     let newTree: CfTree =
       if tree.rootUuid == default(array[16, byte]):
@@ -792,32 +812,41 @@ proc commitMerge*(s: var PageStoreInner; keysByCf: seq[(int, seq[seq[byte]])];
         var entries: seq[(seq[byte], array[16, byte])] = @[]
         for (boundary, pageData) in pageList:
           discard deserializePage(pageData)
-          let uuid = blobPut(s.blobs, pageData)
+          let uuid = blobPut(blobs, pageData)
           entries.add (boundary, uuid)
         let numLeaves = entries.len.uint32
-        var (root, height) = buildIndexTree(s, entries, 0)
+        var (root, height) = buildIndexTree(blobs, entries, 0)
         if height == 0:
           CfTree(rootUuid: root, height: height, numLeaves: 0)
         else:
           CfTree(rootUuid: root, height: height, numLeaves: numLeaves)
       else:
-        let result = mergeSubtree(s, tree.rootUuid, tree.height,
+        let result = mergeSubtree(blobs, tree.rootUuid, tree.height,
                                    none(seq[byte]), sortedKeys, idx)
         if result.isNone:
           tree
         elif result.get.len == 1:
           let newUuid = result.get[0][1]
           let numLeaves = if tree.height == 0: 1'u32
-                          else: countSubtreeLeaves(s, newUuid, tree.height)
+                          else: countSubtreeLeaves(blobs, newUuid, tree.height)
           CfTree(rootUuid: newUuid, height: tree.height, numLeaves: numLeaves)
         else:
-          var (root, height) = buildIndexTree(s, result.get, tree.height)
-          let numLeaves = countSubtreeLeaves(s, root, height)
+          var (root, height) = buildIndexTree(blobs, result.get, tree.height)
+          let numLeaves = countSubtreeLeaves(blobs, root, height)
           CfTree(rootUuid: root, height: height, numLeaves: numLeaves)
-    s.trees[cf] = newTree
+    trees[cf] = newTree
   let newRoot = makeRootName()
-  discard blobPutRoot(s.blobs, newRoot, serializeRoot(s.trees))
-  s.currentRoot = newRoot
+  discard blobPutRoot(blobs, newRoot, serializeRootP(trees, numCf))
+  return newRoot
+
+proc commitMerge*(s: var PageStoreInner; keysByCf: seq[(int, seq[seq[byte]])];
+                  clearJournal: bool) =
+  if s.readOnly:
+    raise newException(IOError, "read-only")
+  let treesPtr =
+    if s.trees.len > 0: cast[ptr UncheckedArray[CfTree]](addr s.trees[0])
+    else: nil
+  s.currentRoot = commitMergeCore(s.blobs, treesPtr, s.numCf, keysByCf)
   if clearJournal:
     journalTruncate(s)
 
@@ -861,7 +890,7 @@ proc commitMergeKv*(s: var PageStoreInner; pairsByCf: seq[(int, seq[(seq[byte], 
       let uuid = blobPut(s.blobs, pageData)
       entries.add (boundary, uuid)
     let numLeaves = entries.len.uint32
-    var (root, height) = buildIndexTree(s, entries, 0)
+    var (root, height) = buildIndexTree(s.blobs, entries, 0)
     if height == 0:
       s.trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: 0)
     else:
@@ -885,7 +914,7 @@ proc commitMergeKv*(s: var PageStoreInner; pairsByCf: seq[(int, seq[(seq[byte], 
         let uuid = blobPut(s.blobs, pageData)
         entries.add (boundary, uuid)
       let numLeaves = entries.len.uint32
-      var (root, height) = buildIndexTree(s, entries, 0)
+      var (root, height) = buildIndexTree(s.blobs, entries, 0)
       if height == 0:
         s.trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: 0)
       else:
@@ -928,7 +957,7 @@ proc commitMergeKv*(s: var PageStoreInner; pairsByCf: seq[(int, seq[(seq[byte], 
         let uuid = blobPut(s.blobs, pageData)
         entries.add (boundary, uuid)
       let numLeaves = entries.len.uint32
-      var (root, height) = buildIndexTree(s, entries, 0)
+      var (root, height) = buildIndexTree(s.blobs, entries, 0)
       if height == 0:
         s.trees[cf] = CfTree(rootUuid: root, height: height, numLeaves: 0)
       else:
