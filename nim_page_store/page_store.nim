@@ -256,17 +256,18 @@ type
   ## de seq[seq[byte]]. A versão aninhada custava ~270µs de churn de alocador
   ## por troca de folha (liberar/criar milhares de strings pequenas via malloc
   ## a cada seek). Páginas são imutáveis sob COW — a arena vale até a evicção.
-  FlatLeafKeys* = object
+  FlatLeafKeys* = ref object
     buf*: seq[byte]        ## chaves concatenadas
     offs*: seq[int32]      ## n+1 offsets; chave i = buf[offs[i] ..< offs[i+1]]
 
-  FlatLeafKV* = object
+  FlatLeafKV* = ref object
     kbuf*: seq[byte]       ## chaves concatenadas
     vbuf*: seq[byte]       ## valores concatenados
     koffs*: seq[int32]     ## n+1 offsets das CHAVES
     voffs*: seq[int32]     ## n+1 offsets dos VALORES
 
 proc flatCount*(f: FlatLeafKeys | FlatLeafKV): int {.inline.} =
+  if f.isNil: return 0
   when f is FlatLeafKeys: max(f.offs.len - 1, 0)
   else: max(f.koffs.len - 1, 0)
 
@@ -277,6 +278,7 @@ proc flatBytes(f: FlatLeafKV): int {.inline.} =
   f.kbuf.len + f.vbuf.len + (f.koffs.len + f.voffs.len) * 4 + 64
 
 proc toFlat*(keys: seq[seq[byte]]): FlatLeafKeys =
+  result = FlatLeafKeys()
   var n = keys.len
   result.offs = newSeq[int32](n + 1)
   var total = 0
@@ -288,6 +290,7 @@ proc toFlat*(keys: seq[seq[byte]]): FlatLeafKeys =
   result.offs[n] = int32(result.buf.len)
 
 proc toFlat*(pairs: seq[(seq[byte], seq[byte])]): FlatLeafKV =
+  result = FlatLeafKV()
   let n = pairs.len
   result.koffs = newSeq[int32](n + 1)
   result.voffs = newSeq[int32](n + 1)
