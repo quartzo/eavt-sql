@@ -135,16 +135,30 @@ proc lookupRange*(h: HydratedSet; eid: int64; prefix: seq[byte]): seq[seq[byte]]
 
 # ── Writes (mirror path) ──────────────────────────────────────────────────────
 
-proc findKeyPos(ks: seq[seq[byte]]; keyPrefix: seq[byte]): int =
-  ## Index of the stored key whose datom-prefix equals keyPrefix, or -1.
+proc cmpPrefix(a, b: openArray[byte]): int =
+  ## Compare the datom-prefix (all but the last 8 suffix bytes) of `a` and `b`.
+  ## Zero-allocation — avoids the `[0 ..< len-8]` slice that was the hot spot.
+  let alen = a.len - 8
+  let blen = b.len - 8
+  let n = min(alen, blen)
+  var i = 0
+  while i < n:
+    if a[i] != b[i]:
+      return if a[i] < b[i]: -1 else: 1
+    inc i
+  if alen < blen: -1
+  elif alen > blen: 1
+  else: 0
+
+proc findKeyPos(ks: seq[seq[byte]]; key: seq[byte]): int =
+  ## Index of the stored key whose datom-prefix equals `key`'s, or -1.
   var lo = 0
   var hi = ks.len
   while lo < hi:
     let mid = (lo + hi) shr 1
-    let mk = ks[mid][0 ..< ks[mid].len - 8]
-    if cmpBytes(mk, keyPrefix) < 0: lo = mid + 1
+    if cmpPrefix(ks[mid], key) < 0: lo = mid + 1
     else: hi = mid
-  if lo < ks.len and ks[lo][0 ..< ks[lo].len - 8] == keyPrefix: lo
+  if lo < ks.len and cmpPrefix(ks[lo], key) == 0: lo
   else: -1
 
 proc applyKey*(h: HydratedSet; key: seq[byte]) =
@@ -155,8 +169,7 @@ proc applyKey*(h: HydratedSet; key: seq[byte]) =
   if eid notin h.index: return
   let e = h.index[eid]
   let sf = beUint64(key, key.len - 8)
-  let keyPrefix = key[0 ..< key.len - 8]
-  let pos = findKeyPos(e.keys, keyPrefix)
+  let pos = findKeyPos(e.keys, key)
   if (sf and 1) == 0:
     # active: replace in place (new version) or insert sorted
     if pos >= 0:
