@@ -57,7 +57,7 @@ proc decompress*(data: openArray[byte]): seq[byte] =
     return @data
 
   let frameSize = ZSTD_compressBound(data.len.csize_t).int * 4
-  result = newSeq[byte](max(frameSize, 262144))
+  result = newSeq[byte](max(frameSize, 524288))
   let rc = ZSTD_decompress(addr result[0], result.len.csize_t,
                             unsafeAddr data[0], data.len.csize_t)
   if ZSTD_isError(rc) != 0:
@@ -71,7 +71,7 @@ proc decompress*(data: openArray[byte]): seq[byte] =
 const
   RootMagic = [0x45'u8, 0x56'u8, 0x54'u8, 0x31'u8]  # "EVT1"
   RootVersion = 2'u16
-  IndexPageMaxSize* = 256 * 1024
+  IndexPageMaxSize* = 512 * 1024
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Root blob serialization

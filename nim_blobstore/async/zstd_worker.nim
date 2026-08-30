@@ -56,6 +56,6 @@ proc decompressInto*(src: pointer; srcLen: int; dst: pointer; dstCap: int): int 
   int(rc)
 
 proc zstdDecompressBound*(): int {.gcsafe, inline.} =
-  ## Conservative output capacity for a ≤256 KiB page (mirrors
-  ## page_store.decompress sizing: bound*4 with a 256 KiB floor).
-  max(int(ZSTD_compressBound(262144.csize_t)) * 4, 262144)
+  ## Conservative output capacity for a ≤512 KiB page (mirrors
+  ## page_store.decompress sizing: bound*4 with a 512 KiB floor).
+  max(int(ZSTD_compressBound(524288.csize_t)) * 4, 524288)

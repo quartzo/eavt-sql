@@ -2,7 +2,7 @@
 ##
 ## Port of spier-kvstore/src/pages.rs
 
-const MaxRawSize* = 256 * 1024
+const MaxRawSize* = 512 * 1024
 
 proc commonPrefixLen*(a, b: openArray[byte]): int =
   let n = min(a.len, b.len)

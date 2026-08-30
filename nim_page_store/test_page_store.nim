@@ -286,8 +286,8 @@ suite "page_store: fail-stop reads":
   test "prefix scan raises when a leaf blob is missing":
     let s = newMemStore()
     defer: closePageStore(s)
-    # Enough keys to span multiple leaves (MaxRawSize = 256 KiB per page).
-    commitKeys(s[], 0, bigKeys(12000, 7))
+    # Enough keys to span multiple leaves (MaxRawSize = 512 KiB per page).
+    commitKeys(s[], 0, bigKeys(20000, 7))
     let tree = s[].trees[0]
     check tree.height >= 1
     let dataOpt = blobGet(s[].blobs, tree.rootUuid)
@@ -311,7 +311,7 @@ suite "page_cursor: leaf-boundary crossing on h=1 tree":
     defer: closePageStore(s)
     var keys: seq[seq[byte]]
     # ~200-byte keys -> handful of keys per leaf -> multi-leaf at once
-    for i in 0..<4000:
+    for i in 0..<8000:
       var k = newSeq[byte](200)
       k[0] = byte((i shr 16) and 0xFF)
       k[1] = byte((i shr 8) and 0xFF)
@@ -342,7 +342,7 @@ suite "page_cursor: leaf-boundary crossing on h=1 tree":
     let s = newMemStore()
     defer: closePageStore(s)
     var keys: seq[seq[byte]]
-    for i in 0..<4000:
+    for i in 0..<8000:
       var k = newSeq[byte](200)
       k[0] = byte((i shr 16) and 0xFF)
       k[1] = byte((i shr 8) and 0xFF)
