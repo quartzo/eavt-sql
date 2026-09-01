@@ -2,8 +2,13 @@
 
 ## Status
 
-Draft — implementation pending (phases F0–F4 below). This document specifies
-the Datomic-style transaction protocol that will replace compiled Scheme
+**Implemented (F0–F4)** — the transactor accepts `tx` requests and the query
+server routes all SQL writes through them (UPSERT, ATTRIBUTE, mixed
+UPDATE/DELETE batching). PARTITION remains on the legacy scheme path
+(engine-managed partitions). Golden tests verify that the SQL-compiled
+Scheme programs and the EDN tx interpreter produce the same final datoms
+(`nim_query/query/test_golden_tx.nim`). This document specifies the
+Datomic-style transaction protocol that replaces compiled Scheme programs
 programs as the write path between the query server and the transactor.
 Reading it before `docs/scheme-transport.md` is not required, but §3 of that
 document (msgpack framing, EDN-like value encoding) is the substrate this
@@ -220,16 +225,17 @@ per eid, the following attributes and calls `eavtDeclareAttr` once:
 | `:db/unique` | `:db.unique/identity` or `:db.unique/value` (both imply indexed) |
 
 ```
-[[:db/add "sch" :db/ident :person/email]
- [:db/add "sch" :db/valueType :db.type/string]
- [:db/add "sch" :db/cardinality :db.cardinality/one]
- [:db/add "sch" :db/unique :db.unique/identity]
+[[:db/add 0 :db/ident :person/email]
+ [:db/add 0 :db/valueType :db.type/string]
+ [:db/add 0 :db/cardinality :db.cardinality/one]
+ [:db/add 0 :db/unique :db.unique/identity]
  [:db/add -1 :person/name "álvia"]]    ; same-tx usage is allowed
 ```
 
 Sequencing: schema ops within a tx execute before data ops, so an attribute
-can be declared and used in the same transaction. (The legacy `declare-attr`
-scheme opcode remains for the SQL path during the transition.)
+can be declared and used in the same transaction. Note: schema declarations
+are persisted by `declareAttrFromSql` even if a LATER data op fails the tx —
+schema datoms do not roll back (the data datoms of the failed tx do).
 
 ## 8. Storage canonical names
 
@@ -263,7 +269,7 @@ scheme opcode remains for the SQL path during the transition.)
 | `(declare-partition "name")` | engine-managed partitions; user declarations not needed in v1 |
 | `(result X N)` | tx-report `{tempids, tx}` (§3.2) |
 
-## 10. Implementation phases
+## 10. Implementation phases (all complete)
 
 | Phase | Scope | Acceptance |
 |-------|-------|------------|

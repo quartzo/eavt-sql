@@ -40,8 +40,8 @@ unnecessary recompilation.
 ## Project Structure
 
 ```
-eavt_transactor_nim/        # Transactor: scheme/schema/admin/kv over UDS (msgpack, chronos loop + blob pool)
-eavt_query_nim/             # Query server: compiles SQL→Scheme (chronos, single-thread async), routes writes to transactor
+eavt_transactor_nim/        # Transactor: tx (EDN)/scheme/schema/admin/kv over UDS (chronos loop + blob pool)
+eavt_query_nim/             # Query server: compiles SQL→tx-data/Scheme (chronos), routes writes to transactor
 eavt-repl-nim/              # REPL client (linenoise, tab-separated output; orc, no threads)
 py_eavt_client/             # Python UDS client (msgpack; sql/scheme/schema/admin)
 vendor/chronos_file_pkg/    # Vendored chronos-file (async file I/O; WAL + async blobstore bridge) — see VENDORED.md
@@ -50,9 +50,10 @@ nim_kvstore/async/        # Async KVStore twin: flush + GC on the event loop (ch
 nim_sql_parse/              # D.1 — SQL lexer + recursive-descent parser
 nim_datalog/                # D.2 — SQL AST → Datalog IR (EAVT patterns)
 nim_planner/                # D.3 — Cost-based join ordering (EAVT/AEVT/AVET/VAET)
-nim_compiler/               # D.4 — Datalog IR → Scheme S-expressions
+nim_compiler/               # D.4 — Datalog IR → Scheme S-exprs + SQL → tx-data (tx_compile)
 nim_sql_frontend/           # Orchestration: parse → compile → SchemeProgram
 nim_scheme/                 # S-expr parser + stack VM with yield/resume
+nim_edn/                    # EDN reader → SExpr (Datomic-style tx-data)
 nim_query/                  # Scanner, hostfns (22 ops), leapfrog triejoin
 nim_eavt/                   # EAVT engine: save/retract + resolver + constraints
 nim_kvstore/                # KVStore + MergedCursor (sync + async twin in async/ subdir)
@@ -94,10 +95,15 @@ BlobStore (Memory / File / S3)
 - **Processes:** query server owns `eavt-query.sock` (clients connect here); transactor
   listens on `eavt-transactor.sock`. SQL is compiled to Scheme **at the query server**
   (`docs/scheme-transport.md`); the transactor is a pure execution engine.
-- **Request types (transactor):** `scheme` (tagged-AST program + `mode`
-  query|exec + `params`), `schema` (CompileStats snapshot), `admin`, `kv`.
-  The query server additionally accepts `sql` (text + params) and passes the rest
-  through verbatim.
+- **Request types (transactor):** `tx` (EDN tx-data, docs/tx-protocol.md —
+  the write path: tempids, lookup refs, schema-as-data, `:db/current-tx`),
+  `scheme` (wire-AST program + `mode` query|exec + `params`; query passthrough
+  for the Python client), `schema` (CompileStats snapshot), `admin`, `kv`.
+  The query server additionally accepts `sql` (text + params): queries execute
+  on the replica; writes compile to `tx`.
+- **Attribute name canonical form:** `ns/name` (slash, no leading colon) in
+  storage and on the wire; the SQL dot surface normalizes at the resolver
+  boundary (`normalizeAttr`).
 - **Position-independence rule:** compiled programs never embed attribute ids;
   attributes resolve by name at execution time (`intern-a`).
 - **Transport:** Unix Domain Socket (`$XDG_RUNTIME_DIR/eavt/`)

@@ -27,3 +27,6 @@ import nim_datalog/test_datalog
 import nim_planner/test_planner
 import nim_compiler/test_compiler
 import nim_sql_frontend/test_sql_frontend
+import nim_query/query/test_edn_tx
+import nim_query/query/test_golden_tx
+import nim_edn/test_edn
