@@ -25,19 +25,45 @@ type
 proc encodeSuffix*(t: int64; retracted: bool): uint64 =
   result = (cast[uint64](t) shl 1) or (if retracted: 1 else: 0)
 
+# ── Word stores big-endian (mesmo output do encadear de shifts; 1 store 8B) ──
+
+when system.cpuEndian == littleEndian:
+  proc bswap64u(v: uint64): uint64 {.inline.} =
+    ((v and 0x00000000000000FF'u64) shl 56) or
+    ((v and 0x000000000000FF00'u64) shl 40) or
+    ((v and 0x0000000000FF0000'u64) shl 24) or
+    ((v and 0x00000000FF000000'u64) shl 8) or
+    ((v and 0x000000FF00000000'u64) shr 8) or
+    ((v and 0x0000FF0000000000'u64) shr 24) or
+    ((v and 0x00FF000000000000'u64) shr 40) or
+    ((v and 0xFF00000000000000'u64) shr 56)
+  proc bswap32u(v: uint32): uint32 {.inline.} =
+    ((v and 0x000000FF'u32) shl 24) or ((v and 0x0000FF00'u32) shl 8) or
+    ((v and 0x00FF0000'u32) shr 8) or ((v and 0xFF000000'u32) shr 24)
+else:
+  template bswap64u(v: uint64): uint64 = v
+  template bswap32u(v: uint32): uint32 = v
+
+proc storeBE64*(p: ptr UncheckedArray[byte]; off: int; v: uint64) {.inline.} =
+  ## 8 bytes big-endian em `p[off..off+8)` — substitui 8 `seq.add`.
+  let x = bswap64u(v)
+  copyMem(addr p[off], unsafeAddr x, 8)
+
+proc storeBE32*(p: ptr UncheckedArray[byte]; off: int; v: uint32) {.inline.} =
+  ## 4 bytes big-endian em `p[off..off+4)` — substitui 4 `seq.add`.
+  let x = bswap32u(v)
+  copyMem(addr p[off], unsafeAddr x, 4)
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # EAVT key: [eid 8B BE][attr 4B BE][value_encoded][suffix 8B BE]
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 proc encodeInt*(n: int64): seq[byte] =
-  # Flip sign bit for ordering
-  var x = cast[uint64](n xor (1'i64 shl 63))
-  result = newSeqOfCap[byte](8)
-  result.add byte(x shr 56); result.add byte((x shr 48) and 0xFF)
-  result.add byte((x shr 40) and 0xFF); result.add byte((x shr 32) and 0xFF)
-  result.add byte(x shr 24); result.add byte((x shr 16) and 0xFF)
-  result.add byte((x shr 8) and 0xFF); result.add byte(x and 0xFF)
+  # Flip sign bit for ordering; 1 store BE em vez de 8 adds.
+  let x = bswap64u(cast[uint64](n xor (1'i64 shl 63)))
+  result = newSeq[byte](8)
+  copyMem(addr result[0], unsafeAddr x, 8)
 
 proc encodeEid*(eid: int64): seq[byte] =
   encodeInt(eid)
@@ -49,38 +75,40 @@ proc encodeFloat*(f: float64): seq[byte] =
     x = not x
   else:
     x = x xor (1'u64 shl 63)
-  result = newSeqOfCap[byte](8)
-  result.add byte(x shr 56); result.add byte((x shr 48) and 0xFF)
-  result.add byte((x shr 40) and 0xFF); result.add byte((x shr 32) and 0xFF)
-  result.add byte(x shr 24); result.add byte((x shr 16) and 0xFF)
-  result.add byte((x shr 8) and 0xFF); result.add byte(x and 0xFF)
+  let b = bswap64u(x)
+  result = newSeq[byte](8)
+  copyMem(addr result[0], unsafeAddr b, 8)
 
 proc encodeVariable*(s: string): seq[byte] =
   ## Encode a string for lexicographic ordering: 8-byte blocks + control byte.
   ## Control: 0xFF = more blocks follow; 0..7 = last block valid bytes.
+  ## Blocos cheios: 1 load + 1 store de 8B; cauda: byte a byte (sem overread).
   let raw = s.cstring
   var len = 0
   while raw[len] != '\0': inc len
   result = newSeqOfCap[byte](len + (len div 8) + 2)
+  var wbuf: uint64
   var pos = 0
   while pos < len:
     let remaining = len - pos
-    let blockLen = min(remaining, 8)
-    for j in 0..<blockLen: result.add byte(raw[pos + j])
-    # Pad to 8 bytes
-    for j in blockLen..<8: result.add byte(0)
-    if remaining <= 8:
-      result.add byte(blockLen)  # last block: valid bytes count
+    let base = result.len
+    result.setLen(base + 9)
+    if remaining > 8:
+      copyMem(addr wbuf, unsafeAddr raw[pos], 8)
+      copyMem(addr result[base], addr wbuf, 8)
+      result[base + 8] = 0xFF
     else:
-      result.add byte(0xFF)      # more blocks follow
-    pos += blockLen
+      for j in 0 ..< remaining: result[base + j] = byte(raw[pos + j])
+      for j in remaining ..< 8: result[base + j] = 0
+      result[base + 8] = byte(remaining)
+    pos += 8
 
 proc encodeVariableUnordered*(data: openArray[byte]): seq[byte] =
   let length = data.len
-  result = newSeqOfCap[byte](length + 4)
-  result.add byte(length shr 24); result.add byte((length shr 16) and 0xFF)
-  result.add byte((length shr 8) and 0xFF); result.add byte(length and 0xFF)
-  result.add data
+  result = newSeq[byte](length + 4)
+  storeBE32(cast[ptr UncheckedArray[byte]](addr result[0]), 0, length.uint32)
+  if length > 0:
+    copyMem(addr result[4], unsafeAddr data[0], length)
 
 # Value encoding by mode
 proc encodeValue*(v: string; mode: EncodeMode; refEid: int64 = 0): seq[byte] =
@@ -187,50 +215,58 @@ proc buildVaetKey*(valueEncoded: openArray[byte]; attr: uint32; eid: int64;
 # Value encoding
 # ═══════════════════════════════════════════════════════════════════════════════
 
-proc cat4IntoArena(arena: Arena; a, b, c, d: openArray[byte]): KeyRef =
-  ## Reserve the concatenation of four pieces in the key arena and write them
-  ## directly — the key is written ONCE, no intermediate seq allocation.
-  let total = a.len + b.len + c.len + d.len
-  let p = allocKeyBytes(arena, total)
-  var off = 0
-  if a.len > 0:
-    copyMem(addr p[off], unsafeAddr a[0], a.len); off += a.len
-  if b.len > 0:
-    copyMem(addr p[off], unsafeAddr b[0], b.len); off += b.len
-  if c.len > 0:
-    copyMem(addr p[off], unsafeAddr c[0], c.len); off += c.len
-  if d.len > 0:
-    copyMem(addr p[off], unsafeAddr d[0], d.len); off += d.len
-  KeyRef(p: p, len: total)
-
 proc buildEavtEntries*(arena: Arena; eid: int64; attr: uint32; encodedValue: seq[byte];
                         t: int64; retracted: bool; mode: EncodeMode;
                         indexed: bool): seq[EavtEntry] =
+  ## Monta as chaves direto no arena com stores de palavra — sem seqs
+  ## intermediárias nem memcpys de fragmentos (o payload [8B eid] etc. é
+  ## escrito 1x por chave com storeBE64/32 + 1 copyMem do valor).
   let sf = encodeSuffix(t, retracted)
-  var eBytes = encodeEid(eid)
-  var aBytes = newSeq[byte](4)
-  aBytes[0] = byte(attr shr 24); aBytes[1] = byte((attr shr 16) and 0xFF)
-  aBytes[2] = byte((attr shr 8) and 0xFF); aBytes[3] = byte(attr and 0xFF)
-  var sfBytes = newSeq[byte](8)
-  sfBytes[0] = byte(sf shr 56); sfBytes[1] = byte((sf shr 48) and 0xFF)
-  sfBytes[2] = byte((sf shr 40) and 0xFF); sfBytes[3] = byte((sf shr 32) and 0xFF)
-  sfBytes[4] = byte(sf shr 24); sfBytes[5] = byte((sf shr 16) and 0xFF)
-  sfBytes[6] = byte((sf shr 8) and 0xFF); sfBytes[7] = byte(sf and 0xFF)
+  let ex = cast[uint64](eid) xor (1'u64 shl 63)
+  let vlen = encodedValue.len
+  let klen = 8 + 4 + vlen + 8
 
   # CF 0: eavt [eid][attr][val][sf]
-  result.add EavtEntry(cf: 0, key: cat4IntoArena(arena, eBytes, aBytes, encodedValue, sfBytes))
+  var p = allocKeyBytes(arena, klen)
+  storeBE64(p, 0, ex)
+  storeBE32(p, 8, attr)
+  if vlen > 0: copyMem(addr p[12], unsafeAddr encodedValue[0], vlen)
+  storeBE64(p, 12 + vlen, sf)
+  result.add EavtEntry(cf: 0, key: KeyRef(p: p, len: klen))
+
   # CF 1: aevt [attr][eid][val][sf]
-  result.add EavtEntry(cf: 1, key: cat4IntoArena(arena, aBytes, eBytes, encodedValue, sfBytes))
+  p = allocKeyBytes(arena, klen)
+  storeBE32(p, 0, attr)
+  storeBE64(p, 4, ex)
+  if vlen > 0: copyMem(addr p[12], unsafeAddr encodedValue[0], vlen)
+  storeBE64(p, 12 + vlen, sf)
+  result.add EavtEntry(cf: 1, key: KeyRef(p: p, len: klen))
 
   if mode == emRef:
     # CF 3: vaet [val][attr][eid][sf]
-    result.add EavtEntry(cf: 3, key: cat4IntoArena(arena, encodedValue, aBytes, eBytes, sfBytes))
+    p = allocKeyBytes(arena, klen)
+    if vlen > 0: copyMem(addr p[0], unsafeAddr encodedValue[0], vlen)
+    storeBE32(p, vlen, attr)
+    storeBE64(p, vlen + 4, ex)
+    storeBE64(p, vlen + 12, sf)
+    result.add EavtEntry(cf: 3, key: KeyRef(p: p, len: klen))
     if indexed:
       # CF 2: avet [attr][val][eid][sf]
-      result.add EavtEntry(cf: 2, key: cat4IntoArena(arena, aBytes, encodedValue, eBytes, sfBytes))
+      p = allocKeyBytes(arena, klen)
+      storeBE32(p, 0, attr)
+      if vlen > 0: copyMem(addr p[4], unsafeAddr encodedValue[0], vlen)
+      storeBE64(p, 4 + vlen, ex)
+      storeBE64(p, 12 + vlen, sf)
+      result.add EavtEntry(cf: 2, key: KeyRef(p: p, len: klen))
   else:
     if indexed:
-      result.add EavtEntry(cf: 2, key: cat4IntoArena(arena, aBytes, encodedValue, eBytes, sfBytes))
+      # CF 2: avet [attr][val][eid][sf]
+      p = allocKeyBytes(arena, klen)
+      storeBE32(p, 0, attr)
+      if vlen > 0: copyMem(addr p[4], unsafeAddr encodedValue[0], vlen)
+      storeBE64(p, 4 + vlen, ex)
+      storeBE64(p, 12 + vlen, sf)
+      result.add EavtEntry(cf: 2, key: KeyRef(p: p, len: klen))
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Decoding (used by query engine scanner)
