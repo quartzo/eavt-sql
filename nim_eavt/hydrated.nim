@@ -199,6 +199,36 @@ proc keyCount*(h: HydratedSet; eid: int64): int {.inline.} =
   if eid notin h.index: return 0
   h.index[eid].offs.len
 
+proc hasAttrKey*(h: HydratedSet; eid: int64; attrId: uint32): bool =
+  ## True quando a entrada hidratada tem chave CF-0 ativa para (eid, attrId).
+  ## Exato sob complete+current: a entrada é autoritativa para o eid inteiro,
+  ## então "não tem chave para o attr" ⇒ não existe datom ativo a retrair.
+  ## Busca binária pelos primeiros 12B ([eid 8B][aid 4B]) — as chaves estão
+  ## ordenadas e chaves do mesmo (eid, aid) são contíguas.
+  if eid notin h.index: return false
+  let e = h.index[eid]
+  var pfx: array[12, byte]
+  let ex = cast[uint64](eid) xor (1'u64 shl 63)
+  storeBE64(cast[ptr UncheckedArray[byte]](addr pfx[0]), 0, ex)
+  storeBE32(cast[ptr UncheckedArray[byte]](addr pfx[0]), 8, attrId)
+
+  proc cmpAttrAt(e: HydratedEntry; i: int; pfx: array[12, byte]): int {.inline.} =
+    let start = keyStart(e, i)
+    let klen = keyLenAt(e, i)
+    let n = min(klen, 12)
+    for j in 0 ..< n:
+      if e.buf[start + j] != pfx[j]:
+        return if e.buf[start + j] < pfx[j]: -1 else: 1
+    if klen < 12: -1 else: 0
+
+  var lo = 0
+  var hi = e.offs.len
+  while lo < hi:
+    let mid = (lo + hi) shr 1
+    if cmpAttrAt(e, mid, pfx) < 0: lo = mid + 1
+    else: hi = mid
+  result = lo < e.offs.len and cmpAttrAt(e, lo, pfx) == 0
+
 proc lookupRange*(h: HydratedSet; eid: int64; prefix: seq[byte]): seq[seq[byte]] =
   ## All stored keys starting with `prefix`, ascending. The caller has already
   ## probed membership for the eid anchored at prefix[0..<8].

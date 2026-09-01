@@ -723,6 +723,32 @@ suite "engine: save + lookup":
     expect EvalError:
       q.saveWithT(1, "user.friend", SExpr(kind: sStr, sval: "not-an-eid"), 1, 0)
 
+  test "skip de retract por (eid, attr) hidratado não quebra overwrite":
+    ## O skip por atributo (hasAttrKey) não pode pular o scan quando o attr
+    ## JÁ tem datom ativo — o overwrite precisa retrair o valor anterior.
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    q.declareAttrFromSql("user.name", ":db.type/string", false, false, 1)
+    q.declareAttrFromSql("user.age", ":db.type/string", false, false, 1)
+    let eid = q.allocateInPartition(4)
+
+    q.saveWithT(eid, "user.name", SExpr(kind: sStr, sval: "Alice"), 2, 0)
+    q.saveWithT(eid, "user.age", SExpr(kind: sStr, sval: "30"), 3, 0)
+    # re-save do attr JÁ escrito: hasAttrKey(name) true → scan roda → retract
+    q.saveWithT(eid, "user.name", SExpr(kind: sStr, sval: "Bob"), 4, 0)
+    check q.lookupValue(eid, "user.name").get.sval == "Bob"
+    check q.lookupValue(eid, "user.age").get.sval == "30"
+
+    # overwrite via save-many (caminho bulk) também retrai
+    let eid2 = q.allocateInPartition(4)
+    q.saveManyWithT("user.name",
+                    @[(eid2, SExpr(kind: sStr, sval: "Carol"))], 5, 0)
+    q.saveManyWithT("user.name",
+                    @[(eid2, SExpr(kind: sStr, sval: "Dana"))], 6, 0)
+    check q.lookupValue(eid2, "user.name").get.sval == "Dana"
+
   test "retract on undeclared attr is no-op":
     let kv = newMemoryKVStore()
     defer: kv.close()

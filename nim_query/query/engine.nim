@@ -165,13 +165,14 @@ proc saveResolvedInto(q: QueryStore; eid: int64; attrId: uint32; vt: uint32;
   t0 = getMonoTime()
 
   if not many:
-    # Skip provado: eid HIDRATADO com zero chaves CF-0 ativas conhecidas não
-    # tem o que retrair — a entrada hidratada é autoritativa (invariante
-    # complete+current). Cobre toda entidade nascida de alloc-entity na
-    # própria carga (o caso bulk), eliminando a leitura-pré-escrita.
+    # Skip provado: eid HIDRATADO é autoritativo (invariante complete+current);
+    # sem chave CF-0 ativa para (eid, attrId) não há o que retrair — a busca
+    # pré-escrita é eliminada por atributo, não só para o primeiro datom da
+    # entidade. Cobre a carga bulk (attrs novos de entidades goc/alloc) e
+    # upserts de attrs ainda não escritos. Entrada ausente/evictida ⇒ scan.
     let needsRetractScan = not (
       q.eavt.hydEnabled and q.eavt.hyd.probe(eid) and
-      q.eavt.hyd.keyCount(eid) == 0)
+      not q.eavt.hyd.hasAttrKey(eid, attrId))
     if needsRetractScan:
       var tPrefix = getMonoTime()
       var ePrefix = keys.encodeEid(eid)
