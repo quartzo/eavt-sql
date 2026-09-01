@@ -198,7 +198,9 @@ proc execTx(eng: SharedEngine; req: Request; transp: StreamTransport) {.async.} 
   ## Native EDN transaction (docs/tx-protocol.md §3): interpret the op
   ## vectors against the engine, reply with a tx-report
   ## {tempids: {...}, tx: t} or an error frame.
+  logDebug("tx", "execTx: enter, ops=" & $req.txdata.len)
   let txReport = transactEdnSafe(eng.store, req.txdata)
+  logDebug("tx", "execTx: report ready, tempids=" & $txReport.tempids.len)
   var ms = MsgStream.init(256)
   var fieldCount = 3  # tempids + tx + more
   if req.id.len > 0: inc fieldCount
@@ -215,7 +217,9 @@ proc execTx(eng: SharedEngine; req: Request; transp: StreamTransport) {.async.} 
   # CRITICAL: via the single output queue — WAL bytes for this tx are flushed
   # before the response reaches the client (same contract as scheme exec;
   # docs/scheme-transport.md and AGENTS.md "fila única de saída").
+  logDebug("tx", "execTx: writing report frame, " & $ms.data.len & " bytes")
   await writeFrameQueued(eng, transp, ms.data)
+  logDebug("tx", "execTx: report frame written")
 
 proc handleSchema(eng: SharedEngine; id: string;
                   transp: StreamTransport) {.async.} =

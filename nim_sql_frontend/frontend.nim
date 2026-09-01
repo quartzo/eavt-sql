@@ -15,7 +15,7 @@ type
     existsMode*: bool
 
 
-proc isDeleteDirect(stmt: DeleteStmt): bool =
+proc isDeleteDirect*(stmt: DeleteStmt): bool =
   for cond in stmt.conditions:
     if cond.left.field == "eid":
       return true

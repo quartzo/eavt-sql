@@ -32,6 +32,9 @@ type
   PendingReq = ref object
     transp: StreamTransport   # client transport to relay responses to
     fut: Future[void]         # completed when more=false
+  PendingReqCollect = ref object
+    buf: string               # collected raw response frames
+    fut: Future[string]       # completed with the collected bytes when more=false
 
   OnEvent* = proc(frame: string) {.gcsafe, raises: [].}
 
@@ -39,6 +42,7 @@ type
     path*: string
     transp: StreamTransport
     pending: Table[string, PendingReq]
+    pendingCollect: Table[string, PendingReqCollect]
     nextId: uint64
     connected*: bool
     onEvent*: OnEvent         # called for every replication "ev" frame
@@ -95,6 +99,10 @@ proc failAllPending(conn: MultiplexedConn) =
     if not p.fut.finished:
       p.fut.fail(newException(IOError, "transactor disconnected"))
   conn.pending.clear()
+  for id, p in conn.pendingCollect:
+    if not p.fut.finished:
+      p.fut.complete(p.buf)  # surface ""/partial — caller inspects for error
+  conn.pendingCollect.clear()
 
 proc nextIdStr(conn: MultiplexedConn): string =
   inc conn.nextId
@@ -127,6 +135,19 @@ proc readerLoop(conn: MultiplexedConn) {.async.} =
         if not getTopBool(body, "more"):
           p.fut.complete()
           conn.pending.del(id)
+      else:
+        let pc = conn.pendingCollect.getOrDefault(id)
+        if pc != nil:
+          # Store FRAMED bytes (4B length prefix + body) so the collector can
+          # relay frames verbatim to its client.
+          pc.buf.add chr(byte(body.len shr 24) and 0xFF)
+          pc.buf.add chr(byte((body.len shr 16) and 0xFF))
+          pc.buf.add chr(byte((body.len shr 8) and 0xFF))
+          pc.buf.add chr(byte(body.len and 0xFF))
+          pc.buf.add body
+          if not getTopBool(body, "more"):
+            pc.fut.complete(pc.buf)
+            conn.pendingCollect.del(id)
 
 # ── Subscribe (send replicate request) ──────────────────────────────────────
 
@@ -169,6 +190,32 @@ proc openMultiplexed*(path: string; onEvent: OnEvent): MultiplexedConn =
   ## as a background task on the current chronos event loop.
   result = MultiplexedConn(path: path, onEvent: onEvent)
   asyncSpawn result.connectLoop()
+
+proc requestCollect*(conn: MultiplexedConn; body: string): Future[string] {.async.} =
+  ## Send a raw msgpack request to the transactor and COLLECT the response
+  ## frames (concatenated raw bodies) instead of relaying them to a client.
+  ## Used by the tx path: the tx-report must be inspected locally (tempids →
+  ## UPSERT rows) before anything reaches the client.  Completes with ""
+  ## when the transactor is down; error frames surface in the collected
+  ## bytes (the caller inspects "error" keys).
+  ## NB (chronos): single unconditional `await` at the end of one flat code
+  ## path — chronos's async transform is brittle with early returns.
+  result = ""
+  if conn.connected and body.len > 0:
+    let id = conn.nextIdStr()
+    let framed = injectTopPair(body, "id", id)
+    if framed.len > 0:
+      let p = PendingReqCollect(fut: newFuture[string]("requestCollect"))
+      conn.pendingCollect[id] = p
+      var sendOk = true
+      try:
+        await conn.sendFrame(framed)
+      except CatchableError as e:
+        conn.pendingCollect.del(id)
+        sendOk = false
+        logDebug("downstream", "tx send failed (" & excMsg(e) & ")")
+      if sendOk:
+        result = await p.fut
 
 proc request*(conn: MultiplexedConn; body: string;
               clientTransp: StreamTransport) {.async.} =

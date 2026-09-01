@@ -79,13 +79,15 @@ const DbValueTypes = [
 
 proc vtFromKeyword(kw: string): string =
   ## :db.type/string → "string" (valueTypeFromName accepts the suffix).
+  ## Case-insensitive: the SQL parser uppercases type names (STRING, REF...).
   ## Unknown value types are a tx error, not a silent string fallback —
   ## a typo'd :db/valueType must fail loudly (§7).
-  if kw.startsWith("db.type/"):
-    let n = kw[8 ..^ 1]
-    if n in DbValueTypes: return n
-    raise txErr("tx: unknown :db/valueType keyword: :" & kw)
-  raise txErr("tx: :db/valueType must be a :db.type/* keyword: :" & kw)
+  let n = kw.toLowerAscii()
+  if n.startsWith("db.type/"):
+    let vt = n[8 ..^ 1]
+    if vt in DbValueTypes: return vt
+    raise txErr("tx: unknown :db/valueType keyword: :" & n)
+  raise txErr("tx: :db/valueType must be a :db.type/* keyword: :" & n)
 
 proc sameSchemaEntity(a, b: SExpr): bool =
   ## Schema datoms group by their raw eid literal (positive int or keyword

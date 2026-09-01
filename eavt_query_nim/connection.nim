@@ -33,6 +33,7 @@ import logutil
 import explain
 import ast as sql_ast
 import parser as sql_parser
+import tx_compile
 
 const BatchSize = 100
 
@@ -137,6 +138,81 @@ proc sendSchemeExec(gw: GatewayState; program: SchemeProgram;
   let req = buildSchemeRequest(program.body, "exec", params)
   await gw.conn.request(req, transp)
 
+# ── EDN tx write path (docs/tx-protocol.md §3) ──────────────────────────────
+
+proc buildTxRequest(txdata: seq[SExpr]): string =
+  ## Build a `tx` request as raw msgpack bytes — ops are native msgpack
+  ## values (keywords ext 0x06), no `params` field (§5.4: values are
+  ## substituted at compile time).
+  var ms = MsgStream.init(256)
+  ms.pack_map(2)
+  ms.pack("type"); ms.pack("tx")
+  ms.pack("txdata")
+  ms.pack_array(txdata.len)
+  for op in txdata:
+    writeSExprWire(ms, op)
+  ms.data
+
+proc firstFrameBody(collected: string): string =
+  ## Body of the first frame in a collected (4B length prefix + body) buffer.
+  if collected.len < 4: return ""
+  let ln = (int(collected[0]) shl 24) or (int(collected[1]) shl 16) or
+           (int(collected[2]) shl 8) or int(collected[3])
+  if 4 + ln > collected.len: return ""
+  collected[4 ..< 4 + ln]
+
+proc getTopReportFields(raw: string): tuple[tempids: seq[(int64, int64)], tx: int64] =
+  ## Extract (tempids, tx) from a tx-report frame — msgpack map at frame
+  ## level, read with topValue/skipValue/mpReadInt, no full tree.
+  var tempids: seq[(int64, int64)] = @[]
+  var tx: int64 = 0
+  var pos = 0
+  let (tf, ts, te) = topValue(raw, "tx")
+  if tf:
+    var p = ts
+    tx = mpReadInt(raw, p, te)
+  let (f, s, e) = topValue(raw, "tempids")
+  if f:
+    # parse the map header manually: mapCountAndHeaderLen over the slot
+    let (n, hdr) = mapCountAndHeaderLen(raw[s ..< e])
+    if n >= 0:
+      var kp = s + hdr
+      for i in 1 .. n:
+        if kp >= e: break
+        let kStart = kp
+        kp = skipValue(raw, kp, 0)
+        if kp < 0: break
+        let kEnd = kp
+        kp = skipValue(raw, kp, 0)
+        if kp < 0 or kp > e: break
+        let vEnd = kp
+        var kpos = kStart
+        let tid = mpReadInt(raw, kpos, kEnd)
+        var vpos = kEnd
+        let vid = mpReadInt(raw, vpos, vEnd)
+        tempids.add((tid, vid))
+  (tempids, tx)
+
+proc sendTxCollect(gw: GatewayState; txdata: seq[SExpr]): Future[string] {.async.} =
+  ## Send a tx request and return the collected raw response frames.
+  ## NB: no `return await` — that pattern yields a nil future in Nim's async
+  ## transform (the yielded-nil Assert the logs show).
+  let req = buildTxRequest(txdata)
+  result = await gw.conn.requestCollect(req)
+
+proc relayReport(transp: StreamTransport; collected: string) {.async.} =
+  ## Relay collected tx-report frames (4B length prefix + body) verbatim to
+  ## the client transport.
+  var pos = 0
+  while pos < collected.len:
+    if pos + 4 > collected.len: break
+    let ln = (int(collected[pos]) shl 24) or (int(collected[pos+1]) shl 16) or
+             (int(collected[pos+2]) shl 8) or int(collected[pos+3])
+    pos += 4
+    if pos + ln > collected.len: break
+    await transp.writeFrameAsync(collected[pos ..< pos + ln])
+    pos += ln
+
 # ── Mixed-operation handlers ────────────────────────────────────────────────
 
 proc handleUpdateMux(gw: GatewayState; updateStmt: sql_ast.UpdateStmt;
@@ -159,17 +235,25 @@ proc handleUpdateMux(gw: GatewayState; updateStmt: sql_ast.UpdateStmt;
       if row.len > 0 and row[0].kind == sInt:
         batch.add(row[0].ival)
     if batch.len >= BatchSize or (not more and batch.len > 0):
-      var stmts: seq[SExpr]
+      var txdata: seq[SExpr]
       for eid in batch:
         for clause in updateStmt.clauses:
           for iv in clause.values:
-            stmts.add(newList(@[newSymbol("save"), newInt(eid),
-                                newStr(iv.attr), valueToSexpr(iv.value)]))
-      stmts.add(newList(@[newSymbol("result"), newInt(batch[0]),
-                          newInt(totalValues)]))
-      let body = if stmts.len == 1: stmts[0]
-                 else: newList(@[newSymbol("begin")] & stmts)
-      await sendSchemeExec(gw, SchemeProgram(body: body), params, transp)
+            txdata.add(txAdd(newInt(eid), iv.attr,
+                             valueToVal(iv.value, params)))
+      let collected = await sendTxCollect(gw, txdata)
+      let reportBody = firstFrameBody(collected)
+      if getTopStr(reportBody, "error").len > 0:
+        await transp.writeErrorAsync(getTopStr(reportBody, "error"))
+        return
+      # Legacy UPDATE row contract: [[firstEid, totalValues]]
+      var ms = MsgStream.init(128)
+      ms.pack_map(3)
+      ms.pack("columns"); ms.pack_array(0)
+      ms.pack("rows"); ms.pack_array(1); ms.pack_array(2)
+      ms.pack(batch[0]); ms.pack(totalValues)
+      ms.pack("more"); ms.pack(false)
+      await transp.writeFrameAsync(ms.data)
       batch.setLen(0)
     if not more: break
 
@@ -192,21 +276,30 @@ proc handleDeleteMux(gw: GatewayState; deleteStmt: sql_ast.DeleteStmt;
       if row.len > 0 and row[0].kind == sInt:
         batch.add(row[0].ival)
     if batch.len >= BatchSize or (not more and batch.len > 0):
-      var stmts: seq[SExpr]
+      var txdata: seq[SExpr]
       for eid in batch:
         for cond in deleteStmt.conditions:
           if cond.left.field == "eid": continue
           let valExpr = case cond.right.rkind
-            of sql_ast.crParam:
-              newList(@[newSymbol("param"), newInt(cond.right.rparam.int64)])
-            of sql_ast.crLiteral: literalToSexpr(cond.right.rlit)
+            of sql_ast.crParam: valueToVal(
+                sql_ast.Value(vkind: sql_ast.valParam, vparam: cond.right.rparam),
+                params)
+            of sql_ast.crLiteral: literalToVal(cond.right.rlit)
             else: newInt(0)
-          stmts.add(newList(@[newSymbol("retract"), newInt(eid),
-                              newStr(cond.left.field), valExpr]))
-      stmts.add(newList(@[newSymbol("result"), newInt(batch[0])]))
-      let body = if stmts.len == 1: stmts[0]
-                 else: newList(@[newSymbol("begin")] & stmts)
-      await sendSchemeExec(gw, SchemeProgram(body: body), params, transp)
+          txdata.add(txRetract(newInt(eid), cond.left.field, valExpr))
+      let collected = await sendTxCollect(gw, txdata)
+      let reportBody = firstFrameBody(collected)
+      if getTopStr(reportBody, "error").len > 0:
+        await transp.writeErrorAsync(getTopStr(reportBody, "error"))
+        return
+      # Legacy DELETE row contract: [[firstEid]]
+      var ms = MsgStream.init(128)
+      ms.pack_map(3)
+      ms.pack("columns"); ms.pack_array(0)
+      ms.pack("rows"); ms.pack_array(1); ms.pack_array(1)
+      ms.pack(batch[0])
+      ms.pack("more"); ms.pack(false)
+      await transp.writeFrameAsync(ms.data)
       batch.setLen(0)
     if not more: break
 
@@ -228,6 +321,8 @@ proc handleSql(gw: GatewayState; raw: string;
 
   # Mixed operations: UPDATE/DELETE with WHERE → query server scans, transactor writes.
   # Only when replica is available and conditions are simple (literal/param).
+  # DELETE with an eid condition (no other retractable conditions) retracts
+  # nothing by definition — answer with the legacy empty row shape.
   if gw.replica != nil:
     if stmt.kind == sql_ast.stmtUpdate and canUseMixedUpdate(stmt.updateStmt):
       await handleUpdateMux(gw, stmt.updateStmt, params, transp)
@@ -235,6 +330,15 @@ proc handleSql(gw: GatewayState; raw: string;
     if stmt.kind == sql_ast.stmtDelete and canUseMixedDelete(stmt.deleteStmt):
       await handleDeleteMux(gw, stmt.deleteStmt, params, transp)
       return
+  if stmt.kind == sql_ast.stmtDelete and frontend.isDeleteDirect(stmt.deleteStmt):
+    # eid-only delete: the compiled scheme path retracts nothing either
+    var ms = MsgStream.init(128)
+    ms.pack_map(3)
+    ms.pack("columns"); ms.pack_array(0)
+    ms.pack("rows"); ms.pack_array(1); ms.pack_array(1); ms.pack(0)
+    ms.pack("more"); ms.pack(false)
+    await transp.writeFrameAsync(ms.data)
+    return
 
   # Existing logic: compile with retry, route by isSelect/isExplain.
   var snapshot = gw.getSnapshot()
@@ -283,14 +387,75 @@ proc handleSql(gw: GatewayState; raw: string;
       if not more: break
     return
 
-  # DML / schema changes: forward as scheme to the transactor via the
-  # shared multiplexed connection.  The transactor orders the WAL frames
-  # generated by this request BEFORE its response (single output queue),
-  # so by the time the ack reaches the client the replica has already
-  # applied them — no guard sleep needed.
-  let mode = if compiled.isSelect: "query" else: "exec"
-  let req = buildSchemeRequest(compiled.program.body, mode, params)
-  await gw.conn.request(req, transp)
+  # PARTITION keeps the legacy scheme path (engine-managed partitions; the
+  # declare-partition hostfn is transactor-internal, §9 of tx-protocol.md).
+  if stmt.kind == sql_ast.stmtPartition:
+    let req = buildSchemeRequest(compiled.program.body, "exec", params)
+    await gw.conn.request(req, transp)
+    return
+
+  # DML / schema changes: compile to EDN tx-data and send a `tx` request
+  # (docs/tx-protocol.md §3).  The tx-report is inspected locally to rebuild
+  # the legacy UPSERT row contract [[eid, N]] for REPL/Python clients; the
+  # transactor's single output queue guarantees the WAL frames precede the
+  # ack, so the replica has applied the datoms when the client proceeds.
+  let txdata: seq[SExpr] = case stmt.kind
+    of sql_ast.stmtUpsert:
+      compileUpsertTx(stmt.upsertStmt, params)
+    of sql_ast.stmtAttribute:
+      compileAttributeTx(stmt.attrStmt)
+    else:
+      @[]
+  if txdata.len == 0:
+    # Nothing to write (e.g. PARTITION): answer with the legacy empty row shape.
+    var ms = MsgStream.init(128)
+    ms.pack_map(3)
+    ms.pack("columns"); ms.pack_array(0)
+    ms.pack("rows"); ms.pack_array(1); ms.pack_array(1); ms.pack(0)
+    ms.pack("more"); ms.pack(false)
+    await transp.writeFrameAsync(ms.data)
+    return
+  let collected = await sendTxCollect(gw, txdata)
+  if collected.len == 0:
+    await transp.writeErrorAsync("transactor disconnected")
+    return
+  # Rebuild the legacy result row for UPSERT: [[firstTempidEid, totalValues]].
+  # For ATTRIBUTE: [[attr, valueType]] (the old (result attr vt) contract).
+  # REPL/Python clients keep their row contract; the transactor's single
+  # output queue guarantees the WAL frames precede the ack, so the replica
+  # has applied the datoms when the client proceeds.
+  let reportBody = firstFrameBody(collected)
+  if getTopStr(reportBody, "error").len > 0:
+    # Surface tx errors (lookup miss, unknown attr...) as SQL errors.
+    await transp.writeErrorAsync(getTopStr(reportBody, "error"))
+    return
+  if stmt.kind == sql_ast.stmtUpsert:
+    let (tempids, _) = getTopReportFields(reportBody)
+    var ms = MsgStream.init(128)
+    ms.pack_map(3)
+    ms.pack("columns"); ms.pack_array(0)
+    ms.pack("rows")
+    if tempids.len > 0:
+      ms.pack_array(1)
+      ms.pack_array(2)
+      ms.pack(tempids[0][1])
+      var n = 0
+      for clause in stmt.upsertStmt.clauses: n += clause.values.len
+      ms.pack(n)
+    else:
+      ms.pack_array(0)
+    ms.pack("more"); ms.pack(false)
+    await transp.writeFrameAsync(ms.data)
+  elif stmt.kind == sql_ast.stmtAttribute:
+    var ms = MsgStream.init(128)
+    ms.pack_map(3)
+    ms.pack("columns"); ms.pack_array(0)
+    ms.pack("rows"); ms.pack_array(1); ms.pack_array(2)
+    ms.pack(stmt.attrStmt.attr); ms.pack(stmt.attrStmt.valueType)
+    ms.pack("more"); ms.pack(false)
+    await transp.writeFrameAsync(ms.data)
+  else:
+    await relayReport(transp, collected)
 
 proc handleSchema(gw: GatewayState; transp: StreamTransport) {.async.} =
   ## Served from the local replica's stats — never touches the transactor.

@@ -153,7 +153,7 @@ func isMsgpackMap*(buf: string): bool {.raises: [].} =
   of 0x80..0x8f, 0xde, 0xdf: true
   else: false
 
-proc mapCountAndHeaderLen(buf: string): tuple[count: int64, hdr: int] =
+proc mapCountAndHeaderLen*(buf: string): tuple[count: int64, hdr: int] =
   ## (-1, 0) when not a map / truncated header.
   if buf.len == 0: return (-1, 0)
   let b = rd8(buf, 0)

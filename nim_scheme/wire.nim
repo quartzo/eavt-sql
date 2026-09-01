@@ -131,7 +131,7 @@ proc writeSExprPlain*(s: MsgStream; e: SExpr) =
 
 # ── Direct msgpack decode (no intermediate tree) ────────────────────────────
 
-proc mpReadInt(buf: string; pos: var int; limit: int): int64 =
+proc mpReadInt*(buf: string; pos: var int; limit: int): int64 =
   ## Read any msgpack int encoding at pos, advancing pos.
   if pos >= limit: raise newException(WireError, "truncated int")
   let b = ord(buf[pos])
