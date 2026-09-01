@@ -30,3 +30,4 @@ import nim_sql_frontend/test_sql_frontend
 import nim_query/query/test_edn_tx
 import nim_query/query/test_golden_tx
 import nim_edn/test_edn
+import nim_datalog/test_query_edn

@@ -25,9 +25,9 @@ proc skipWs(input: string; pos: var int) =
   while pos < input.len and input[pos] in Whitespace:
     inc pos
 
-proc parseEdnValue(input: string; pos: var int): SExpr
+proc parseEdnValue(input: string; pos: var int): SExpr {.raises: [EdnError], gcsafe.}
 
-proc parseEdnString(input: string; pos: var int): SExpr =
+proc parseEdnString(input: string; pos: var int): SExpr {.raises: [EdnError], gcsafe.} =
   ## pos sits on the opening quote.
   inc pos
   var s = ""
@@ -55,7 +55,7 @@ proc parseEdnString(input: string; pos: var int): SExpr =
       inc pos
   raise newException(EdnError, "edn: unterminated string")
 
-proc parseEdnAtom(input: string; pos: var int): SExpr =
+proc parseEdnAtom(input: string; pos: var int): SExpr {.raises: [EdnError], gcsafe.} =
   var start = pos
   while pos < input.len and input[pos] notin Whitespace and
         input[pos] notin {'(', ')', '[', ']', '{', '}', '"'}:
@@ -78,7 +78,7 @@ proc parseEdnAtom(input: string; pos: var int): SExpr =
     except ValueError: return newSymbol(s)
 
 proc parseEdnColl(input: string; pos: var int; closing: char;
-                  what: string): seq[SExpr] =
+                  what: string): seq[SExpr] {.raises: [EdnError], gcsafe.} =
   ## pos sits just past the opening delimiter.
   while true:
     skipWs(input, pos)
@@ -92,7 +92,7 @@ proc parseEdnColl(input: string; pos: var int; closing: char;
     else:
       result.add parseEdnValue(input, pos)
 
-proc parseEdnValue(input: string; pos: var int): SExpr =
+proc parseEdnValue(input: string; pos: var int): SExpr {.raises: [EdnError], gcsafe.} =
   skipWs(input, pos)
   if pos >= input.len:
     raise newException(EdnError, "edn: unexpected end of input")
@@ -115,7 +115,7 @@ proc parseEdnValue(input: string; pos: var int): SExpr =
   else:
     return parseEdnAtom(input, pos)
 
-proc readEdn*(input: string): SExpr =
+proc readEdn*(input: string): SExpr {.raises: [EdnError], gcsafe.} =
   ## Read a single EDN value from the whole input.  Trailing content
   ## (other than whitespace) is an error.
   var pos = 0
@@ -124,7 +124,7 @@ proc readEdn*(input: string): SExpr =
   if pos != input.len:
     raise newException(EdnError, "edn: trailing content at pos " & $pos)
 
-proc readEdnVector*(input: string): seq[SExpr] =
+proc readEdnVector*(input: string): seq[SExpr] {.raises: [EdnError], gcsafe.} =
   ## Read a top-level vector `[op op ...]` and return its elements —
   ## the tx-data entry point (docs/tx-protocol.md §3.1).
   var pos = 0

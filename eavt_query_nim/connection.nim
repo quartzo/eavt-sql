@@ -34,6 +34,7 @@ import explain
 import ast as sql_ast
 import parser as sql_parser
 import tx_compile
+import datalog_compile
 
 const BatchSize = 100
 
@@ -60,6 +61,105 @@ proc writeSelectFrame(transp: StreamTransport; rows: seq[seq[SExpr]]; more: bool
       writeSExprPlain(ms, v)
   ms.pack("more"); ms.pack(more)
   await transp.writeFrameAsync(ms.data)
+
+proc writeSelectFrameCols(transp: StreamTransport; columns: seq[string];
+                          rows: seq[seq[SExpr]]; more: bool) {.async.} =
+  ## Like writeSelectFrame but with named columns (the Datalog :find vars).
+  var ms = MsgStream.init(256)
+  ms.pack_map(3)
+  ms.pack("columns"); ms.pack_array(columns.len)
+  for c in columns: ms.pack(c)
+  ms.pack("rows")
+  ms.pack_array(rows.len)
+  for row in rows:
+    ms.pack_array(row.len)
+    for v in row:
+      writeSExprPlain(ms, v)
+  ms.pack("more"); ms.pack(more)
+  await transp.writeFrameAsync(ms.data)
+
+proc handleDatalog(gw: GatewayState; raw: string;
+                   transp: StreamTransport) {.async.} =
+  ## Datalog EDN query (docs/datalog-reference.md):
+  ##   {"type": "datalog", "query": "[:find ... :where ...]",
+  ##    "params": [wire ASTs], "explain": bool}
+  ## Compiles via the Datalog IR directly (no SQL AST) and streams rows on
+  ## the replica — the same consistency model as SELECT.
+  let queryText = getTopStr(raw, "query")
+  if queryText.len == 0:
+    await transp.writeErrorAsync("datalog request missing query field")
+    return
+  var params: seq[SExpr] = @[]
+  let (pf, ps, pe) = topValue(raw, "params")
+  if pf:
+    for (s, e) in topArrayElems(raw, ps, pe):
+      params.add(wireFromMsgpackAt(raw, s, e))
+  let explain = getTopBool(raw, "explain")
+
+  # Compile with the same stale-schema retry as the SQL path.
+  var findVars: seq[string] = @[]
+  var compiled: frontend.CompileResult = nil
+  var lastErr: ref CatchableError = nil
+  for attempt in 0..1:
+    try:
+      var fv: seq[string] = @[]
+      compiled = compileDatalogQuery(queryText, gw.getSnapshot(), fv)
+      findVars = fv
+      break
+    except CatchableError as e:
+      lastErr = e
+      if "attribute resolution failed" in e.msg and attempt == 0:
+        await sleepAsync(15.milliseconds)
+        gw.invalidateSnapshot()
+        try:
+          discard gw.getSnapshot()
+        except CatchableError:
+          discard
+      else:
+        raise
+  if compiled == nil:
+    raise lastErr
+
+  if explain or gw.replica == nil:
+    if explain:
+      var ms = MsgStream.init(4096)
+      ms.pack_map(3)
+      ms.pack("columns"); ms.pack_array(0)
+      ms.pack("rows"); ms.pack_array(1); ms.pack_array(1)
+      let explainStr = renderExplain(compiled)
+      ms.pack(explainStr)
+      ms.pack("more"); ms.pack(false)
+      await transp.writeFrameAsync(ms.data)
+      return
+    if gw.replica == nil:
+      await transp.writeErrorAsync("replica unavailable")
+      return
+
+  # Streaming execution on the replica (same as SELECT).
+  let proto = newQuerySession(gw.replica.store, compiled.program, params,
+                              1'i64, none[int64]())
+  let sess = newStreamingSession(proto)
+  var first = true
+  while true:
+    let (rows, more) = nextBatchSafe(sess, 100)
+    var ms = MsgStream.init(256)
+    ms.pack_map(3)
+    ms.pack("columns")
+    if first:
+      ms.pack_array(findVars.len)
+      for v in findVars: ms.pack(v)
+    else:
+      ms.pack_array(0)
+    ms.pack("rows")
+    ms.pack_array(rows.len)
+    for row in rows:
+      ms.pack_array(row.len)
+      for v in row:
+        writeSExprPlain(ms, v)
+    ms.pack("more"); ms.pack(more)
+    await transp.writeFrameAsync(ms.data)
+    first = false
+    if not more: break
 
 # ── Mixed-operation helpers ─────────────────────────────────────────────────
 
@@ -494,6 +594,8 @@ proc serveGatewayConnection*(gw: GatewayState; transp: StreamTransport) {.
         case t
         of "sql":
           await handleSql(gw, raw, transp)
+        of "datalog":
+          await handleDatalog(gw, raw, transp)
         of "schema":
           await handleSchema(gw, transp)
         of "scheme", "tx", "admin", "kv":

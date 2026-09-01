@@ -153,6 +153,29 @@ class EavtClient:
         self._send_msg(_PACKER.pack(req))
         return self._recv_loop()
 
+    def q(self, query: str, *args) -> list[tuple]:
+        """Execute a Datalog EDN query (docs/datalog-reference.md) and
+        return rows as flat tuples — the Datomic-style surface.
+
+        query: EDN vector like
+          [:find ?name :where [?e :person/name ?name]]
+        args: positional params bound to :in $ ?var vars.
+        """
+        req = {"type": "datalog", "query": query}
+        if args:
+            req["params"] = [to_wire(a) for a in args]
+        self._send_msg(_PACKER.pack(req))
+        rows = []
+        while True:
+            resp = msgpack.unpackb(self._recv_msg())
+            if "error" in resp and resp["error"]:
+                raise RuntimeError(resp["error"])
+            for row in resp.get("rows", []):
+                rows.append(tuple(row))
+            if not resp.get("more", False):
+                break
+        return rows
+
     def schema(self) -> dict:
         """Fetch the schema snapshot (attrIds, indexEstimates, partitionIds, refAttrs)."""
         req = {"type": "schema"}
