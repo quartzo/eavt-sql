@@ -1,9 +1,10 @@
 # Carga da Receita Federal — instrumento, referência e knobs
 
 Metodologia oficial para os exercícios de carga (1k→50k empresas) e a
-extrapolação para a base completa. Referência desta rodada: **2026-08-24,
-commit `9622628`+** (arena plana, cursor preguiçoso corrigido, fila única
-de replicação, root broadcast no flush assíncrono).
+extrapolação para a base completa. Referência desta rodada: **2026-09-01,
+commit `e73d61d`+** (save-many storage-batched, fix REF, word-store nos
+encoders, skip de retract por (eid, attr) hidratado, fix do rootName do
+flush worker, estabs via carga bulk com cache de eids client-side).
 
 ## Instrumento
 
@@ -28,21 +29,23 @@ para comparações.
 
 | estágio | taxa | tempo do estágio |
 |---|---|---|
-| empresas | 22.557 | 2,2 s |
-| estabs   | **5.326** | 12,2 s |
-| simples  | 28.558 | 1,9 s |
-| sócios   | 16.231 | 1,8 s |
+| empresas | 26.327 | 1,9 s |
+| estabs   | **8.747** | 7,4 s |
+| simples  | 35.123 | 1,6 s |
+| sócios   | 19.598 | 1,3 s |
 
-Degradação suave entre 1k→50k: estabs −17%, demais ±5%.
+Degradação suave entre 1k→50k. Estabs usa a carga bulk (`load_estabs_bulk`,
+save-many + cache de eids; `--flat-estabs` mantém o caminho per-datom para
+comparação: 6.577 rows/s).
 
 ## Extrapolação da carga completa (@ taxas de 50k)
 
 ```
-empresas   46M / 22.557/s → 0,57 h
-estabs     73M /  5.326/s → 3,81 h   ← domina
-simples    50M / 28.558/s → 0,49 h
-sócios     28M / 16.231/s → 0,48 h
-TOTAL ≈ 5,3 h
+empresas   46M / 26.327/s → 0,49 h
+estabs     73M /  8.747/s → 2,32 h   ← domina
+simples    50M / 35.123/s → 0,40 h
+sócios     28M / 19.598/s → 0,40 h
+TOTAL ≈ 3,6 h
 ```
 
 ## Knobs relevantes
