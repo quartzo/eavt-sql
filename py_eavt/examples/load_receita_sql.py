@@ -403,6 +403,154 @@ def load_estabs(client: EavtClient, data_dir: Path, batch_size: int, max_scan: i
           f"({total / max(elapsed, 0.001):,.0f}/s)", flush=True)
 
 
+# ── Carga bulk (save-many storage-batched + cache de eids client-side) ────────
+#
+# 3 fases por batch:
+#   A (exec):   goc das entidades novas (estab + códigos REF em cache-miss)
+#   B (query):  lookup-entity das entidades criadas em A → cache
+#   C (exec):   save-many por atributo com pares (eid, valor) — um batchWrite
+#
+# O cache mapeia (unique_attr, código) → eid. Tabelas lookup são pequenas e
+# ficam para sempre; pais empresa.cnpj_base crescem com a base, então o cache
+# é descartado ao passar do teto — Estabelecimentos0 é ordenado por cnpj_base,
+# logo a localidade é curta e um teto moderado mantém o hit rate.
+
+ESTAB_STR_ATTRS = [
+    (3, "estab.matriz_filial"), (4, "estab.nome_fantasia"),
+    (5, "estab.situacao"), (6, "estab.data_situacao"),
+    (10, "estab.data_inicio_ativ"), (13, "estab.tipo_logradouro"),
+    (14, "estab.logradouro"), (15, "estab.numero"),
+    (16, "estab.complemento"), (17, "estab.bairro"),
+    (18, "estab.cep"), (19, "estab.uf"), (21, "estab.ddd1"),
+    (22, "estab.telefone1"), (23, "estab.ddd2"),
+    (24, "estab.telefone2"), (27, "estab.email"),
+]
+ESTAB_REF_ATTRS = [
+    (0, "estab.empresa", "empresa.cnpj_base"),
+    (7, "estab.motivo", "motivo.codigo"),
+    (9, "estab.pais", "pais.codigo"),
+    (11, "estab.cnae_principal", "cnae.codigo"),
+    (20, "estab.municipio", "municipio.codigo"),
+]
+ESTAB_CACHE_MAX = 500_000
+
+
+def _estab_bulk_phase_a(client, batch, cache):
+    """goc do que não está no cache; retorna as chaves novas p/ fase B."""
+    body, new_keys = [], []
+    for row in batch:
+        key = ("estab.cnpj_completo", row[0] + row[1].zfill(4) + row[2].zfill(2))
+        if key not in cache:
+            body.append(WForm(SETBANG, E_SYM,
+                              WForm(GOC, WAttr(key[0]), WStr(key[1]))))
+            new_keys.append(key)
+        for idx, attr, uattr in ESTAB_REF_ATTRS:
+            code = row[idx] if idx != 0 else row[0]
+            key = (uattr, code)
+            if code and key not in cache:
+                body.append(WForm(SETBANG, WSym("G"),
+                                  WForm(GOC, WAttr(uattr), WStr(code))))
+                new_keys.append(key)
+    sec_codes = set()
+    for row in batch:
+        if row[12]:
+            for code in row[12].split(","):
+                code = code.strip()
+                if code:
+                    sec_codes.add(code)
+    for code in sorted(sec_codes):
+        key = ("cnae.codigo", code)
+        if key not in cache:
+            body.append(WForm(SETBANG, WSym("G"),
+                              WForm(GOC, WAttr("cnae.codigo"), WStr(code))))
+            new_keys.append(key)
+    if body:
+        body.append(WForm(RESULT, WInt(0)))
+        run_scheme_batch(client, body)
+    return new_keys
+
+
+def _estab_bulk_phase_b(client, new_keys, cache):
+    if not new_keys:
+        return
+    qbody = [WForm(WSym("result-row"),
+                   WForm(WSym("lookup-entity"), WAttr(k[0]), WStr(k[1])))
+             for k in new_keys]
+    rows = []
+    for ch in client.scheme_wire(WForm(BEGIN, *qbody), mode="query"):
+        rows.extend(ch.get("rows", []))
+    if len(rows) != len(new_keys):
+        raise RuntimeError(
+            f"bulk phase B: {len(rows)} rows para {len(new_keys)} chaves")
+    for key, r in zip(new_keys, rows):
+        cache[key] = r[0]
+
+
+def _estab_bulk_phase_c(client, batch, cache):
+    by_pairs = {}
+    for row in batch:
+        e = WInt(cache[("estab.cnpj_completo",
+                        row[0] + row[1].zfill(4) + row[2].zfill(2))])
+        for idx, attr in ESTAB_STR_ATTRS:
+            if row[idx]:
+                by_pairs.setdefault(attr, []).extend([e, WStr(row[idx])])
+        for idx, attr, uattr in ESTAB_REF_ATTRS:
+            code = row[idx] if idx != 0 else row[0]
+            if code:
+                by_pairs.setdefault(attr, []).extend(
+                    [e, WInt(cache[(uattr, code)])])
+        if row[12]:
+            for code in row[12].split(","):
+                code = code.strip()
+                if code:
+                    by_pairs.setdefault("estab.cnae_secundario", []).extend(
+                        [e, WInt(cache[("cnae.codigo", code)])])
+    body = []
+    for attr, pairs in by_pairs.items():
+        body.append(WForm(WSym("save-many"), WAttr(attr), *pairs))
+    body.append(WForm(RESULT, WInt(0)))
+    run_scheme_batch(client, body)
+
+
+def load_estabs_bulk(client: EavtClient, data_dir: Path, max_rows: int,
+                     batch_size: int) -> tuple[int, int]:
+    """Estabelecimentos via save-many storage-batched (um batchWrite/lote).
+
+    Requer o fast path de save-many sem eid duplicado no lote — válido aqui
+    (cnpj_completo é único). REF vai como eid int (código → cache).
+    Retorna (saved, scanned) como os demais loaders.
+    """
+    zpath = find_zip(data_dir, "Estabelecimentos0")
+    cache: dict = {}
+    saved = scanned = 0
+    batch: list = []
+    t0 = time.perf_counter()
+    for row in rows_from_zip(zpath):
+        scanned += 1
+        if len(row) < 30 or len(row[0]) != 8 or not row[0].isdigit():
+            continue
+        batch.append(row)
+        if len(batch) >= batch_size:
+            nk = _estab_bulk_phase_a(client, batch, cache)
+            _estab_bulk_phase_b(client, nk, cache)
+            _estab_bulk_phase_c(client, batch, cache)
+            saved += len(batch)
+            batch = []
+            if len(cache) > ESTAB_CACHE_MAX:
+                cache.clear()
+            if saved >= max_rows:
+                break
+    if batch and saved < max_rows:
+        nk = _estab_bulk_phase_a(client, batch, cache)
+        _estab_bulk_phase_b(client, nk, cache)
+        _estab_bulk_phase_c(client, batch, cache)
+        saved += len(batch)
+    elapsed = time.perf_counter() - t0
+    print(f"  estabs(bulk): {saved:,} linhas gravadas "
+          f"(scanned {scanned:,}) in {elapsed:.1f}s", flush=True)
+    return saved, scanned
+
+
 def _flush_estab_batch(client, batch):
     body = []
     for row in batch:

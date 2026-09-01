@@ -476,8 +476,10 @@ def run_size(client_holder: list, n: int, args, results: dict) -> None:
 
         if not args.skip_estabs:
             t0 = time.perf_counter()
-            sr, _ = load_estabs_goc(client, args.data_dir,
-                                    estab_rows, args.batch)
+            loader = (load_estabs_goc if args.flat_estabs
+                      else L.load_estabs_bulk)
+            sr, _ = loader(client, args.data_dir,
+                           estab_rows, args.batch)
             stage_secs["estabs"] = time.perf_counter() - t0
             stage_rows["estabs"] = sr
 
@@ -614,6 +616,9 @@ def main() -> int:
     ap.add_argument("--legacy-filter", action="store_true",
                     help="modo antigo: varre arquivos nacionais filtrando "
                          "pelo conjunto de membros (lento; comparação)")
+    ap.add_argument("--flat-estabs", action="store_true",
+                    help="estabs via save flat por datom (comparação com o "
+                         "caminho bulk, que é o default)")
     args = ap.parse_args()
 
     results = {
