@@ -171,11 +171,15 @@ proc extractRight(right: sql_ast.ConditionRight): BoundValue =
 proc validateAttrName(field: string): string =
   ## SQL surface accepts dot notation (d1.ns.attr → field "ns.attr"); the IR
   ## carries the SLASH canonical form (tx-protocol.md §8) — normalize here so
-  ## resolveIr and the storage agree on names end-to-end.
-  if not field.contains('.'):
+  ## resolveIr and the storage agree on names end-to-end.  Idempotent: the
+  ## same FieldRef may flow through more than once (already slash → kept).
+  if field.contains('/'):
+    field
+  elif field.contains('.'):
+    field.replace('.', '/')
+  else:
     raise newException(ValueError,
-      "attribute name must include namespace (e.g. 'company.name'), got '" & field & "'")
-  field.replace('.', '/')
+      "attribute name must include namespace (e.g. 'company.name' or 'company/name'), got '" & field & "'")
 
 proc processEq(la: string; lf: var string; right: sql_ast.ConditionRight,
     aliases: var Table[string, AliasState]) =

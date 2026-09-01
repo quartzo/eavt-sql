@@ -338,6 +338,13 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
     if depth < numDepths - 1:
       for s in scanners:
         innerItems.add(list(newKeyword("scanner-push"), s, newSymbol(varName)))
+      # Mark the pushed positions as emitted: deeper trailing emissions
+      # consult boundEmitted via prePushes — without this they would re-push
+      # the depth var, duplicating it in the scanner's position stack and
+      # misaligning the prefix (the value slot would receive the eid).
+      for ipIdx, ip in plan.iterPlans:
+        for (d, p) in ip.varDepths:
+          if d == depth: boundEmitted[ipIdx].incl(p); break
     innerItems.add(newSymbol("__BODY__"))
     if depth < numDepths - 1:
       for s in scanners:
