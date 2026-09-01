@@ -7,6 +7,14 @@
 
 import std/[random, algorithm, sets, options]
 
+when defined(eavtTreapDiag):
+  ## Contadores do estudo de custo interno do treap (build -d:eavtTreapDiag).
+  var gCmpCalls* = 0'i64     ## chamadas de cmpKeyRef (nós visitados na descida)
+  var gCmpIters* = 0'i64     ## iterações de byte dentro das comparações
+  var gInsRotMut* = 0'i64    ## rotações in-place (mutável)
+  var gInsRotCopy* = 0'i64   ## rotações com path-copy (leitores ativos)
+  var gInsNodes* = 0'i64     ## allocNode (folhas novas + path copies)
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Arena allocation (nodes + key/value bytes)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -62,6 +70,29 @@ type
     hnd*: MemTableHandle
     numCf*: int
 
+when defined(eavtTreapPrefetch):
+  ## Prefetch das duas children na descida — esconde a latência de miss
+  ## do pointer chasing (o insert é memory-bound: ~27 hops seriais).
+  proc prefetchRead(p: pointer) {.importc: "__builtin_prefetch", nodecl, noconv.}
+
+  when defined(eavtTreapPrefetchDeep):
+    template prefetchChildren(n: TreapNode) =
+      ## Profundo: structs dos netos + key-lines dos filhos (1 nível à frente).
+      let l = n.left
+      if l != nil:
+        prefetchRead(l.left)
+        prefetchRead(l.right)
+        prefetchRead(l.keyPtr)
+      let r = n.right
+      if r != nil:
+        prefetchRead(r.left)
+        prefetchRead(r.right)
+        prefetchRead(r.keyPtr)
+  else:
+    template prefetchChildren(n: TreapNode) =
+      prefetchRead(n.left)
+      prefetchRead(n.right)
+
 proc `=destroy`(a: var ArenaObj) =
   ## Free every block owned by the arena when its refcount drops to zero.
   ## Coarse lifetime: no per-node free — the whole generation dies at once.
@@ -73,6 +104,8 @@ proc `=destroy`(a: var ArenaObj) =
 # ── Arena allocator ──
 
 proc allocNode*(a: Arena): TreapNode =
+  when defined(eavtTreapDiag):
+    inc gInsNodes
   if a.nodeBlocks.len == 0 or a.nodeBump >= NodeBlockSize:
     let b = cast[ptr UncheckedArray[TreapNodeObj]](
       allocShared0(NodeBlockSize * sizeof(TreapNodeObj)))
@@ -126,13 +159,27 @@ proc cmpKeyOpen*(key: openArray[byte]; np: ptr UncheckedArray[byte]; nlen: int):
 
 proc cmpKeyRef*(key: KeyRef; np: ptr UncheckedArray[byte]; nlen: int): int =
   ## Compare `key` (KeyRef) with a node's inline key (ptr, len). -1/0/1.
-  let n = min(key.len, nlen)
-  for i in 0 ..< n:
-    if key.p[i] < np[i]: return -1
-    if key.p[i] > np[i]: return 1
-  if key.len < nlen: return -1
-  if key.len > nlen: return 1
-  0
+  when defined(eavtTreapCmpMem):
+    ## Variante memcmp: mesmo contrato (n bytes, desempate por length).
+    let n = min(key.len, nlen)
+    if n > 0:
+      let c = cmpMem(key.p, np, n)
+      if c != 0: return if c < 0: -1 else: 1
+    if key.len < nlen: return -1
+    if key.len > nlen: return 1
+    return 0
+  else:
+    when defined(eavtTreapDiag):
+      inc gCmpCalls
+    let n = min(key.len, nlen)
+    for i in 0 ..< n:
+      when defined(eavtTreapDiag):
+        inc gCmpIters
+      if key.p[i] < np[i]: return -1
+      if key.p[i] > np[i]: return 1
+    if key.len < nlen: return -1
+    if key.len > nlen: return 1
+    return 0
 
 proc toKeyRef*(key: openArray[byte]): KeyRef =
   if key.len > 0:
@@ -218,6 +265,8 @@ proc prefixUpperBound(prefix: Key): Key =
   result = prefix & @[byte(0xFF), 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
 
 proc rotateRight(a: Arena; n: TreapNode): TreapNode =
+  when defined(eavtTreapDiag):
+    inc gInsRotCopy
   let l = n.left
   var nn = copyNode(a, n)
   nn.left = l.right
@@ -227,6 +276,8 @@ proc rotateRight(a: Arena; n: TreapNode): TreapNode =
   result.right = nn
 
 proc rotateLeft(a: Arena; n: TreapNode): TreapNode =
+  when defined(eavtTreapDiag):
+    inc gInsRotCopy
   let r = n.right
   var nn = copyNode(a, n)
   nn.left = n.left
@@ -237,6 +288,8 @@ proc rotateLeft(a: Arena; n: TreapNode): TreapNode =
 
 proc rotateRightMut(n: TreapNode): TreapNode =
   ## In-place right rotation. Returns new root (the left child).
+  when defined(eavtTreapDiag):
+    inc gInsRotMut
   let l = n.left
   n.left = l.right
   l.right = n
@@ -244,6 +297,8 @@ proc rotateRightMut(n: TreapNode): TreapNode =
 
 proc rotateLeftMut(n: TreapNode): TreapNode =
   ## In-place left rotation. Returns new root (the right child).
+  when defined(eavtTreapDiag):
+    inc gInsRotMut
   let r = n.right
   n.right = r.left
   r.left = n
@@ -389,6 +444,8 @@ proc insertOwned(a: Arena; node: TreapNode; key: KeyRef;
                  deleted: bool = false; mutable: bool = false): (TreapNode, bool) =
   ## Load-path variant: the key is ALREADY in the arena (written by
   ## buildEavtEntries), so the leaf references it — no copy.
+  when defined(eavtTreapPrefetch):
+    if node != nil: prefetchChildren(node)
   if node == nil:
     inc gInsNew; gInsKeyBytes += key.len
     return (newLeaf(a, key, value, deleted, copyKey=false), true)
