@@ -27,6 +27,9 @@ type
 
 const
   extSymbol* = 0x05'i8  ## application ext type carrying a symbol name
+  extKeyword* = 0x06'i8 ## application ext type carrying a keyword name
+                        ## (EDN :ns/name; canonical storage form strips
+                        ## the leading colon — docs/tx-protocol.md §8)
 
 proc appendRaw*(s: MsgStream; bytes: string) {.inline.} =
   ## Append pre-encoded msgpack bytes to a MsgStream.  CRITICAL: plain
@@ -51,6 +54,10 @@ proc writeSExprWire*(s: MsgStream; e: SExpr) =
     s.pack_ext(e.symval.len, extSymbol)
     if e.symval.len > 0:
       appendRaw(s, e.symval)
+  of sKeyword:
+    s.pack_ext(e.kwval.len, extKeyword)
+    if e.kwval.len > 0:
+      appendRaw(s, e.kwval)
   of sBool:
     s.pack(e.bval)
   of sBytes:
@@ -83,6 +90,7 @@ proc sexprToPlainMsgpack*(e: SExpr): string =
     of sFloat:  s.pack(e.fval)
     of sStr:    s.pack(e.sval)
     of sSymbol: s.pack(e.symval)
+    of sKeyword: s.pack(e.kwval)
     of sBool:   s.pack(e.bval)
     of sBytes:
       s.pack_bin(e.bytesval.len)
@@ -106,6 +114,7 @@ proc writeSExprPlain*(s: MsgStream; e: SExpr) =
   of sFloat:  s.pack(e.fval)
   of sStr:    s.pack(e.sval)
   of sSymbol: s.pack(e.symval)
+  of sKeyword: s.pack(e.kwval)
   of sBool:   s.pack(e.bval)
   of sBytes:
     s.pack_bin(e.bytesval.len)
@@ -318,6 +327,8 @@ proc mpNode(buf: string; pos: var int; limit: int; depth: int): SExpr =
     let (exttype, payload) = mpReadExt(buf, pos, limit)
     if exttype == extSymbol:
       newSymbol(payload)
+    elif exttype == extKeyword:
+      newKeyword(payload)
     else:
       raise newException(WireError,
         "unknown ext type 0x" & toHex(int(exttype) and 0xff, 2) &
@@ -344,3 +355,14 @@ proc programFromMsgpack*(data: string): SExpr {.raises: [WireError].} =
   if not found:
     raise newException(WireError, "request is missing program")
   wireFromMsgpackAt(data, s, e)
+
+proc txdataFromMsgpack*(data: string): seq[SExpr] {.raises: [WireError].} =
+  ## Decode the top-level "txdata" value of a `tx` request frame — an array
+  ## of EDN op vectors (docs/tx-protocol.md §3.1).  Each element slot comes
+  ## from topArrayElems (exact element bounds), so each op decodes with
+  ## wireFromMsgpackAt's strict "consume exactly the slot" check.
+  let (found, s, e) = topValue(data, "txdata")
+  if not found:
+    raise newException(WireError, "tx request is missing txdata")
+  for (sOp, eOp) in topArrayElems(data, s, e):
+    result.add(wireFromMsgpackAt(data, sOp, eOp))

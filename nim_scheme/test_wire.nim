@@ -103,6 +103,7 @@ proc sameSexpr(a, b: SExpr): bool =
   of sFloat: a.fval == b.fval
   of sStr: a.sval == b.sval
   of sSymbol: a.symval == b.symval
+  of sKeyword: a.kwval == b.kwval
   of sBytes: a.bytesval == b.bytesval
   of sResource: a.rid == b.rid
   of sList:
@@ -159,7 +160,8 @@ suite "wire.msgpack-direct":
     expect(WireError): discard wireFromMsgpack("\x92\x81\xa1k\x01\x01")
   test "unknown ext type raises":
     expect(WireError): discard wireFromMsgpack("\xd4\x02A")       # fixext1 type 2
-    expect(WireError): discard wireFromMsgpack("\xc7\x01\x06A")   # ext8 type 6
+    expect(WireError): discard wireFromMsgpack("\xd4\x07A")       # fixext1 type 7
+    expect(WireError): discard wireFromMsgpack("\xc7\x01\x42A")   # ext8 type 0x42
   test "timestamp ext (type -1) raises":
     # 0xd6 fixext4 with type 0xff (-1)
     expect(WireError): discard wireFromMsgpack("\xd6\xff\x00\x00\x00\x00")

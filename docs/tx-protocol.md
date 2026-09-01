@@ -123,7 +123,7 @@ malformed op vector, non-vector `txdata`.
 
 | Op | Syntax | Semantics |
 |----|--------|-----------|
-| add | `[:db/add e :attr v]` | Assert datom `(e, attr, v)` at this tx. `e` may be an eid (positive int), a tempid (negative int64), a lookup ref, or `:db/current-tx`. |
+| add | `[:db/add e :attr v]` | Assert datom `(e, attr, v)` at this tx. `e` may be an eid (positive int), a tempid (negative int64), a lookup ref, or `:db/current-tx`. **Idempotent**: adding a datom already present is a no-op, for `:db.cardinality/one` and `:db.cardinality/many` alike (Datomic semantics). |
 | retract | `[:db/retract e :attr v]` | Retract the matching datom. `e` must resolve to an existing eid (tempid not allowed); **error** on `:db/current-tx`. |
 | schema | `[:db/add eid :db/ident :ns/name]` + `:db/valueType` / `:db/cardinality` / `:db/unique` datoms for the same eid | Interpreted as an attribute declaration (§7), not raw datoms. |
 | partition | — | All tempids resolve in `:db.part/user` (id 4). `:db.part/tx` and `:db.part/db` are engine-managed; user tx-data cannot allocate there. |

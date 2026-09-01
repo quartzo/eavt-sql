@@ -57,9 +57,15 @@ proc makeEntityId*(partitionId: uint64, seq: int64): int64 =
 # Attribute name normalization
 # ═══════════════════════════════════════════════════════════════════════════════
 
-proc normalizeAttr*(name: string): string =
+proc normalizeAttr*(name: string): string {.raises: [ValueError].} =
+  ## Attribute names normalize to dot notation internally (storage canonical
+  ## form until tx-protocol F3 flips it to slash):  :ns/name → ns.name,
+  ## ns/name → ns.name, ns.name → ns.name.  Bare names without any
+  ## namespace separator are rejected — a typo must fail loudly.
   if name.len > 0 and name[0] == ':' and '/' in name:
     result = name[1..^1].replace('/', '.')
+  elif '/' in name and '.' notin name:
+    result = name.replace('/', '.')
   elif '.' notin name:
     raise newException(ValueError,
       "attribute name must include namespace (e.g. 'company.name'), got " & name)

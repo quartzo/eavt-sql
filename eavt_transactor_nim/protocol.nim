@@ -4,14 +4,16 @@ import scheme, wire, msgpack_scan
 
 type
   RequestKind* = enum
-    rkScheme, rkSchema, rkAdmin, rkKv
+    rkScheme, rkTx, rkSchema, rkAdmin, rkKv
   Request* = object
     id*: string            ## correlation id — echoed in responses (multiplexing)
     case kind*: RequestKind
     of rkScheme:
-      program*: SExpr      ## decoded tagged-AST program body
+      program*: SExpr      ## decoded wire-AST program body
       mode*: string        ## "query" (streaming) | "exec" (batch)
-      params*: seq[SExpr]  ## decoded tagged-AST params, 1-indexed via (param N)
+      params*: seq[SExpr]  ## decoded wire-AST params, 1-indexed via (param N)
+    of rkTx:
+      txdata*: seq[SExpr]  ## EDN op vectors (docs/tx-protocol.md §3.1)
     of rkSchema:
       discard
     of rkAdmin:
@@ -38,6 +40,9 @@ proc parseRequest*(data: string): Request =
     if pf:
       for (s, e) in topArrayElems(data, ps, pe):
         result.params.add(wireFromMsgpackAt(data, s, e))
+  of "tx":
+    result = Request(kind: rkTx, id: result.id,
+                     txdata: txdataFromMsgpack(data))
   of "schema":
     result = Request(kind: rkSchema, id: result.id)
   of "admin":

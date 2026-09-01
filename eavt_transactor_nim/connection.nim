@@ -16,7 +16,7 @@
 ## replica's reader applies them before the ack completes (read-your-writes).
 ## Connections without a "replicate" subscription write responses directly.
 
-import std/[options, strutils, monotimes, streams]
+import std/[options, strutils, monotimes, streams, tables]
 import chronos
 import msgpack4nim
 import scheme, msgpack_scan
@@ -28,6 +28,8 @@ import protocol
 import replication
 import logutil
 import wire
+import hostfns
+import edn_tx
 
 proc writeFrameAsync(transp: StreamTransport; body: string) {.async.} =
   var buf = newSeq[byte](4 + body.len)
@@ -98,6 +100,13 @@ proc executeProgramSafe(session: QuerySession): SExpr {.raises: [ValueError].} =
 proc allocateTxSafe(eng: SharedEngine): int64 {.raises: [ValueError].} =
   try:
     eng.store.eavt.allocateTAndWriteTx()
+  except Exception as e:
+    raise (ref ValueError)(msg: e.msg)
+
+proc transactEdnSafe(ops: EngineOps; txdata: seq[SExpr]): edn_tx.TxReport {.
+    raises: [ValueError].} =
+  try:
+    transactEdn(ops, txdata)
   except Exception as e:
     raise (ref ValueError)(msg: e.msg)
 
@@ -184,6 +193,29 @@ proc execScheme(eng: SharedEngine; req: Request; transp: StreamTransport) {.asyn
     else:
       await writeResponseAsync(eng, transp, @[], @[], false,
                                 "unexpected result: " & $r, req.id)
+
+proc execTx(eng: SharedEngine; req: Request; transp: StreamTransport) {.async.} =
+  ## Native EDN transaction (docs/tx-protocol.md §3): interpret the op
+  ## vectors against the engine, reply with a tx-report
+  ## {tempids: {...}, tx: t} or an error frame.
+  let txReport = transactEdnSafe(eng.store, req.txdata)
+  var ms = MsgStream.init(256)
+  var fieldCount = 3  # tempids + tx + more
+  if req.id.len > 0: inc fieldCount
+  ms.pack_map(fieldCount)
+  if req.id.len > 0:
+    ms.pack("id"); ms.pack(req.id)
+  ms.pack("tempids")
+  ms.pack_map(int64(txReport.tempids.len))
+  for tid, eid in pairs(txReport.tempids):
+    ms.pack(tid)      # tempids are negative int64 keys (§5.1)
+    ms.pack(eid)
+  ms.pack("tx"); ms.pack(txReport.tx)
+  ms.pack("more"); ms.pack(false)
+  # CRITICAL: via the single output queue — WAL bytes for this tx are flushed
+  # before the response reaches the client (same contract as scheme exec;
+  # docs/scheme-transport.md and AGENTS.md "fila única de saída").
+  await writeFrameQueued(eng, transp, ms.data)
 
 proc handleSchema(eng: SharedEngine; id: string;
                   transp: StreamTransport) {.async.} =
@@ -315,6 +347,7 @@ proc processFrame(eng: SharedEngine; raw: string; id: string;
     req.id = id  # id from the outer frame header (already parsed)
     case req.kind
     of rkScheme: await execScheme(eng, req, transp)
+    of rkTx: await execTx(eng, req, transp)
     of rkSchema: await handleSchema(eng, req.id, transp)
     of rkAdmin: await handleAdmin(eng, req.command, req.id, transp)
     of rkKv: await handleKv(eng, req, transp)

@@ -11,7 +11,7 @@ import std/[tables, strutils, options, sequtils, algorithm]
 
 type
   SExprKind* = enum
-    sVoid, sBool, sInt, sFloat, sStr, sBytes, sSymbol, sList, sResource
+    sVoid, sBool, sInt, sFloat, sStr, sBytes, sSymbol, sKeyword, sList, sResource
 
   SExpr* = ref object
     case kind*: SExprKind
@@ -21,6 +21,7 @@ type
     of sStr:    sval*: string
     of sBytes:  bytesval*: seq[byte]
     of sSymbol: symval*: string
+    of sKeyword: kwval*: string
     of sList:   items*: seq[SExpr]
     of sResource: rid*: int
     of sVoid:   discard
@@ -35,6 +36,7 @@ proc newFloat*(f: float64): SExpr = SExpr(kind: sFloat, fval: f)
 proc newStr*(s: string): SExpr = SExpr(kind: sStr, sval: s)
 proc newBytes*(b: seq[byte]): SExpr = SExpr(kind: sBytes, bytesval: b)
 proc newSymbol*(s: string): SExpr = SExpr(kind: sSymbol, symval: s)
+proc newKeyword*(s: string): SExpr = SExpr(kind: sKeyword, kwval: s)
 proc newList*(items: seq[SExpr]): SExpr = SExpr(kind: sList, items: items)
 proc newResource*(r: int): SExpr = SExpr(kind: sResource, rid: r)
 
@@ -50,6 +52,7 @@ proc `$`*(e: SExpr): string =
   of sStr: "\"" & e.sval & "\""
   of sBytes: "#b\"" & e.bytesval.mapIt($it).join("") & "\""
   of sSymbol: e.symval
+  of sKeyword: ":" & e.kwval
   of sList: "(" & e.items.mapIt($it).join(" ") & ")"
   of sResource: "#<resource>"
 
@@ -123,6 +126,7 @@ proc cmpValueS(a, b: SExpr): int =
   of sFloat:
     if a.fval < b.fval: -1 elif a.fval > b.fval: 1 else: 0
   of sStr: cmp(a.sval, b.sval)
+  of sKeyword: cmp(a.kwval, b.kwval)
   of sBytes:
     if a.bytesval.len < b.bytesval.len: -1
     elif a.bytesval.len > b.bytesval.len: 1
@@ -920,7 +924,7 @@ proc evalSpecialForm(name: string; args: SExpr; env: var Environment;
 proc evalExpr(expr: SExpr; env: var Environment; host: HostFns;
               state: var YieldState): EvalStep =
   case expr.kind:
-  of sVoid, sBool, sInt, sFloat, sStr, sBytes, sResource:
+  of sVoid, sBool, sInt, sFloat, sStr, sKeyword, sBytes, sResource:
     return done(expr)
   of sSymbol:
     let v = env.get(expr.symval)

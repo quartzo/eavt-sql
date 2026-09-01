@@ -5,7 +5,7 @@ proc fromBoundValue*(bv: BoundValue): PlanValue =
   case bv.kind
   of bvInt: PlanValue(kind: pvValue, pvInt: bv.ival)
   of bvFloat: PlanValue(kind: pvValue, pvFloat: bv.fval)
-  of bvStr, bvAttr: PlanValue(kind: pvValue, pvStr: bv.sval)
+  of bvStr, bvAttr: PlanValue(kind: pvValue, pvStr: if bv.kind == bvStr: bv.sval else: bv.attrName)
   of bvResolvedAttr: PlanValue(kind: pvValue, pvInt: bv.raId.int64)
   of bvParam: PlanValue(kind: pvParam, pvParamIdx: bv.paramIdx)
   of bvBool: PlanValue(kind: pvValue, pvInt: if bv.bval: 1 else: 0)
@@ -552,14 +552,14 @@ proc buildQueryPlan*(
     if pattern.e.kind == dsConst:
       case pattern.e.constVal.kind
       of bvInt: boundInts["e"] = PlanValue(kind: pvValue, pvInt: pattern.e.constVal.ival)
-      of bvStr, bvAttr: boundInts["e"] = PlanValue(kind: pvValue, pvStr: pattern.e.constVal.sval)
+      of bvStr, bvAttr: boundInts["e"] = PlanValue(kind: pvValue, pvStr: if pattern.e.constVal.kind == bvStr: pattern.e.constVal.sval else: pattern.e.constVal.attrName)
       of bvParam: boundInts["e"] = PlanValue(kind: pvParam, pvParamIdx: pattern.e.constVal.paramIdx)
       of bvExpr: boundInts["e"] = PlanValue(kind: pvExpr, exprValue: pattern.e.constVal.exprValue)
       else: discard
     if pattern.a.kind == dsConst:
       case pattern.a.constVal.kind
       of bvResolvedAttr: boundInts["a"] = PlanValue(kind: pvValue, pvStr: pattern.a.constVal.raName)
-      of bvStr, bvAttr: boundInts["a"] = PlanValue(kind: pvValue, pvStr: pattern.a.constVal.sval)
+      of bvStr, bvAttr: boundInts["a"] = PlanValue(kind: pvValue, pvStr: if pattern.a.constVal.kind == bvStr: pattern.a.constVal.sval else: pattern.a.constVal.attrName)
       of bvParam: boundInts["a"] = PlanValue(kind: pvParam, pvParamIdx: pattern.a.constVal.paramIdx)
       of bvExpr: boundInts["a"] = PlanValue(kind: pvExpr, exprValue: pattern.a.constVal.exprValue)
       else: discard
@@ -567,7 +567,7 @@ proc buildQueryPlan*(
       case pattern.v.constVal.kind
       of bvInt: boundInts["v"] = PlanValue(kind: pvValue, pvInt: pattern.v.constVal.ival)
       of bvFloat: boundInts["v"] = PlanValue(kind: pvValue, pvFloat: pattern.v.constVal.fval)
-      of bvStr, bvAttr: boundInts["v"] = PlanValue(kind: pvValue, pvStr: pattern.v.constVal.sval)
+      of bvStr, bvAttr: boundInts["v"] = PlanValue(kind: pvValue, pvStr: if pattern.v.constVal.kind == bvStr: pattern.v.constVal.sval else: pattern.v.constVal.attrName)
       of bvParam: boundInts["v"] = PlanValue(kind: pvParam, pvParamIdx: pattern.v.constVal.paramIdx)
       of bvExpr: boundInts["v"] = PlanValue(kind: pvExpr, exprValue: pattern.v.constVal.exprValue)
       else: discard

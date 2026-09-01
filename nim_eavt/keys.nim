@@ -382,8 +382,9 @@ proc encodeFixed*(val: SExpr): seq[byte] =
 
 proc encodeBoundValue*(val: SExpr): seq[byte] =
   ## Encodes a value for scanner prefix building.
+  ## Keywords encode like strings (variable-length, ordered).
   case val.kind:
-  of sStr:  encodeVariable(val.sval)
+  of sStr, sKeyword:  encodeVariable(if val.kind == sStr: val.sval else: val.kwval)
   of sBytes: encodeVariableUnordered(val.bytesval)
   else:     encodeFixed(val)
 

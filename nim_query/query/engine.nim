@@ -113,6 +113,7 @@ proc sexprToPackedValue(val: SExpr): string =
   of sInt: result = $val.ival
   of sFloat: result = $val.fval
   of sStr: result = val.sval
+  of sKeyword: result = val.kwval
   of sBool: result = (if val.bval: "true" else: "false")
   of sBytes:
     result = newString(val.bytesval.len)
@@ -321,6 +322,28 @@ method valueTypeFor(q: QueryStore; aid: uint32): Option[uint32] =
 method isUniqueAttr(q: QueryStore; name: string): bool =
   let aid = q.eavt.lookupAttr(name)
   aid.isSome and q.eavt.isUnique(aid.get)
+
+method hasDatom(q: QueryStore; eid: int64; attr: string; val: SExpr): bool =
+  ## Active-datom membership: true when (eid, attr, val) is currently
+  ## asserted.  Works for both cardinalities — the tx interpreter uses it to
+  ## make :db/add idempotent (Datomic semantics: adding a present datom is
+  ## a no-op, for :db.cardinality/one and :db.cardinality/many alike).
+  ## Byte comparison against the stored value segment of the CF-0 key —
+  ## buildEavtEntries stores `encodedValue` verbatim, and encodeSaveValue
+  ## reproduces it for every mode (ref targets included).
+  let aidOpt = q.eavt.lookupAttr(attr)
+  if aidOpt.isNone: return false
+  let aid = aidOpt.get
+  let vt = q.eavt.valueTypeFor(aid).get(resolver.DbTypeString)
+  let mode = valueTypeToEncodeMode(vt)
+  let encoded = encodeSaveValue(val, vt, mode, eid)
+  var prefix = keys.encodeEid(eid)
+  prefix.add byte(aid shr 24); prefix.add byte((aid shr 16) and 0xFF)
+  prefix.add byte((aid shr 8) and 0xFF); prefix.add byte(aid and 0xFF)
+  for k in q.eavt.scanPrefixActive(0, prefix):
+    if k.len < 20: continue
+    if k[12 ..< k.len - 8] == encoded: return true
+  return false
 
 method lookupEntity(q: QueryStore; attrName: string; value: SExpr): Option[int64] =
   ## Unique-attr lookup: scan avet [attr 4B][val][eid 8B][sf 8B] by prefix.

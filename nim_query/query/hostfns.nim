@@ -98,6 +98,9 @@ method valueTypeFor*(ops: EngineOps; aid: uint32): Option[uint32] {.base, gcsafe
 
 method isUniqueAttr*(ops: EngineOps; name: string): bool {.base, gcsafe.} = false
 
+method hasDatom*(ops: EngineOps; eid: int64; attr: string; val: SExpr): bool {.
+    base, gcsafe.} = false
+
 method lookupEntity*(ops: EngineOps; attrName: string; value: SExpr): Option[int64] {.base, gcsafe.} =
   none[int64]()
 

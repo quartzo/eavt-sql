@@ -633,16 +633,20 @@ proc resolveAsOfTx*(eng: EavtEngine; asOfUs: uint64): Option[uint64] =
 
 proc eavtDeclareAttr*(eng: EavtEngine; name: string; valueType: uint32;
                        many: bool; unique: bool = false): (uint32, bool) =
-  let (aid, isNew) = eng.resolver.declareAttr(name, valueType, many)
+  let canonical = normalizeAttr(name)
+  let (aid, isNew) = eng.resolver.declareAttr(canonical, valueType, many)
   if unique: eng.resolver.setUnique(aid, true)
   if isNew or unique:
     eng.cachedStatsTime = 0  # invalidate cache (novos attrs e mudança de unique)
   if isNew:
     # Persist schema as db.* datoms (Rust declare_attr_with_t).
+    # The ident datom carries the CANONICAL name (same form the in-memory
+    # resolver table uses) — replica bootstrap reads this datom raw, so a
+    # raw name here would make transactor and replica disagree on lookup.
     let t = eng.resolver.allocateInPartition(PartTx)
     let e = aid.int64
     var bwTmp1 = buildEavtEntries(eng.kv.mt.hnd.arena, e, DbIdentAid,
-      encodeValue(name, emVariable, 0), e, false, emVariable, true)
+      encodeValue(canonical, emVariable, 0), e, false, emVariable, true)
     eng.batchWrite(bwTmp1)
     var bwTmp2 = buildEavtEntries(eng.kv.mt.hnd.arena, e, DbValueTypeAid,
       encodeValue($valueType, emFixed, 0), t, false, emFixed, true)

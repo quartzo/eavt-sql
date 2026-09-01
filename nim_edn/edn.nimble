@@ -1,0 +1,6 @@
+version       = "0.1.0"
+author        = "eavt-sql-nim"
+description   = "EDN reader producing SExpr (Datomic-style tx-data subset)"
+license       = "MIT"
+srcDir        = "."
+backend       = "c"

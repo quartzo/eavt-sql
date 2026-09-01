@@ -25,6 +25,7 @@ proc cmpValue*(a, b: SExpr): int =
     elif a.fval > b.fval: 1
     else: 0
   of sStr: cmp(a.sval, b.sval)
+  of sKeyword: cmp(a.kwval, b.kwval)
   of sBytes:
     if a.bytesval.len < b.bytesval.len: -1
     elif a.bytesval.len > b.bytesval.len: 1

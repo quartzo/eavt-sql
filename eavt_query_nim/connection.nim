@@ -331,7 +331,7 @@ proc serveGatewayConnection*(gw: GatewayState; transp: StreamTransport) {.
           await handleSql(gw, raw, transp)
         of "schema":
           await handleSchema(gw, transp)
-        of "scheme", "admin", "kv":
+        of "scheme", "tx", "admin", "kv":
           await gw.conn.forwardRaw(raw, transp)
         else:
           if not hasTopKey(raw, "type"):
