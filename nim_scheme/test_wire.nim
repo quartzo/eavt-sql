@@ -1,17 +1,21 @@
-## test_wire.nim — Unit tests for nim_scheme/wire (tagged AST transport).
+## test_wire.nim — Unit tests for nim_scheme/wire (EDN-like transport:
+## native msgpack values + ext 0x05 for symbols).
 
-import std/[unittest, json, strutils]
+import std/[unittest, strutils]
 import scheme, wire
 
-proc rt(e: SExpr): SExpr = wireToSexpr(sexprToWire(e))
+proc rt(e: SExpr): SExpr = wireFromMsgpack(sexprToMsgpack(e))
 
 suite "wire.roundtrip":
   test "void":       check rt(newVoid()).kind == sVoid
   test "bool":       check rt(newBool(true)).bval == true
+  test "bool false": check rt(newBool(false)).bval == false
   test "int":        check rt(newInt(-42)).ival == -42
   test "int64 min":  check rt(newInt(int64.low)).ival == int64.low
   test "int64 max":  check rt(newInt(int64.high)).ival == int64.high
   test "float":      check rt(newFloat(3.25)).fval == 3.25
+  test "float negative zero":
+    check rt(newFloat(-0.0)).fval == -0.0
   test "str":        check rt(newStr("hello")).sval == "hello"
   test "str with quotes and newline":
     check rt(newStr("a \"b\"\nc")).sval == "a \"b\"\nc"
@@ -24,6 +28,11 @@ suite "wire.roundtrip":
   test "str not symbol":
     let r = rt(newStr("scanner-open"))
     check r.kind == sStr
+
+  test "empty symbol name":
+    let r = rt(newSymbol(""))
+    check r.kind == sSymbol
+    check r.symval == ""
 
   test "bytes":
     let r = rt(newBytes(@[byte(0), byte(1), byte(255), byte(10)]))
@@ -56,38 +65,25 @@ suite "wire.roundtrip":
     check r.items[4].items[0].bval == false
     check r.items[4].items[1].fval == -0.5
 
-  test "float tag survives float value":
-    # tag 1 must decode as float even though msgpack/json may normalize numbers
-    let r = wireToSexpr(%*[1, 2.0])
-    check r.kind == sFloat
-    check r.fval == 2.0
-
-  test "int tag with integral value stays int":
-    let r = wireToSexpr(%*[0, 5])
-    check r.kind == sInt
-    check r.ival == 5
+suite "wire.encoding-shape":
+  test "symbol is ext 0x05":
+    # fixext1 (0xd4) + type 0x05 + payload "a"
+    check sexprToMsgpack(newSymbol("a")) == "\xd4\x05a"
+  test "str is native msgpack str":
+    check sexprToMsgpack(newStr("a")) == "\xa1a"
+  test "bytes is native bin":
+    check sexprToMsgpack(newBytes(@[byte(1), byte(2)])) == "\xc4\x02\x01\x02"
+  test "long symbol uses ext8 path":
+    let s = "x".repeat(40)
+    let bytes = sexprToMsgpack(newSymbol(s))
+    check bytes[0].ord == 0xc7  # ext8
+    check bytes[1].ord == 40
+    check bytes[2].ord == 0x05  # type byte
+    check wireFromMsgpack(bytes).symval == s
 
 suite "wire.errors":
   test "resource rejected":
-    expect(WireError): discard sexprToWire(newResource(1))
-
-  test "unknown tag":
-    expect(WireError): discard wireToSexpr(%*[99, 1])
-
-  test "not an array":
-    expect(WireError): discard wireToSexpr(%*"oops")
-
-  test "wrong arity":
-    expect(WireError): discard wireToSexpr(%*[0, 1, 2])
-
-  test "tag not int":
-    expect(WireError): discard wireToSexpr(%*["0", 1])
-
-  test "bytes item out of range":
-    expect(WireError): discard wireToSexpr(%*[5, [300]])
-
-  test "bytes item not int":
-    expect(WireError): discard wireToSexpr(%*[5, ["a"]])
+    expect(WireError): discard sexprToMsgpack(newResource(1))
 
 suite "wire.program":
   test "parsed program text round-trips through wire":
@@ -96,8 +92,7 @@ suite "wire.program":
     let r = rt(prog.body)
     check $r == $prog.body
 
-# ── Direct msgpack decode (wireFromMsgpack) ─────────────────────────────────
-import msgpack4nim/msgpack2json
+# ── Direct msgpack decode edge cases ────────────────────────────────────────
 
 proc sameSexpr(a, b: SExpr): bool =
   if a.kind != b.kind: return false
@@ -116,26 +111,22 @@ proc sameSexpr(a, b: SExpr): bool =
       if not sameSexpr(a.items[i], b.items[i]): return false
     true
 
-proc mpRoundTrip(e: SExpr): SExpr =
-  ## encode → JsonNode → msgpack bytes → direct decode
-  wireFromMsgpack(fromJsonNode(sexprToWire(e)))
-
 suite "wire.msgpack-direct":
   test "round-trips all scalar kinds":
-    check sameSexpr(mpRoundTrip(newInt(-42)), newInt(-42))
-    check sameSexpr(mpRoundTrip(newInt(int64.high)), newInt(int64.high))
-    check sameSexpr(mpRoundTrip(newInt(int64.low)), newInt(int64.low))
-    check sameSexpr(mpRoundTrip(newFloat(3.25)), newFloat(3.25))
-    check sameSexpr(mpRoundTrip(newStr("hé\"llo\n")), newStr("hé\"llo\n"))
-    check sameSexpr(mpRoundTrip(newSymbol("scanner-open")), newSymbol("scanner-open"))
-    check mpRoundTrip(newBool(true)).bval == true
-    check mpRoundTrip(newVoid()).kind == sVoid
-    check sameSexpr(mpRoundTrip(newBytes(@[byte(0), byte(255)])),
+    check sameSexpr(rt(newInt(-42)), newInt(-42))
+    check sameSexpr(rt(newInt(int64.high)), newInt(int64.high))
+    check sameSexpr(rt(newInt(int64.low)), newInt(int64.low))
+    check sameSexpr(rt(newFloat(3.25)), newFloat(3.25))
+    check sameSexpr(rt(newStr("hé\"llo\n")), newStr("hé\"llo\n"))
+    check sameSexpr(rt(newSymbol("scanner-open")), newSymbol("scanner-open"))
+    check rt(newBool(true)).bval == true
+    check rt(newVoid()).kind == sVoid
+    check sameSexpr(rt(newBytes(@[byte(0), byte(255)])),
                     newBytes(@[byte(0), byte(255)]))
-    check mpRoundTrip(newBytes(@[])).bytesval.len == 0
+    check rt(newBytes(@[])).bytesval.len == 0
   test "long string (>31 chars uses str8/str16 path)":
     let long = newStr("x".repeat(100))
-    check sameSexpr(mpRoundTrip(long), long)
+    check sameSexpr(rt(long), long)
   test "nested program shape round-trips":
     let e = newList(@[
       newSymbol("begin"),
@@ -145,39 +136,48 @@ suite "wire.msgpack-direct":
                 newStr("12345678")]),
       newList(@[newSymbol("result"), newSymbol("E"), newInt(80)]),
     ])
-    check sameSexpr(mpRoundTrip(e), e)
+    check sameSexpr(rt(e), e)
   test "deep nesting under the cap":
     var e = newInt(1)
     for i in 0 ..< 50:
       e = newList(@[newSymbol("wrap"), e])
-    check sameSexpr(mpRoundTrip(e), e)
+    check sameSexpr(rt(e), e)
   test "truncated input raises":
-    let bytes = fromJsonNode(sexprToWire(newList(@[newSymbol("ab"), newInt(5)])))
+    let bytes = sexprToMsgpack(newList(@[newSymbol("ab"), newInt(5)]))
     for n in 0 ..< bytes.len:
       expect(WireError): discard wireFromMsgpack(bytes[0 ..< n])
-  test "non-array input raises":
-    expect(WireError): discard wireFromMsgpack(fromJsonNode(%"hello"))
-    expect(WireError): discard wireFromMsgpack(fromJsonNode(%*[1, 2, 3]))
-  test "unknown tag raises":
-    expect(WireError): discard wireFromMsgpack(fromJsonNode(%*[99, 1]))
-  test "bool tag with non-bool payload raises":
-    expect(WireError): discard wireFromMsgpack(fromJsonNode(%*[4, "x"]))
-
-  test "sexprToMsgpack matches sexprToWire+fromJsonNode":
-    proc mpDirect(e: SExpr): SExpr = wireFromMsgpack(sexprToMsgpack(e))
-    check sameSexpr(mpDirect(newInt(-42)), newInt(-42))
-    check sameSexpr(mpDirect(newFloat(3.25)), newFloat(3.25))
-    check sameSexpr(mpDirect(newStr("hello")), newStr("hello"))
-    check sameSexpr(mpDirect(newSymbol("save")), newSymbol("save"))
-    check mpDirect(newBool(true)).bval == true
-    check mpDirect(newVoid()).kind == sVoid
-    check sameSexpr(mpDirect(newBytes(@[byte(0), byte(255)])),
-                    newBytes(@[byte(0), byte(255)]))
-    let nested = newList(@[newSymbol("begin"),
-                           newList(@[newSymbol("save"), newSymbol("E"),
-                                     newStr("x"), newInt(1)])])
-    check sameSexpr(mpDirect(nested), nested)
-    # Verify byte-level equality with legacy path
-    check sexprToMsgpack(newInt(42)) == fromJsonNode(sexprToWire(newInt(42)))
-    check sexprToMsgpack(newStr("x")) == fromJsonNode(sexprToWire(newStr("x")))
-    check sexprToMsgpack(newSymbol("a")) == fromJsonNode(sexprToWire(newSymbol("a")))
+  test "bare scalar values decode as themselves":
+    check wireFromMsgpack("\x05").kind == sInt
+    check wireFromMsgpack("\xa1x").sval == "x"
+    check wireFromMsgpack("\xc3").bval == true
+    check wireFromMsgpack("\xc0").kind == sVoid
+  test "f32 input decodes as f64":
+    # 0xca + big-endian float32 2.0
+    check wireFromMsgpack("\xca\x40\x00\x00\x00").fval == 2.0
+  test "map inside program raises":
+    expect(WireError): discard wireFromMsgpack("\x81\xa1k\x01")
+    expect(WireError): discard wireFromMsgpack("\x92\x81\xa1k\x01\x01")
+  test "unknown ext type raises":
+    expect(WireError): discard wireFromMsgpack("\xd4\x02A")       # fixext1 type 2
+    expect(WireError): discard wireFromMsgpack("\xc7\x01\x06A")   # ext8 type 6
+  test "timestamp ext (type -1) raises":
+    # 0xd6 fixext4 with type 0xff (-1)
+    expect(WireError): discard wireFromMsgpack("\xd6\xff\x00\x00\x00\x00")
+  test "str8/str16/str32 decode":
+    check wireFromMsgpack("\xd9\x05" & "abcde").sval == "abcde"
+    check wireFromMsgpack("\xda\x00\x05" & "abcde").sval == "abcde"
+    check wireFromMsgpack("\xdb\x00\x00\x00\x05" & "abcde").sval == "abcde"
+  test "bin8/bin16/bin32 decode":
+    check wireFromMsgpack("\xc4\x02\x01\x02").bytesval == @[byte(1), byte(2)]
+    check wireFromMsgpack("\xc5\x00\x02\x01\x02").bytesval == @[byte(1), byte(2)]
+    check wireFromMsgpack("\xc6\x00\x00\x00\x02\x01\x02").bytesval == @[byte(1), byte(2)]
+  test "ext16/ext32 symbol decode":
+    check wireFromMsgpack("\xc8\x00\x02\x05ab").symval == "ab"
+    check wireFromMsgpack("\xc9\x00\x00\x00\x02\x05ab").symval == "ab"
+  test "trailing bytes raise":
+    expect(WireError): discard wireFromMsgpack("\xd4\x05a" & "\x01")
+  test "depth cap raises":
+    var bytes = "\x01"
+    for i in 0 ..< 70:
+      bytes = "\x92\xd4\x05w" & bytes
+    expect(WireError): discard wireFromMsgpack(bytes)

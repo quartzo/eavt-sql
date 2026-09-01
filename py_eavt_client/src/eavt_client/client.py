@@ -6,36 +6,33 @@ import msgpack
 # Shared Packer — packb() builds a new Packer per call; reusing one skips
 # that setup cost on every request (single-threaded use only).
 _PACKER = msgpack.Packer()
-_UNPACKER_KW = {"raw": False}
+_UNPACKER_KW = {
+    "raw": False,
+    "ext_hook": lambda code, data: Sym(data.decode("utf-8"))
+        if code == 0x05 else msgpack.ExtType(code, data),
+}
 
 
 class Sym(str):
-    """Marks a string as a Scheme symbol (wire tag 3). Plain `str` values
-    are encoded as Scheme strings (tag 2)."""
+    """Marks a string as a Scheme symbol (msgpack ext type 0x05). Plain
+    `str` values are encoded as Scheme strings."""
 
 
 def to_wire(v):
-    """Convert a Python value to the tagged AST wire form (docs/scheme-transport.md §3.3).
+    """Convert a Python value to the wire program form (docs/scheme-transport.md §3.3).
 
-    int → [0, i], float → [1, f], str → [2, s], Sym → [3, s], bool → [4, b],
-    bytes → [5, [...]], None → [6, null], list/tuple → [7, [children]].
+    Values travel as native msgpack types: int → int, float → float,
+    str → str, bool → bool, bytes → bin, None → nil, list/tuple → array.
+    Sym → ext type 0x05 (payload = UTF-8 name).
     """
     if isinstance(v, Sym):
-        return [3, str(v)]
-    if v is None:
-        return [6, None]
-    if isinstance(v, bool):
-        return [4, v]
-    if isinstance(v, int):
-        return [0, v]
-    if isinstance(v, float):
-        return [1, v]
-    if isinstance(v, str):
-        return [2, v]
+        return msgpack.ExtType(0x05, str(v).encode("utf-8"))
     if isinstance(v, (bytes, bytearray)):
-        return [5, list(v)]
+        return bytes(v)
     if isinstance(v, (list, tuple)):
-        return [7, [to_wire(x) for x in v]]
+        return [to_wire(x) for x in v]
+    if isinstance(v, (bool, int, float, str, type(None))):
+        return v
     raise TypeError(f"cannot encode {type(v).__name__} as scheme AST")
 
 
@@ -130,11 +127,13 @@ class EavtClient:
         return results
 
     def scheme_wire(self, program, *params, mode: str = "exec") -> list[dict]:
-        """Execute a program already in tagged-wire form (lists of
-        [tag, value] nodes) — skips the to_wire() conversion pass.
+        """Execute a program already in wire form (native msgpack values,
+        symbols as msgpack.ExtType(0x05, name)) — skips the to_wire()
+        conversion pass.
 
-        Wire tag table (docs/scheme-transport.md §3.3):
-          0=int, 1=float, 2=str, 3=symbol, 4=bool, 5=bytes, 6=void, 7=list
+        Encoding table (docs/scheme-transport.md §3.3):
+          int→int, float→float, str→str, bool→bool, bytes→bin,
+          None→nil, list→array, Sym→ext 0x05
         """
         req = {"type": "scheme", "program": program, "mode": mode}
         if params:
@@ -143,7 +142,7 @@ class EavtClient:
         return self._recv_loop()
 
     def scheme(self, program, *params, mode: str = "query") -> list[dict]:
-        """Execute a Scheme program (tagged AST, see to_wire) on the server.
+        """Execute a Scheme program (wire form, see to_wire) on the server.
 
         mode="query" streams rows; mode="exec" runs to completion.
         Returns all result chunks as a list of dicts, like sql().

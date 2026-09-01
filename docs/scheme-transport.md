@@ -18,8 +18,9 @@ becomes a pure Scheme execution engine.**
 
 ### Design Goals
 
-- **AST, not text, on the wire**: programs travel as tagged msgpack arrays — no
-  S-expression string printing/parsing round-trip, no bytes escaping issues.
+- **AST, not text, on the wire**: programs travel as native msgpack values
+  (symbols via ext type) — no S-expression string printing/parsing round-trip,
+  no bytes escaping issues, no `[tag, value]` wrapper arrays.
 - **Position-independence**: compiled programs never embed attribute ids (aids) as
   integers; attributes resolve by name at execution time.
 - **Client transparency**: the REPL keeps sending `{"type": "sql"}` to the same
@@ -70,7 +71,7 @@ chunked as `{"columns": [...], "rows": [...], "more": bool}` or
 
 | `type` | Fields | Behavior |
 |--------|--------|----------|
-| `scheme` | `program` (tagged AST), `mode`: `"query"` \| `"exec"`, `params` (array of tagged ASTs, optional) | `query` streams rows via yield/resume; `exec` runs to completion and returns the `(result ...)` payload |
+| `scheme` | `program` (wire AST, §3.3), `mode`: `"query"` \| `"exec"`, `params` (array of wire ASTs, optional) | `query` streams rows via yield/resume; `exec` runs to completion and returns the `(result ...)` payload |
 | `schema` | — | Returns the `CompileStats` snapshot as a single msgpack map (see 3.3) |
 | `admin` | `command` | Unchanged (`flush`, `flush-sync`, `status`, `memtable`, `dump ...`) |
 | `kv` | `op`, `cf`, `key`, `value` | Unchanged |
@@ -88,33 +89,34 @@ chunked as `{"columns": [...], "rows": [...], "more": bool}` or
 
 `type: sql` is **removed** from the transactor.
 
-### 3.3 Tagged AST encoding (`program`, `params`)
+### 3.3 Program encoding (`program`, `params`) — EDN-like msgpack
 
-A program node is a 2-element array `[tag, value]` (lists are `[7, [children...]]`).
-This preserves the symbol × string distinction that plain JSON cannot express, and
-carries bytes as an array of ints — no hex, no textual round-trip.
+A program node is a **native msgpack value**; the only distinction plain
+msgpack cannot express (symbol × string) rides on an application ext type:
 
-| Tag | Kind | Value encoding |
-|-----|------|----------------|
-| `0` | int | JSON number (int64) |
-| `1` | float | JSON number (float64) |
-| `2` | str | JSON string |
-| `3` | symbol | JSON string |
-| `4` | bool | JSON bool |
-| `5` | bytes | array of ints (0–255) |
-| `6` | void | `null` |
-| `7` | list | array of child nodes |
+| SExpr kind | Wire encoding |
+|------------|---------------|
+| int | msgpack int (int64) |
+| float | msgpack float (f64; f32 accepted) |
+| str | msgpack str |
+| symbol | **ext type `0x05`**, payload = UTF-8 name |
+| bool | msgpack bool |
+| bytes | msgpack bin |
+| void | msgpack nil |
+| list | msgpack array of child nodes |
 
 `sResource` never appears in compiled programs (scanners/iterators are created at
-execution time); encoders reject it.
+execution time); encoders reject it. The decoder is fail-loud: maps inside a
+program, unknown ext types and truncated input all raise `WireError`.
 
 ### 3.4 Python helpers (`py_eavt_client`)
 
-`to_wire(v)` converts Python values to the tagged form (int → `[0, i]`,
-float → `[1, f]`, `str` → `[2, s]`, `Sym` → `[3, s]`, `bool` → `[4, b]`,
-`bytes` → `[5, [...]]`, `None` → `[6, null]`, list/tuple → `[7, [...]`).
-Plain `str` is a Scheme **string**; wrap variable/function names in
-`Sym("name")` to get a **symbol**. `EavtClient.scheme(program, *params)` and
+`to_wire(v)` converts Python values to the wire form — values travel as
+native msgpack types (int → int, float → float, str → str, bool → bool,
+bytes → bin, None → nil, list/tuple → array); `Sym("name")` becomes
+`msgpack.ExtType(0x05, name)` to mark a **symbol**. Plain `str` is a Scheme
+**string**. On decode, ext `0x05` is unwrapped back to `Sym` (via the
+unpacker's `ext_hook`). `EavtClient.scheme(program, *params)` and
 `EavtClient.schema()` speak this protocol.
 
 ### 3.5 Schema snapshot format

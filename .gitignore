@@ -9,5 +9,6 @@ nim_*/*/test_*
 !nim_*/*/test_*.nim
 nim_query/query/test_query
 __pycache__/
+uv.lock
 eavt_*/server
 eavt_transactor_nim/test_replication_queue
