@@ -25,7 +25,8 @@ proc renderExplain*(compiled: CompileResult): string =
             break
         case spec.kind
         of skVar:
-          result.add("    " & pos & " = ?" & spec.varName & varLabel & "\n")
+          # var names are already ?-prefixed (EDN VM, passo 2 fase A)
+          result.add("    " & pos & " = " & spec.varName & varLabel & "\n")
         of skBound:
           if spec.boundVal != 0:
             result.add("    " & pos & " = #" & $spec.boundVal & varLabel & "\n")

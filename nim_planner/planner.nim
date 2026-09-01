@@ -166,11 +166,11 @@ proc exploreOrderingDepth(
     return
 
   proc varPriority(name: string): int =
-    if name.startsWith("_e_"): 0
-    elif name.startsWith("_a_"): 1
-    elif name.startsWith("_v"): 2
+    if name.startsWith("?e_"): 0
+    elif name.startsWith("?a_"): 1
+    elif name.startsWith("?v"): 2
     elif name.startsWith("_t_"): 3
-    elif name.startsWith("_added_"): 4
+    elif name.startsWith("?added_"): 4
     else: 5
 
   var candidates = remainingVars
@@ -335,7 +335,7 @@ proc buildIterPlan(
           sameVarConstraints[foundDepth].add(pos)
     of dsMissing:
       if not seenRealVar:
-        let synthName = "_skip_" & pos & "_" & idxEntry[0].toLowerAscii()
+        let synthName = "?skip_" & pos & "_" & idxEntry[0].toLowerAscii()
         var foundDepth = -1
         for di, v in globalVarOrder:
           if v == synthName:
@@ -534,7 +534,7 @@ proc buildQueryPlan*(
     for posIdx in 0..<firstVarPos:
       let pos = idxEntry[posIdx]
       if pattern.slot(pos).kind == dsMissing:
-        let synthName = "_skip_" & pos & "_" & idxName.toLowerAscii()
+        let synthName = "?skip_" & pos & "_" & idxName.toLowerAscii()
         if synthName notin orderedVars:
           var found = false
           for vi, v in orderedVars:

@@ -1,4 +1,5 @@
 import std/[unittest, tables, sets, strutils]
+import edn
 import parser as sql_parser, frontend, stats, scheme
 
 proc makeStats(): CompileStats =
@@ -26,16 +27,16 @@ suite "frontend: expression projection (no triejoin)":
     let (_, r) = compileStmt("SELECT 20+20")
     check r.isSelect
     let body = $(r.program.body)
-    check body == "(result-row (+ 20 20))"
+    check body == "[:result-row [:+ 20 20]]"
 
   test "SELECT parenthesised compiles with precedence":
     let (_, r) = compileStmt("SELECT (1+2)*3")
-    check $(r.program.body) == "(result-row (* (+ 1 2) 3))"
+    check $(r.program.body) == "[:result-row [:* [:+ 1 2] 3]]"
 
   test "SELECT eid() compiles to lookup-entity":
     let (_, r) = compileStmt("SELECT eid('company.name', 'ACME')")
-    check $(r.program.body) == "(result-row (lookup-entity \"company.name\" \"ACME\"))"
+    check $(r.program.body) == "[:result-row [:lookup-entity \"company.name\" \"ACME\"]]"
 
   test "SELECT param arithmetic compiles":
     let (_, r) = compileStmt("SELECT 20+%1")
-    check $(r.program.body) == "(result-row (+ 20 (param 1)))"
+    check $(r.program.body) == "[:result-row [:+ 20 [:param 1]]]"

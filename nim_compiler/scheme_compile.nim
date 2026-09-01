@@ -17,26 +17,26 @@ proc compileLiteral*(lit: sql_ast.Literal): SExpr =
 proc compileValue*(value: sql_ast.Value): SExpr =
   case value.vkind
   of valLiteral: compileLiteral(value.vlit)
-  of valParam: list(newSymbol("param"), newInt(value.vparam.int64))
+  of valParam: list(newKeyword("param"), newInt(value.vparam.int64))
   of valAliasRef: newSymbol(value.vref)
   of valEidLookup:
-    list(newSymbol("lookup-entity"), compileValue(value.eidAttr), compileValue(value.eidValue))
+    list(newKeyword("lookup-entity"), compileValue(value.eidAttr), compileValue(value.eidValue))
   of valValLookup:
     let entity = compileValue(value.valEntity)
-    list(newSymbol("lookup-value"), entity, compileValue(value.valAttr))
+    list(newKeyword("lookup-value"), entity, compileValue(value.valAttr))
   of valBinOp:
-    list(newSymbol(value.binOp), compileValue(value.binLeft), compileValue(value.binRight))
+    list(newKeyword(value.binOp), compileValue(value.binLeft), compileValue(value.binRight))
   of valUnaryOp:
     # unary "-": emit (- 0 operand) so the VM's binary "-" handles it.
-    list(newSymbol(value.unOp), newInt(0), compileValue(value.unOperand))
+    list(newKeyword(value.unOp), newInt(0), compileValue(value.unOperand))
 
 proc compileEntityRef(eref: sql_ast.UpsertEntityRef): SExpr =
   case eref.erefKind
-  of ueNew: list(newSymbol("alloc-entity"), newInt(4))
-  of ueTx: list(newSymbol("tx-entity"))
-  of ueExplicitEid: list(newSymbol("param"), newInt(eref.eidParam.int64))
+  of ueNew: list(newKeyword("alloc-entity"), newInt(4))
+  of ueTx: list(newKeyword("tx-entity"))
+  of ueExplicitEid: list(newKeyword("param"), newInt(eref.eidParam.int64))
   of ueLookup:
-    list(newSymbol("lookup-entity"), compileValue(eref.lookupAttr), compileValue(eref.lookupValue))
+    list(newKeyword("lookup-entity"), compileValue(eref.lookupAttr), compileValue(eref.lookupValue))
 
 proc compileUpsertScheme*(stmt: sql_ast.UpsertStmt): SchemeProgram =
   var totalValues = 0
@@ -60,26 +60,26 @@ proc compileUpsertScheme*(stmt: sql_ast.UpsertStmt): SchemeProgram =
     var saves: seq[SExpr]
     for iv in clause.values:
       let valueExpr = compileValue(iv.value)
-      saves.add(list(newSymbol("save"), newSymbol(alias), newStr(iv.attr), valueExpr))
+      saves.add(list(newKeyword("save"), newSymbol(alias), newStr(iv.attr), valueExpr))
 
     let body = if saves.len == 1: saves[0]
-               else: list(@[newSymbol("begin")] & saves)
+               else: list(@[newKeyword("begin")] & saves)
 
-    whenClauses.add(list(newSymbol("when"), newSymbol(alias), body))
+    whenClauses.add(list(newKeyword("when"), newSymbol(alias), body))
 
-  var resultExpr = list(newSymbol("result"), newSymbol(firstAlias), newInt(totalValues.int64))
+  var resultExpr = list(newKeyword("result"), newSymbol(firstAlias), newInt(totalValues.int64))
 
   if nullableAliases.len > 0:
     for i in countdown(nullableAliases.len-1, 0):
-      resultExpr = list(newSymbol("when"), newSymbol(nullableAliases[i]), resultExpr)
+      resultExpr = list(newKeyword("when"), newSymbol(nullableAliases[i]), resultExpr)
 
   whenClauses.add(resultExpr)
 
   # Convert let* to begin + set!
-  var upsertBody: seq[SExpr] = @[newSymbol("begin")]
+  var upsertBody: seq[SExpr] = @[newKeyword("begin")]
   for b in bindings:
     if b.kind == sList and b.items.len >= 2:
-      upsertBody.add(list(newSymbol("set!"), b.items[0], b.items[1]))
+      upsertBody.add(list(newKeyword("set!"), b.items[0], b.items[1]))
   upsertBody.add(whenClauses)
   let body = list(upsertBody)
   SchemeProgram(body: body)
@@ -88,18 +88,18 @@ proc compileAttributeScheme*(stmt: sql_ast.AttributeStmt): SchemeProgram =
   let attr = newStr(stmt.attr)
   let vt = newStr(stmt.valueType)
   let body = list(
-    newSymbol("begin"),
-    list(newSymbol("declare-attr"), attr, vt, newBool(stmt.many), newBool(stmt.unique)),
-    list(newSymbol("result"), attr, vt),
+    newKeyword("begin"),
+    list(newKeyword("declare-attr"), attr, vt, newBool(stmt.many), newBool(stmt.unique)),
+    list(newKeyword("result"), attr, vt),
   )
   SchemeProgram(body: body)
 
 proc compilePartitionScheme*(stmt: sql_ast.PartitionStmt): SchemeProgram =
   let body = list(
-    newSymbol("begin"),
-    list(newSymbol("set!"), newSymbol("pid"),
-      list(newSymbol("declare-partition"), newStr(stmt.name))),
-    list(newSymbol("result"), newSymbol("pid")),
+    newKeyword("begin"),
+    list(newKeyword("set!"), newSymbol("?pid"),
+      list(newKeyword("declare-partition"), newStr(stmt.name))),
+    list(newKeyword("result"), newSymbol("?pid")),
   )
   SchemeProgram(body: body)
 
@@ -107,10 +107,10 @@ proc compileDeleteDirectScheme*(entityVal: int64, retractPairs: seq[(string, int
   let eid = newInt(entityVal)
   var stmts: seq[SExpr]
   for (attr, val) in retractPairs:
-    stmts.add(list(newSymbol("retract"), eid, newStr(attr), newInt(val)))
-  stmts.add(list(newSymbol("result"), eid))
+    stmts.add(list(newKeyword("retract"), eid, newStr(attr), newInt(val)))
+  stmts.add(list(newKeyword("result"), eid))
   let body = if stmts.len == 1: stmts[0]
-             else: list(@[newSymbol("begin")] & stmts)
+             else: list(@[newKeyword("begin")] & stmts)
   SchemeProgram(body: body)
 
 proc planValueToSexpr(pv: PlanValue): SExpr =
@@ -119,7 +119,7 @@ proc planValueToSexpr(pv: PlanValue): SExpr =
     if pv.pvStr != "": newStr(pv.pvStr)
     elif pv.pvFloat != 0: newFloat(pv.pvFloat)
     else: newInt(pv.pvInt)
-  of pvParam: list(newSymbol("param"), newInt(pv.pvParamIdx.int64))
+  of pvParam: list(newKeyword("param"), newInt(pv.pvParamIdx.int64))
   of pvExpr: compileValue(pv.exprValue)
 
 proc boundToSexpr(bv: BoundValue): SExpr =
@@ -127,8 +127,8 @@ proc boundToSexpr(bv: BoundValue): SExpr =
   of bvInt: newInt(bv.ival)
   of bvFloat: newFloat(bv.fval)
   of bvStr, bvAttr: newStr(if bv.kind == bvStr: bv.sval else: bv.attrName)
-  of bvResolvedAttr: list(newSymbol("intern-a"), newStr(bv.raName))
-  of bvParam: list(newSymbol("param"), newInt(bv.paramIdx.int64))
+  of bvResolvedAttr: list(newKeyword("intern-a"), newStr(bv.raName))
+  of bvParam: list(newKeyword("param"), newInt(bv.paramIdx.int64))
   of bvVar: newSymbol("?" & bv.varName)
   of bvBool: newBool(bv.bval)
   of bvExpr: compileValue(bv.exprValue)
@@ -142,24 +142,24 @@ proc buildRangeTree(branches: seq[seq[(string, PlanValue)]]): SExpr =
       if op == "in":
         inVals.add(planValueToSexpr(pv))
       else:
-        otherConds.add(list(newSymbol(op), planValueToSexpr(pv)))
+        otherConds.add(list(newKeyword(op), planValueToSexpr(pv)))
     if inVals.len == 1:
-      otherConds.add(list(newSymbol("="), inVals[0]))
+      otherConds.add(list(newKeyword("="), inVals[0]))
     elif inVals.len > 1:
       # IN (a, b, c) is the disjunction (= a) OR (= b) OR (= c) — emitting a
       # single (= a b c) would drop all but the first value.
-      var eqs: seq[SExpr] = @[newSymbol("or")]
+      var eqs: seq[SExpr] = @[newKeyword("or")]
       for v in inVals:
-        eqs.add(list(newSymbol("="), v))
+        eqs.add(list(newKeyword("="), v))
       otherConds.add(list(eqs))
     if otherConds.len == 1: otherConds[0]
-    else: list(@[newSymbol("and")] & otherConds)
+    else: list(@[newKeyword("and")] & otherConds)
 
   if branches.len == 1: buildBranch(branches[0])
   else:
     var branchSexprs: seq[SExpr]
     for b in branches: branchSexprs.add(buildBranch(b))
-    list(@[newSymbol("or")] & branchSexprs)
+    list(@[newKeyword("or")] & branchSexprs)
 
 proc replaceBodyPlaceholder(expr: SExpr, replacement: SExpr): SExpr =
   if expr.kind == sSymbol and expr.symval == "__BODY__":
@@ -173,11 +173,11 @@ proc flattenBegins*(expr: SExpr): SExpr =
   case expr.kind
   of sList:
     let items = expr.items.mapIt(flattenBegins(it))
-    if items.len > 0 and items[0].kind == sSymbol and items[0].symval == "begin":
+    if items.len > 0 and items[0].kind == sKeyword and items[0].kwval == "begin":
       var acc: seq[SExpr] = @[items[0]]
       for item in items[1..^1]:
         if item.kind == sList and item.items.len > 0 and
-           item.items[0].kind == sSymbol and item.items[0].symval == "begin":
+           item.items[0].kind == sKeyword and item.items[0].kwval == "begin":
           acc.add(item.items[1..^1])
         else:
           acc.add(item)
@@ -209,8 +209,8 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
   # Build scanner bindings
   var scannerBindings: seq[SExpr]
   for ipIdx, ip in plan.iterPlans:
-    let scannerName = "s" & $ipIdx
-    var openArgs = @[newSymbol("scanner-open"), newStr(toUpperAscii(ip.indexName))]
+    let scannerName = "?s" & $ipIdx
+    var openArgs = @[newKeyword("scanner-open"), newStr(toUpperAscii(ip.indexName))]
     if plan.history: openArgs.add(newBool(true))
     scannerBindings.add(list(newSymbol(scannerName), list(openArgs)))
 
@@ -229,7 +229,7 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
     var bv = initTable[string, SExpr]()
     for (posName, pv) in pairs(ip.boundInts):
       let valExpr = if pv.kind == pvValue and pv.pvStr != "" and posName == "a":
-        list(newSymbol("intern-a"), newStr(pv.pvStr))
+        list(newKeyword("intern-a"), newStr(pv.pvStr))
       else:
         planValueToSexpr(pv)
       bv[posName] = valExpr
@@ -251,7 +251,7 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
       var found = false
       for (d, _) in ip.varDepths:
         if d == depth: found = true; break
-      if found: scanners.add(newSymbol("s" & $ipIdx))
+      if found: scanners.add(newSymbol("?s" & $ipIdx))
     if scanners.len == 0: continue
 
     # Emit scanner-push for bound values before this depth's variable
@@ -270,12 +270,12 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
         if posName in bindVals[ipIdx]:
           boundEmitted[ipIdx].incl(posName)
           scanPos[ipIdx] += 1
-          let scannerSym = newSymbol("s" & $ipIdx)
+          let scannerSym = newSymbol("?s" & $ipIdx)
           ops.add(list(
-            newSymbol("begin"),
-            list(newSymbol("scanner-push"), scannerSym, bindVals[ipIdx][posName]),
+            newKeyword("begin"),
+            list(newKeyword("scanner-push"), scannerSym, bindVals[ipIdx][posName]),
             newSymbol("__BODY__"),
-            list(newSymbol("scanner-pop"), scannerSym),
+            list(newKeyword("scanner-pop"), scannerSym),
           ))
 
       # Gap scanning
@@ -290,24 +290,24 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
         if gapSlot in boundEmitted[ipIdx] or isHandled:
           scanPos[ipIdx] += 1
           continue
-        let gapVar = "_skip_" & gapSlot & "_" & toLowerAscii(ip.indexName)
+        let gapVar = "?skip_" & gapSlot & "_" & toLowerAscii(ip.indexName)
         scanPos[ipIdx] += 1
-        let scannerSym = newSymbol("s" & $ipIdx)
-        let gapIterVar = newSymbol("_it_" & gapVar)
+        let scannerSym = newSymbol("?s" & $ipIdx)
+        let gapIterVar = newSymbol("?it_" & gapVar)
         let gapBody = list(
-          newSymbol("begin"),
-          list(newSymbol("scanner-push"), scannerSym, newSymbol(gapVar)),
+          newKeyword("begin"),
+          list(newKeyword("scanner-push"), scannerSym, newSymbol(gapVar)),
           newSymbol("__BODY__"),
-          list(newSymbol("scanner-pop"), scannerSym))
+          list(newKeyword("scanner-pop"), scannerSym))
         let gapWhile = list(
-          newSymbol("while"),
-          list(newSymbol("set!"), newSymbol(gapVar),
-            list(newSymbol("scanner-iterate-next"), gapIterVar)),
+          newKeyword("while"),
+          list(newKeyword("set!"), newSymbol(gapVar),
+            list(newKeyword("scanner-iterate-next"), gapIterVar)),
           gapBody)
         let gapExpr = list(
-          newSymbol("begin"),
-          list(newSymbol("set!"), gapIterVar,
-            list(newSymbol("scanner-iterate-init"), scannerSym, list())),
+          newKeyword("begin"),
+          list(newKeyword("set!"), gapIterVar,
+            list(newKeyword("scanner-iterate-init"), scannerSym, list())),
           gapWhile)
         ops.add(gapExpr)
 
@@ -320,38 +320,38 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
     var isSynthetic = false
     for synth in plan.syntheticVars:
       if synth.name == varName:
-        rangesExpr = list(newSymbol("ranges-create"), list(newSymbol("="), newSymbol(synth.sourceVar)))
+        rangesExpr = list(newKeyword("ranges-create"), list(newKeyword("="), newSymbol(synth.sourceVar)))
         isSynthetic = true
         break
     if not isSynthetic and not rangesIsEmpty:
-      rangesExpr = list(newSymbol("ranges-create"), rangesTree)
+      rangesExpr = list(newKeyword("ranges-create"), rangesTree)
 
     # Build init args: scanners... ranges
     var initArgs: seq[SExpr] = @[]
     for s in scanners: initArgs.add(s)
     initArgs.add(rangesExpr)
 
-    let iterVar = newSymbol("_it_" & varName)
+    let iterVar = newSymbol("?it_" & varName)
 
-    var innerItems = @[newSymbol("begin")]
+    var innerItems = @[newKeyword("begin")]
     # Push/pop only needed when there are deeper levels to restrict.
     if depth < numDepths - 1:
       for s in scanners:
-        innerItems.add(list(newSymbol("scanner-push"), s, newSymbol(varName)))
+        innerItems.add(list(newKeyword("scanner-push"), s, newSymbol(varName)))
     innerItems.add(newSymbol("__BODY__"))
     if depth < numDepths - 1:
       for s in scanners:
-        innerItems.add(list(newSymbol("scanner-pop"), s))
+        innerItems.add(list(newKeyword("scanner-pop"), s))
 
     let mainWhile = list(
-      newSymbol("while"),
-      list(newSymbol("set!"), newSymbol(varName),
-        list(newSymbol("scanner-iterate-next"), iterVar)),
+      newKeyword("while"),
+      list(newKeyword("set!"), newSymbol(varName),
+        list(newKeyword("scanner-iterate-next"), iterVar)),
       list(innerItems))
     let mainExpr = list(
-      newSymbol("begin"),
-      list(newSymbol("set!"), iterVar,
-        list(@[newSymbol("scanner-iterate-init")] & initArgs)),
+      newKeyword("begin"),
+      list(newKeyword("set!"), iterVar,
+        list(@[newKeyword("scanner-iterate-init")] & initArgs)),
       mainWhile)
     ops.add(mainExpr)
 
@@ -392,12 +392,12 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
     let lastIdx = trailing.len - 1
     for i, (posName, valExpr) in trailing:
       boundEmitted[ipIdx].incl(posName)
-      let scannerSym = newSymbol("s" & $ipIdx)
+      let scannerSym = newSymbol("?s" & $ipIdx)
       if i == lastIdx:
         # The last trailing binding may hide further range vars behind it
         # (e.g. AEVT: a bound, e depth var, v const + range var): prefer the
         # range var's ranges over a plain equality when both target v.
-        var lastRanges = list(newSymbol("="), valExpr)
+        var lastRanges = list(newKeyword("="), valExpr)
         for posIdx, pos in ip.idxOrder:
           if pos == posName or posIdx >= ip.idxOrder.len: continue
           let spec = ip.specs[posIdx]
@@ -407,37 +407,37 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
             boundEmitted[ipIdx].incl(pos)
             break
         let trailVar = "_" & posName & "_trail"
-        let trailIterVar = newSymbol("_it_" & trailVar)
-        let trailRanges = list(newSymbol("ranges-create"), lastRanges)
+        let trailIterVar = newSymbol("?it_" & trailVar)
+        let trailRanges = list(newKeyword("ranges-create"), lastRanges)
         let trailBody = list(
-          newSymbol("begin"),
-          list(newSymbol("scanner-push"), scannerSym, newSymbol(trailVar)),
+          newKeyword("begin"),
+          list(newKeyword("scanner-push"), scannerSym, newSymbol(trailVar)),
           newSymbol("__BODY__"),
-          list(newSymbol("scanner-pop"), scannerSym))
+          list(newKeyword("scanner-pop"), scannerSym))
         let trailWhile = list(
-          newSymbol("while"),
-          list(newSymbol("set!"), newSymbol(trailVar),
-            list(newSymbol("scanner-iterate-next"), trailIterVar)),
+          newKeyword("while"),
+          list(newKeyword("set!"), newSymbol(trailVar),
+            list(newKeyword("scanner-iterate-next"), trailIterVar)),
           trailBody)
-        var trailItems = @[newSymbol("begin")]
+        var trailItems = @[newKeyword("begin")]
         for p in prePushes:
-          trailItems.add(list(newSymbol("scanner-push"), scannerSym, posToVar[p]))
+          trailItems.add(list(newKeyword("scanner-push"), scannerSym, posToVar[p]))
         trailItems.add(list(
-          newSymbol("set!"), trailIterVar,
-          list(newSymbol("scanner-iterate-init"), scannerSym, trailRanges)))
+          newKeyword("set!"), trailIterVar,
+          list(newKeyword("scanner-iterate-init"), scannerSym, trailRanges)))
         trailItems.add(trailWhile)
         for p in countdown(prePushes.len - 1, 0):
-          trailItems.add(list(newSymbol("scanner-pop"), scannerSym))
+          trailItems.add(list(newKeyword("scanner-pop"), scannerSym))
         ops.add(list(trailItems))
       else:
-        var pushItems = @[newSymbol("begin")]
+        var pushItems = @[newKeyword("begin")]
         for p in prePushes:
-          pushItems.add(list(newSymbol("scanner-push"), scannerSym, posToVar[p]))
-        pushItems.add(list(newSymbol("scanner-push"), scannerSym, valExpr))
+          pushItems.add(list(newKeyword("scanner-push"), scannerSym, posToVar[p]))
+        pushItems.add(list(newKeyword("scanner-push"), scannerSym, valExpr))
         pushItems.add(newSymbol("__BODY__"))
-        pushItems.add(list(newSymbol("scanner-pop"), scannerSym))
+        pushItems.add(list(newKeyword("scanner-pop"), scannerSym))
         for p in countdown(prePushes.len - 1, 0):
-          pushItems.add(list(newSymbol("scanner-pop"), scannerSym))
+          pushItems.add(list(newKeyword("scanner-pop"), scannerSym))
         ops.add(list(pushItems))
 
   # Trailing range vars (no const binding): positions whose spec is a var
@@ -469,10 +469,10 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
       if pos in emittedPos: continue
       emittedPos.incl(pos)
 
-      let scannerSym = newSymbol("s" & $ipIdx)
+      let scannerSym = newSymbol("?s" & $ipIdx)
       let varSym = newSymbol(spec.varName)
-      let iterVar = newSymbol("_it_" & spec.varName)
-      let rangesExpr = list(newSymbol("ranges-create"), rangeTrees[spec.varName])
+      let iterVar = newSymbol("?it_" & spec.varName)
+      let rangesExpr = list(newKeyword("ranges-create"), rangeTrees[spec.varName])
 
       # Occupy intermediate variable positions before filtering this one.
       var prePushes: seq[string] = @[]
@@ -482,24 +482,24 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
         if checkPos in posToVar: prePushes.add(checkPos)
 
       let innerBody = list(
-        newSymbol("begin"),
-        list(newSymbol("scanner-push"), scannerSym, varSym),
+        newKeyword("begin"),
+        list(newKeyword("scanner-push"), scannerSym, varSym),
         newSymbol("__BODY__"),
-        list(newSymbol("scanner-pop"), scannerSym))
+        list(newKeyword("scanner-pop"), scannerSym))
       let innerWhile = list(
-        newSymbol("while"),
-        list(newSymbol("set!"), varSym,
-          list(newSymbol("scanner-iterate-next"), iterVar)),
+        newKeyword("while"),
+        list(newKeyword("set!"), varSym,
+          list(newKeyword("scanner-iterate-next"), iterVar)),
         innerBody)
-      var items = @[newSymbol("begin")]
+      var items = @[newKeyword("begin")]
       for p in prePushes:
-        items.add(list(newSymbol("scanner-push"), scannerSym, posToVar[p]))
+        items.add(list(newKeyword("scanner-push"), scannerSym, posToVar[p]))
       items.add(list(
-        newSymbol("set!"), iterVar,
-        list(newSymbol("scanner-iterate-init"), scannerSym, rangesExpr)))
+        newKeyword("set!"), iterVar,
+        list(newKeyword("scanner-iterate-init"), scannerSym, rangesExpr)))
       items.add(innerWhile)
       for p in countdown(prePushes.len - 1, 0):
-        items.add(list(newSymbol("scanner-pop"), scannerSym))
+        items.add(list(newKeyword("scanner-pop"), scannerSym))
       ops.add(list(items))
 
   # Build nested: start from leaf_body, apply ops in reverse
@@ -514,42 +514,42 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
     let eVal = if pattern.e.kind == dsConst: boundToSexpr(pattern.e.constVal) else: continue
     let aVal = if pattern.a.kind == dsConst: boundToSexpr(pattern.a.constVal) else: continue
     let vVal = if pattern.v.kind == dsConst: boundToSexpr(pattern.v.constVal) else: continue
-    let probeSVar = "_s_probe"
-    let probeIterVar = newSymbol("_it_probe")
+    let probeSVar = "?s_probe"
+    let probeIterVar = newSymbol("?it_probe")
     body = list(
-      newSymbol("begin"),
-      list(newSymbol("set!"), newSymbol(probeSVar),
-        list(newSymbol("scanner-open"), newStr("EAVT"))),
-      list(newSymbol("set!"), probeIterVar,
-        list(newSymbol("scanner-iterate-init"), newSymbol(probeSVar), list())),
+      newKeyword("begin"),
+      list(newKeyword("set!"), newSymbol(probeSVar),
+        list(newKeyword("scanner-open"), newStr("EAVT"))),
+      list(newKeyword("set!"), probeIterVar,
+        list(newKeyword("scanner-iterate-init"), newSymbol(probeSVar), list())),
       list(
-        newSymbol("begin"),
-        list(newSymbol("scanner-push"), newSymbol(probeSVar), eVal),
-        list(newSymbol("scanner-push"), newSymbol(probeSVar), aVal),
-        list(newSymbol("scanner-push"), newSymbol(probeSVar), vVal),
+        newKeyword("begin"),
+        list(newKeyword("scanner-push"), newSymbol(probeSVar), eVal),
+        list(newKeyword("scanner-push"), newSymbol(probeSVar), aVal),
+        list(newKeyword("scanner-push"), newSymbol(probeSVar), vVal),
         list(
-          newSymbol("while"),
-          list(newSymbol("set!"), newSymbol(tParam),
-            list(newSymbol("scanner-iterate-next"), probeIterVar)),
+          newKeyword("while"),
+          list(newKeyword("set!"), newSymbol(tParam),
+            list(newKeyword("scanner-iterate-next"), probeIterVar)),
           list(
-            newSymbol("begin"),
-            list(newSymbol("scanner-push"), newSymbol(probeSVar), newSymbol(tParam)),
+            newKeyword("begin"),
+            list(newKeyword("scanner-push"), newSymbol(probeSVar), newSymbol(tParam)),
             body,
-            list(newSymbol("scanner-pop"), newSymbol(probeSVar)),
+            list(newKeyword("scanner-pop"), newSymbol(probeSVar)),
           ),
         ),
-        list(newSymbol("scanner-pop"), newSymbol(probeSVar)),
-        list(newSymbol("scanner-pop"), newSymbol(probeSVar)),
-        list(newSymbol("scanner-pop"), newSymbol(probeSVar)),
+        list(newKeyword("scanner-pop"), newSymbol(probeSVar)),
+        list(newKeyword("scanner-pop"), newSymbol(probeSVar)),
+        list(newKeyword("scanner-pop"), newSymbol(probeSVar)),
       ),
     )
 
   var fullBody = body
   if scannerBindings.len > 0:
-    var stmts: seq[SExpr] = @[newSymbol("begin")]
+    var stmts: seq[SExpr] = @[newKeyword("begin")]
     for b in scannerBindings:
       if b.kind == sList and b.items.len >= 2:
-        stmts.add(list(newSymbol("set!"), b.items[0], b.items[1]))
+        stmts.add(list(newKeyword("set!"), b.items[0], b.items[1]))
     stmts.add(body)
     fullBody = list(stmts)
 
@@ -577,11 +577,11 @@ proc buildProjection(plan: QueryPlanResult, totalProjLen: int, constantIndices: 
     fvIdx += 1
     let bnd = newSymbol(varName)
     if varName in plan.attrVars:
-      projArgs.add(list(newSymbol("attr-name"), bnd))
+      projArgs.add(list(newKeyword("attr-name"), bnd))
     else:
-      projArgs.add(list(newSymbol("resolve-val"), bnd))
+      projArgs.add(list(newKeyword("resolve-val"), bnd))
 
-  list(@[newSymbol("result-row")] & projArgs)
+  list(@[newKeyword("result-row")] & projArgs)
 
 proc compileSelectScheme*(plan: QueryPlanResult): tuple[prog: SchemeProgram, vars: seq[string], depthVarPairs: seq[(int, int)]] =
   var findVars: seq[string]
@@ -595,7 +595,7 @@ proc compileSelectScheme*(plan: QueryPlanResult): tuple[prog: SchemeProgram, var
       if pv != nil: constantIndices[i] = pv
 
   let leafBody = if plan.existsMode and constantIndices.len == 0:
-    list(newSymbol("result-row"), newInt(1))
+    list(newKeyword("result-row"), newInt(1))
   else:
     buildProjection(plan, plan.findVars.len, constantIndices)
 
@@ -610,7 +610,7 @@ proc compileDeleteScheme*(plan: QueryPlanResult, findVars: seq[string], targetEv
     if cond.left.field == "eid": continue
     let attr = cond.left.field
     let valSexpr = case cond.right.rkind
-      of crParam: list(newSymbol("param"), newInt(cond.right.rparam.int64))
+      of crParam: list(newKeyword("param"), newInt(cond.right.rparam.int64))
       of crLiteral:
         case cond.right.rlit.lkind
         of litInt: newInt(cond.right.rlit.ival)
@@ -620,12 +620,12 @@ proc compileDeleteScheme*(plan: QueryPlanResult, findVars: seq[string], targetEv
         of litBytes: newBytes(cond.right.rlit.bytesval)
       else: newInt(0)
 
-    leafStmts.add(list(newSymbol("retract"), eidGet, newStr(attr), valSexpr))
+    leafStmts.add(list(newKeyword("retract"), eidGet, newStr(attr), valSexpr))
 
-  leafStmts.add(list(newSymbol("result-row"), eidGet))
+  leafStmts.add(list(newKeyword("result-row"), eidGet))
 
   let leafBody = if leafStmts.len == 1: leafStmts[0]
-                 else: list(@[newSymbol("begin")] & leafStmts)
+                 else: list(@[newKeyword("begin")] & leafStmts)
 
   buildTriejoinScheme(plan, findVars, leafBody)
 
@@ -635,7 +635,7 @@ proc compileUpdateScheme*(plan: QueryPlanResult, findVars: seq[string],
   var firstEidGet: SExpr
 
   for clause in updateStmt.clauses:
-    let clauseEvar = "_e_" & toLowerAscii(clause.alias)
+    let clauseEvar = "?e_" & toLowerAscii(clause.alias)
     let eidGet = newSymbol(clauseEvar)
     if firstEidGet == nil: firstEidGet = eidGet
 
@@ -648,18 +648,18 @@ proc compileUpdateScheme*(plan: QueryPlanResult, findVars: seq[string],
           of litStr: newStr(iv.value.vlit.sval)
           of litBool: newBool(iv.value.vlit.bval)
           of litBytes: newBytes(iv.value.vlit.bytesval)
-        of valParam: list(newSymbol("param"), newInt(iv.value.vparam.int64))
+        of valParam: list(newKeyword("param"), newInt(iv.value.vparam.int64))
         of valAliasRef:
-          let refEvar = "_e_" & toLowerAscii(iv.value.vref)
+          let refEvar = "?e_" & toLowerAscii(iv.value.vref)
           newSymbol(refEvar)
         else: newInt(0)
 
-      leafStmts.add(list(newSymbol("save"), eidGet, newStr(iv.attr), valSexpr))
+      leafStmts.add(list(newKeyword("save"), eidGet, newStr(iv.attr), valSexpr))
 
-  leafStmts.add(list(newSymbol("result-row"), firstEidGet))
+  leafStmts.add(list(newKeyword("result-row"), firstEidGet))
 
   let leafBody = if leafStmts.len == 1: leafStmts[0]
-                 else: list(@[newSymbol("begin")] & leafStmts)
+                 else: list(@[newKeyword("begin")] & leafStmts)
 
   buildTriejoinScheme(plan, findVars, leafBody)
 

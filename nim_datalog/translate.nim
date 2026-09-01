@@ -21,7 +21,7 @@ type
 proc newAliasState(alias: string): AliasState =
   AliasState(
     alias: alias,
-    eVar: "_e_" & alias,
+    eVar: "?e_" & alias,
     txVar: "_t_" & alias,
     attrs: @[],
     rangeConds: initTable[string, seq[seq[(string, BoundValue)]]](),
@@ -32,16 +32,16 @@ proc safeAttrName(attr: string): string =
   attr.replace(".", "_").replace(":", "_c_").replace("/", "_s_").replace("-", "_h_")
 
 proc vVar(st: AliasState, attr: string): string =
-  "_v_" & st.alias & "_" & safeAttrName(attr)
+  "?v_" & st.alias & "_" & safeAttrName(attr)
 
 proc aVar(st: AliasState): string =
-  "_a_" & st.alias
+  "?a_" & st.alias
 
 proc valVar(st: AliasState): string =
-  "_vv_" & st.alias
+  "?vv_" & st.alias
 
 proc addedVar(st: AliasState): string =
-  "_added_" & st.alias
+  "?added_" & st.alias
 
 proc ensureAlias(aliases: var Table[string, AliasState], name: string) =
   if name notin aliases:
@@ -158,13 +158,13 @@ proc extractRight(right: sql_ast.ConditionRight): BoundValue =
   of crLiteral: extractLiteral(right.rlit)
   of crField:
     if right.fref.field == "eid":
-      newBoundVar("_e_" & right.fref.alias)
+      newBoundVar("?e_" & right.fref.alias)
     elif right.fref.field == "val":
-      newBoundVar("_vv_" & right.fref.alias)
+      newBoundVar("?vv_" & right.fref.alias)
     elif right.fref.field == "attr":
-      newBoundVar("_a_" & right.fref.alias)
+      newBoundVar("?a_" & right.fref.alias)
     else:
-      newBoundVar("_v_" & right.fref.alias & "_" & safeAttrName(right.fref.field))
+      newBoundVar("?v_" & right.fref.alias & "_" & safeAttrName(right.fref.field))
   of crExpr: newBoundExpr(right.exprValue)
   of crIn, crOr: newBoundMissing("compound")
 
@@ -465,7 +465,7 @@ proc buildFindVars(stmt: sql_ast.SelectStmt, aliases: Table[string, AliasState],
       let st = aliases.getOrDefault(alias)
       case field
       of "eid":
-        let varName = aliasEVars.getOrDefault(alias, "_e_" & alias)
+        let varName = aliasEVars.getOrDefault(alias, "?e_" & alias)
         if st != nil and st.eBoundValue.isSome:
           let bv = st.eBoundValue.get
           if not bv.isVar:
@@ -475,15 +475,15 @@ proc buildFindVars(stmt: sql_ast.SelectStmt, aliases: Table[string, AliasState],
         else:
           result.add(FindVar(kind: fvVar, varName: varName))
       of "tx": result.add(FindVar(kind: fvVar, varName: "_t_" & alias))
-      of "added": result.add(FindVar(kind: fvVar, varName: "_added_" & alias))
+      of "added": result.add(FindVar(kind: fvVar, varName: "?added_" & alias))
       of "attr":
-        let varName = "_a_" & alias
+        let varName = "?a_" & alias
         if st != nil and st.attrBoundValue.isSome:
           result.add(FindVar(kind: fvConst, cName: varName, cVal: st.attrBoundValue.get))
         else:
           result.add(FindVar(kind: fvVar, varName: varName))
       of "val":
-        let varName = "_vv_" & alias
+        let varName = "?vv_" & alias
         if st != nil and st.valBoundValue.isSome:
           let bv = st.valBoundValue.get
           if not bv.isVar:
@@ -493,7 +493,7 @@ proc buildFindVars(stmt: sql_ast.SelectStmt, aliases: Table[string, AliasState],
         else:
           result.add(FindVar(kind: fvVar, varName: varName))
       else:
-        let varName = "_v_" & alias & "_" & safeAttrName(field)
+        let varName = "?v_" & alias & "_" & safeAttrName(field)
         if st != nil and field in st.attrValues:
           let bv = st.attrValues[field]
           if not bv.isVar:

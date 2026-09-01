@@ -1,4 +1,5 @@
 import std/[unittest, tables, sets, sequtils, strutils]
+import edn
 import ast, parser as sql_parser, scheme, scheme_compile, compiler, datalog_ast, pattern, planner_ast, planner, translate
 
 suite "compiler: UPSERT":
@@ -17,8 +18,8 @@ suite "compiler: UPSERT":
     check stmt.kind == stmtUpsert
     let prog = compileUpsertScheme(stmt.upsertStmt)
     let s = $prog.body
-    check "(param 1)" in s
-    check "(param 2)" in s
+    check "[:param 1]" in s
+    check "[:param 2]" in s
 
   test "alias ref in multi-clause":
     let stmt = sql_parser.parse("UPSERT AS D1 SET person.name = 'A' , AS D2 SET company.ceo = d1")
@@ -27,14 +28,14 @@ suite "compiler: UPSERT":
     let s = $prog.body
     check "D1" in s
     check "D2" in s
-    check "(result D1 2)" in s
+    check "[:result D1 2]" in s
 
   test "round-trip parseable":
     let stmt = sql_parser.parse("UPSERT AS D1 SET person.age = %1, person.name = 'Bob'")
     check stmt.kind == stmtUpsert
     let prog = compileUpsertScheme(stmt.upsertStmt)
     let schemeStr = $prog.body
-    let reparsed = scheme.parse(schemeStr)
+    let reparsed = edn.readEdn(schemeStr)
     check $reparsed == schemeStr
 
 suite "compiler: ATTRIBUTE":
@@ -77,7 +78,7 @@ suite "compiler: DML direct (compileDmlDirect)":
 suite "compiler: flattenBegins":
   proc sym(s: string): SExpr = newSymbol(s)
   proc begin(items: seq[SExpr]): SExpr =
-    newList(@[sym("begin")] & items)
+    newList(@[newKeyword("begin")] & items)
   proc listItems(items: varargs[SExpr]): SExpr =
     newList(@items)
 

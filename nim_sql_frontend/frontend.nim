@@ -68,7 +68,7 @@ proc compileSql*(stmt: SqlStmt, cstats: CompileStats): CompileResult =
               projArgs.add(compileLiteral(proj.literal.get))
             else:
               projArgs.add(newVoid())
-          let prog = SchemeProgram(body: list(@[newSymbol("result-row")] & projArgs))
+          let prog = SchemeProgram(body: list(@[newKeyword("result-row")] & projArgs))
           result.isSelect = true
           result.program = prog
           result.selectBody = prog

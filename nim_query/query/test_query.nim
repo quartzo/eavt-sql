@@ -8,6 +8,7 @@
 ##      --passL:-lcrypto --passL:-lzstd -r query/test_query.nim
 
 import std/[unittest, options, tables, strutils, sequtils]
+import edn
 import scheme
 import keys
 import kvstore
@@ -218,7 +219,7 @@ suite "cmpValue":
     check SExpr(kind: sBytes, bytesval: @[byte 1]) <
            SExpr(kind: sBytes, bytesval: @[byte 1, 0])
 
-  test "cross-type ordering (by kind enum)":
+  test "cross-type ordering [by kind enum]":
     check SExpr(kind: sVoid) != SExpr(kind: sInt, ival: 0)
     check SExpr(kind: sBool, bval: false) < SExpr(kind: sInt, ival: 0)
     check SExpr(kind: sInt, ival: 0) < SExpr(kind: sFloat, fval: 0.0)
@@ -314,7 +315,7 @@ suite "opsToIntervals":
     check intervals[0][0].get.ival == 42
     check intervals[0][1].get.ival == 42
 
-  test "Gt produces (val, +inf)":
+  test "Gt produces [val, +inf]":
     let ops = @[(int32(RangeOpGt), SExpr(kind: sInt, ival: 0))]
     let intervals = opsToIntervals(ops)
     check intervals.len == 1
@@ -322,13 +323,13 @@ suite "opsToIntervals":
     check intervals[0][1].isNone
     check (intervals[0][2] and RangeLoOpen) != 0
 
-  test "Gte produces [val, +inf)":
+  test "Gte produces [val, +inf]":
     let ops = @[(int32(RangeOpGte), SExpr(kind: sInt, ival: 0))]
     let intervals = opsToIntervals(ops)
     check intervals.len == 1
     check (intervals[0][2] and RangeLoOpen) == 0
 
-  test "Lt produces (-inf, val)":
+  test "Lt produces [-inf, val]":
     let ops = @[(int32(RangeOpLt), SExpr(kind: sInt, ival: 100))]
     let intervals = opsToIntervals(ops)
     check intervals.len == 1
@@ -386,89 +387,89 @@ suite "opsToIntervals":
 type DummyHost = ref object of HostFns
 
 proc evalArith(progStr: string): SExpr =
-  let prog = SchemeProgram(body: scheme.parse(progStr))
+  let prog = SchemeProgram(body: edn.readEdn(progStr))
   var env = newEnvironment()
   var host: HostFns = DummyHost()
   eval(prog, env, host)
 
 suite "scheme: arithmetic":
   test "addition ints":
-    check evalArith("(+ 2 3)").ival == 5
+    check evalArith("[:+ 2 3]").ival == 5
 
   test "addition multiple":
-    check evalArith("(+ 1 2 3)").ival == 6
+    check evalArith("[:+ 1 2 3]").ival == 6
 
   test "addition with float returns float":
-    let r = evalArith("(+ 1 2.0)")
+    let r = evalArith("[:+ 1 2.0]")
     check r.kind == sFloat
     check r.fval == 3.0
 
   test "subtraction":
-    check evalArith("(- 10 3)").ival == 7
+    check evalArith("[:- 10 3]").ival == 7
 
   test "unary negation":
-    check evalArith("(- 5)").ival == -5
+    check evalArith("[:- 5]").ival == -5
 
   test "multiplication":
-    check evalArith("(* 3 4)").ival == 12
+    check evalArith("[:* 3 4]").ival == 12
 
   test "division":
-    let r = evalArith("(/ 10 4)")
+    let r = evalArith("[:/ 10 4]")
     check r.kind == sFloat
     check r.fval == 2.5
 
   test "division by zero raises":
     expect EvalError:
-      discard evalArith("(/ 1 0)")
+      discard evalArith("[:/ 1 0]")
 
   test "mod":
-    check evalArith("(mod 10 3)").ival == 1
+    check evalArith("[:mod 10 3]").ival == 1
 
   test "mod by zero raises":
     expect EvalError:
-      discard evalArith("(mod 1 0)")
+      discard evalArith("[:mod 1 0]")
 
   test "min int":
-    check evalArith("(min 5 3 7)").ival == 3
+    check evalArith("[:min 5 3 7]").ival == 3
 
   test "max int":
-    check evalArith("(max 5 3 7)").ival == 7
+    check evalArith("[:max 5 3 7]").ival == 7
 
   test "abs int":
-    check evalArith("(abs -5)").ival == 5
+    check evalArith("[:abs -5]").ival == 5
 
   test "abs float":
-    check evalArith("(abs -3.14)").fval == 3.14
+    check evalArith("[:abs -3.14]").fval == 3.14
 
 suite "scheme: comparison":
   test "less than":
-    check evalArith("(< 1 2)").bval == true
-    check evalArith("(< 2 1)").bval == false
+    check evalArith("[:< 1 2]").bval == true
+    check evalArith("[:< 2 1]").bval == false
 
   test "greater than":
-    check evalArith("(> 2 1)").bval == true
-    check evalArith("(> 1 2)").bval == false
+    check evalArith("[:> 2 1]").bval == true
+    check evalArith("[:> 1 2]").bval == false
 
-  test "equality (numeric via float comparison)":
-    check evalArith("(= 5 5)").bval == true
-    check evalArith("(= 5 6)").bval == false
+  test "equality [numeric via float comparison]":
+    check evalArith("[:= 5 5]").bval == true
+    check evalArith("[:= 5 6]").bval == false
 
   test "not equal":
-    check evalArith("(!= 1 2)").bval == true
-    check evalArith("(!= 1 1)").bval == false
+    check evalArith("[:!= 1 2]").bval == true
+    check evalArith("[:!= 1 1]").bval == false
 
   test "less or equal":
-    check evalArith("(<= 1 2)").bval == true
-    check evalArith("(<= 2 2)").bval == true
-    check evalArith("(<= 3 2)").bval == false
+    check evalArith("[:<= 1 2]").bval == true
+    check evalArith("[:<= 2 2]").bval == true
+    check evalArith("[:<= 3 2]").bval == false
 
   test "greater or equal":
-    check evalArith("(>= 2 1)").bval == true
-    check evalArith("(>= 2 2)").bval == true
+    check evalArith("[:>= 2 1]").bval == true
+    check evalArith("[:>= 2 2]").bval == true
 
-  test "chained comparison (3 args)":
-    check evalArith("(< 1 2 3)").bval == true
-    check evalArith("(< 1 3 2)").bval == false
+  test "chained comparison [3 args]":
+    check evalArith("[:< 1 2 3]").bval == true
+    check evalArith("[:< 1 3 2]").bval == false
 
 suite "hostfns: isNative":
   test "isNative basic":
@@ -522,7 +523,7 @@ suite "scanner: extractCurrent — eid position":
     check extracted.get.kind == sInt
     check extracted.get.ival == 42
 
-  test "extract attr from EAVT key (at position 1)":
+  test "extract attr from EAVT key [at position 1]":
     let key = buildEavtKey(42, 77'u32, @[byte 0, 0, 0, 0, 0, 0, 0, 0], 100, false)
     let sc = newV2Scanner("EAVT", @["e", "a", "v"], none[int64](), none[uint32]())
     # Push eid as fixed, move to attr position
@@ -693,7 +694,7 @@ suite "engine: save + lookup":
       q.saveManyWithT("no.such.attr",
                       @[(1'i64, SExpr(kind: sStr, sval: "x"))], 1, 0)
 
-  test "REF save stores the TARGET eid (not the subject) — flat e bulk":
+  test "REF save stores the TARGET eid [:not the subject] — flat e bulk":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
@@ -723,7 +724,7 @@ suite "engine: save + lookup":
     expect EvalError:
       q.saveWithT(1, "user.friend", SExpr(kind: sStr, sval: "not-an-eid"), 1, 0)
 
-  test "skip de retract por (eid, attr) hidratado não quebra overwrite":
+  test "skip de retract por [eid, attr] hidratado não quebra overwrite":
     ## O skip por atributo (hasAttrKey) não pode pular o scan quando o attr
     ## JÁ tem datom ativo — o overwrite precisa retrair o valor anterior.
     let kv = newMemoryKVStore()
@@ -755,7 +756,7 @@ suite "engine: save + lookup":
     let q = newQueryStore(kv)
     q.retract(1, "no.such.attr", SExpr(kind: sStr, sval: "x"), 1, 0)
 
-  test "lookupEntity finds entity after first flush (lazy pagestore cursor)":
+  test "lookupEntity finds entity after first flush [lazy pagestore cursor]":
     ## Regressão: a 1ª chamada de lookup-entity numa store sem root de CF2
     ## cria cursor de pagestore NIL; o flush publica a raiz e o caminho de
     ## reuso nunca criava o cursor — todo seek pós-flush errava.
@@ -976,10 +977,10 @@ suite "engine: StreamingSession → nextBatch":
     let eid = q.allocateInPartition(4)
     q.saveWithT(eid, "user.name", SExpr(kind: sStr, sval: "Alice"), 1, 0)
 
-    let program = scheme.parse("(begin " &
-                         "  (begin (set! s0 (scanner-open \"EAVT\" #f)) " &
-                         "    (begin (set! _it_e (scanner-iterate-init s0 ())) (while (set! e (scanner-iterate-next _it_e)) " &
-                         "      (result-row e))))))")
+    let program = edn.readEdn("[:begin " &
+                         "  [:begin [:set! ?s0 [:scanner-open \"EAVT\" false]] " &
+                         "    [:begin [:set! ?it_e [:scanner-iterate-init ?s0 []]] [:while [:set! e [:scanner-iterate-next ?it_e]] " &
+                         "      [:result-row e]]]]]")
     let proto = newQuerySession(q, SchemeProgram(body: program), @[], 0, none[int64]())
     let sess = newStreamingSession(proto)
 
@@ -995,13 +996,13 @@ suite "engine: DML with batch execute":
 
     q.declareAttrFromSql("user.name", ":db.type/string", false, false, 1)
 
-    let progStr = "(begin " &
-      "(declare-attr \"user.name\" \":db.type/string\" #f #f) " &
-      "(begin (set! eid (alloc-entity 4)) " &
-      "  (save eid \"user.name\" \"UPSERT User\") " &
-      "  (result eid)))"
+    let progStr = "[:begin " &
+      "[:declare-attr \"user/name\" \":db.type/string\" false false] " &
+      "[:begin [:set! eid [:alloc-entity 4]] " &
+      "  [:save eid \"user/name\" \"UPSERT User\"] " &
+      "  [:result eid]]]"
 
-    let program = SchemeProgram(body: scheme.parse(progStr))
+    let program = SchemeProgram(body: edn.readEdn(progStr))
     let session = newQuerySession(q, program, @[], 0, none[int64]())
     let result = executeProgram(session)
 
@@ -1024,9 +1025,9 @@ suite "engine: DML with batch execute":
     let eid = q.allocateInPartition(4)
     q.saveWithT(eid, "user.name", SExpr(kind: sStr, sval: "Before"), 1, 0)
 
-    let progStr = "(begin (retract " & $eid & " \"user.name\" \"Before\") " &
-      "(result (lookup-value " & $eid & " \"user.name\")))"
-    let program = SchemeProgram(body: scheme.parse(progStr))
+    let progStr = "[:begin [:retract " & $eid & " \"user.name\" \"Before\"] " &
+      "[:result [:lookup-value " & $eid & " \"user.name\"]]]"
+    let program = SchemeProgram(body: edn.readEdn(progStr))
     let session = newQuerySession(q, program, @[], 2, none[int64]())
     let result = executeProgram(session)
 
@@ -1045,7 +1046,7 @@ suite "engine: partitions":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: scheme.parse("(result (declare-partition \"my.part\"))"))
+    let prog = SchemeProgram(body: edn.readEdn("[:result [:declare-partition \"my.part\"]]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.kind == sList
@@ -1057,11 +1058,11 @@ suite "engine: partitions":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: scheme.parse("(declare-partition \"my.part\")"))
+    let prog = SchemeProgram(body: edn.readEdn("[:declare-partition \"my.part\"]"))
     var session = newQuerySession(q, prog, @[], 0, none[int64]())
     discard executeProgram(session)
 
-    let prog2 = SchemeProgram(body: scheme.parse("(result (declare-partition \"my.part\"))"))
+    let prog2 = SchemeProgram(body: edn.readEdn("[:result [:declare-partition \"my.part\"]]"))
     session = newQuerySession(q, prog2, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].ival > 0
@@ -1071,11 +1072,11 @@ suite "engine: partitions":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: scheme.parse(
-      "(begin " &
-      "  (declare-partition \"custom\") " &
-      "  (begin (set! pid (declare-partition \"custom\")) " &
-      "    (result (alloc-entity pid))))"))
+    let prog = SchemeProgram(body: edn.readEdn(
+      "[:begin " &
+      "  [:declare-partition \"custom\"] " &
+      "  [:begin [:set! pid [:declare-partition \"custom\"]] " &
+      "    [:result [:alloc-entity pid]]]]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.kind == sList
@@ -1091,7 +1092,7 @@ suite "engine: alloc-entity / tx-entity":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: scheme.parse("(result (alloc-entity))"))
+    let prog = SchemeProgram(body: edn.readEdn("[:result [:alloc-entity]]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].ival > 0
@@ -1101,8 +1102,8 @@ suite "engine: alloc-entity / tx-entity":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: scheme.parse(
-      "(result (alloc-entity) (alloc-entity) (alloc-entity))"))
+    let prog = SchemeProgram(body: edn.readEdn(
+      "[:result [:alloc-entity] [:alloc-entity] [:alloc-entity]]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     # (result e1 e2 e3) — flattened args, not nested list
@@ -1117,7 +1118,7 @@ suite "engine: alloc-entity / tx-entity":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: scheme.parse("(result (tx-entity))"))
+    let prog = SchemeProgram(body: edn.readEdn("[:result [:tx-entity]]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].ival == 0  # tx is 0
@@ -1127,7 +1128,7 @@ suite "engine: alloc-entity / tx-entity":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: scheme.parse("(result (alloc-entity 4))"))
+    let prog = SchemeProgram(body: edn.readEdn("[:result [:alloc-entity 4]]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].ival > 0
@@ -1142,22 +1143,22 @@ suite "engine: combined roundtrip":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: scheme.parse(
-      "(begin " &
-      "  (declare-attr \"user.name\" \":db.type/string\" #f #t) " &
-      "  (declare-attr \"user.hq\" \":db.type/string\" #f #f) " &
-      "  (begin (set! c1 (alloc-entity)) (set! c2 (alloc-entity)) " &
-      "    (save c1 \"user.name\" \"ACME\") " &
-      "    (save c1 \"user.hq\" \"NYC\") " &
-      "    (save c2 \"user.name\" \"Globex\") " &
-      "    (save c2 \"user.hq\" \"SF\") " &
-      "    (result c1 " &
-      "           (lookup-value c1 \"user.name\") " &
-      "           (lookup-value c1 \"user.hq\") " &
+    let prog = SchemeProgram(body: edn.readEdn(
+      "[:begin " &
+      "  [:declare-attr \"user.name\" \":db.type/string\" false true] " &
+      "  [:declare-attr \"user.hq\" \":db.type/string\" false false] " &
+      "  [:begin [:set! c1 [:alloc-entity]] [:set! c2 [:alloc-entity]] " &
+      "    [:save c1 \"user.name\" \"ACME\"] " &
+      "    [:save c1 \"user.hq\" \"NYC\"] " &
+      "    [:save c2 \"user.name\" \"Globex\"] " &
+      "    [:save c2 \"user.hq\" \"SF\"] " &
+      "    [:result c1 " &
+      "           [:lookup-value c1 \"user.name\"] " &
+      "           [:lookup-value c1 \"user.hq\"] " &
       "           c2 " &
-      "           (lookup-value c2 \"user.name\") " &
-      "           (lookup-value c2 \"user.hq\") " &
-      "           (lookup-entity \"user.name\" \"Globex\"))))"))
+      "           [:lookup-value c2 \"user.name\"] " &
+      "           [:lookup-value c2 \"user.hq\"] " &
+      "           [:lookup-entity \"user.name\" \"Globex\"]]]]"))
     let session = newQuerySession(q, prog, @[], 1, none[int64]())
     let result = executeProgram(session)
     check result.kind == sList
@@ -1183,16 +1184,16 @@ suite "engine: combined roundtrip":
 
     q.declareAttrFromSql("user.name", ":db.type/string", false, false, 1)
 
-    var prog = SchemeProgram(body: scheme.parse(
-      "(begin (begin (set! e (alloc-entity)) " &
-      "  (save e \"user.name\" \"Zed\") " &
-      "  (result e)))"))
+    var prog = SchemeProgram(body: edn.readEdn(
+      "[:begin [:begin [:set! e [:alloc-entity]] " &
+      "  [:save e \"user.name\" \"Zed\"] " &
+      "  [:result e]]]"))
     var session = newQuerySession(q, prog, @[], 1, none[int64]())
     let r1 = executeProgram(session)
     let eid = r1.items[1].ival
 
-    prog = SchemeProgram(body: scheme.parse(
-      "(result (lookup-value " & $eid & " \"user.name\"))"))
+    prog = SchemeProgram(body: edn.readEdn(
+      "[:result [:lookup-value " & $eid & " \"user.name\"]]"))
     session = newQuerySession(q, prog, @[], 2, some(0'i64))
     let r2 = executeProgram(session)
     check r2.items[1].sval == "Zed"
@@ -1202,13 +1203,13 @@ suite "engine: combined roundtrip":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: scheme.parse(
-      "(begin " &
-      "  (declare-attr \"co.reg\" \":db.type/string\" #f #t) " &
-      "  (set! a (get-or-create-entity \"co.reg\" \"R1\")) " &
-      "  (set! b (get-or-create-entity \"co.reg\" \"R1\")) " &
-      "  (set! c (get-or-create-entity \"co.reg\" \"R2\")) " &
-      "  (result a b c (lookup-value a \"co.reg\")))"))
+    let prog = SchemeProgram(body: edn.readEdn(
+      "[:begin " &
+      "  [:declare-attr \"co.reg\" \":db.type/string\" false true] " &
+      "  [:set! a [:get-or-create-entity \"co.reg\" \"R1\"]] " &
+      "  [:set! b [:get-or-create-entity \"co.reg\" \"R1\"]] " &
+      "  [:set! c [:get-or-create-entity \"co.reg\" \"R2\"]] " &
+      "  [:result a b c [:lookup-value a \"co.reg\"]]]"))
     let session = newQuerySession(q, prog, @[], 1, none[int64]())
     let result = executeProgram(session)
     let a = result.items[1].ival
@@ -1226,14 +1227,14 @@ suite "engine: combined roundtrip":
 
     q.declareAttrFromSql("co.reg", ":db.type/string", false, true, 1)
 
-    var prog = SchemeProgram(body: scheme.parse(
-      "(result (get-or-create-entity \"co.reg\" \"X9\"))"))
+    var prog = SchemeProgram(body: edn.readEdn(
+      "[:result [:get-or-create-entity \"co.reg\" \"X9\"]]"))
     var session = newQuerySession(q, prog, @[], 1, none[int64]())
     let r1 = executeProgram(session)
     let eid = r1.items[1].ival
 
-    prog = SchemeProgram(body: scheme.parse(
-      "(result (lookup-entity \"co.reg\" \"X9\"))"))
+    prog = SchemeProgram(body: edn.readEdn(
+      "[:result [:lookup-entity \"co.reg\" \"X9\"]]"))
     session = newQuerySession(q, prog, @[], 2, none[int64]())
     let r2 = executeProgram(session)
     check r2.items[1].ival == eid
@@ -1245,8 +1246,8 @@ suite "engine: combined roundtrip":
 
     q.declareAttrFromSql("tag.x", ":db.type/string", true, false, 1)
 
-    let prog = SchemeProgram(body: scheme.parse(
-      "(get-or-create-entity \"tag.x\" \"anything\")"))
+    let prog = SchemeProgram(body: edn.readEdn(
+      "[:get-or-create-entity \"tag.x\" \"anything\"]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     expect EvalError:
       discard executeProgram(session)
@@ -1261,8 +1262,8 @@ suite "engine: error paths":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: scheme.parse(
-      "(begin (set! e (alloc-entity)) (save e \"no.such.attr\" \"x\"))"))
+    let prog = SchemeProgram(body: edn.readEdn(
+      "[:begin [:set! e [:alloc-entity]] [:save e \"no.such.attr\" \"x\"]]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     expect EvalError:
       discard executeProgram(session)
@@ -1274,8 +1275,8 @@ suite "engine: error paths":
 
     q.declareAttrFromSql("tag.x", ":db.type/string", true, false, 1)
 
-    let prog = SchemeProgram(body: scheme.parse(
-      "(lookup-entity \"tag.x\" \"anything\")"))
+    let prog = SchemeProgram(body: edn.readEdn(
+      "[:lookup-entity \"tag.x\" \"anything\"]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     expect EvalError:
       discard executeProgram(session)
@@ -1284,7 +1285,7 @@ suite "engine: error paths":
     # Unterminated S-expression causes ParseError
     var caught = false
     try:
-      discard scheme.parse("(result 'unterminated")
+      discard edn.readEdn("[:result 'unterminated")
     except CatchableError:
       caught = true
     check caught
@@ -1294,7 +1295,7 @@ suite "engine: error paths":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: scheme.parse("(no-such-fn 1 2)"))
+    let prog = SchemeProgram(body: edn.readEdn("[no-such-fn 1 2]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     expect EvalError:
       discard executeProgram(session)
@@ -1304,7 +1305,7 @@ suite "engine: error paths":
     defer: kv.close()
     let q = newQueryStore(kv)
 
-    let prog = SchemeProgram(body: scheme.parse("(result)"))
+    let prog = SchemeProgram(body: edn.readEdn("[:result]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.kind == sList
@@ -1344,7 +1345,7 @@ suite "engine: blob type":
     check val.isSome
     check val.get.bytesval.len == 0
 
-  test "blob large bytes (25KB)":
+  test "blob large bytes [25KB]":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
@@ -1431,7 +1432,7 @@ suite "engine: blob type":
 # ═══════════════════════════════════════════════════════════════════════════════
 
 suite "engine: dedup":
-  test "lookup finds entity by unique attr (dedup entity)":
+  test "lookup finds entity by unique attr [dedup entity]":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
@@ -1598,8 +1599,8 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: scheme.parse(
-      "(begin (set! s (scanner-open \"EAVT\")) (result (scanner-prefix s)))"))
+    let prog = SchemeProgram(body: edn.readEdn(
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] [:result [:scanner-prefix s]]]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.kind == sList
@@ -1611,8 +1612,8 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: scheme.parse(
-      "(begin (set! s (scanner-open \"AEVT\")) (result (scanner-prefix s)))"))
+    let prog = SchemeProgram(body: edn.readEdn(
+      "[:begin [:set! s [:scanner-open \"AEVT\"]] [:result [:scanner-prefix s]]]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].bytesval.len == 0
@@ -1621,8 +1622,8 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: scheme.parse(
-      "(begin (set! s (scanner-open \"AVET\")) (result (scanner-prefix s)))"))
+    let prog = SchemeProgram(body: edn.readEdn(
+      "[:begin [:set! s [:scanner-open \"AVET\"]] [:result [:scanner-prefix s]]]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].bytesval.len == 0
@@ -1631,8 +1632,8 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: scheme.parse(
-      "(begin (set! s (scanner-open \"VAET\")) (result (scanner-prefix s)))"))
+    let prog = SchemeProgram(body: edn.readEdn(
+      "[:begin [:set! s [:scanner-open \"VAET\"]] [:result [:scanner-prefix s]]]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].bytesval.len == 0
@@ -1641,10 +1642,10 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: scheme.parse(
-      "(begin (set! s (scanner-open \"EAVT\")) " &
-      "(scanner-push s 1000) " &
-      "(result (scanner-prefix s)))"))
+    let prog = SchemeProgram(body: edn.readEdn(
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s 1000] " &
+      "[:result [:scanner-prefix s]]]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     let pref = result.items[1].bytesval
@@ -1654,11 +1655,11 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: scheme.parse(
-      "(begin (set! s (scanner-open \"EAVT\")) " &
-      "(scanner-push s 1000) " &
-      "(scanner-push s 42) " &
-      "(result (scanner-prefix s)))"))
+    let prog = SchemeProgram(body: edn.readEdn(
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s 1000] " &
+      "[:scanner-push s 42] " &
+      "[:result [:scanner-prefix s]]]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     let pref = result.items[1].bytesval
@@ -1668,12 +1669,12 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: scheme.parse(
-      "(begin (set! s (scanner-open \"EAVT\")) " &
-      "(scanner-push s 1000) " &
-      "(scanner-push s 42) " &
-      "(scanner-pop s) " &
-      "(result (scanner-prefix s)))"))
+    let prog = SchemeProgram(body: edn.readEdn(
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s 1000] " &
+      "[:scanner-push s 42] " &
+      "[:scanner-pop s] " &
+      "[:result [:scanner-prefix s]]]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     let pref = result.items[1].bytesval
@@ -1683,10 +1684,10 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: scheme.parse(
-      "(begin (set! s (scanner-open \"EAVT\")) " &
-      "(scanner-pop s) " &
-      "(result (scanner-prefix s)))"))
+    let prog = SchemeProgram(body: edn.readEdn(
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] " &
+      "[:scanner-pop s] " &
+      "[:result [:scanner-prefix s]]]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].bytesval.len == 0
@@ -1695,11 +1696,11 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: scheme.parse(
-      "(begin (set! s (scanner-open \"EAVT\")) " &
-      "(scanner-push s 1000) " &
-      "(scanner-pop s) " &
-      "(result (scanner-prefix s)))"))
+    let prog = SchemeProgram(body: edn.readEdn(
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s 1000] " &
+      "[:scanner-pop s] " &
+      "[:result [:scanner-prefix s]]]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].bytesval.len == 0
@@ -1708,13 +1709,13 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: scheme.parse(
-      "(begin (set! s (scanner-open \"EAVT\")) " &
-      "(scanner-push s 1000) " &
-      "(scanner-push s 42) " &
-      "(scanner-pop s) " &
-      "(scanner-push s 99) " &
-      "(result (scanner-prefix s)))"))
+    let prog = SchemeProgram(body: edn.readEdn(
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s 1000] " &
+      "[:scanner-push s 42] " &
+      "[:scanner-pop s] " &
+      "[:scanner-push s 99] " &
+      "[:result [:scanner-prefix s]]]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     let pref = result.items[1].bytesval
@@ -1724,9 +1725,9 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: scheme.parse(
-      "(begin (set! s (scanner-open \"EAVT\")) " &
-      "(result (scanner-push s 1)))"))
+    let prog = SchemeProgram(body: edn.readEdn(
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] " &
+      "[:result [:scanner-push s 1]]]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].kind == sVoid  # push returns Void
@@ -1735,9 +1736,9 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: scheme.parse(
-      "(begin (set! s (scanner-open \"EAVT\" #t)) " &
-      "(result (scanner-prefix s)))"))
+    let prog = SchemeProgram(body: edn.readEdn(
+      "[:begin [:set! s [:scanner-open \"EAVT\" true]] " &
+      "[:result [:scanner-prefix s]]]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].bytesval.len == 0
@@ -1746,12 +1747,12 @@ suite "engine: scanner host fns":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let prog = SchemeProgram(body: scheme.parse(
-      "(begin " &
-      "  (begin (set! s0 (scanner-open \"EAVT\")) (set! s1 (scanner-open \"EAVT\")) " &
-      "    (scanner-push s0 100) " &
-      "    (scanner-push s1 200) " &
-      "    (result (scanner-prefix s0) (scanner-prefix s1))))"))
+    let prog = SchemeProgram(body: edn.readEdn(
+      "[:begin " &
+      "  [:begin [:set! s0 [:scanner-open \"EAVT\"]] [:set! s1 [:scanner-open \"EAVT\"]] " &
+      "    [:scanner-push s0 100] " &
+      "    [:scanner-push s1 200] " &
+      "    [:result [:scanner-prefix s0] [:scanner-prefix s1]]]]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     # (result pref0 pref1) — both should be 8 bytes (eid)
@@ -1765,10 +1766,10 @@ suite "engine: scanner host fns":
     defer: kv.close()
     let q = newQueryStore(kv)
     let large = (1'i64 shl 62) - 1
-    let prog = SchemeProgram(body: scheme.parse(
-      "(begin (set! s (scanner-open \"EAVT\")) " &
-      "(scanner-push s " & $large & ") " &
-      "(result (scanner-prefix s)))"))
+    let prog = SchemeProgram(body: edn.readEdn(
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s " & $large & "] " &
+      "[:result [:scanner-prefix s]]]"))
     let session = newQuerySession(q, prog, @[], 0, none[int64]())
     let result = executeProgram(session)
     check result.items[1].bytesval.len == 8
@@ -1780,7 +1781,7 @@ suite "engine: scanner host fns":
 
 proc runSelect(q: QueryStore; progText: string; params: seq[SExpr] = @[];
                 maxRows: int = 500): seq[seq[SExpr]] =
-  let program = SchemeProgram(body: scheme.parse(progText))
+  let program = SchemeProgram(body: edn.readEdn(progText))
   let proto = newQuerySession(q, program, params, 0, none[int64]())
   let sess = newStreamingSession(proto)
   while result.len < maxRows:
@@ -1801,10 +1802,10 @@ suite "engine: scanner-iterate basic":
     let aid = q.lookupAttr("tag.x").get
 
     let rows = runSelect(q,
-      "(begin (set! s (scanner-open \"EAVT\")) " &
-      "(scanner-push s " & $eid & ") " &
-      "(scanner-push s " & $aid.int64 & ") " &
-      "(begin (set! _it_v (scanner-iterate-init s ())) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s " & $eid & "] " &
+      "[:scanner-push s " & $aid.int64 & "] " &
+      "[:begin [:set! _it_v [:scanner-iterate-init s []]] [:while [:set! v [:scanner-iterate-next _it_v]] [:result-row v]]]]")
     var vals = newSeq[int64]()
     for row in rows:
       if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
@@ -1820,10 +1821,10 @@ suite "engine: scanner-iterate basic":
     let aid = q.lookupAttr("user.age").get
 
     let rows = runSelect(q,
-      "(begin (set! s (scanner-open \"EAVT\")) " &
-      "(scanner-push s " & $eid & ") " &
-      "(scanner-push s " & $aid.int64 & ") " &
-      "(begin (set! _it_v (scanner-iterate-init s ())) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s " & $eid & "] " &
+      "[:scanner-push s " & $aid.int64 & "] " &
+      "[:begin [:set! _it_v [:scanner-iterate-init s []]] [:while [:set! v [:scanner-iterate-next _it_v]] [:result-row v]]]]")
     check rows.len == 1
     check rows[0][0].ival == 25
 
@@ -1839,10 +1840,10 @@ suite "engine: scanner-iterate basic":
     let aid = q.lookupAttr("tag.x").get
 
     let rows = runSelect(q,
-      "(begin (set! s (scanner-open \"EAVT\")) " &
-      "(scanner-push s " & $eid & ") " &
-      "(scanner-push s " & $aid.int64 & ") " &
-      "(begin (set! _it_v (scanner-iterate-init s ())) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s " & $eid & "] " &
+      "[:scanner-push s " & $aid.int64 & "] " &
+      "[:begin [:set! _it_v [:scanner-iterate-init s []]] [:while [:set! v [:scanner-iterate-next _it_v]] [:result-row v]]]]")
     var vals = newSeq[int64]()
     for row in rows:
       if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
@@ -1861,10 +1862,10 @@ suite "engine: scanner-iterate basic":
     let aid = q.lookupAttr("tag.x").get
 
     let rows = runSelect(q,
-      "(begin (set! s (scanner-open \"EAVT\")) " &
-      "(scanner-push s " & $eid & ") " &
-      "(scanner-push s " & $aid.int64 & ") " &
-      "(begin (set! _it_v (scanner-iterate-init s ())) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s " & $eid & "] " &
+      "[:scanner-push s " & $aid.int64 & "] " &
+      "[:begin [:set! _it_v [:scanner-iterate-init s []]] [:while [:set! v [:scanner-iterate-next _it_v]] [:result-row v]]]]")
     var vals = newSeq[int64]()
     for row in rows:
       if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
@@ -1887,10 +1888,10 @@ suite "engine: scanner-iterate :ranges":
     let aid = q.lookupAttr("tag.x").get
 
     let rows = runSelect(q,
-      "(begin (set! s (scanner-open \"EAVT\")) (set! r0 (ranges-create (and (>= 10) (<= 20)))) " &
-      "(scanner-push s " & $eid & ") " &
-      "(scanner-push s " & $aid.int64 & ") " &
-      "(begin (set! _it_v (scanner-iterate-init s r0)) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] [:set! r0 [:ranges-create [:and [:>= 10] [:<= 20]]]] " &
+      "[:scanner-push s " & $eid & "] " &
+      "[:scanner-push s " & $aid.int64 & "] " &
+      "[:begin [:set! _it_v [:scanner-iterate-init s r0]] [:while [:set! v [:scanner-iterate-next _it_v]] [:result-row v]]]]")
     var vals = newSeq[int64]()
     for row in rows:
       if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
@@ -1907,10 +1908,10 @@ suite "engine: scanner-iterate :ranges":
     let aid = q.lookupAttr("tag.x").get
 
     let rows = runSelect(q,
-      "(begin (set! s (scanner-open \"EAVT\")) " &
-      "(scanner-push s " & $eid & ") " &
-      "(scanner-push s " & $aid.int64 & ") " &
-      "(begin (set! _it_v (scanner-iterate-init s (ranges-create (= 15)))) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s " & $eid & "] " &
+      "[:scanner-push s " & $aid.int64 & "] " &
+      "[:begin [:set! _it_v [:scanner-iterate-init s [:ranges-create [:= 15]]]] [:while [:set! v [:scanner-iterate-next _it_v]] [:result-row v]]]]")
     check rows.len == 1
     check rows[0][0].ival == 15
 
@@ -1925,10 +1926,10 @@ suite "engine: scanner-iterate :ranges":
     let aid = q.lookupAttr("tag.x").get
 
     let rows = runSelect(q,
-      "(begin (set! s (scanner-open \"EAVT\")) " &
-      "(scanner-push s " & $eid & ") " &
-      "(scanner-push s " & $aid.int64 & ") " &
-      "(begin (set! _it_v (scanner-iterate-init s (ranges-create (!= 15)))) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s " & $eid & "] " &
+      "[:scanner-push s " & $aid.int64 & "] " &
+      "[:begin [:set! _it_v [:scanner-iterate-init s [:ranges-create [:!= 15]]]] [:while [:set! v [:scanner-iterate-next _it_v]] [:result-row v]]]]")
     var vals = newSeq[int64]()
     for row in rows:
       if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
@@ -1951,10 +1952,10 @@ suite "engine: multi-scanner leapfrog":
     for v in [20'i64, 30, 40]: q.saveWithT(eid2, "tag.x", SExpr(kind: sInt, ival: v), 1, 0)
 
     let rows = runSelect(q,
-      "(begin (set! s1 (scanner-open \"EAVT\")) (set! s2 (scanner-open \"EAVT\")) " &
-      "(scanner-push s1 " & $eid1 & ") (scanner-push s1 " & $aid.int64 & ") " &
-      "(scanner-push s2 " & $eid2 & ") (scanner-push s2 " & $aid.int64 & ") " &
-      "(begin (set! _it_v (scanner-iterate-init s1 s2 ())) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
+      "[:begin [:set! s1 [:scanner-open \"EAVT\"]] [:set! s2 [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s1 " & $eid1 & "] [:scanner-push s1 " & $aid.int64 & "] " &
+      "[:scanner-push s2 " & $eid2 & "] [:scanner-push s2 " & $aid.int64 & "] " &
+      "[:begin [:set! _it_v [:scanner-iterate-init s1 s2 []]] [:while [:set! v [:scanner-iterate-next _it_v]] [:result-row v]]]]")
     var vals = newSeq[int64]()
     for row in rows:
       if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
@@ -1972,10 +1973,10 @@ suite "engine: multi-scanner leapfrog":
     for v in [100'i64, 200]: q.saveWithT(eid2, "tag.x", SExpr(kind: sInt, ival: v), 1, 0)
 
     let rows = runSelect(q,
-      "(begin (set! s1 (scanner-open \"EAVT\")) (set! s2 (scanner-open \"EAVT\")) " &
-      "(scanner-push s1 " & $eid1 & ") (scanner-push s1 " & $aid.int64 & ") " &
-      "(scanner-push s2 " & $eid2 & ") (scanner-push s2 " & $aid.int64 & ") " &
-      "(begin (set! _it_v (scanner-iterate-init s1 s2 ())) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
+      "[:begin [:set! s1 [:scanner-open \"EAVT\"]] [:set! s2 [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s1 " & $eid1 & "] [:scanner-push s1 " & $aid.int64 & "] " &
+      "[:scanner-push s2 " & $eid2 & "] [:scanner-push s2 " & $aid.int64 & "] " &
+      "[:begin [:set! _it_v [:scanner-iterate-init s1 s2 []]] [:while [:set! v [:scanner-iterate-next _it_v]] [:result-row v]]]]")
     check rows.len == 0
 
   test "single matching value in both scanners":
@@ -1990,10 +1991,10 @@ suite "engine: multi-scanner leapfrog":
     q.saveWithT(eid2, "tag.x", SExpr(kind: sInt, ival: 42), 1, 0)
 
     let rows = runSelect(q,
-      "(begin (set! s1 (scanner-open \"EAVT\")) (set! s2 (scanner-open \"EAVT\")) " &
-      "(scanner-push s1 " & $eid1 & ") (scanner-push s1 " & $aid.int64 & ") " &
-      "(scanner-push s2 " & $eid2 & ") (scanner-push s2 " & $aid.int64 & ") " &
-      "(begin (set! _it_v (scanner-iterate-init s1 s2 ())) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
+      "[:begin [:set! s1 [:scanner-open \"EAVT\"]] [:set! s2 [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s1 " & $eid1 & "] [:scanner-push s1 " & $aid.int64 & "] " &
+      "[:scanner-push s2 " & $eid2 & "] [:scanner-push s2 " & $aid.int64 & "] " &
+      "[:begin [:set! _it_v [:scanner-iterate-init s1 s2 []]] [:while [:set! v [:scanner-iterate-next _it_v]] [:result-row v]]]]")
     check rows.len == 1
     check rows[0][0].ival == 42
 
@@ -2006,8 +2007,8 @@ suite "engine: scanner-iterate more":
     let eid = q.allocateInPartition(4'u64)
     q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: 1), 1, 0)
     let rows = runSelect(q,
-      "(begin (set! s (scanner-open \"EAVT\")) " &
-      "(begin (set! _it_v (scanner-iterate-init s ())) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] " &
+      "[:begin [:set! _it_v [:scanner-iterate-init s []]] [:while [:set! v [:scanner-iterate-next _it_v]] [:result-row v]]]]")
     # declare+save writes entries — at least 1 datom
     check rows.len > 0
 
@@ -2020,10 +2021,10 @@ suite "engine: scanner-iterate more":
     q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: 10), 1, 0)
     let aid = q.lookupAttr("tag.x").get
     let rows = runSelect(q,
-      "(begin (set! s (scanner-open \"EAVT\")) " &
-      "(scanner-push s " & $eid & ") " &
-      "(scanner-push s " & $aid.int64 & ") " &
-      "(begin (set! _it_v (scanner-iterate-init s ())) (while (set! v (scanner-iterate-next _it_v)) (result-row v (attr-name " & $aid.int64 & ")))))")
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s " & $eid & "] " &
+      "[:scanner-push s " & $aid.int64 & "] " &
+      "[:begin [:set! _it_v [:scanner-iterate-init s []]] [:while [:set! v [:scanner-iterate-next _it_v]] [:result-row v [:attr-name " & $aid.int64 & "]]]]]")
     check rows.len >= 1
     check rows[0][1].sval == "tag/x"
 
@@ -2036,9 +2037,9 @@ suite "engine: scanner-iterate more":
     q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: 10), 1, 0)
     let aid = q.lookupAttr("tag.x").get
     let rows = runSelect(q,
-      "(begin (set! s (scanner-open \"AEVT\")) " &
-      "(scanner-push s " & $aid.int64 & ") " &
-      "(begin (set! _it_e (scanner-iterate-init s ())) (while (set! e (scanner-iterate-next _it_e)) (result-row e))))")
+      "[:begin [:set! s [:scanner-open \"AEVT\"]] " &
+      "[:scanner-push s " & $aid.int64 & "] " &
+      "[:begin [:set! _it_e [:scanner-iterate-init s []]] [:while [:set! e [:scanner-iterate-next _it_e]] [:result-row e]]]]")
     check rows.len >= 1
 
   test "param accessible in body":
@@ -2050,10 +2051,10 @@ suite "engine: scanner-iterate more":
     q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: 10), 1, 0)
     let aid = q.lookupAttr("tag.x").get
     let rows = runSelect(q,
-      "(begin (set! s (scanner-open \"EAVT\")) " &
-      "(scanner-push s " & $eid & ") " &
-      "(scanner-push s " & $aid.int64 & ") " &
-      "(begin (set! _it_v (scanner-iterate-init s ())) (while (set! v (scanner-iterate-next _it_v)) (result-row v v))))")
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s " & $eid & "] " &
+      "[:scanner-push s " & $aid.int64 & "] " &
+      "[:begin [:set! _it_v [:scanner-iterate-init s []]] [:while [:set! v [:scanner-iterate-next _it_v]] [:result-row v v]]]]")
     check rows.len >= 1
     check rows[0][0] == rows[0][1]
 
@@ -2067,11 +2068,11 @@ suite "engine: scanner-iterate more":
       q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: v), 1, 0)
     let aid = q.lookupAttr("tag.x").get
     let rows = runSelect(q,
-      "(begin (set! s (scanner-open \"EAVT\")) " &
-      "(scanner-push s " & $eid & ") " &
-      "(scanner-push s " & $aid.int64 & ") " &
-      "(begin (set! _it_v (scanner-iterate-init s (ranges-create (or (= 1) (= 20)))))) (while (set! v (scanner-iterate-next _it_v)) " &
-      "  (result-row v)))))")
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s " & $eid & "] " &
+      "[:scanner-push s " & $aid.int64 & "] " &
+      "[:begin [:set! _it_v [:scanner-iterate-init s [:ranges-create [:or [:= 1] [:= 20]]]]]] [:while [:set! v [:scanner-iterate-next _it_v]] " &
+      "  [:result-row v]]]")
     var vals = newSeq[int64]()
     for row in rows:
       if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
@@ -2087,10 +2088,10 @@ suite "engine: scanner-iterate more":
       q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: v), 1, 0)
     let aid = q.lookupAttr("tag.x").get
     let rows = runSelect(q,
-      "(begin (set! s (scanner-open \"EAVT\")) (set! r0 (ranges-create (and))) " &
-      "(scanner-push s " & $eid & ") " &
-      "(scanner-push s " & $aid.int64 & ") " &
-      "(begin (set! _it_v (scanner-iterate-init s r0)) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] [:set! r0 [:ranges-create [:and]]] " &
+      "[:scanner-push s " & $eid & "] " &
+      "[:scanner-push s " & $aid.int64 & "] " &
+      "[:begin [:set! _it_v [:scanner-iterate-init s r0]] [:while [:set! v [:scanner-iterate-next _it_v]] [:result-row v]]]]")
     var vals = newSeq[int64]()
     for row in rows:
       if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
@@ -2106,11 +2107,11 @@ suite "engine: scanner-iterate more":
       q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: v), 1, 0)
     let aid = q.lookupAttr("tag.x").get
     let rows = runSelect(q,
-      "(begin (set! s (scanner-open \"EAVT\")) " &
-      "(scanner-push s " & $eid & ") " &
-      "(scanner-push s " & $aid.int64 & ") " &
-      "(begin (set! _it_v (scanner-iterate-init s (ranges-create (and (> 100) (< 200)))))) (while (set! v (scanner-iterate-next _it_v)) " &
-      "  (result-row v)))))")
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s " & $eid & "] " &
+      "[:scanner-push s " & $aid.int64 & "] " &
+      "[:begin [:set! _it_v [:scanner-iterate-init s [:ranges-create [:and [:> 100] [:< 200]]]]]] [:while [:set! v [:scanner-iterate-next _it_v]] " &
+      "  [:result-row v]]]")
     check rows.len == 0
 
   test "multi three-way join":
@@ -2126,11 +2127,11 @@ suite "engine: scanner-iterate more":
     for v in [20'i64, 30, 40]: q.saveWithT(eid2, "tag.x", SExpr(kind: sInt, ival: v), 1, 0)
     for v in [30'i64, 40, 50]: q.saveWithT(eid3, "tag.x", SExpr(kind: sInt, ival: v), 1, 0)
     let rows = runSelect(q,
-      "(begin (set! s1 (scanner-open \"EAVT\")) (set! s2 (scanner-open \"EAVT\")) (set! s3 (scanner-open \"EAVT\")) " &
-      "(scanner-push s1 " & $eid1 & ") (scanner-push s1 " & $aid.int64 & ") " &
-      "(scanner-push s2 " & $eid2 & ") (scanner-push s2 " & $aid.int64 & ") " &
-      "(scanner-push s3 " & $eid3 & ") (scanner-push s3 " & $aid.int64 & ") " &
-      "(begin (set! _it_v (scanner-iterate-init s1 s2 s3 ())) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
+      "[:begin [:set! s1 [:scanner-open \"EAVT\"]] [:set! s2 [:scanner-open \"EAVT\"]] [:set! s3 [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s1 " & $eid1 & "] [:scanner-push s1 " & $aid.int64 & "] " &
+      "[:scanner-push s2 " & $eid2 & "] [:scanner-push s2 " & $aid.int64 & "] " &
+      "[:scanner-push s3 " & $eid3 & "] [:scanner-push s3 " & $aid.int64 & "] " &
+      "[:begin [:set! _it_v [:scanner-iterate-init s1 s2 s3 []]] [:while [:set! v [:scanner-iterate-next _it_v]] [:result-row v]]]]")
     check rows.len == 1
     check rows[0][0].ival == 30
 
@@ -2145,10 +2146,10 @@ suite "engine: scanner-iterate more":
     for v in [10'i64, 20, 30, 50]: q.saveWithT(eid1, "tag.x", SExpr(kind: sInt, ival: v), 1, 0)
     for v in [20'i64, 30, 50, 70]: q.saveWithT(eid2, "tag.x", SExpr(kind: sInt, ival: v), 1, 0)
     let rows = runSelect(q,
-      "(begin (set! s1 (scanner-open \"EAVT\")) (set! s2 (scanner-open \"EAVT\")) (set! r0 (ranges-create (>= 30))) " &
-      "(scanner-push s1 " & $eid1 & ") (scanner-push s1 " & $aid.int64 & ") " &
-      "(scanner-push s2 " & $eid2 & ") (scanner-push s2 " & $aid.int64 & ") " &
-      "(begin (set! _it_v (scanner-iterate-init s1 s2 r0)) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
+      "[:begin [:set! s1 [:scanner-open \"EAVT\"]] [:set! s2 [:scanner-open \"EAVT\"]] [:set! r0 [:ranges-create [:>= 30]]] " &
+      "[:scanner-push s1 " & $eid1 & "] [:scanner-push s1 " & $aid.int64 & "] " &
+      "[:scanner-push s2 " & $eid2 & "] [:scanner-push s2 " & $aid.int64 & "] " &
+      "[:begin [:set! _it_v [:scanner-iterate-init s1 s2 r0]] [:while [:set! v [:scanner-iterate-next _it_v]] [:result-row v]]]]")
     var vals = newSeq[int64]()
     for row in rows:
       if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
@@ -2163,11 +2164,11 @@ suite "engine: scanner-iterate more":
     for v in [1'i64, 2, 3]: q.saveWithT(eid, "tag.x", SExpr(kind: sInt, ival: v), 1, 0)
     let aid = q.lookupAttr("tag.x").get
     let rows = runSelect(q,
-      "(begin (set! s (scanner-open \"EAVT\")) " &
-      "(scanner-push s " & $eid & ") " &
-      "(scanner-push s " & $aid.int64 & ") " &
-      "(begin (set! _it_v (scanner-iterate-init s ())) (while (set! v (scanner-iterate-next _it_v)) (result-row v))) " &
-      "(begin (set! _it_v (scanner-iterate-init s ())) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s " & $eid & "] " &
+      "[:scanner-push s " & $aid.int64 & "] " &
+      "[:begin [:set! _it_v [:scanner-iterate-init s []]] [:while [:set! v [:scanner-iterate-next _it_v]] [:result-row v]]] " &
+      "[:begin [:set! _it_v [:scanner-iterate-init s []]] [:while [:set! v [:scanner-iterate-next _it_v]] [:result-row v]]]]")
     # Only first iterate emits — second is empty
     var vals = newSeq[int64]()
     for row in rows:
@@ -2185,17 +2186,17 @@ suite "engine: scanner-iterate more":
     for v in [1'i64, 2, 3]: q.saveWithT(srcEid, "tag.src", SExpr(kind: sInt, ival: v), 1, 0)
     let dstEid = q.allocateInPartition(4'u64)
     discard runSelect(q,
-      "(begin (set! s (scanner-open \"EAVT\")) " &
-      "(scanner-push s " & $srcEid & ") " &
-      "(scanner-push s " & $srcAid.int64 & ") " &
-      "(begin (set! _it_v (scanner-iterate-init s ())) (while (set! v (scanner-iterate-next _it_v)) (save " & $dstEid & " \"tag.copy\" v))))")
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s " & $srcEid & "] " &
+      "[:scanner-push s " & $srcAid.int64 & "] " &
+      "[:begin [:set! _it_v [:scanner-iterate-init s []]] [:while [:set! v [:scanner-iterate-next _it_v]] [:save " & $dstEid & " \"tag.copy\" v]]]]")
     # Verify copies were saved by scanning dstEid
     let dstAid = q.lookupAttr("tag.copy").get
     let rows = runSelect(q,
-      "(begin (set! s (scanner-open \"EAVT\")) " &
-      "(scanner-push s " & $dstEid & ") " &
-      "(scanner-push s " & $dstAid.int64 & ") " &
-      "(begin (set! _it_v (scanner-iterate-init s ())) (while (set! v (scanner-iterate-next _it_v)) (result-row v))))")
+      "[:begin [:set! s [:scanner-open \"EAVT\"]] " &
+      "[:scanner-push s " & $dstEid & "] " &
+      "[:scanner-push s " & $dstAid.int64 & "] " &
+      "[:begin [:set! _it_v [:scanner-iterate-init s []]] [:while [:set! v [:scanner-iterate-next _it_v]] [:result-row v]]]]")
     var vals = newSeq[int64]()
     for row in rows:
       if row.len > 0 and row[0].kind == sInt: vals.add row[0].ival
@@ -2205,12 +2206,12 @@ suite "engine: scanner-iterate more":
 # Engine: select-path (yield-mode) — ported from test_scheme_arith.py
 # ═══════════════════════════════════════════════════════════════════════════════
 
-suite "engine: select-path (yield-mode)":
+suite "engine: select-path [yield-mode]":
   test "arith in select path":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let rows = runSelect(q, "(begin (+ 1 2) (result-row 3))")
+    let rows = runSelect(q, "[:begin [:+ 1 2] [:result-row 3]]")
     check rows.len == 1
     check rows[0][0].ival == 3
 
@@ -2218,7 +2219,7 @@ suite "engine: select-path (yield-mode)":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let rows = runSelect(q, "(begin (and #t 42) (result-row 1))")
+    let rows = runSelect(q, "[:begin [:and true 42] [:result-row 1]]")
     check rows.len == 1
     check rows[0][0].ival == 1
 
@@ -2226,7 +2227,7 @@ suite "engine: select-path (yield-mode)":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let rows = runSelect(q, "(begin (or #f 7) (result-row 2))")
+    let rows = runSelect(q, "[:begin [:or false 7] [:result-row 2]]")
     check rows.len == 1
     check rows[0][0].ival == 2
 
@@ -2234,7 +2235,7 @@ suite "engine: select-path (yield-mode)":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let rows = runSelect(q, "(begin (not #t) (result-row 3))")
+    let rows = runSelect(q, "[:begin [:not true] [:result-row 3]]")
     check rows.len == 1
     check rows[0][0].ival == 3
 
@@ -2286,7 +2287,7 @@ func extractT(txEid: int64): int64 =
 # TX tests (ported from test_tx.py)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-suite "engine: TX entity (port of test_tx.py)":
+suite "engine: TX entity [port of test_tx.py]":
   test "upsert as TX returns eid":
     let kv = newMemoryKVStore()
     defer: kv.close()
@@ -2343,7 +2344,7 @@ suite "engine: TX entity (port of test_tx.py)":
 # TX join tests (ported from test_tx_join.py)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-suite "engine: TX join (port of test_tx_join.py)":
+suite "engine: TX join [port of test_tx_join.py]":
   test "upsert into cnpj in tx partition":
     let kv = newMemoryKVStore()
     defer: kv.close()
@@ -2370,7 +2371,7 @@ suite "engine: TX join (port of test_tx_join.py)":
 # SQL integration tests (ported from test_sql.py — representative subset)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-suite "engine: SQL integration (port of test_sql.py)":
+suite "engine: SQL integration [port of test_sql.py]":
   test "attribute string one unique":
     let kv = newMemoryKVStore()
     defer: kv.close()
@@ -2564,7 +2565,7 @@ suite "engine: SQL integration (port of test_sql.py)":
 # Engine integration tests (ported from test_engine.py — representative subset)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-suite "engine: integration (port of test_engine.py)":
+suite "engine: integration [port of test_engine.py]":
   test "retract removes datom":
     let kv = newMemoryKVStore()
     defer: kv.close()
@@ -2749,8 +2750,8 @@ suite "engine: position-independent programs":
     let stmt = sql_parser.parse("SELECT d1.eid WHERE d1.pos.item = %1")
     let compiled = compileSql(stmt, q.eavt.buildCompileStats())
     let text = writeScheme(compiled.program)
-    check text.contains("(intern-a \"pos/item\")")
-    check not text.contains("(scanner-push s0 " & $aid & ")")
+    check text.contains("[:intern-a \"pos/item\"]")
+    check not text.contains("[:scanner-push s0 " & $aid & "]")
 
   test "intern-a raises on unknown attribute":
     let kv = newMemoryKVStore()
@@ -2759,8 +2760,8 @@ suite "engine: position-independent programs":
     let tx = q.allocateTx()
     var exc: ref CatchableError = nil
     try:
-      let session = newQuerySession(q, SchemeProgram(body: scheme.parse(
-        "(result-row (intern-a \"no.such.attr\"))")), @[], tx, none[int64]())
+      let session = newQuerySession(q, SchemeProgram(body: edn.readEdn(
+        "[:result-row [:intern-a \"no.such.attr\"]]")), @[], tx, none[int64]())
       discard executeProgram(session)
     except CatchableError as e:
       exc = e
@@ -2768,7 +2769,7 @@ suite "engine: position-independent programs":
     check "no.such.attr" in exc.msg
 
 suite "engine: ranges with param references":
-  test "range value resolves (param N) at runtime":
+  test "range value resolves [:param N] at runtime":
     # regression: ranges-create used to embed the (param N) expression unevaluated,
     # making every range/equality filter on a value return 0 rows
     let kv = newMemoryKVStore()
@@ -2781,18 +2782,18 @@ suite "engine: ranges with param references":
     let aid = q.lookupAttr("gen.i").get
 
     let gt = runSelect(q,
-      "(begin (set! s0 (scanner-open \"AVET\")) (scanner-push s0 " & $aid.int64 & ") " &
-      "(set! it (scanner-iterate-init s0 (ranges-create (> (param 1))))) " &
-      "(while (set! v (scanner-iterate-next it)) (result-row v)))",
+      "[:begin [:set! s0 [:scanner-open \"AVET\"]] [:scanner-push s0 " & $aid.int64 & "] " &
+      "[:set! it [:scanner-iterate-init s0 [:ranges-create [:> [:param 1]]]]] " &
+      "[:while [:set! v [:scanner-iterate-next it]] [:result-row v]]]",
       @[SExpr(kind: sInt, ival: 7)])
     check gt.len == 3
     check gt[0][0].ival == 8
     check gt[2][0].ival == 10
 
     let eq = runSelect(q,
-      "(begin (set! s0 (scanner-open \"AVET\")) (scanner-push s0 " & $aid.int64 & ") " &
-      "(set! it (scanner-iterate-init s0 (ranges-create (= (param 1))))) " &
-      "(while (set! v (scanner-iterate-next it)) (result-row v)))",
+      "[:begin [:set! s0 [:scanner-open \"AVET\"]] [:scanner-push s0 " & $aid.int64 & "] " &
+      "[:set! it [:scanner-iterate-init s0 [:ranges-create [:= [:param 1]]]]] " &
+      "[:while [:set! v [:scanner-iterate-next it]] [:result-row v]]]",
       @[SExpr(kind: sInt, ival: 4)])
     check eq.len == 1
     check eq[0][0].ival == 4
@@ -2865,7 +2866,7 @@ suite "engine: value filters on non-indexed attrs":
     check rowsOf("SELECT d1.nb.i WHERE d1.nb.i > %1",
                  @[SExpr(kind: sInt, ival: 8)]).len == 2
 
-  test "IN on unique attr (depth-var path)":
+  test "IN on unique attr [depth-var path]":
     let kvU = newMemoryKVStore()
     defer: kvU.close()
     let qU = newQueryStore(kvU)
@@ -2926,7 +2927,7 @@ suite "engine: hydrated eid fast path":
     let val = q.lookupValue(found.get, "hyd.name")
     check val.isSome and val.get.sval == "Ann"
 
-  test "card-one re-save retract-scan sees the hydrated entry (read-your-writes)":
+  test "card-one re-save retract-scan sees the hydrated entry [read-your-writes]":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)

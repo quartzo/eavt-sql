@@ -7,7 +7,7 @@ suite "translate: simple SELECT":
     let ir = buildDatalogIr(stmt)
     check ir.findVars.len == 1
     check ir.findVars[0].kind == fvVar
-    check ir.findVars[0].varName == "_v_d1_company_s_name"
+    check ir.findVars[0].varName == "?v_d1_company_s_name"
     check ir.patterns.len == 1
     check ir.patterns[0].e.kind == dsConst
     check ir.patterns[0].e.constVal.kind == bvParam
@@ -16,7 +16,7 @@ suite "translate: simple SELECT":
     check ir.patterns[0].a.constVal.kind == bvAttr
     check ir.patterns[0].a.constVal.attrName == "company/name"
     check ir.patterns[0].v.kind == dsVar
-    check ir.patterns[0].v.varName == "_v_d1_company_s_name"
+    check ir.patterns[0].v.varName == "?v_d1_company_s_name"
     check not ir.star
     check not ir.existsMode
     check not ir.history
@@ -27,7 +27,7 @@ suite "translate: simple SELECT":
     check ir.findVars.len == 1
     check ir.patterns.len == 1
     check ir.patterns[0].e.kind == dsVar
-    check ir.patterns[0].e.varName == "_e_d1"
+    check ir.patterns[0].e.varName == "?e_d1"
     check ir.patterns[0].a.kind == dsConst
     check ir.patterns[0].a.constVal.kind == bvAttr
     check ir.patterns[0].a.constVal.attrName == "company/name"
@@ -37,11 +37,11 @@ suite "translate: simple SELECT":
     let ir = buildDatalogIr(stmt)
     check ir.findVars.len == 3
     check ir.findVars[0].kind == fvVar
-    check ir.findVars[0].varName == "_e_d1"
+    check ir.findVars[0].varName == "?e_d1"
     check ir.findVars[1].kind == fvVar
-    check ir.findVars[1].varName == "_a_d1"
+    check ir.findVars[1].varName == "?a_d1"
     check ir.findVars[2].kind == fvVar
-    check ir.findVars[2].varName == "_vv_d1"
+    check ir.findVars[2].varName == "?vv_d1"
     check ir.patterns.len == 2
 
   test "star without conditions":
@@ -66,8 +66,8 @@ suite "translate: joins":
     check ir.patterns.len == 2
     check ir.patterns[0].e.kind == dsConst and ir.patterns[0].e.constVal.kind == bvParam
     check ir.patterns[0].a.constVal.attrName == "company/partner"
-    check ir.patterns[0].v.kind == dsVar and ir.patterns[0].v.varName == "_e_d2"
-    check ir.patterns[1].e.kind == dsVar and ir.patterns[1].e.varName == "_e_d2"
+    check ir.patterns[0].v.kind == dsVar and ir.patterns[0].v.varName == "?e_d2"
+    check ir.patterns[1].e.kind == dsVar and ir.patterns[1].e.varName == "?e_d2"
     check ir.patterns[1].a.constVal.attrName == "company/name"
 
   test "multi-projection":
@@ -77,7 +77,7 @@ suite "translate: joins":
     check ir.findVars[0].kind == fvConst
     check ir.findVars[0].cVal.kind == bvParam
     check ir.findVars[1].kind == fvVar
-    check ir.findVars[1].varName == "_v_d1_company_s_name"
+    check ir.findVars[1].varName == "?v_d1_company_s_name"
     check ir.findVars[2].kind == fvVar
     check ir.findVars[2].varName == "_t_d1"
 
@@ -85,7 +85,7 @@ suite "translate: ranges and operators":
   test "range gt":
     let stmt = parse("SELECT d1.company.name WHERE d1.company.price > 1000")
     let ir = buildDatalogIr(stmt)
-    let key1 = "_v_d1_company_s_price"
+    let key1 = "?v_d1_company_s_price"
     check ir.rangeBounds.hasKey(key1)
     check ir.rangeBounds[key1].len == 1
     check ir.rangeBounds[key1][0].len == 1
@@ -94,28 +94,28 @@ suite "translate: ranges and operators":
   test "range gte and lt with AND":
     let stmt = parse("SELECT d1.company.name WHERE d1.company.price >= 3.14 AND d1.company.price < 42")
     let ir = buildDatalogIr(stmt)
-    let key2 = "_v_d1_company_s_price"
+    let key2 = "?v_d1_company_s_price"
     check ir.rangeBounds.hasKey(key2)
     check ir.rangeBounds[key2][0].len == 2
 
   test "neq operator":
     let stmt = parse("SELECT d1.ns.attr WHERE d1.ns.val != %1")
     let ir = buildDatalogIr(stmt)
-    let key = "_v_d1_ns_s_val"
+    let key = "?v_d1_ns_s_val"
     check ir.rangeBounds.hasKey(key)
     check ir.rangeBounds[key][0][0][0] == "!="
 
   test "neq angle bracket <>":
     let stmt = parse("SELECT d1.ns.attr WHERE d1.ns.val <> %1")
     let ir = buildDatalogIr(stmt)
-    let key = "_v_d1_ns_s_val"
+    let key = "?v_d1_ns_s_val"
     check ir.rangeBounds.hasKey(key)
 
 suite "translate: IN":
   test "in with params":
     let stmt = parse("SELECT d1.ns.attr WHERE d1.ns.val IN (%1, %2, %3)")
     let ir = buildDatalogIr(stmt)
-    let key = "_v_d1_ns_s_val"
+    let key = "?v_d1_ns_s_val"
     check ir.rangeBounds.hasKey(key)
     check ir.rangeBounds[key].len == 1
     check ir.rangeBounds[key][0].len == 3
@@ -125,28 +125,28 @@ suite "translate: IN":
   test "in with literals":
     let stmt = parse("SELECT d1.ns.attr WHERE d1.ns.val IN (10, 20, 30)")
     let ir = buildDatalogIr(stmt)
-    let key = "_v_d1_ns_s_val"
+    let key = "?v_d1_ns_s_val"
     check ir.rangeBounds.hasKey(key)
     check ir.rangeBounds[key][0].len == 3
 
   test "in via bare equals-parenthesized":
     let stmt = parse("SELECT d1.ns.attr WHERE d1.ns.val = (10, %1, 'hello')")
     let ir = buildDatalogIr(stmt)
-    let key = "_v_d1_ns_s_val"
+    let key = "?v_d1_ns_s_val"
     check ir.rangeBounds.hasKey(key)
 
 suite "translate: OR":
   test "or condition":
     let stmt = parse("SELECT d1.company.name WHERE d1.eid = %1 OR d1.eid = %2")
     let ir = buildDatalogIr(stmt)
-    check ir.rangeBounds.hasKey("_e_d1")
-    check ir.rangeBounds["_e_d1"].len == 2
+    check ir.rangeBounds.hasKey("?e_d1")
+    check ir.rangeBounds["?e_d1"].len == 2
 
 suite "translate: aliases from projections without WHERE":
   test "bare projection alias":
     let stmt = parse("SELECT d1.company.name")
     let ir = buildDatalogIr(stmt)
-    check ir.findVars[0].varName == "_v_d1_company_s_name"
+    check ir.findVars[0].varName == "?v_d1_company_s_name"
     check ir.patterns[0].e.kind == dsVar
 
 suite "translate: errors":

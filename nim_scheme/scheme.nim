@@ -53,7 +53,7 @@ proc `$`*(e: SExpr): string =
   of sBytes: "#b\"" & e.bytesval.mapIt($it).join("") & "\""
   of sSymbol: e.symval
   of sKeyword: ":" & e.kwval
-  of sList: "(" & e.items.mapIt($it).join(" ") & ")"
+  of sList: "[" & e.items.mapIt($it).join(" ") & "]"
   of sResource: "#<resource>"
 
 proc writeScheme*(program: SchemeProgram): string =
@@ -741,14 +741,18 @@ proc evalSpecialForm(name: string; args: SExpr; env: var Environment;
       of sList:
         if sexpr.items.len == 0: return
         let head = sexpr.items[0]
-        if head.kind == sSymbol and head.symval == "and":
+        let headName = case head.kind
+          of sKeyword: head.kwval
+          of sSymbol: head.symval
+          else: ""
+        if headName == "and":
           for i in 1..<sexpr.items.len: walk(sexpr.items[i], flat, env, host, state)
-        elif head.kind == sSymbol and head.symval == "or":
+        elif headName == "or":
           for i in 1..<sexpr.items.len:
-            flat.add newList(@[newSymbol("branch")])
+            flat.add newList(@[newKeyword("branch")])
             walk(sexpr.items[i], flat, env, host, state)
-        elif head.kind == sSymbol and head.symval in opMap:
-          if head.symval == "in":
+        elif headName in opMap:
+          if headName == "in":
             for idx in 1..<sexpr.items.len:
               let step = evalExpr(sexpr.items[idx], env, host, state)
               if step.kind == esYield:
@@ -758,13 +762,13 @@ proc evalSpecialForm(name: string; args: SExpr; env: var Environment;
             let step = evalExpr(sexpr.items[1], env, host, state)
             if step.kind == esYield:
               raise newException(EvalError, "ranges-create: value expression yielded unexpectedly")
-            flat.add newList(@[newInt(opMap[head.symval]), step.result])
+            flat.add newList(@[newInt(opMap[headName]), step.result])
       else: discard
     walk(inner, flat, env, host, state)
     # Parse flat into branches seq[seq[(op,val)]]
     var branches: seq[seq[(int32, SExpr)]] = @[@[]]
     for item in flat:
-      if item.kind == sList and item.items.len == 1 and item.items[0].kind == sSymbol and item.items[0].symval == "branch":
+      if item.kind == sList and item.items.len == 1 and item.items[0].kind == sKeyword and item.items[0].kwval == "branch":
         branches.add @[]
       elif item.kind == sList and item.items.len >= 2 and item.items[0].kind == sInt:
         let op = int32(item.items[0].ival)
@@ -933,8 +937,10 @@ proc evalExpr(expr: SExpr; env: var Environment; host: HostFns;
   of sList:
     if expr.items.len == 0: return done(newVoid())
     let first = expr.items[0]
-    if first.kind == sSymbol:
-      let name = first.symval
+    if first.kind == sKeyword:
+      # EDN VM: opcodes are keywords heading vectors — [:begin ...],
+      # [:scanner-open ...], [:+ 1 2] (docs: passo 2, fase A).
+      let name = first.kwval
       if isSpecialForm(name):
         return evalSpecialForm(name, expr, env, host, state)
       # Host function dispatch
@@ -970,8 +976,11 @@ proc evalExpr(expr: SExpr; env: var Environment; host: HostFns;
       of "dbg-scanners": return host.dbgScanners(args)
       of "ranges-show": return host.rangesShow(args)
       else: raise newException(EvalError, "unknown host function: " & name)
-      raise newException(EvalError, "unbound: " & name)
-    raise newException(EvalError, "cannot apply non-symbol as function")
+    if first.kind == sSymbol:
+      raise newException(EvalError,
+        "legacy scheme form rejected — programs are EDN vectors with " &
+        "keyword opcodes: [" & first.symval & " ...]")
+    raise newException(EvalError, "cannot apply non-keyword as function")
   return done(newVoid())
 
 # ═══════════════════════════════════════════════════════════════════════════════
