@@ -72,6 +72,7 @@ chunked as `{"columns": [...], "rows": [...], "more": bool}` or
 | `type` | Fields | Behavior |
 |--------|--------|----------|
 | `scheme` | `program` (wire AST, §3.3), `mode`: `"query"` \| `"exec"`, `params` (array of wire ASTs, optional) | `query` streams rows via yield/resume; `exec` runs to completion and returns the `(result ...)` payload |
+| `tx` | `txdata` (array of EDN vectors) | Datomic-style transaction, interpreted natively — **specified in `docs/tx-protocol.md`**; the future write path, replacing `scheme` exec |
 | `schema` | — | Returns the `CompileStats` snapshot as a single msgpack map (see 3.3) |
 | `admin` | `command` | Unchanged (`flush`, `flush-sync`, `status`, `memtable`, `dump ...`) |
 | `kv` | `op`, `cf`, `key`, `value` | Unchanged |
@@ -240,5 +241,6 @@ that the transactor never needs the planner, datalog, or SQL parser.
 
 ## 8. Related Documents
 
+- `docs/tx-protocol.md` — EDN tx protocol (the planned replacement for `scheme` exec writes)
 - `docs/scheme-ir.md` — SExpr type system, evaluator, host functions
 - `docs/sql-reference.md` — SQL surface accepted by the compiler
