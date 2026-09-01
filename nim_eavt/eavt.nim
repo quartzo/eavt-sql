@@ -551,7 +551,14 @@ proc eavtSave*(eng: EavtEngine; eid: int64; attrName: string;
   let vt = eng.resolver.valueTypeFor(attrId).get(DbTypeString)
   let many = eng.resolver.isMany(attrId)
   let mode = valueTypeToEncodeMode(vt)
-  let encoded = encodeValue(value, mode, 0)
+  # REF: o valor carrega o eid do alvo (port do engine.py ref_eid=int(value)).
+  let encoded =
+    if mode == emRef:
+      try: encodeValue(value, mode, parseInt(value))
+      except ValueError:
+        raise newException(ValueError,
+          "REF value must be an entity id, got: \"" & value & "\"")
+    else: encodeValue(value, mode, 0)
   let indexed = eng.resolver.isIndexed(attrId)
   if not many:
     # Retract any existing active datoms for this eid+attr.
@@ -573,7 +580,13 @@ proc eavtRetract*(eng: EavtEngine; eid: int64; attrName: string;
   let attrId = eng.resolver.internAttr(attrName)
   let vt = eng.resolver.valueTypeFor(attrId).get(DbTypeString)
   let mode = valueTypeToEncodeMode(vt)
-  let encoded = encodeValue(value, mode, 0)
+  let encoded =
+    if mode == emRef:
+      try: encodeValue(value, mode, parseInt(value))
+      except ValueError:
+        raise newException(ValueError,
+          "REF value must be an entity id, got: \"" & value & "\"")
+    else: encodeValue(value, mode, 0)
   let indexed = eng.resolver.isIndexed(attrId)
   var entries = buildEavtEntries(eng.kv.mt.hnd.arena, eid, attrId, encoded, t, true, mode, indexed)
   eng.batchWrite(entries)

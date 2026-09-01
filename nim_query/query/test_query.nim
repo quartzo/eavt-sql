@@ -693,6 +693,36 @@ suite "engine: save + lookup":
       q.saveManyWithT("no.such.attr",
                       @[(1'i64, SExpr(kind: sStr, sval: "x"))], 1, 0)
 
+  test "REF save stores the TARGET eid (not the subject) — flat e bulk":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    q.declareAttrFromSql("user.name", ":db.type/string", false, false, 1)
+    q.declareAttrFromSql("user.friend", ":db.type/ref", false, false, 1)
+
+    let subject = q.allocateInPartition(4)
+    let target = q.allocateInPartition(4)
+
+    # caminho per-datom
+    q.saveWithT(subject, "user.friend", SExpr(kind: sInt, ival: target), 2, 0)
+    check q.lookupValue(subject, "user.friend").get.ival == target
+
+    # caminho bulk (save-many) — mesmo datom em eid diferente
+    let subject2 = q.allocateInPartition(4)
+    q.saveManyWithT("user.friend",
+                    @[(subject2, SExpr(kind: sInt, ival: target))], 3, 0)
+    check q.lookupValue(subject2, "user.friend").get.ival == target
+
+  test "REF save with non-numeric value raises loud":
+    let kv = newMemoryKVStore()
+    defer: kv.close()
+    let q = newQueryStore(kv)
+
+    q.declareAttrFromSql("user.friend", ":db.type/ref", false, false, 1)
+    expect EvalError:
+      q.saveWithT(1, "user.friend", SExpr(kind: sStr, sval: "not-an-eid"), 1, 0)
+
   test "retract on undeclared attr is no-op":
     let kv = newMemoryKVStore()
     defer: kv.close()

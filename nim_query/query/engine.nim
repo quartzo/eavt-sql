@@ -137,14 +137,29 @@ method openCursor(q: QueryStore; cfId: uint32; prefix: seq[byte]): Cursor =
   let mc = q.kv.openScanCursor(cfId.int)
   mergedCursor(mc)
 
-proc saveResolved(q: QueryStore; eid: int64; attrId: uint32; vt: uint32;
-                  many, indexed: bool; mode: EncodeMode; val: SExpr; t: int64) =
+proc encodeSaveValue(val: SExpr; vt: uint32; mode: EncodeMode; eid: int64): seq[byte] =
+  ## Port do engine.py (ref_eid = int(value)): REF grava o eid do ALVO,
+  ## carregado no valor — não o eid do sujeito.
+  let packed = sexprToValueForType(val, vt)
+  if mode == emRef:
+    try:
+      return encodeValue(packed, mode, parseInt(packed))
+    except ValueError:
+      raise newException(EvalError,
+        "REF value must be an entity id, got: \"" & packed & "\"")
+  result = encodeValue(packed, mode, eid)
+
+proc saveResolvedInto(q: QueryStore; eid: int64; attrId: uint32; vt: uint32;
+                      many, indexed: bool; mode: EncodeMode; val: SExpr; t: int64;
+                      entries: var seq[EavtEntry]) =
   ## Core of saveWithT with attribute metadata pre-resolved — shared by
   ## save (resolves per datom) and save-many (resolves once per batch).
+  ## Appends to `entries` instead of writing; the caller issues a single
+  ## batchWrite for the accumulated batch (storage-level bulk save).
   q.saveCount += 1
   var t0 = getMonoTime()
 
-  let encoded = encodeValue(sexprToValueForType(val, vt), mode, eid)
+  let encoded = encodeSaveValue(val, vt, mode, eid)
 
   q.saveEncodeNs += (getMonoTime().ticks - t0.ticks)
   t0 = getMonoTime()
@@ -175,7 +190,7 @@ proc saveResolved(q: QueryStore; eid: int64; attrId: uint32; vt: uint32;
       for ek in foundKeys:
         if ek.len < 20: continue
         var retEntries = buildEavtEntries(q.eavt.kv.mt.hnd.arena, eid, attrId, ek[12 ..< ek.len - 8], t, true, mode, indexed)
-        q.eavt.batchWrite(retEntries)
+        entries.add retEntries
         retracted += 1
       q.saveRetractApplyNs += (getMonoTime().ticks - tScan.ticks)
       q.saveRetractCount += retracted
@@ -186,13 +201,18 @@ proc saveResolved(q: QueryStore; eid: int64; attrId: uint32; vt: uint32;
   q.saveRetractScanNs += (getMonoTime().ticks - t0.ticks)
   t0 = getMonoTime()
 
-  var entries = buildEavtEntries(q.eavt.kv.mt.hnd.arena, eid, attrId, encoded, t, false, mode, indexed)
+  entries.add buildEavtEntries(q.eavt.kv.mt.hnd.arena, eid, attrId, encoded, t, false, mode, indexed)
 
   q.saveBuildEntriesNs += (getMonoTime().ticks - t0.ticks)
-  t0 = getMonoTime()
 
+proc saveResolved(q: QueryStore; eid: int64; attrId: uint32; vt: uint32;
+                  many, indexed: bool; mode: EncodeMode; val: SExpr; t: int64) =
+  ## Per-datom path: build + immediate batchWrite (read-your-writes within
+  ## the same call chain — retract scans of later datoms see earlier ones).
+  var entries: seq[EavtEntry] = @[]
+  q.saveResolvedInto(eid, attrId, vt, many, indexed, mode, val, t, entries)
+  var t0 = getMonoTime()
   q.eavt.batchWrite(entries)
-
   q.saveBatchWriteNs += (getMonoTime().ticks - t0.ticks)
 
 method saveWithT(q: QueryStore; eid: int64; attr: string; val: SExpr;
@@ -238,8 +258,29 @@ method saveManyWithT(q: QueryStore; attr: string; pairs: seq[(int64, SExpr)];
 
   q.saveTypeCheckNs += (getMonoTime().ticks - t0.ticks)
 
+  # Bulk fast path: sem eid duplicado no lote, os retract-scans de attrs
+  # cardinality-ONE têm prefixos disjuntos → acumular entradas e emitir UM
+  # batchWrite é equivalente à escrita per-datom. Eid duplicado (overwrite
+  # dentro do lote) cai no caminho per-datom para preservar read-your-writes
+  # entre os pares.
+  var bulk = true
+  if not many and pairs.len > 1:
+    var seen = initTable[int64, bool](pairs.len)
+    for (eid, _) in pairs:
+      if eid in seen:
+        bulk = false
+        break
+      seen[eid] = true
+  if not bulk:
+    for (eid, val) in pairs:
+      q.saveResolved(eid, attrId, vt, many, indexed, mode, val, t)
+    return
+  var all: seq[EavtEntry]
   for (eid, val) in pairs:
-    q.saveResolved(eid, attrId, vt, many, indexed, mode, val, t)
+    q.saveResolvedInto(eid, attrId, vt, many, indexed, mode, val, t, all)
+  t0 = getMonoTime()
+  q.eavt.batchWrite(all)
+  q.saveBatchWriteNs += (getMonoTime().ticks - t0.ticks)
 
 method retract(q: QueryStore; eid: int64; attr: string; val: SExpr;
                 t: int64; asOf: int64) =
@@ -248,7 +289,7 @@ method retract(q: QueryStore; eid: int64; attr: string; val: SExpr;
   let attrId = attrIdOpt.get
   let vt = q.eavt.valueTypeFor(attrId).get(scanner.DbTypeString)
   let mode = valueTypeToEncodeMode(vt)
-  let encoded = encodeValue(sexprToValueForType(val, vt), mode, eid)
+  let encoded = encodeSaveValue(val, vt, mode, eid)
   let indexed = q.eavt.resolver.isIndexed(attrId)
   var entries = buildEavtEntries(q.eavt.kv.mt.hnd.arena, eid, attrId, encoded, t, true, mode, indexed)
   q.eavt.batchWrite(entries)
