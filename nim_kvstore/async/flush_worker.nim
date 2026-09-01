@@ -133,7 +133,14 @@ proc runFlush*(fw: FlushWorker; numCf: int; roots: seq[mt_be.TreapNode];
   while not w.done.load(moAcquire):
     await sleepAsync(1.milliseconds)
   if w.ok:
-    result = (rootName: $w.rootNameBuf[0 ..< w.rootNameLen],
-              trees: w.treesSeq, ok: true)
+    # NOTA: `$` sobre slice de array[char] produz o REPR (@['r', ...]) —
+    # foi exatamente o bug que corrompia o rootName broadcastado à réplica
+    # (publishRoot falhava, réplica presa na geração 0, db.* perdidos no
+    # seal seguinte → "attribute resolution failed" em todo SQL). Construir
+    # string explicitamente.
+    var rn = newString(w.rootNameLen)
+    if w.rootNameLen > 0:
+      copyMem(addr rn[0], addr w.rootNameBuf[0], w.rootNameLen)
+    result = (rootName: rn, trees: w.treesSeq, ok: true)
   else:
     result = (rootName: "", trees: @[], ok: false)
