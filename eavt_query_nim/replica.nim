@@ -13,6 +13,7 @@ import chronos
 import chronos_file
 import msgpack4nim
 import kvstore, eavt, engine
+import resolver
 import stats
 import msgpack_scan
 import logutil
@@ -27,6 +28,13 @@ type
     store*: QueryStore
     connected*: bool
     path*: string          # data dir (shared with transactor)
+    ## Set quando o WAL entregou datoms db.*: o snapshot de stats do gateway
+    ## está stale independentemente do TTL de 30s (getSnapshot consome).
+    schemaDirty*: bool
+
+const
+  ## Datoms de schema (nim_eavt/resolver) — cf 1 (AEVT), aid nos 4 primeiros bytes BE.
+  WalSchemaAids = [DbIdentAid, DbCardinalityAid, DbValueTypeAid, DbUniqueAid]
 
 proc openReplica*(dir: string): ReplicaEngine =
   ## Open a read-only KVStore on the data directory.  The journal replay
@@ -106,6 +114,19 @@ proc getStats*(r: ReplicaEngine): stats.CompileStats =
   r.store.eavt.cachedStatsTime = 0.0  # force rebuild past the engine TTL
   r.store.eavt.buildCompileStats()
 
+proc refreshResolverOnSchemaWal*(r: ReplicaEngine) =
+  ## Datoms db.* chegaram via WAL. applyWal só escreve no treap — o resolver
+  ## em memória (tabela de attrs, flags UNIQUE) NÃO se atualiza sozinho;
+  ## sem este refresh, isUniqueAttr na réplica fica stale até o TTL de 30s
+  ## do gateway. Re-bootstrap imediato (raro: só em mudança de schema) e
+  ## invalidação do snapshot de stats.
+  try:
+    r.store.eavt.bootstrapResolver()
+  except Exception as e:
+    logWarn("replica", "resolver refresh on schema wal failed (" &
+      excMsg(e) & "); stats may be stale")
+  r.schemaDirty = true
+
 proc close*(r: ReplicaEngine) =
   if r != nil and r.kv != nil:
     r.kv.close()
@@ -167,6 +188,8 @@ proc onReplicationEvent*(r: ReplicaEngine; frame: string) {.gcsafe, raises: [].}
             let b = ord(frame[s])
             if b >= 0x00 and b <= 0x7f: data.add(byte(b))
     r.applyWal(data)
+    if journalHasSchemaRecords(data, WalSchemaAids):
+      r.refreshResolverOnSchemaWal()
   of "seal":
     r.applySeal()
   of "root":

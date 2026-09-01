@@ -635,8 +635,9 @@ proc eavtDeclareAttr*(eng: EavtEngine; name: string; valueType: uint32;
                        many: bool; unique: bool = false): (uint32, bool) =
   let (aid, isNew) = eng.resolver.declareAttr(name, valueType, many)
   if unique: eng.resolver.setUnique(aid, true)
+  if isNew or unique:
+    eng.cachedStatsTime = 0  # invalidate cache (novos attrs e mudança de unique)
   if isNew:
-    eng.cachedStatsTime = 0  # invalidate cache
     # Persist schema as db.* datoms (Rust declare_attr_with_t).
     let t = eng.resolver.allocateInPartition(PartTx)
     let e = aid.int64
@@ -650,10 +651,16 @@ proc eavtDeclareAttr*(eng: EavtEngine; name: string; valueType: uint32;
     var bwTmp3 = buildEavtEntries(eng.kv.mt.hnd.arena, e, DbCardinalityAid,
       encodeValue($cardId, emFixed, 0), t, false, emFixed, true)
     eng.batchWrite(bwTmp3)
-    if unique:
-      var bwTmp4 = buildEavtEntries(eng.kv.mt.hnd.arena, e, DbUniqueAid,
-        encodeValue($DbUniqueIdentityAid, emFixed, 0), t, false, emFixed, true)
-      eng.batchWrite(bwTmp4)
+  if unique:
+    # Persist db.unique FORA do if isNew: redeclarar UNIQUE sobre um attr
+    # existente atualiza o resolver em memória, mas sem o datom a flag só
+    # existe neste engine — réplicas nunca a recebem via WAL e ela se perde
+    # no restart. Gravação idempotente (put).
+    let t = eng.resolver.allocateInPartition(PartTx)
+    let e = aid.int64
+    var bwTmp4 = buildEavtEntries(eng.kv.mt.hnd.arena, e, DbUniqueAid,
+      encodeValue($DbUniqueIdentityAid, emFixed, 0), t, false, emFixed, true)
+    eng.batchWrite(bwTmp4)
   return (aid, isNew)
 
 proc bootstrapSystemAttrs*(eng: EavtEngine) =

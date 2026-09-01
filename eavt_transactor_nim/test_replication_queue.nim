@@ -60,3 +60,56 @@ suite "replication: ordem da fila de eventos":
     let frames = s.collectOutgoing()
     check frames.len == 1
     check frames[0].find("\xA4root") >= 0
+
+  test "response enfileirada DEPOIS dos bytes wal da mesma request":
+    # Invariante central da fila única: o sink roda durante a execução
+    # (broadcastWal → buf); o handler enfileira a response depois —
+    # flushBuf no enqueue garante wal-antes-de-response no fio.
+    let hub = initReplicationHub("/tmp/nonexistent")
+    let s = Subscriber()
+    hub.register(s)
+
+    block:
+      var d = @[byte(9), byte(9)]
+      broadcastWal(addr hub, addr d[0], d.len)
+    s.enqueueResponse("\xDE\xAD\xBE\xEF")  # frame de resposta da request
+
+    let frames = s.collectOutgoing()
+    check frames.len == 2
+    check frames[0].find("\xA3wal") >= 0
+    check frames[1].find("\xDE\xAD\xBE\xEF") >= 0
+
+    # Response em conexão SEM wal pendente não altera a ordem
+    let s2 = Subscriber()
+    hub.register(s2)
+    s2.enqueueResponse("only")
+    check s2.collectOutgoing().len == 1
+
+  test "backlog acima do limite fecha o subscriber":
+    let hub = initReplicationHub("/tmp/nonexistent")
+    let s = Subscriber()
+    hub.register(s)
+    check not s.closed
+
+    # 8 * 10 MiB = 80 MiB > ReplicationBacklogMaxBytes (64 MiB)
+    var chunk: seq[byte]
+    chunk.setLen(10 * 1024 * 1024)
+    for i in 0..<8:
+      broadcastWal(addr hub, addr chunk[0], chunk.len)
+      if s.closed: break
+
+    check s.closed
+    # Subscriber fechado não recebe mais bytes: o pendente congela
+    let pendingAtClose = s.pendingCount()
+    check pendingAtClose > 0
+    var d = @[byte(1)]
+    broadcastWal(addr hub, addr d[0], d.len)
+    check s.pendingCount() == pendingAtClose
+
+  test "enqueueResponse respeita subscriber fechado":
+    let hub = initReplicationHub("/tmp/nonexistent")
+    let s = Subscriber()
+    hub.register(s)
+    s.closed = true
+    s.enqueueResponse("ignored")
+    check s.pendingCount() == 0

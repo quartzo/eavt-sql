@@ -100,6 +100,96 @@ suite "eavt: attribute declaration":
       eng.kv.close()
     removeDir(path)
 
+  test "re-declare UNIQUE persists db.unique across restart":
+    # Regressão: eavtDeclareAttr só gravava db.unique dentro de `if isNew` —
+    # redeclarar um attr existente com UNIQUE atualizava o resolver em
+    # memória mas nunca persistia o datom (réplica não recebia, restart
+    # perdia a flag).
+    let path = "/tmp/eavttest_uniq_" & $getTime().toUnix() & "_" & $getTime().nanosecond
+    createDir(path)
+    block:
+      let cfg = {"backend": "file", "path": path}.toTable
+      let kv = newKVStore(cfg)
+      let eng = newEavtEngine(kv)
+      eng.bootstrapResolver()
+      discard eng.eavtDeclareAttr("persist.u", DbTypeString, false)
+      check not eng.isUnique(eng.lookupAttr("persist.u").get)
+      discard eng.eavtDeclareAttr("persist.u", DbTypeString, false, true)
+      check eng.isUnique(eng.lookupAttr("persist.u").get)
+      eng.kv.flush()
+      eng.kv.close()
+    block:
+      let cfg = {"backend": "file", "path": path}.toTable
+      let kv = newKVStore(cfg)
+      let eng = newEavtEngine(kv)
+      eng.bootstrapResolver()
+      let aid = eng.lookupAttr("persist.u")
+      check aid.isSome()
+      check eng.isUnique(aid.get())
+      eng.kv.close()
+    removeDir(path)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Schema replication: WAL → resolver (corrida do ATTRIBUTE ... UNIQUE)
+# ══════════════════════════════════════════════════════════════════════════════
+
+proc walRecord(cf: uint8; key: seq[byte]): seq[byte] =
+  ## Serializa uma key em registro journal/WAL — formato do sink em
+  ## eavt_transactor_nim/wal.nim: [4B len BE (=1+klen)][cf][key][4B vlen][1B val].
+  let fld = 1 + key.len
+  result = @[byte((fld shr 24) and 0xFF), byte((fld shr 16) and 0xFF),
+             byte((fld shr 8) and 0xFF), byte(fld and 0xFF)]
+  result.add cf
+  result.add key
+  result.add @[byte(0), byte(0), byte(0), byte(1), byte(0)]  # vlen=1, value=0x00
+
+proc collectSchemaWal(eng: EavtEngine): seq[byte] =
+  ## Extrai as keys db.* (cf 1, AEVT) do engine e monta os bytes wal.
+  for aid in [DbIdentAid, DbValueTypeAid, DbCardinalityAid, DbUniqueAid]:
+    for k in eng.scanPrefix(1, @[0'u8, 0'u8, 0'u8, byte(aid)]):
+      result.add walRecord(1'u8, k)
+
+proc schemaAids(): array[4, uint32] =
+  [DbIdentAid, DbCardinalityAid, DbValueTypeAid, DbUniqueAid]
+
+suite "eavt: schema replication (WAL → resolver)":
+  test "journalHasSchemaRecords detecta schema e ignora dados":
+    var schemaBytes: seq[byte]
+    block:
+      let eng = newTestEngine()
+      discard eng.eavtDeclareAttr("wal.detect", DbTypeString, false, true)
+      schemaBytes = collectSchemaWal(eng)
+    check schemaBytes.len > 0
+    check journalHasSchemaRecords(schemaBytes, schemaAids())
+
+    # Registro de dados (aid de usuário, fora do conjunto de schema)
+    var dataKey = @[byte(0), byte(0), byte(0), byte(42)]
+    dataKey.add @[byte(1), byte(2), byte(3)]
+    let dataOnly = walRecord(1'u8, dataKey)
+    check not journalHasSchemaRecords(dataOnly, schemaAids())
+
+    # Framing inválido (len maior que o buffer) — falso, sem travar
+    var bad = @[byte(0), byte(0), byte(0), byte(200), byte(1)]
+    check not journalHasSchemaRecords(bad, schemaAids())
+
+  test "schema wal aplicado à réplica torna attr UNIQUE visível no resolver":
+    var walBytes: seq[byte]
+    block:
+      let eng = newTestEngine()
+      discard eng.eavtDeclareAttr("wal.email", DbTypeString, false, true)
+      check eng.isUnique(eng.lookupAttr("wal.email").get)
+      walBytes = collectSchemaWal(eng)
+    check journalHasSchemaRecords(walBytes, schemaAids())
+
+    # "Réplica": engine fresco recebe os datoms via WAL e re-bootstrapa.
+    let engB = newTestEngine()
+    check engB.lookupAttr("wal.email").isNone  # ainda stale
+    engB.kv.applyJournalRecords(walBytes)
+    engB.bootstrapResolver()
+    let aid = engB.lookupAttr("wal.email")
+    check aid.isSome
+    check engB.isUnique(aid.get)
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Save and retract
 # ══════════════════════════════════════════════════════════════════════════════

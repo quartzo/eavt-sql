@@ -23,11 +23,15 @@ proc initGatewayState*(downstreamPath: string): GatewayState =
 proc getSnapshot*(gw: GatewayState): CompileStats {.raises: [].} =
   ## Build or return cached stats from the replica engine.
   ## Staleness degrades plan quality only (programs are position-independent).
+  ## `schemaDirty` (datoms db.* chegaram via WAL) bypassa o TTL: o snapshot
+  ## precisa refletir o schema novo no compile imediatamente.
   try:
-    if gw.fetchedAt > 0 and epochTime() - gw.fetchedAt < SCHEMA_TTL_SECONDS and
+    if gw.fetchedAt > 0 and not gw.replica.schemaDirty and
+       epochTime() - gw.fetchedAt < SCHEMA_TTL_SECONDS and
        gw.stats.attrIds.len > 0:
       return gw.stats
     gw.stats = gw.replica.getStats()
+    gw.replica.schemaDirty = false
     gw.fetchedAt = epochTime()
     gw.stats
   except Exception:

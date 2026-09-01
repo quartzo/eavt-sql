@@ -241,15 +241,25 @@ Do not use it for the server's connection loop or for flush.
 
 ## Known Issues / Open Questions
 
-- **Replication race on `ATTRIBUTE ... UNIQUE`** (não resolvido — pesquisar).
-  O `declare-attr`/`ATTRIBUTE` é um write que vai ao transactor; a réplica
-  (query server) só recebe a declaração quando a atualização do memtable replica
-  via WAL. Uma consulta que depende da unicidade (`lookup-entity` / `eid()`,
-  e por tabela o planejador do SQL `WHERE unique_attr = valor`) respondida pela
-  réplica **antes** da replicação alcançar o `declare-attr` vê o resolver stale
-  e falha com `lookup-entity: attribute is not UNIQUE`. Repro mínimo: declara o
-  attr UNIQUE, `save`, e consulta `eid()` imediatamente sem `flush`+espera —
-  falha; após `flush` + sleep, funciona. Candidatos de correção: responder
-  leituras no transactor (não na réplica), ou a réplica bloquear/sincronizar até
-  a geração da declaração, ou deferir o check de unicidade para o transactor.
+- ~~**Replication race on `ATTRIBUTE ... UNIQUE`**~~ **RESOLVIDO** (fila única
+  + refresh de resolver na réplica). Diagnóstico real (diferia do registrado):
+  a propagação WAL nunca foi o gargalo — o sink transmite no momento do
+  `batchWrite`. Eram dois problemas: (a) o transactor escrevia a response por
+  uma task e os bytes wal por outra (drain com tick de 2ms), sem ordem
+  garantida entre elas; (b) `applyWal` na réplica só escrevia no treap — o
+  resolver em memória (tabela de attrs, flag UNIQUE) só era reconstruído via
+  `getStats`, atrás de um TTL de 30s, e o check de unicidade é 100% runtime
+  (`lookup-entity` hostfn). Correção: **fila única de saída por transporte de
+  replicação** (`Subscriber.queue` em `eavt_transactor_nim/replication.nim`) —
+  responses de requests em conexão com `replicate` são enfileiradas via
+  `enqueueResponse`, que descarrega o buf wal antes; a ordem
+  "wal-antes-da-response" é estrutural, sem call-site a lembrar. Na réplica,
+  frames wal com datoms db.* (`journalHasSchemaRecords` em nim_kvstore)
+  disparam `bootstrapResolver()` + `schemaDirty` (bypass do TTL em
+  `getSnapshot`). Além disso, `eavtDeclareAttr` gravava `db.unique` só quando
+  `isNew` — redeclarar UNIQUE num attr existente nunca persistia o datom
+  (réplica nunca recebia, restart perdia a flag); agora grava sempre que
+  `unique=true`. Backlog > 64 MiB fecha o subscriber (fail-fast; reconecta e
+  re-snapshot em 1s). Regressão: `test_replication_queue.nim` (ordem na fila),
+  `test_eavt.nim` (WAL→resolver, redeclare + restart).
 

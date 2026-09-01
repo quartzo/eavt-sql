@@ -140,6 +140,27 @@ proc applyJournalRecords*(kv: KVStore; data: openArray[byte]) {.gcsafe.} =
   if entries.len > 0:
     kv.mtSize = kv.mt.batch(entries)
 
+proc journalHasSchemaRecords*(data: openArray[byte]; schemaAids: openArray[uint32]): bool =
+  ## True se os bytes em formato journal carregam algum registro cuja key
+  ## começa com um dos aids de schema (layout AEVT: aid BE nos 4 primeiros
+  ## bytes da key). Formato por registro (sink em wal.nim):
+  ## [4B len BE][1B cf][key][4B vlen][1B val], onde len inclui o byte de cf
+  ## (len = 1 + keylen) → registro ocupa 9 + len bytes. Custo linear nos
+  ## bytes; a réplica usa para disparar o re-bootstrap do resolver.
+  var pos = 0
+  while pos + 9 <= data.len:
+    let fld = (int(data[pos]) shl 24) or (int(data[pos + 1]) shl 16) or
+              (int(data[pos + 2]) shl 8) or int(data[pos + 3])
+    if fld < 2 or pos + 9 + fld > data.len:
+      return false  # framing inválido — não travar o chamador
+    if data[pos + 4] == 1 and fld >= 5:
+      let aid = (uint32(data[pos + 5]) shl 24) or (uint32(data[pos + 6]) shl 16) or
+                (uint32(data[pos + 7]) shl 8) or uint32(data[pos + 8])
+      if schemaAids.contains(aid):
+        return true
+    pos += 9 + fld
+  false
+
 proc sealLiveToFlush*(kv: KVStore) {.gcsafe.} =
   ## Seal the live memtable into flushRoots (the first half of kv.flush).
   ## Used by the replication replica when the server signals a seal event:

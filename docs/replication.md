@@ -45,12 +45,13 @@ replica's `onReplicationEvent` callback (snapshot/wal/seal/root).
 ### Snapshot + replication events
 
 The query server sends `{"type":"replicate"}` once on connection open.  The
-transactor registers a subscriber, sends the snapshot, spawns the drain task,
-and **returns to the read loop** — subsequent request frames are dispatched
-pipelined (each spawned as an independent async handler).  Replication
-events and response frames write concurrently to the same transport;
-chronos `StreamTransport` queues writes as complete vectors — frames are
-never interleaved at the byte level.
+transactor registers a subscriber and sends the snapshot directly (outside
+the queue); after that, every frame to the transport goes through the
+subscriber's single output queue, drained by a single-flight task woken on
+each enqueue.  Subsequent request frames are dispatched pipelined (each
+spawned as an independent async handler); handler responses are **enqueued**
+(not written directly) so that wal records generated during execution always
+precede the response on the wire.
 
 | Event | Payload | Meaning |
 |-------|---------|---------|
@@ -77,16 +78,43 @@ make interleaving safe on the single event loop.
 
 ## Read-your-writes
 
-The WAL sink broadcasts bytes to subscribers **under kv.lock, before the DML
-response is written** — so by the time the query server relays a DML response,
-its bytes are already queued transactor-side.  The query server sleeps 50 ms
-after relaying a DML (transactor drains subscribers every ~2 ms + UDS latency +
-reader task scheduling), so the next statement in the same session sees its own
-writes on the local replica.
+**Guaranteed by single-queue ordering, not by sleeps.** Every frame written
+to a replication transport — wal/seal/root events AND response frames — flows
+through the subscriber's single output queue (`Subscriber.queue`).  The WAL
+sink runs during request execution (broadcast → `s.buf`); the handler enqueues
+its response only afterwards, and `enqueueResponse` flushes `s.buf` into the
+queue first.  The transactor therefore writes the request's wal frame(s)
+**before** the response on the same transport, and the query server's reader
+applies them in arrival order: by the time the ack is relayed to the client,
+the replica's treap already holds the writes.  There is no guard sleep and
+no cross-task race: the drain is a single-flight task (`pump`) woken on every
+enqueue — no polling.
 
-Schema freshness: the query server rebuilds compile stats from the replica on
-TTL (30 s) or on "attribute resolution failed" (retry with 15 ms grace +
-resolver re-bootstrap + engine stats-cache bypass).
+Backpressure: the subscriber keeps an exact byte accounting of pending
+frames.  When the backlog exceeds 64 MiB the subscriber is presumed unable
+to keep up and is **closed** (logError + transport close) — the query server
+reconnects after 1 s and receives a fresh snapshot.  A query server whose
+replica cannot keep up fails loudly instead of growing memory without bound.
+
+Schema freshness: when a wal frame carries schema datoms (db.ident /
+db.valueType / db.cardinality / db.unique — cf 1, aid in the first 4 key
+bytes), the replica re-bootstraps its resolver immediately (the treap update
+alone does not touch the in-memory resolver) and marks `schemaDirty`, which
+bypasses the gateway stats TTL (30 s) on the next snapshot fetch.  This is
+what makes `lookup-entity`/`eid()` usable on the replica right after
+`ATTRIBUTE ... UNIQUE`: the resolver sees the UNIQUE flag before the ack.
+
+The compile path also rebuilds stats on "attribute resolution failed"
+(retry with 15 ms grace + resolver re-bootstrap + engine stats-cache bypass).
+
+### Snapshot
+
+The snapshot (sealed segment paths + open-tail bytes + root + blobDir) is
+sent as a **direct write at subscribe time, outside the queue** — it never
+counts against the backlog and cannot trigger the stall discard.  The
+subscriber is registered before the open tail is captured, so records
+broadcast in between land in both the snapshot's openTail and the subscriber
+buf; the replica re-applies them as idempotent puts.
 
 ## Pipelined transactor dispatch
 
