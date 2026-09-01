@@ -684,13 +684,13 @@ proc bootstrapSystemAttrs*(eng: EavtEngine) =
   let tx = eng.resolver.allocateInPartition(PartTx)
 
   proc meta(name: string): tuple[vt: uint32, cardId: uint32, uniqueId: uint32] =
-    let vt = if name in ["db.ident", "db.part/id"]: DbTypeString
-             elif name == "db.txInstant": DbTypeInstant
-             elif name in ["db.isComponent", "db.index", "db.fulltext", "db.noHistory"]: DbTypeBoolean
+    let vt = if name in ["db/ident", "db.part/id"]: DbTypeString
+             elif name == "db/txInstant": DbTypeInstant
+             elif name in ["db/isComponent", "db/index", "db/fulltext", "db/noHistory"]: DbTypeBoolean
              else: DbTypeRef
     let cardId = DbCardinalityOneAid
-    let uniqueId = (if name == "db.unique.value": DbUniqueValueAid
-                    elif name == "db.unique.identity": DbUniqueIdentityAid
+    let uniqueId = (if name == "db/unique/value": DbUniqueValueAid
+                    elif name == "db/unique/identity": DbUniqueIdentityAid
                     else: 0'u32)
     (vt, cardId, uniqueId)
 

@@ -58,47 +58,50 @@ proc makeEntityId*(partitionId: uint64, seq: int64): int64 =
 # ═══════════════════════════════════════════════════════════════════════════════
 
 proc normalizeAttr*(name: string): string {.raises: [ValueError].} =
-  ## Attribute names normalize to dot notation internally (storage canonical
-  ## form until tx-protocol F3 flips it to slash):  :ns/name → ns.name,
-  ## ns/name → ns.name, ns.name → ns.name.  Bare names without any
-  ## namespace separator are rejected — a typo must fail loudly.
-  if name.len > 0 and name[0] == ':' and '/' in name:
-    result = name[1..^1].replace('/', '.')
-  elif '/' in name and '.' notin name:
-    result = name.replace('/', '.')
-  elif '.' notin name:
-    raise newException(ValueError,
-      "attribute name must include namespace (e.g. 'company.name'), got " & name)
-  else:
+  ## Attribute names normalize to SLASH notation — the storage canonical
+  ## form (tx-protocol.md §8):  :ns/name → ns/name, ns.name → ns/name,
+  ## ns/name → ns/name.  Bare names without any namespace separator are
+  ## rejected — a typo must fail loudly.
+  if name.len > 0 and name[0] == ':':
+    if '/' notin name:
+      raise newException(ValueError,
+        "attribute keyword must be namespaced (e.g. ':company/name'), got " & name)
+    result = name[1..^1]
+  elif '.' in name and '/' notin name:
+    result = name.replace('.', '/')
+  elif '/' in name:
     result = name
+  else:
+    raise newException(ValueError,
+      "attribute name must include namespace (e.g. 'company/name' or 'company.name'), got " & name)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Bootstrap schema
 # ═══════════════════════════════════════════════════════════════════════════════
 
 const BootstrapSchema*: array[26, (string, uint32)] = [
-  ("db.ident", 1),
-  ("db.cardinality", 2),
-  ("db.valueType", 3),
-  ("db.isComponent", 4),
-  ("db.unique", 5),
-  ("db.index", 6),
-  ("db.fulltext", 7),
-  ("db.noHistory", 8),
-  ("db.txInstant", 9),
-  ("db.type.string", 20),
-  ("db.type.ref", 21),
-  ("db.type.long", 22),
-  ("db.type.keyword", 23),
-  ("db.type.boolean", 24),
-  ("db.type.instant", 25),
-  ("db.type.bytes", 26),
-  ("db.type.float", 27),
-  ("db.type.blob", 28),
-  ("db.cardinality.one", 35),
-  ("db.cardinality.many", 36),
-  ("db.unique.value", 37),
-  ("db.unique.identity", 38),
+  ("db/ident", 1),
+  ("db/cardinality", 2),
+  ("db/valueType", 3),
+  ("db/isComponent", 4),
+  ("db/unique", 5),
+  ("db/index", 6),
+  ("db/fulltext", 7),
+  ("db/noHistory", 8),
+  ("db/txInstant", 9),
+  ("db/type/string", 20),
+  ("db/type/ref", 21),
+  ("db/type/long", 22),
+  ("db/type/keyword", 23),
+  ("db/type/boolean", 24),
+  ("db/type/instant", 25),
+  ("db/type/bytes", 26),
+  ("db/type/float", 27),
+  ("db/type/blob", 28),
+  ("db/cardinality/one", 35),
+  ("db/cardinality/many", 36),
+  ("db/unique/value", 37),
+  ("db/unique/identity", 38),
   ("db.part/id", 39),
   ("db.part/db", 40),
   ("db.part/tx", 41),
@@ -162,11 +165,11 @@ proc newResolver*(): Resolver =
   # Set value types for all bootstrap schema attributes
   for (name, aid) in BootstrapSchema:
     if aid notin result.valueTypes:
-      let vt = if name in ["db.ident", "db.part/id"]: DbTypeString
-               elif name == "db.txInstant": DbTypeInstant
-               elif name in ["db.isComponent", "db.index", "db.fulltext",
-                              "db.noHistory"]: DbTypeBoolean
-               elif name.startsWith("db.type."): DbTypeLong
+      let vt = if name in ["db/ident", "db.part/id"]: DbTypeString
+               elif name == "db/txInstant": DbTypeInstant
+               elif name in ["db/isComponent", "db/index", "db/fulltext",
+                              "db/noHistory"]: DbTypeBoolean
+               elif name.startsWith("db.type/"): DbTypeLong
                else: DbTypeRef
       result.valueTypes[aid] = vt
 

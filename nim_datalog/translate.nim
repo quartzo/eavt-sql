@@ -168,12 +168,16 @@ proc extractRight(right: sql_ast.ConditionRight): BoundValue =
   of crExpr: newBoundExpr(right.exprValue)
   of crIn, crOr: newBoundMissing("compound")
 
-proc validateAttrName(field: string) =
+proc validateAttrName(field: string): string =
+  ## SQL surface accepts dot notation (d1.ns.attr → field "ns.attr"); the IR
+  ## carries the SLASH canonical form (tx-protocol.md §8) — normalize here so
+  ## resolveIr and the storage agree on names end-to-end.
   if not field.contains('.'):
     raise newException(ValueError,
       "attribute name must include namespace (e.g. 'company.name'), got '" & field & "'")
+  field.replace('.', '/')
 
-proc processEq(la, lf: string, right: sql_ast.ConditionRight,
+proc processEq(la: string; lf: var string; right: sql_ast.ConditionRight,
     aliases: var Table[string, AliasState]) =
   case lf
   of "eid":
@@ -236,7 +240,7 @@ proc processEq(la, lf: string, right: sql_ast.ConditionRight,
     ensureAlias(aliases, la)
     aliases[la].addedRequested = true
   else:
-    validateAttrName(lf)
+    lf = validateAttrName(lf)
     ensureAlias(aliases, la)
     if lf notin aliases[la].attrs:
       aliases[la].attrs.add(lf)
@@ -270,7 +274,7 @@ proc processEq(la, lf: string, right: sql_ast.ConditionRight,
       aliases[la].attrValues[lf] = newBoundExpr(right.exprValue)
     else: discard
 
-proc processRange(la, lf, op: string, right: sql_ast.ConditionRight,
+proc processRange(la: string; lf: var string; op: string, right: sql_ast.ConditionRight,
     aliases: var Table[string, AliasState]) =
   if lf in ["attr", "val", "tx"]: return
   ensureAlias(aliases, la)
@@ -282,7 +286,7 @@ proc processRange(la, lf, op: string, right: sql_ast.ConditionRight,
     aliases[la].rangeConds[evar][^1].add((op, bv))
     return
 
-  validateAttrName(lf)
+  lf = validateAttrName(lf)
   if lf notin aliases[la].attrs:
     aliases[la].attrs.add(lf)
   let bv = extractRight(right)
@@ -293,14 +297,14 @@ proc processRange(la, lf, op: string, right: sql_ast.ConditionRight,
 proc processIn(left: sql_ast.FieldRef, values: seq[sql_ast.ConditionRight],
     aliases: var Table[string, AliasState]) =
   let la = left.alias
-  let lf = left.field
-  if lf in ["attr", "val", "tx"]: return
+  if left.field in ["attr", "val", "tx"]: return
+  let lf = validateAttrName(left.field)
   ensureAlias(aliases, la)
+  left.field = lf
   var target: string
   if lf == "eid":
     target = aliases[la].eVar
   else:
-    validateAttrName(lf)
     if lf notin aliases[la].attrs:
       aliases[la].attrs.add(lf)
     target = lf
@@ -323,8 +327,7 @@ proc processOr(left: sql_ast.FieldRef, branches: seq[seq[sql_ast.OrBranchItem]],
   if field == "eid":
     target = aliases[alias].eVar
   else:
-    validateAttrName(field)
-    target = field
+    target = validateAttrName(field)
 
   for branch in branches:
     for inner in branch:
@@ -394,7 +397,7 @@ proc processConditions(stmt: sql_ast.SelectStmt, aliases: var Table[string, Alia
       processIn(cond.left, cond.right.inValues, aliases)
     else:
       let la = cond.left.alias
-      let lf = cond.left.field
+      var lf = cond.left.field
       case cond.op
       of "=": processEq(la, lf, cond.right, aliases)
       of ">", "<", ">=", "<=", "!=":
@@ -417,9 +420,10 @@ proc processProjections(stmt: sql_ast.SelectStmt, aliases: var Table[string, Ali
       of "added": st.addedRequested = true
       of "eid": discard
       else:
-        validateAttrName(fr.field)
-        if fr.field notin st.attrs:
-          st.attrs.add(fr.field)
+        let fname = validateAttrName(fr.field)
+        if fname notin st.attrs:
+          st.attrs.add(fname)
+        fr.field = fname
       result.add(some((fr.alias, fr.field)))
     else:
       result.add(none((string, string)))

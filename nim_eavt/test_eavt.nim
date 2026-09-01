@@ -262,7 +262,7 @@ suite "eavt: resolver":
   test "attrName returns name from aid":
     let eng = newTestEngine()
     let (aid, _) = eng.eavtDeclareAttr("named.attr", DbTypeLong, false)
-    check eng.attrName(aid) == "named.attr"
+    check eng.attrName(aid) == "named/attr"
 
   test "valueTypeFor returns correct type":
     let eng = newTestEngine()

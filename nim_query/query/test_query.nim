@@ -823,7 +823,7 @@ suite "engine: save + lookup":
 
     q.declareAttrFromSql("user.name", ":db.type/string", false, false, 1)
     let aid = q.lookupAttr("user.name").get
-    check q.attrName(aid) == "user.name"
+    check q.attrName(aid) == "user/name"
 
   test "isUniqueAttr":
     let kv = newMemoryKVStore()
@@ -2025,7 +2025,7 @@ suite "engine: scanner-iterate more":
       "(scanner-push s " & $aid.int64 & ") " &
       "(begin (set! _it_v (scanner-iterate-init s ())) (while (set! v (scanner-iterate-next _it_v)) (result-row v (attr-name " & $aid.int64 & ")))))")
     check rows.len >= 1
-    check rows[0][1].sval == "tag.x"
+    check rows[0][1].sval == "tag/x"
 
   test "iterate AEVT finds eids by attr":
     let kv = newMemoryKVStore()
@@ -2645,7 +2645,7 @@ suite "engine: integration (port of test_engine.py)":
     let q = newQueryStore(kv)
     q.declareAttrFromSql("person.name", ":db.type/string", false, false, 1)
     let aid = q.eavt.lookupAttr("person.name").get
-    check q.eavt.attrName(aid) == "person.name"
+    check q.eavt.attrName(aid) == "person/name"
 
   test "save with many cardinality accumulates":
     let kv = newMemoryKVStore()
@@ -2749,7 +2749,7 @@ suite "engine: position-independent programs":
     let stmt = sql_parser.parse("SELECT d1.eid WHERE d1.pos.item = %1")
     let compiled = compileSql(stmt, q.eavt.buildCompileStats())
     let text = writeScheme(compiled.program)
-    check text.contains("(intern-a \"pos.item\")")
+    check text.contains("(intern-a \"pos/item\")")
     check not text.contains("(scanner-push s0 " & $aid & ")")
 
   test "intern-a raises on unknown attribute":
