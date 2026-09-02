@@ -18,8 +18,8 @@ Options:
 
 Modes:
   Interactive:    eavt-sql-cli                   (REPL with history)
-  Execute:        eavt-sql-cli -e "SELECT 1;"   (run and exit)
-  Pipe:           echo "SELECT 1;" | eavt-sql-cli (read stdin, no prompt)
+  Execute:        eavt-sql-cli -e "[:find ?x :where [_ :dummy/x ?x]];"   (run and exit)
+  Pipe:           echo "[:find ?x :where [_ :dummy/x ?x]];" | eavt-sql-cli (read stdin, no prompt)
 """
 
 proc executeCommands(client: var EavtClient; commands: string): int =
@@ -119,8 +119,8 @@ proc executeCommands(client: var EavtClient; commands: string): int =
           stderr.writeLine "Unknown command: ", stripped
           return 1
     else:
-      # SQL command
-      for chunk in client.exec(stripped):
+      # Datalog query
+      for chunk in client.datalog(stripped):
         if chunk.error.len > 0:
           stderr.writeLine "Error: ", chunk.error
           return 1

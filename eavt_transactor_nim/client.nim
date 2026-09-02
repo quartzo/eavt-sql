@@ -285,3 +285,60 @@ proc kvScan*(c: var EavtClient; cf: int): seq[SqlResult] =
         sr.rows.add(r)
     result.add(sr)
     if not node["more"].getBool: break
+
+proc datalog*(c: var EavtClient; query: string): seq[SqlResult] =
+  ## Send a Datalog EDN query to the query server. The query is sent as
+  ## plain EDN text in the "query" field — the gateway compiles and streams
+  ## rows back in the same format as exec().
+  var node = newJObject()
+  node["type"] = %"datalog"
+  node["query"] = %query
+  sendMsg(c, msgpack2json.fromJsonNode(node))
+  while true:
+    let resp = recvMsg(c)
+    if resp.len == 0: break
+    let node = toJsonNode(resp)
+    if node.hasKey("error") and node["error"].getStr.len > 0:
+      result.add(SqlResult(error: node["error"].getStr))
+      break
+    var sr = SqlResult()
+    if node.hasKey("columns"):
+      for col in node["columns"]: sr.columns.add(col.getStr)
+    if node.hasKey("rows"):
+      for row in node["rows"]:
+        var r: seq[string]
+        for v in row:
+          if v.kind == JArray:
+            var bs: seq[byte]
+            for b in v: bs.add(byte(b.getInt()))
+            var s = newString(bs.len)
+            if bs.len > 0: copyMem(addr s[0], addr bs[0], bs.len)
+            r.add(s)
+          else:
+            r.add($v)
+        sr.rows.add(r)
+    result.add(sr)
+    if not node["more"].getBool: break
+
+proc txExec*(c: var EavtClient; txdataJson: JsonNode): string =
+  ## Send a tx request with EDN tx-data. Returns the tx-report as a string
+  ## summary (tempids + tx id).
+  var node = newJObject()
+  node["type"] = %"tx"
+  node["txdata"] = txdataJson
+  sendMsg(c, msgpack2json.fromJsonNode(node))
+  let resp = recvMsg(c)
+  if resp.len == 0: return "error: transactor disconnected"
+  try:
+    let n = toJsonNode(resp)
+    if n.hasKey("error") and n["error"].getStr.len > 0:
+      return "error: " & n["error"].getStr
+    var parts: seq[string] = @[]
+    if n.hasKey("tempids"):
+      for k, v in n["tempids"]:
+        parts.add(k & "=" & $v.getInt)
+    if n.hasKey("tx"):
+      parts.add("tx=" & $n["tx"].getInt())
+    return "tx-report: " & parts.join(", ")
+  except CatchableError as e:
+    return "error: malformed response (" & e.msg & ")"

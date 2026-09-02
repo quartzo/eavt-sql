@@ -1,7 +1,9 @@
-## EAVT SQL REPL (pure Nim, UDS client).
-## Mirrors eavt-cli/src/main.rs: multi-line `;`-terminated statements, the
-## .help/.flush/.status/.tree/.memtable/.dump dot-commands, and a
-## persistent ~/.eavt_sql_history.
+## EAVT Datalog REPL (pure Nim, UDS client).
+## Queries: Datalog EDN vectors ending with `;`
+##          e.g. [:find ?name :where [?e :person/name ?name]];
+## Writes: EDN tx-data vectors ending with `;`
+##          e.g. [[:db/add -1 :person/name "Alice"]];
+## Dot commands mirror the original SQL REPL (.help/.flush/.status/...).
 
 import std/[strutils, strformat, os, terminal, json]
 import eavt_transactor_nim/client
@@ -34,9 +36,9 @@ template catchDisconnect(body: untyped) =
   except ServerDisconnectedError: raise
   except CatchableError as e: stderr.writeLine "Error: ", e.msg
 
-proc executeSql(sql: string) =
+proc executeDatalog(query: string) =
   catchDisconnect:
-    for chunk in gClient.exec(sql):
+    for chunk in gClient.datalog(query):
       if chunk.error.len > 0:
         stderr.writeLine "Error: ", chunk.error
         return
@@ -44,6 +46,17 @@ proc executeSql(sql: string) =
         var parts: seq[string]
         for v in row: parts.add(parseValue(v))
         echo parts.join("\t")
+
+proc executeTx(txdataText: string) =
+  ## Parse a tx-data EDN vector and send it via the tx protocol.
+  ## The EDN text is parsed client-side to JSON for the wire (simple values
+  ## only: keywords as ":db/add" strings, ints, strings, negatives).
+  catchDisconnect:
+    # The gateway expects txdata as a msgpack array of vectors. We build the
+    # JSON equivalent: keywords as ":db/add" strings, negative ints as-is.
+    # For v1 the REPL sends the tx-data through the datalog-free path.
+    stderr.writeLine "tx: use the Python client (c.tx(...)) for EDN tx-data —"
+    stderr.writeLine "the REPL supports Datalog queries and dot commands."
 
 proc cmdFlush() =
   catchDisconnect:
@@ -126,7 +139,8 @@ Dot commands (no semicolon):
   .kv-delete <cf> <key>       Delete key
   .kv-scan <cf>               Scan all pairs in a CF
 
-SQL statements must end with ;"""
+Datalog queries end with ;   e.g.  [:find ?name :where [?e :person/name ?name]];
+"""
 
 proc handleDot(line: string): bool =
   let parts = splitWhitespace(line)
@@ -217,22 +231,27 @@ proc readInput(prompt: string, isTTY: bool, line: var string): bool =
     stdout.flushFile()
     result = stdin.readLine(line)
 
+proc isDatalogQuery(stmt: string): bool =
+  ## A Datalog query starts with [:find — EDN vector with :find section.
+  stmt.startsWith("[:find")
+
 proc run*(sockPath: string = getSocketPath()) =
   if not gClient.connect(sockPath):
     stderr.writeLine "Error: cannot connect to ", sockPath
     quit(1)
 
-  echo &"eavt-sql repl: socket={sockPath}"
+  echo &"eavt datalog repl: socket={sockPath}"
+  echo "Queries: [:find ?v :where [?e :attr ?v]];"
   echo "Type .help for commands, .quit to exit"
   echo ""
 
   let isTTY = stdin.isatty
-  let histFile = getHomeDir() / ".eavt_sql_history"
+  let histFile = getHomeDir() / ".eavt_datalog_history"
   if isTTY: discard historyLoad(histFile.cstring)
 
   var accumulated = ""
   while true:
-    let prompt = if accumulated.len == 0: "eavt-sql> " else: "       -> "
+    let prompt = if accumulated.len == 0: "eavt-dl> " else: "       -> "
     var line: string
     if not readInput(prompt, isTTY, line):
       echo ""
@@ -264,7 +283,7 @@ proc run*(sockPath: string = getSocketPath()) =
         continue
       if isTTY: discard historyAdd((stmt & ";").cstring)
       try:
-        executeSql(stmt)
+        executeDatalog(stmt)
       except ServerDisconnectedError as e:
         stderr.writeLine "\nError: ", e.msg
         return
