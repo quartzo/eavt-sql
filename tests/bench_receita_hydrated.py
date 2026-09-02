@@ -157,7 +157,7 @@ def load_socios_tx(client, data_dir: Path,
 
 def prog_eid_lookup(cnpj: str) -> str:
     """Datalog query: eid of a empresa by cnpj_base unique value."""
-    return "[:find ?e :where [?e :empresa.cnpj_base ?cnpj]]"
+    return "[:find ?e :in $ ?cnpj :where [?e :empresa.cnpj_base ?cnpj]]"
 
 
 def run_size(client_holder: list, n: int, args, results: dict) -> None:
@@ -196,7 +196,8 @@ def run_size(client_holder: list, n: int, args, results: dict) -> None:
     if not args.skip_simples:
         try:
             t0 = time.perf_counter()
-            pr, _ = L.merge_simples(client, args.data_dir, args.batch)
+            pr, _ = L.merge_simples(client, args.data_dir, args.batch,
+                                    max_rows=simples_rows)
             stage_secs["simples"] = time.perf_counter() - t0
             stage_rows["simples"] = pr
         except FileNotFoundError:
@@ -234,7 +235,7 @@ def run_size(client_holder: list, n: int, args, results: dict) -> None:
     # Pre-resolve eids via Datalog (untimed)
     eids = []
     for c in sample_cnpjs:
-        rows = client.q("[:find ?e :where [?e :empresa.cnpj_base ?cnpj]]", c)
+        rows = client.q("[:find ?e :in $ ?cnpj :where [?e :empresa.cnpj_base ?cnpj]]", c)
         eids.append(rows[0][0] if rows else None)
     paired = [(c, e) for c, e in zip(sample_cnpjs, eids) if e is not None]
     print(f"-- resolved {len(paired)}/{k} sample eids --", flush=True)
@@ -245,33 +246,39 @@ def run_size(client_holder: list, n: int, args, results: dict) -> None:
 
     print("-- probes --", flush=True)
 
+    probes: dict[str, dict] = {}
+
     # eid_lookup: Datalog projection
     def q_eid(cnpj):
-        client.q("[:find ?e :where [?e :empresa.cnpj_base ?cnpj]]", cnpj)
-    probes["eid_lookup"] = timed_probe(
-        "eid_lookup(q)", lambda c: q_eid(c), sc, args.warmup)
+        client.q("[:find ?e :in $ ?cnpj :where [?e :empresa.cnpj_base ?cnpj]]", cnpj)
+    if paired:
+        probes["eid_lookup"] = timed_probe(
+            "eid_lookup(q)", lambda c: q_eid(c), sc, args.warmup)
 
     # attr_by_eid: Datalog with eid param
     def q_attr(eid):
         client.q("[:find ?v :in $ ?e :where [?e :empresa.razao_social ?v]]", eid)
-    probes["attr_by_eid"] = timed_probe(
-        "attr_by_eid(q)", lambda e: client.q(
-            "[:find ?v :in $ ?e :where [?e :empresa.razao_social ?v]]", e),
-        se, args.warmup)
+    if paired:
+        probes["attr_by_eid"] = timed_probe(
+            "attr_by_eid(q)", lambda e: client.q(
+                "[:find ?v :in $ ?e :where [?e :empresa.razao_social ?v]]", e),
+            se, args.warmup)
 
     # attrs_x3: three attrs, one Datalog query
-    probes["attrs_x3"] = timed_probe(
-        "attrs_x3(q)", lambda e: client.q(
-            "[:find ?rs ?cs ?p :in $ ?e :where [?e :empresa.razao_social ?rs] "
-            "[?e :empresa.capital_social ?cs] [?e :empresa.porte ?p]]", e),
-        se, args.warmup)
+    if paired:
+        probes["attrs_x3"] = timed_probe(
+            "attrs_x3(q)", lambda e: client.q(
+                "[:find ?rs ?cs ?p :in $ ?e :where [?e :empresa.razao_social ?rs] "
+                "[?e :empresa.capital_social ?cs] [?e :empresa.porte ?p]]", e),
+            se, args.warmup)
 
     # upsert: tx :db/add on resolved eid
     def upsert_probe(e):
         client.tx([[Kw("db/add"), e, Kw("empresa.capital_social"),
                     1000.0]])
-    probes["upsert"] = timed_probe(
-        "upsert(tx)", lambda e: upsert_probe(e), se, args.warmup)
+    if paired:
+        probes["upsert"] = timed_probe(
+            "upsert(tx)", lambda e: upsert_probe(e), se, args.warmup)
 
     entry = {
         "n_loaded": loaded,

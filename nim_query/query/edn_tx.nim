@@ -133,11 +133,58 @@ proc applySchemaGroup(ops: EngineOps; txdata: seq[SExpr]; seed: SExpr;
 
 # ── Main entry ──────────────────────────────────────────────────────────────
 
+const MaxTxAttrs = 128        ## distinct attr keywords per tx (stack cache)
+
+type
+  AttrE = object
+    h: uint32                 ## FNV-1a of name; 0 = empty slot
+    name: string              ## kwval (one copy per distinct attr)
+    attrId: uint32            ## 0 = unresolved / undeclared
+    unique: bool
+    declared: bool
+
+proc fnv1a(s: string): uint32 =
+  var h = 2166136261'u32
+  for c in s:
+    h = (h xor uint32(c)) * 16777619'u32
+  if h == 0: h = 1
+  h
+
 proc transactEdn*(ops: EngineOps; txdata: seq[SExpr]): TxReport =
   ## Execute one EDN transaction; returns the tx-report (§3.2).
   ## One allocateTx per transaction — every datom shares its t.
+  ##
+  ## Flat interpreter: ONE classification pass produces TxOpInfo records in
+  ## the EngineOps scratch (buffers reused across txs — no steady-state
+  ## allocation); the schema, anchor and apply passes read the flat records
+  ## only.  All resolution happens before the first write issues, so any
+  ## failure aborts the tx with zero datoms applied.
   if txdata.len == 0:
     raise txErr("tx: empty txdata")
+
+  # Per-tx stack cache: distinct attr keywords → name/attrId/unique.
+  # 128 open-addressed slots; overflow (-2) falls back to per-op lookups.
+  var cache: array[MaxTxAttrs, AttrE]
+
+  proc intern(name: string): int32 =
+    ## Slot of `name` in the stack cache; inserts on first sight. -2 = full.
+    let h = fnv1a(name)
+    let start = int(h mod MaxTxAttrs)
+    for k in 0 ..< MaxTxAttrs:
+      let j = (start + k) mod MaxTxAttrs
+      if cache[j].h == 0:
+        cache[j].h = h
+        cache[j].name = name
+        return int32(j)
+      if cache[j].h == h and cache[j].name == name:
+        return int32(j)
+    -2
+
+  # ── 1. Classification pass ─────────────────────────────────────────────────
+  ops.txInfos.setLen(0)
+  var minTid = 0'i64
+  var maxTid = -1'i64
+  var haveTids = false
 
   for op in txdata:
     if op.kind != sList or op.items.len != 4:
@@ -145,129 +192,198 @@ proc transactEdn*(ops: EngineOps; txdata: seq[SExpr]): TxReport =
     if op.items[0].kind != sKeyword:
       raise txErr("tx: op must start with a keyword: " & $op)
 
-  # 1. Allocate the tx entity + txInstant.  Its eid is this tx's t.
+    var info: TxOpInfo
+    info.aRef = op.items[2]
+    info.eRef = op.items[1]
+    info.vRef = op.items[3]
+
+    case op.items[0].kwval
+    of "db/add": info.kind = tokAdd
+    of "db/retract": info.kind = tokRetract
+    else:
+      raise txErr("tx: unknown op keyword: :" & op.items[0].kwval)
+
+    if op.items[2].kind == sKeyword:
+      info.attrSlot = intern(op.items[2].kwval)
+    else:
+      info.attrSlot = -1
+
+    let e = op.items[1]
+    if isTempid(e):
+      info.ekind = teTempid
+      info.eid = e.ival
+      if not haveTids or e.ival < minTid: minTid = e.ival
+      if not haveTids or e.ival > maxTid: maxTid = e.ival
+      haveTids = true
+    elif isDbCurrentTx(e): info.ekind = teCurrentTx
+    elif isLookupRef(e): info.ekind = teLookupRef
+    elif e.kind == sInt and e.ival >= 0:
+      info.ekind = teEid
+      info.eid = e.ival
+    elif e.kind == sKeyword: info.ekind = teKeyword  # schema entity name
+    else: info.ekind = teInvalid
+
+    let v = op.items[3]
+    if isTempid(v): info.vkind = tvTempid
+    elif isLookupRef(v): info.vkind = tvLookupRef
+    else: info.vkind = tvScalar
+
+    if info.kind == tokAdd:
+      info.schema = info.aRef.kind == sKeyword and
+        info.aRef.kwval.isSchemaAttrKw
+
+    ops.txInfos.add(info)
+
+  # ── 2. Allocate the tx entity + txInstant.  Its eid is this tx's t. ───────
   let txEid = ops.allocateTx()
   let t = txEid
 
-  # 2. Schema ops first (same-tx declaration usable by data ops).
-  for op in txdata:
-    if isSchemaAdd(op):
-      ops.applySchemaGroup(txdata, op.items[1], t)
+  # ── 3. Schema ops first (same-tx declaration usable by data ops). ─────────
+  for i in 0 ..< ops.txInfos.len:
+    let info = ops.txInfos[i]
+    if info.kind == tokAdd and info.schema and
+       info.aRef.kwval == "db/ident":
+      ops.applySchemaGroup(txdata, info.eRef, t)
 
-  # 3. Resolve all tempids before any write: upsert anchors (first
+  # Refresh the attr cache: attrs declared above (or in earlier txs) resolve
+  # here — one resolver call per DISTINCT attr, never per op.
+  for j in 0 ..< MaxTxAttrs:
+    if cache[j].h != 0 and not cache[j].declared:
+      let aidOpt = ops.lookupAttr(cache[j].name)
+      if aidOpt.isSome:
+        cache[j].attrId = aidOpt.get
+        cache[j].unique = ops.isUniqueAttr(cache[j].name)
+        cache[j].declared = true
+
+  # ── 4. Resolve all tempids before any write: upsert anchors (first
   #    :db/add of the tempid with a unique attr) look up or allocate;
-  #    bare tempids allocate fresh.  Failure aborts with zero datoms.
+  #    bare tempids allocate fresh.  Failure aborts with zero datoms. ────────
   var resolved = initTable[int64, int64]()
-  for op in txdata:
-    if isSchemaAdd(op): continue
-    let eSlot = op.items[1]
-    if not isTempid(eSlot): continue
-    let tid = eSlot.ival
-    if tid in resolved: continue
-    var anchorAttr = ""
-    var anchorVal = SExpr(kind: sVoid)
-    for later in txdata:
-      if isSchemaAdd(later): continue
-      if later.items[0].kwval == "db/add" and
-         isTempid(later.items[1]) and later.items[1].ival == tid and
-         later.items[2].kind == sKeyword and
-         ops.isUniqueAttr(later.items[2].kwval):
-        anchorAttr = later.items[2].kwval
-        anchorVal = later.items[3]
-        break
-    if anchorAttr.len > 0:
-      let found = ops.lookupEntity(anchorAttr, anchorVal)
-      if found.isSome:
-        resolved[tid] = found.get
+  if haveTids:
+    let span = int(maxTid - minTid + 1)
+    if span > 1_000_000:
+      raise txErr("tx: tempid span too large (max 1000000): " & $span)
+    ops.txAnchorOp.setLen(span)
+    ops.txAnchorEid.setLen(span)
+    for idx in 0 ..< span:
+      ops.txAnchorOp[idx] = 0
+      ops.txAnchorEid[idx] = 0
+
+    # anchor detection: first :db/add of each tempid with a UNIQUE attr
+    for i in 0 ..< ops.txInfos.len:
+      let info = ops.txInfos[i]
+      if info.kind != tokAdd or info.ekind != teTempid: continue
+      var isUnique = false
+      if info.attrSlot >= 0: isUnique = cache[info.attrSlot].unique
+      elif info.attrSlot == -2: isUnique = ops.isUniqueAttr(info.aRef.kwval)
+      if isUnique:
+        let idx = int(info.eid - minTid)
+        if ops.txAnchorOp[idx] == 0: ops.txAnchorOp[idx] = int32(i + 1)
+
+    # resolution in first-occurrence order (deterministic eid allocation)
+    for i in 0 ..< ops.txInfos.len:
+      let info = ops.txInfos[i]
+      if info.ekind != teTempid: continue
+      let tid = info.eid
+      let idx = int(tid - minTid)
+      if ops.txAnchorEid[idx] != 0: continue
+      var eid: int64
+      let aop = ops.txAnchorOp[idx]
+      if aop != 0:
+        let ao = ops.txInfos[aop - 1]
+        let anchorName = if ao.attrSlot >= 0: cache[ao.attrSlot].name
+                         else: ao.aRef.kwval
+        let found = ops.lookupEntity(anchorName, ao.vRef)
+        eid = if found.isSome: found.get
+              else: ops.allocateInPartition(PartUser)
       else:
-        resolved[tid] = ops.allocateInPartition(PartUser)
-    else:
-      resolved[tid] = ops.allocateInPartition(PartUser)
+        eid = ops.allocateInPartition(PartUser)
+      ops.txAnchorEid[idx] = eid
+      resolved[tid] = eid
 
-  # 4. Apply data ops in order (schema group ops already consumed in step 2).
-  for op in txdata:
-    if isSchemaGroupOp(op): continue
-    let kind = op.items[0].kwval
-    case kind
-    of "db/add":
-      let eSlot = op.items[1]
-      let attr = expectKwVal(op.items[2], "attribute")
-      let vSlot = op.items[3]
+  # ── 5. Apply pass: resolve e/v slots in place, then two batchWrites
+  #    (saves, retracts).  No intermediate op seqs. ──────────────────────────
+  for i in 0 ..< ops.txInfos.len:
+    var info = ops.txInfos[i]
+    if info.kind == tokAdd and info.schema: continue
 
-      var eId: int64
-      if isTempid(eSlot):
-        eId = resolved[eSlot.ival]
-      elif isDbCurrentTx(eSlot):
-        eId = txEid
-      elif isLookupRef(eSlot):
-        let attr = expectKwVal(eSlot.items[0], "lookup ref attr")
-        if not ops.isUniqueAttr(attr):
-          raise txErr("tx: lookup ref attr not UNIQUE: " & attr)
-        let found = ops.lookupEntity(attr, eSlot.items[1])
-        if found.isNone:
-          raise txErr("tx: lookup ref [:" & attr & " " & $eSlot.items[1] &
-            "] did not match any entity")
-        eId = found.get
-      elif eSlot.kind == sInt and eSlot.ival >= 0:
-        eId = eSlot.ival
-      else:
-        raise txErr("tx: cannot resolve e slot: " & $eSlot)
-
-      var val = vSlot
-      if isTempid(vSlot):
-        if vSlot.ival notin resolved:
-          raise txErr("tx: tempid " & $vSlot.ival &
-            " referenced in v slot but never allocated")
-        val = newInt(resolved[vSlot.ival])
-      elif isLookupRef(vSlot):
-        let rattr = expectKwVal(vSlot.items[0], "lookup ref attr")
-        if not ops.isUniqueAttr(rattr):
-          raise txErr("tx: lookup ref attr not UNIQUE: " & rattr)
-        let found = ops.lookupEntity(rattr, vSlot.items[1])
-        if found.isNone:
-          raise txErr("tx: lookup ref [:" & rattr & " " & $vSlot.items[1] &
-            "] did not match any entity")
-        val = newInt(found.get)
-
-      # Datomic semantics: :db/add of a datom that is already present is a
-      # no-op — for :db.cardinality/one AND :db.cardinality/many.  Without
-      # this, a re-assert of the same value under cardinality-one produces a
-      # retract+reassert pair at the same t that shadows the datom (breaking
-      # unique lookups), and under many it would duplicate the value in
-      # every index scan.
-      if ops.hasDatom(eId, attr, val):
-        continue
-
-      ops.saveWithT(eId, attr, val, t, 0)
-
-    of "db/retract":
-      let eSlot = op.items[1]
-      if isDbCurrentTx(eSlot):
+    if info.kind == tokRetract:
+      if info.ekind == teCurrentTx:
         raise txErr("tx: :db/retract on :db/current-tx is not allowed (§6)")
-      let attr = expectKwVal(op.items[2], "attribute")
-      let vSlot = op.items[3]
-      if vSlot.kind == sKeyword or isLookupRef(vSlot) or isTempid(vSlot):
+      if info.attrSlot == -1:
+        raise txErr("tx: expected keyword for attribute, got " & $info.aRef)
+      if info.vRef.kind == sKeyword or info.vkind != tvScalar:
         raise txErr("tx: :db/retract requires a concrete scalar value (§4)")
-
-      var eId: int64
-      if isTempid(eSlot):
+      if info.ekind == teTempid:
         raise txErr("tx: :db/retract does not take a tempid (§4)")
-      elif isLookupRef(eSlot):
-        let rattr = expectKwVal(eSlot.items[0], "lookup ref attr")
-        if not ops.isUniqueAttr(rattr):
-          raise txErr("tx: lookup ref attr not UNIQUE: " & rattr)
-        let found = ops.lookupEntity(rattr, eSlot.items[1])
-        if found.isNone:
-          raise txErr("tx: lookup ref [:" & rattr & " " & $eSlot.items[1] &
-            "] did not match any entity")
-        eId = found.get
-      elif eSlot.kind == sInt and eSlot.ival >= 0:
-        eId = eSlot.ival
-      else:
-        raise txErr("tx: cannot resolve e slot: " & $eSlot)
 
-      ops.retract(eId, attr, vSlot, t, 0)
-    else:
-      raise txErr("tx: unknown op keyword: :" & kind)
+    # attr: name + attrId (attrId 0 = undeclared; retract no-ops on it)
+    var attrName: string
+    if info.attrSlot >= 0:
+      attrName = cache[info.attrSlot].name
+      if not cache[info.attrSlot].declared and info.kind == tokAdd:
+        raise newException(EvalError, "save to undeclared attr: " & attrName)
+      ops.txInfos[i].attrId = cache[info.attrSlot].attrId
+    else:  # -2 overflow: per-op slow path; -1 handled above
+      attrName = info.aRef.kwval
+      let aidOpt = ops.lookupAttr(attrName)
+      ops.txInfos[i].attrId = if aidOpt.isSome: aidOpt.get else: 0
+      if aidOpt.isNone and info.kind == tokAdd:
+        raise newException(EvalError, "save to undeclared attr: " & attrName)
+
+    # e slot
+    case info.ekind
+    of teTempid:
+      ops.txInfos[i].eid = ops.txAnchorEid[int(info.eid - minTid)]
+    of teCurrentTx:
+      ops.txInfos[i].eid = txEid
+    of teLookupRef:
+      let lattr = expectKwVal(info.eRef.items[0], "lookup ref attr")
+      if not ops.isUniqueAttr(lattr):
+        raise txErr("tx: lookup ref attr not UNIQUE: " & lattr)
+      let found = ops.lookupEntity(lattr, info.eRef.items[1])
+      if found.isNone:
+        raise txErr("tx: lookup ref [:" & lattr & " " & $info.eRef.items[1] &
+          "] did not match any entity")
+      ops.txInfos[i].eid = found.get
+    of teEid: discard
+    of teKeyword, teInvalid:
+      raise txErr("tx: cannot resolve e slot: " & $info.eRef)
+
+    # v slot
+    case info.vkind
+    of tvTempid:
+      let tid = info.vRef.ival
+      if tid < minTid or tid > maxTid or
+         ops.txAnchorEid[int(tid - minTid)] == 0:
+        raise txErr("tx: tempid " & $tid &
+          " referenced in v slot but never allocated")
+      ops.txInfos[i].vresolved = ops.txAnchorEid[int(tid - minTid)]
+    of tvLookupRef:
+      let rattr = expectKwVal(info.vRef.items[0], "lookup ref attr")
+      if not ops.isUniqueAttr(rattr):
+        raise txErr("tx: lookup ref attr not UNIQUE: " & rattr)
+      let found = ops.lookupEntity(rattr, info.vRef.items[1])
+      if found.isNone:
+        raise txErr("tx: lookup ref [:" & rattr & " " & $info.vRef.items[1] &
+          "] did not match any entity")
+      ops.txInfos[i].vresolved = found.get
+    of tvScalar: discard
+
+    # Datomic semantics: :db/add of a datom that is already present is a
+    # no-op — for :db.cardinality/one AND :db.cardinality/many.  Without
+    # this, a re-assert of the same value under cardinality-one produces a
+    # retract+reassert pair at the same t that shadows the datom (breaking
+    # unique lookups), and under many it would duplicate the value in
+    # every index scan.
+    if info.kind == tokAdd:
+      let val = if info.vkind == tvScalar: info.vRef
+                else: newInt(ops.txInfos[i].vresolved)
+      if ops.hasDatom(ops.txInfos[i].eid, attrName, val):
+        ops.txInfos[i].attrId = 0  # mark no-op: engine skips it
+
+  # 6. Emit one batchWrite for saves and one for retracts.
+  ops.saveBatchEdn(ops.txInfos, t, 0)
+  ops.retractBatch(ops.txInfos, t, 0)
 
   result = TxReport(tempids: resolved, tx: t)

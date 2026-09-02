@@ -65,6 +65,11 @@ proc len*(reg: ScannerRegistry): int = reg.scanners.len
 
 type
   EngineOps* = ref object of RootObj
+    ## Scratch buffers for the EDN tx interpreter — reused across txs so the
+    ## steady-state path performs no per-tx allocation (single event loop).
+    txInfos*: seq[TxOpInfo]     # flat classification, one per op
+    txAnchorOp*: seq[int32]     # tempid → op index (+1) of its unique anchor
+    txAnchorEid*: seq[int64]    # tempid → resolved eid
 
 method openCursor*(ops: EngineOps; cfId: uint32; prefix: seq[byte]): Cursor {.base, gcsafe.} =
   raise newException(EvalError, "not implemented")
@@ -78,6 +83,12 @@ method saveManyWithT*(ops: EngineOps; attr: string;
 
 method retract*(ops: EngineOps; eid: int64; attr: string; val: SExpr;
                  t: int64; asOf: int64) {.base, gcsafe.} = discard
+
+method saveBatchEdn*(ops: EngineOps; infos: seq[TxOpInfo];
+                     t: int64; asOf: int64) {.base, gcsafe.} = discard
+
+method retractBatch*(ops: EngineOps; infos: seq[TxOpInfo];
+                     t: int64; asOf: int64) {.base, gcsafe.} = discard
 
 method lookupAttr*(ops: EngineOps; name: string): Option[uint32] {.base, gcsafe.} =
   none[uint32]()

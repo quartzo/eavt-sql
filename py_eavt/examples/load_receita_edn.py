@@ -18,7 +18,9 @@ Source: /home/fabio/dev/dagster_flows/tests_data/receita_zip
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
+import hashlib
 import io
 import sys
 import time
@@ -117,10 +119,13 @@ SCHEMA_ATTRS = [
     ("estab/telefone2", "string", False, False),
     ("estab/email", "string", False, False),
     # socio
-    ("socio/empresa", "ref", False, False),
+    ("socio/empresa", "ref", False, False),   # on the participacao edge
+    ("socio/pessoa", "ref", False, False),    # edge → pessoa node
     ("socio/tipo_pessoa", "string", False, False),
     ("socio/nome", "string", False, False),
     ("socio/cpf_cnpj", "string", False, False),
+    ("socio/chave", "string", False, True),   # pessoa node key
+    ("socio/chave_rel", "string", False, True),  # participacao edge key
     ("socio/qualificacao", "ref", False, False),
     ("socio/data_entrada", "string", False, False),
     ("socio/pais", "ref", False, False),
@@ -168,6 +173,37 @@ def tx_batch(client, ops: list[list]) -> dict:
         return {}
     return client.tx(ops)
 
+
+class RefTids:
+    """Per-tx tempid allocator with get-or-create anchors for ref targets.
+
+    A ref value in the tx is another entity's eid.  The goc primitive of
+    the tx protocol is the upsert anchor: [:db/add refTid :ns/attr code]
+    maps refTid → the existing entity with that unique value, or allocates
+    a fresh one (missing lookup codes exist in the source data).  Ref
+    writes then use refTid as the v-slot value (tempid chaining)."""
+
+    def __init__(self):
+        self.next = -1
+        self.by_key: dict[tuple[str, str], int] = {}
+
+    def fresh(self) -> int:
+        """A new negative tempid with no anchor (fresh entity)."""
+        tid = self.next
+        self.next -= 1
+        return tid
+
+    def ref(self, ops: list[list], anchor_attr: str, code: str) -> int:
+        """Tempid for the entity identified by (anchor_attr, code)."""
+        key = (anchor_attr, code)
+        tid = self.by_key.get(key)
+        if tid is None:
+            tid = self.fresh()
+            self.by_key[key] = tid
+            ops.append(op_add(tid, anchor_attr, code))
+        return tid
+
+
 # ── Loaders ───────────────────────────────────────────────────────────────────
 
 LOOKUPS = [
@@ -181,27 +217,31 @@ LOOKUPS = [
 
 
 def load_lookups(client, data_dir: Path, batch_size: int):
-    """Load all lookup tables via tx batches with tempid upsert."""
+    """Load all lookup tables via tx batches. One tempid per row — the row's
+    own :codigo op is its upsert anchor (unique attr), so re-runs reuse the
+    existing entity instead of collapsing everything into one."""
     for zip_prefix, prefix, desc_attr in LOOKUPS:
         zpath = find_zip(data_dir, zip_prefix)
         ops: list[list] = []
         total = 0
+        row_in_tx = 0
         t0 = time.perf_counter()
 
         for row in rows_from_zip(zpath):
             if len(row) < 2 or not row[0]:
                 continue
-            # tempid -1 anchored on the unique attr (codigo) — get-or-create
-            ops.append(op_add(-1, f"{prefix}/codigo", row[0]))
+            tid = -(row_in_tx + 1)
+            ops.append(op_add(tid, f"{prefix}/codigo", row[0]))
             if row[1]:
-                ops.append(op_add(-1, f"{prefix}/{desc_attr}", row[1]))
+                ops.append(op_add(tid, f"{prefix}/{desc_attr}", row[1]))
+            total += 1
+            row_in_tx += 1
             if len(ops) >= batch_size * 2:
                 tx_batch(client, ops)
-                total += len(ops) // 2
                 ops = []
+                row_in_tx = 0
         if ops:
             tx_batch(client, ops)
-            total += len(ops) // 2
 
         elapsed = time.perf_counter() - t0
         print(f"  {prefix}: {total:,} entries in {elapsed:.1f}s "
@@ -213,6 +253,8 @@ def load_empresas(client, data_dir: Path, n: int, batch_size: int) -> int:
     zpath = find_zip(data_dir, "Empresas0")
     ops: list[list] = []
     total = 0
+    row_in_tx = 0
+    refs = RefTids()
     t0 = time.perf_counter()
 
     for row in rows_from_zip(zpath):
@@ -221,20 +263,26 @@ def load_empresas(client, data_dir: Path, n: int, batch_size: int) -> int:
         cnpj = row[0]
         if len(cnpj) != 8 or not cnpj.isdigit():
             continue
-        ops.append(op_add(-1, "empresa/cnpj_base", row[0]))
+        tid = refs.fresh()
+        ops.append(op_add(tid, "empresa/cnpj_base", row[0]))
         if row[1]:
-            ops.append(op_add(-1, "empresa/razao_social", row[1]))
+            ops.append(op_add(tid, "empresa/razao_social", row[1]))
         if row[2]:
-            ops.append(op_add(-1, "empresa/natureza_juridica", row[2]))
+            ops.append(op_add(tid, "empresa/natureza_juridica",
+                              refs.ref(ops, "natureza/codigo", row[2])))
         if row[3]:
-            ops.append(op_add(-1, "empresa/qualificacao_resp", row[3]))
+            ops.append(op_add(tid, "empresa/qualificacao_resp",
+                              refs.ref(ops, "qualificacao/codigo", row[3])))
         if row[4]:
-            ops.append(op_add(-1, "empresa/capital_social", float(row[4].replace(",", "."))))
+            ops.append(op_add(tid, "empresa/capital_social", float(row[4].replace(",", "."))))
         if row[5]:
-            ops.append(op_add(-1, "empresa/porte", row[5]))
+            ops.append(op_add(tid, "empresa/porte", row[5]))
         total += 1
+        row_in_tx += 1
         if total % batch_size == 0:
             tx_batch(client, ops)
+            row_in_tx = 0
+            refs = RefTids()
             elapsed = time.perf_counter() - t0
             print(f"    {total:>10,} empresas  {elapsed:7.1f}s  "
                   f"({total / elapsed:,.0f}/s)", flush=True)
@@ -253,10 +301,13 @@ def load_empresas(client, data_dir: Path, n: int, batch_size: int) -> int:
 
 ZERO_DATE = "00000000"
 
-def merge_simples(client, data_dir: Path, batch_size: int = BATCH_SIZE) -> tuple[int, int]:
-    """Simples merge via tx upsert (tempid on empresa/cnpj_base unique anchor)."""
+def merge_simples(client, data_dir: Path, batch_size: int = BATCH_SIZE,
+                  max_rows: int = 0) -> tuple[int, int]:
+    """Simples merge via tx upsert (tempid on empresa/cnpj_base unique anchor).
+    max_rows > 0 stops after that many matched rows (proportional subset)."""
     zpath = find_zip(data_dir, "Simples")
     matched = 0
+    pending = 0
     scanned = 0
     t0 = time.perf_counter()
     ops: list[list] = []
@@ -278,17 +329,22 @@ def merge_simples(client, data_dir: Path, batch_size: int = BATCH_SIZE) -> tuple
         if row[6] and row[6] != ZERO_DATE: sets.append(("empresa/data_exclusao_mei", row[6]))
         if not sets:
             continue
-        # upsert by cnpj_base unique anchor
-        ops.append(op_add(-1, "empresa/cnpj_base", row[0]))
+        # upsert by cnpj_base unique anchor (distinct tempid per row)
+        tid = -(pending + 1)
+        ops.append(op_add(tid, "empresa/cnpj_base", row[0]))
         for attr, val in sets:
-            ops.append(op_add(-1, attr, val))
+            ops.append(op_add(tid, attr, val))
+        pending += 1
         if len(ops) >= batch_size * 2:
             tx_batch(client, ops)
-            matched += len(ops) // (len(sets) + 1)
+            matched += pending
+            pending = 0
             ops = []
+            if max_rows > 0 and matched >= max_rows:
+                break
     if ops:
         tx_batch(client, ops)
-        matched += 1
+        matched += pending
     elapsed = time.perf_counter() - t0
     print(f"  simples: {matched:,} matched (scanned {scanned:,}) in {elapsed:.1f}s "
           f"({matched / max(elapsed, 0.001):,.0f}/s)", flush=True)
@@ -316,25 +372,30 @@ ESTAB_REF_ATTRS = [
 
 
 def _flush_estab_batch(client, batch):
-    """Write estabs via tx :db/add with tempid upsert on cnpj_completo."""
+    """Write estabs via tx :db/add — fresh entity per row (goc anchor on
+    cnpj_completo); empresa + lookup refs via RefTids goc anchors."""
     ops: list[list] = []
+    refs = RefTids()
     for row in batch:
         cnpj_full = row[0] + row[1].zfill(4) + row[2].zfill(2)
-        ops.append(op_add(-1, "estab/cnpj_completo", cnpj_full))
-        ops.append(op_add(-1, "empresa/cnpj_base", row[0]))
+        estab_tid = refs.fresh()
+        ops.append(op_add(estab_tid, "estab/cnpj_completo", cnpj_full))
+        etid = refs.ref(ops, "empresa/cnpj_base", row[0])
+        ops.append(op_add(estab_tid, "estab/empresa", etid))
         for idx, attr in ESTAB_STR_ATTRS:
             if idx == 0: continue  # already added above
             if row[idx]:
-                ops.append(op_add(-1, attr, row[idx]))
+                ops.append(op_add(estab_tid, attr, row[idx]))
         for idx, attr, uattr in ESTAB_REF_ATTRS:
             code = row[idx] if idx != 0 else row[0]
             if code and attr != "estab.empresa":
-                ops.append(op_add(-1, attr, kw(code)))
+                ops.append(op_add(estab_tid, attr, refs.ref(ops, uattr, code)))
         if row[12]:
             for code in row[12].split(","):
                 code = code.strip()
                 if code:
-                    ops.append(op_add(-1, "estab/cnae_secundario", kw(code)))
+                    ops.append(op_add(estab_tid, "estab/cnae_secundario",
+                                      refs.ref(ops, "cnae/codigo", code)))
     tx_batch(client, ops)
 
 
@@ -365,18 +426,51 @@ def load_estabs_bulk(client, data_dir: Path, max_rows: int,
     return saved, scanned
 
 
+def socio_chave(cpf_cnpj: str, nome: str) -> str:
+    """Dedup key for a socio across empresas: the non-masked characters of
+    the CPF/CNPJ plus 6 urlsafe-base64 chars of a hash of the normalized
+    name.  Masked CPFs alone collide (the source masks the middle digits);
+    the name hash disambiguates."""
+    visible = cpf_cnpj.replace("*", "")
+    norm = " ".join(nome.strip().upper().split())
+    digest = hashlib.sha256(norm.encode("utf-8")).digest()
+    tag = base64.urlsafe_b64encode(digest)[:6].decode("ascii")
+    return f"{visible}-{tag}"
+
+
 def _flush_socio_batch(client, batch):
-    """Write socios via tx :db/add with tempid upsert on cnpj_base."""
+    """Write socios via tx as a graph: PESSOA node deduped by socio/chave
+    (masked cpf + name hash) holds person attrs; PARTICIPACAO edge entity
+    per (empresa, pessoa) keyed by socio/chave_rel holds the edge attrs
+    (qualificacao, data_entrada) and the two refs (empresa, pessoa).
+    All identities via goc anchors — re-runs are idempotent and each
+    cargo stays on its own participation."""
     ops: list[list] = []
+    refs = RefTids()
     for row in batch:
-        ops.append(op_add(-1, "socio/empresa", row[0]))
-        if row[1]: ops.append(op_add(-1, "socio/tipo_pessoa", row[1]))
-        if row[2]: ops.append(op_add(-1, "socio/nome", row[2]))
-        if row[3]: ops.append(op_add(-1, "socio/cpf_cnpj", row[3]))
-        if row[4]: ops.append(op_add(-1, "socio/qualificacao", kw(row[4])))
-        if row[5] and row[5] != ZERO_DATE: ops.append(op_add(-1, "socio/data_entrada", row[5]))
-        if row[6]: ops.append(op_add(-1, "socio/pais", kw(row[6])))
-        if row[10]: ops.append(op_add(-1, "socio/faixa_etaria", row[10]))
+        chave = socio_chave(row[3] or "", row[2] or "")
+        # pessoa node (person attrs)
+        pessoa_tid = (refs.fresh() if len(chave) < 4   # no identity info
+                      else refs.ref(ops, "socio/chave", chave))
+        if row[1]: ops.append(op_add(pessoa_tid, "socio/tipo_pessoa", row[1]))
+        if row[2]: ops.append(op_add(pessoa_tid, "socio/nome", row[2]))
+        if row[3]: ops.append(op_add(pessoa_tid, "socio/cpf_cnpj", row[3]))
+        if row[6]:
+            ops.append(op_add(pessoa_tid, "socio/pais",
+                              refs.ref(ops, "pais/codigo", row[6])))
+        if row[10]:
+            ops.append(op_add(pessoa_tid, "socio/faixa_etaria", row[10]))
+        # participacao edge (per empresa+pessoa, with its own attrs)
+        etid = refs.ref(ops, "empresa/cnpj_base", row[0])
+        rel_tid = (refs.fresh() if len(chave) < 4
+                   else refs.ref(ops, "socio/chave_rel", f"{chave}-{row[0]}"))
+        ops.append(op_add(rel_tid, "socio/empresa", etid))
+        ops.append(op_add(rel_tid, "socio/pessoa", pessoa_tid))
+        if row[4]:
+            ops.append(op_add(rel_tid, "socio/qualificacao",
+                              refs.ref(ops, "qualificacao/codigo", row[4])))
+        if row[5] and row[5] != ZERO_DATE:
+            ops.append(op_add(rel_tid, "socio/data_entrada", row[5]))
     tx_batch(client, ops)
 
 

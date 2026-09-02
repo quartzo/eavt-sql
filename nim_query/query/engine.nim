@@ -46,6 +46,9 @@ type
     # SExpr per request, split from "rest (VM/allocs)" in the exec report
     decodeNs*: int64
     decodeCount*: int64
+    # EDN tx scratch (reused across txs — steady-state no allocation)
+    txEntries*: seq[EavtEntry]
+    txDupSeen*: Table[(int64, uint32), bool]
 
 proc newQueryStore*(kv: KVStore): QueryStore =
   let eng = newEavtEngine(kv)
@@ -295,6 +298,94 @@ method retract(q: QueryStore; eid: int64; attr: string; val: SExpr;
   let indexed = q.eavt.resolver.isIndexed(attrId)
   var entries = buildEavtEntries(q.eavt.kv.mt.hnd.arena, eid, attrId, encoded, t, true, mode, indexed)
   q.eavt.batchWrite(entries)
+
+method saveBatchEdn(q: QueryStore; infos: seq[TxOpInfo];
+                    t: int64; asOf: int64) =
+  ## Bulk save for EDN tx ops — flat infos from the interpreter scratch.
+  ## Metadata resolved once per distinct attrId; ONE batchWrite for the tx.
+  ## Correctness guard (mirrors saveManyWithT's `bulk`): a duplicate
+  ## (eid, attrId) card-ONE pair in the batch falls back to the per-datom
+  ## path to preserve read-your-writes between the ops.
+  type Meta = tuple[attrId: uint32, vt: uint32, mode: EncodeMode,
+                    many, indexed: bool]
+  var metaCache: array[64, Meta]
+  var metaN = 0
+  proc metaFor(attrId: uint32): Meta =
+    for i in 0 ..< metaN:
+      if metaCache[i].attrId == attrId: return metaCache[i]
+    let vt = q.eavt.valueTypeFor(attrId).get(scanner.DbTypeString)
+    let m = (attrId, vt, valueTypeToEncodeMode(vt),
+             q.eavt.isMany(attrId), q.eavt.resolver.isIndexed(attrId))
+    if metaN < 64: metaCache[metaN] = m; inc metaN
+    m
+
+  var all: seq[EavtEntry]
+  var n = 0
+  for info in infos:
+    # attrId 0 = interpreter-marked no-op (hasDatom hit) or undeclared attr
+    if info.kind == tokAdd and not info.schema and info.attrId != 0: inc n
+  if n == 0: return
+
+  var bulk = true
+  if n > 1:
+    q.txDupSeen.clear()
+    for info in infos:
+      if info.kind != tokAdd or info.schema or info.attrId == 0: continue
+      if not metaFor(info.attrId).many:   # card-ONE only
+        let key = (info.eid, info.attrId)
+        if key in q.txDupSeen:
+          bulk = false
+          break
+        q.txDupSeen[key] = true
+
+  if not bulk:
+    for info in infos:
+      if info.kind != tokAdd or info.schema or info.attrId == 0: continue
+      let m = metaFor(info.attrId)
+      let val = if info.vkind == tvScalar: info.vRef
+                else: newInt(info.vresolved)
+      q.saveResolved(info.eid, m.attrId, m.vt, m.many, m.indexed,
+                     m.mode, val, t)
+    return
+
+  q.txEntries.setLen(0)
+  for info in infos:
+    if info.kind != tokAdd or info.schema or info.attrId == 0: continue
+    let m = metaFor(info.attrId)
+    let val = if info.vkind == tvScalar: info.vRef
+              else: newInt(info.vresolved)
+    q.saveResolvedInto(info.eid, m.attrId, m.vt, m.many, m.indexed,
+                       m.mode, val, t, q.txEntries)
+  q.eavt.batchWrite(q.txEntries)
+
+method retractBatch(q: QueryStore; infos: seq[TxOpInfo];
+                    t: int64; asOf: int64) =
+  ## Batch retract for EDN tx ops — ONE batchWrite for all retractions.
+  type Meta = tuple[attrId: uint32, vt: uint32, mode: EncodeMode,
+                    indexed: bool]
+  var metaCache: array[64, Meta]
+  var metaN = 0
+  proc metaFor(attrId: uint32): Meta =
+    for i in 0 ..< metaN:
+      if metaCache[i].attrId == attrId: return metaCache[i]
+    let vt = q.eavt.valueTypeFor(attrId).get(scanner.DbTypeString)
+    let m = (attrId, vt, valueTypeToEncodeMode(vt),
+             q.eavt.resolver.isIndexed(attrId))
+    if metaN < 64: metaCache[metaN] = m; inc metaN
+    m
+
+  q.txEntries.setLen(0)
+  for info in infos:
+    # attrId 0 = undeclared attr → no-op (matches per-datom retract)
+    if info.kind != tokRetract or info.attrId == 0: continue
+    let m = metaFor(info.attrId)
+    let encoded = encodeSaveValue(info.vRef, m.vt, m.mode, info.eid)
+    let entries = buildEavtEntries(q.eavt.kv.mt.hnd.arena, info.eid,
+                                   m.attrId, encoded, t, true, m.mode,
+                                   m.indexed)
+    for e in entries: q.txEntries.add(e)
+  if q.txEntries.len > 0:
+    q.eavt.batchWrite(q.txEntries)
 
 method lookupAttr(q: QueryStore; name: string): Option[uint32] =
   q.eavt.lookupAttr(name)

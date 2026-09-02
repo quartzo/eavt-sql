@@ -205,3 +205,28 @@ proc opsToIntervals*(ops: seq[(int32, SExpr)]):
     intervals = newIntervals
 
   mergeIntervals(intervals)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Flat tx-op classification (edn_tx) — one record per op, no per-op allocation.
+# The SExpr refs point into the wire-parse result; nothing here copies strings.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+type
+  TxOpKind* = enum tokAdd, tokRetract
+  TxESlotKind* = enum
+    teTempid, teEid, teLookupRef, teCurrentTx, teKeyword, teInvalid
+  TxVSlotKind* = enum tvScalar, tvTempid, tvLookupRef
+  TxOpInfo* = object
+    kind*: TxOpKind
+    ekind*: TxESlotKind
+    vkind*: TxVSlotKind
+    schema*: bool        # :db/add carrying a db/* schema attribute
+    attrSlot*: int32     # index into the tx attr stack-cache; -1 malformed,
+                         # -2 overflow (slow path)
+    attrId*: uint32      # resolved attr id; 0 = undeclared / no-op marker
+    eid*: int64          # e-slot: tempid (<0) at classification, resolved eid
+                         # (>=0) after resolution; positive eid for teEid
+    vresolved*: int64    # v-slot tempid/lookup-ref → resolved eid (0 = n/a)
+    aRef*: SExpr         # original attr slot
+    eRef*: SExpr         # original e-slot
+    vRef*: SExpr         # original v-slot
