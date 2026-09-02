@@ -1,5 +1,5 @@
 import std/[math, tables, sets, sequtils, algorithm, options, strutils, json]
-import datalog_ast, pattern, planner_ast, ast as sql_ast
+import datalog_ast, pattern, planner_ast
 
 proc fromBoundValue*(bv: BoundValue): PlanValue =
   case bv.kind
@@ -9,7 +9,6 @@ proc fromBoundValue*(bv: BoundValue): PlanValue =
   of bvResolvedAttr: PlanValue(kind: pvValue, pvInt: bv.raId.int64)
   of bvParam: PlanValue(kind: pvParam, pvParamIdx: bv.paramIdx)
   of bvBool: PlanValue(kind: pvValue, pvInt: if bv.bval: 1 else: 0)
-  of bvExpr: PlanValue(kind: pvExpr, exprValue: bv.exprValue)
   else: nil
 
 proc convertRangeBounds*(bounds: Table[string, seq[seq[(string, BoundValue)]]]): RangeBoundsMap =
@@ -295,7 +294,6 @@ proc buildIterPlan(
         of bvResolvedAttr: SpecKind(kind: skBoundAttr, attrId: s.constVal.raId)
         of bvParam: SpecKind(kind: skBoundParam, paramIdx: s.constVal.paramIdx)
         of bvVar: SpecKind(kind: skVar, varName: s.constVal.varName)
-        of bvExpr: SpecKind(kind: skBoundExpr, bvExprRepr: $toJson(s.constVal.exprValue))
         else: SpecKind(kind: skBound, boundVal: 0)
 
   var varDepths: seq[(int, string)]
@@ -554,14 +552,12 @@ proc buildQueryPlan*(
       of bvInt: boundInts["e"] = PlanValue(kind: pvValue, pvInt: pattern.e.constVal.ival)
       of bvStr, bvAttr: boundInts["e"] = PlanValue(kind: pvValue, pvStr: if pattern.e.constVal.kind == bvStr: pattern.e.constVal.sval else: pattern.e.constVal.attrName)
       of bvParam: boundInts["e"] = PlanValue(kind: pvParam, pvParamIdx: pattern.e.constVal.paramIdx)
-      of bvExpr: boundInts["e"] = PlanValue(kind: pvExpr, exprValue: pattern.e.constVal.exprValue)
       else: discard
     if pattern.a.kind == dsConst:
       case pattern.a.constVal.kind
       of bvResolvedAttr: boundInts["a"] = PlanValue(kind: pvValue, pvStr: pattern.a.constVal.raName)
       of bvStr, bvAttr: boundInts["a"] = PlanValue(kind: pvValue, pvStr: if pattern.a.constVal.kind == bvStr: pattern.a.constVal.sval else: pattern.a.constVal.attrName)
       of bvParam: boundInts["a"] = PlanValue(kind: pvParam, pvParamIdx: pattern.a.constVal.paramIdx)
-      of bvExpr: boundInts["a"] = PlanValue(kind: pvExpr, exprValue: pattern.a.constVal.exprValue)
       else: discard
     if pattern.v.kind == dsConst:
       case pattern.v.constVal.kind
@@ -569,7 +565,6 @@ proc buildQueryPlan*(
       of bvFloat: boundInts["v"] = PlanValue(kind: pvValue, pvFloat: pattern.v.constVal.fval)
       of bvStr, bvAttr: boundInts["v"] = PlanValue(kind: pvValue, pvStr: if pattern.v.constVal.kind == bvStr: pattern.v.constVal.sval else: pattern.v.constVal.attrName)
       of bvParam: boundInts["v"] = PlanValue(kind: pvParam, pvParamIdx: pattern.v.constVal.paramIdx)
-      of bvExpr: boundInts["v"] = PlanValue(kind: pvExpr, exprValue: pattern.v.constVal.exprValue)
       else: discard
 
     iterPlans.add(buildIterPlan(pattern, patIdx, idxName, boundInts, orderedVars, syntheticVars))

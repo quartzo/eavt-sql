@@ -40,8 +40,6 @@ proc renderExplain*(compiled: CompileResult): string =
             result.add("    " & pos & " = " & $spec.bvInt & varLabel & "\n")
         of skBoundParam:
           result.add("    " & pos & " = %" & $spec.paramIdx & varLabel & "\n")
-        of skBoundExpr:
-          result.add("    " & pos & " = expr(" & spec.bvExprRepr & ")" & varLabel & "\n")
     result.add("\n")
   for t in compiled.traces:
     result.add($t & "\n")

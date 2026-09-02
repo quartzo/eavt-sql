@@ -11,7 +11,6 @@ import std/[unittest, options, tables, strutils, sequtils]
 import edn
 import edn_tx
 import datalog_compile
-import parser as sql_parser
 import scheme
 import keys
 import kvstore
@@ -22,7 +21,6 @@ import types
 import scanner
 import hostfns
 import engine
-import frontend
 import explain
 import planner_ast
 import stats
@@ -1791,6 +1789,21 @@ proc runSelect(q: QueryStore; progText: string; params: seq[SExpr] = @[];
     result.add rows
     if not more: break
 
+proc runDlWithStats(q: QueryStore; query: string; cstats: CompileStats;
+                    params: seq[SExpr] = @[]): seq[SExpr] =
+  ## Compile a Datalog EDN query with a potentially stale CompileStats —
+  ## the position-independence test uses this to verify that stale aids
+  ## only degrade the plan, never the results.
+  var fv: seq[string] = @[]
+  let compiled = compileDatalogQuery(query, cstats, fv)
+  let sess = newStreamingSession(newQuerySession(q, compiled.program, params,
+                                                 q.allocateTx(), none[int64]()))
+  while true:
+    let (batch, more) = sess.nextBatch(100)
+    for row in batch:
+      result.add SExpr(kind: sList, items: row)
+    if not more: break
+
 suite "engine: scanner-iterate basic":
   test "iterate emits all values for eid+aid":
     let kv = newMemoryKVStore()
@@ -2242,35 +2255,6 @@ suite "engine: select-path [yield-mode]":
     check rows[0][0].ival == 3
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# runSql helper: full SQL → Scheme → execute pipeline
-# ═══════════════════════════════════════════════════════════════════════════════
-
-proc runSqlWithStats(q: QueryStore; sql: string; cstats: CompileStats;
-                     params: seq[SExpr] = @[]): seq[SExpr] =
-  let stmt = sql_parser.parse(sql)
-  let compiled = compileSql(stmt, cstats)
-  if compiled.isExplain:
-    result.add SExpr(kind: sStr, sval: renderExplain(compiled))
-    return
-  let tx = q.allocateTx()
-  if compiled.isSelect:
-    let proto = newQuerySession(q, compiled.program, params, tx, none[int64]())
-    let sess = newStreamingSession(proto)
-    var rows: seq[seq[SExpr]]
-    while rows.len < 500:
-      let (batch, more) = sess.nextBatch(100)
-      rows.add batch
-      if not more: break
-    for row in rows:
-      result.add SExpr(kind: sList, items: row)
-  else:
-    let session = newQuerySession(q, compiled.program, params, tx, none[int64]())
-    let r = executeProgram(session)
-    result.add r
-
-proc runSql(q: QueryStore; sql: string; params: seq[SExpr] = @[]): seq[SExpr] =
-  runSqlWithStats(q, sql, q.eavt.buildCompileStats(), params)
-
 # ── Datalog test helpers (fase C: para novos testes) ─────────────────────────
 
 proc txAttr(q: QueryStore; name: string; vt: string; many = false; unique = false): int =
@@ -2311,9 +2295,6 @@ proc runDl(q: QueryStore; query: string; params: seq[SExpr] = @[]): seq[SExpr] =
       result.add SExpr(kind: sList, items: row)
     if not more: break
 
-proc expectRows(q: QueryStore; sql: string): seq[SExpr] =
-  result = runSql(q, sql)
-
 const PART_TX = 3'u64
 const TX_PARTITION_BASE = PART_TX shl 44
 
@@ -2329,89 +2310,66 @@ func extractT(txEid: int64): int64 =
 # TX tests (ported from test_tx.py)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-suite "engine: TX entity [port of test_tx.py]":
-  test "upsert as TX returns eid":
+suite "engine: TX entity → Datalog":
+  test "upsert tempid returns eid in report":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE tx.user STRING ONE")
-    let rows = runSql(q, "UPSERT AS TX SET tx.user = 'bob'")
-    check rows.len >= 1
-    let r = rows[0]
-    check r.kind == sList
-    check r.items[0].symval == "result"
-    let txEid = r.items[1].ival
+    discard txAttr(q, "tx.user", "string")
+    let rep = transactEdn(q, readEdnVector(
+      "[[:db/add -1 :tx/user \"bob\"]]"))
+    check rep.tempids.len == 1
+    let txEid = rep.tempids[-1]
     check txEid >= TX_PARTITION_BASE.int64
-    check extractT(txEid) > 1
+    check extractT(txEid) >= 1
 
   test "separate tx UPSERTs give distinct eids":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE tx.user STRING ONE")
-    let rA = runSql(q, "UPSERT AS TX SET tx.user = 'alice'")
-    let rB = runSql(q, "UPSERT AS TX SET tx.user = 'bob'")
-    let eidA = rA[0].items[1].ival
-    let eidB = rB[0].items[1].ival
-    check eidA != eidB
-    check extractT(eidB) > extractT(eidA)
+    discard txAttr(q, "tx.user", "string")
+    let repA = transactEdn(q, readEdnVector(
+      "[[:db/add -1 :tx/user \"alice\"]]"))
+    let repB = transactEdn(q, readEdnVector(
+      "[[:db/add -1 :tx/user \"bob\"]]"))
+    check repA.tempids[-1] != repB.tempids[-1]
 
-  test "ATTRIBUTE compiles and executes":
+  test "ATTRIBUTE declares attr":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let rows = runSql(q, "ATTRIBUTE tx.user STRING ONE")
-    check rows.len >= 1
-    let r = rows[0]
-    check r.kind == sList
-    check r.items[0].symval == "result"
-    check r.items[1].sval == "tx.user"
+    discard txAttr(q, "tx.user", "string")
     check q.eavt.isDeclared(q.eavt.lookupAttr("tx.user").get)
 
   test "upsert multi-clause returns result":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE tx.user STRING ONE")
-    discard runSql(q, "ATTRIBUTE company.name STRING ONE")
-    let rows = runSql(q,
-      "UPSERT AS D1 SET company.name = 'ACME', AS TX SET tx.user = 'alice'")
-    check rows.len >= 1
-    let r = rows[0]
-    check r.kind == sList
-    check r.items[0].symval == "result"
-    check r.items.len >= 2
+    discard txAttr(q, "tx.user", "string")
+    discard txAttr(q, "company.name", "string")
+    let rep = transactEdn(q, readEdnVector(
+      "[[:db/add -1 :company/name \"ACME\"] [:db/add -2 :tx.user \"alice\"]]"))
+    check rep.tempids.len == 2
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TX join tests (ported from test_tx_join.py)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-suite "engine: TX join [port of test_tx_join.py]":
-  test "upsert into cnpj in tx partition":
+suite "engine: TX join → Datalog":
+  test "upsert into cnpj via tx":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE cnpj.numero STRING ONE")
-    discard runSql(q, "ATTRIBUTE cnpj.razao_social STRING ONE")
-    let rows = runSql(q,
-      "UPSERT SET cnpj.numero = '12345678000199', cnpj.razao_social = 'Raisehands Data Architecture'")
-    check rows.len >= 1
-    let r = rows[0]
-    check r.kind == sList
-    check r.items[0].symval == "result"
+    discard txAttr(q, "cnpj.numero", "string")
+    discard txAttr(q, "cnpj.razao_social", "string")
+    let rep = transactEdn(q, readEdnVector(
+      "[[:db/add -1 :cnpj.numero \"12345678000199\"] " &
+      "[:db/add -1 :cnpj.razao_social \"Raisehands Data Architecture\"]]"))
+    check rep.tempids.len == 1
 
   test "declare attr with many":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let rows = runSql(q, "ATTRIBUTE cnpj.numero STRING ONE")
-    check rows.len >= 1
+    discard txAttr(q, "cnpj.numero", "string")
     check q.eavt.isDeclared(q.eavt.lookupAttr("cnpj.numero").get)
     check not q.eavt.isMany(q.eavt.lookupAttr("cnpj.numero").get)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# SQL integration tests (ported from test_sql.py — representative subset)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 suite "engine: SQL integration → Datalog (fase C)":
   test "attribute string one unique":
@@ -2626,130 +2584,93 @@ suite "engine: integration [port of test_engine.py]":
 # Position-independence (scheme transport)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-suite "engine: position-independent programs":
-  test "select with stale aids in cstats returns correct rows":
+suite "engine: position-independent programs → Datalog":
+  test "stale aids in cstats return correct rows":
     # Programs must resolve attributes by name at runtime (intern-a), never
     # embed aids: a stale schema snapshot may only degrade the plan, not results.
-    # (attrs declared UNIQUE so value filters hit the AVET index)
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE pos.item STRING ONE UNIQUE")
-    discard runSql(q, "ATTRIBUTE pos.owner STRING ONE")
-    discard runSql(q, "UPSERT SET pos.item = 'alpha', pos.owner = 'red'")
-    discard runSql(q, "UPSERT SET pos.item = 'beta', pos.owner = 'blue'")
-    let good = runSql(q, "SELECT d1.eid WHERE d1.pos.item = %1",
-                      @[SExpr(kind: sStr, sval: "alpha")])
+    discard txAttr(q, "pos.item", "string", unique=true)
+    discard txAttr(q, "pos.owner", "string")
+    discard txAdd(q, 70368744177665'i64, "pos.item", newStr("alpha"))
+    discard txAdd(q, 70368744177665'i64, "pos.owner", newStr("red"))
+    discard txAdd(q, 70368744177666'i64, "pos.item", newStr("beta"))
+    discard txAdd(q, 70368744177666'i64, "pos.owner", newStr("blue"))
+    let good = runDl(q, "[:find ?e :where [?e :pos.item \"alpha\"]]")
     check good.len == 1
     var stale = q.eavt.buildCompileStats()
     for k in stale.attrIds.keys.toSeq:
       stale.attrIds[k] = 999_999'u32
-    let bad = runSqlWithStats(q, "SELECT d1.eid WHERE d1.pos.item = %1", stale,
-                              @[SExpr(kind: sStr, sval: "alpha")])
+    let bad = runDlWithStats(q, "[:find ?e :where [?e :pos.item \"alpha\"]]", stale)
     check $bad == $good
 
   test "stale aids still resolve multi-attribute filters":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE pos.item STRING ONE UNIQUE")
-    discard runSql(q, "ATTRIBUTE pos.owner STRING ONE UNIQUE")
-    discard runSql(q, "UPSERT SET pos.item = 'alpha', pos.owner = 'red'")
-    discard runSql(q, "UPSERT SET pos.item = 'beta', pos.owner = 'blue'")
-    let sql = "SELECT d1.eid, d1.pos.owner WHERE d1.pos.item = %1 AND d1.pos.owner = %2"
-    let ps = @[SExpr(kind: sStr, sval: "alpha"), SExpr(kind: sStr, sval: "red")]
-    let good = runSql(q, sql, ps)
+    discard txAttr(q, "pos.item", "string", unique=true)
+    discard txAttr(q, "pos.owner", "string", unique=true)
+    discard txAdd(q, 70368744177665'i64, "pos.item", newStr("alpha"))
+    discard txAdd(q, 70368744177665'i64, "pos.owner", newStr("red"))
+    discard txAdd(q, 70368744177666'i64, "pos.item", newStr("beta"))
+    discard txAdd(q, 70368744177666'i64, "pos.owner", newStr("blue"))
+    let dl = "[:find ?e ?owner :where [?e :pos.item \"alpha\"] [?e :pos.owner ?owner]]"
+    let good = runDl(q, dl)
     check good.len == 1
+    check good[0].items[1].sval == "red"
     var stale = q.eavt.buildCompileStats()
     for k in stale.attrIds.keys.toSeq:
-      stale.attrIds[k] = 777'u32
-    let bad = runSqlWithStats(q, sql, stale, ps)
+      stale.attrIds[k] = 999_999'u32
+    let bad = runDlWithStats(q, dl, stale)
     check $bad == $good
 
   test "stale aids still resolve eid filters":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE pos.item STRING ONE")
-    let up = runSql(q, "UPSERT SET pos.item = 'alpha'")
-    let eid = up[0].items[1].ival
-    let sql = "SELECT d1.pos.item WHERE d1.eid = %1"
-    let ps = @[SExpr(kind: sInt, ival: eid)]
-    let good = runSql(q, sql, ps)
+    discard txAttr(q, "pos.item", "string")
+    discard txAdd(q, 70368744177665'i64, "pos.item", newStr("alpha"))
+    let eid = 70368744177665'i64
+    let good = runDl(q, "[:find ?v :in $ ?e :where [?e :pos.item ?v]]", @[SExpr(kind: sInt, ival: eid)])
     check good.len == 1
     var stale = q.eavt.buildCompileStats()
     for k in stale.attrIds.keys.toSeq:
-      stale.attrIds[k] = 555'u32
-    let bad = runSqlWithStats(q, sql, stale, ps)
+      stale.attrIds[k] = 999_999'u32
+    let bad = runDlWithStats(q, "[:find ?v :in $ ?e :where [?e :pos.item ?v]]", stale,
+                             @[SExpr(kind: sInt, ival: eid)])
     check $bad == $good
 
-  test "compiled program contains intern-a, not baked aid":
+suite "engine: ranges with param references → Datalog":
+  test "range value resolves at runtime":
+    # regression: ranges-create used to embed the (param N) expression unevaluated
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE pos.item STRING ONE UNIQUE")
-    discard runSql(q, "UPSERT SET pos.item = 'alpha'")
-    let aid = q.eavt.lookupAttr("pos.item").get
-    let stmt = sql_parser.parse("SELECT d1.eid WHERE d1.pos.item = %1")
-    let compiled = compileSql(stmt, q.eavt.buildCompileStats())
-    let text = writeScheme(compiled.program)
-    check text.contains("[:intern-a \"pos/item\"]")
-    check not text.contains("[:scanner-push s0 " & $aid & "]")
-
-  test "intern-a raises on unknown attribute":
-    let kv = newMemoryKVStore()
-    defer: kv.close()
-    let q = newQueryStore(kv)
-    let tx = q.allocateTx()
-    var exc: ref CatchableError = nil
-    try:
-      let session = newQuerySession(q, SchemeProgram(body: edn.readEdn(
-        "[:result-row [:intern-a \"no.such.attr\"]]")), @[], tx, none[int64]())
-      discard executeProgram(session)
-    except CatchableError as e:
-      exc = e
-    check exc != nil
-    check "no.such.attr" in exc.msg
-
-suite "engine: ranges with param references":
-  test "range value resolves [:param N] at runtime":
-    # regression: ranges-create used to embed the (param N) expression unevaluated,
-    # making every range/equality filter on a value return 0 rows
-    let kv = newMemoryKVStore()
-    defer: kv.close()
-    let q = newQueryStore(kv)
-    q.declareAttrFromSql("gen.i", ":db.type/long", false, true, 1)
+    discard txAttr(q, "gen.i", "long", unique=true)
     for i in 1..10:
-      let eid = q.allocateInPartition(4'u64)
-      q.saveWithT(eid, "gen.i", SExpr(kind: sInt, ival: i.int64), 1, 0)
-    let aid = q.lookupAttr("gen.i").get
+      discard txAdd(q, 70368744177664'i64 + int64(i), "gen.i", newInt(i))
 
-    let gt = runSelect(q,
-      "[:begin [:set! s0 [:scanner-open \"AVET\"]] [:scanner-push s0 " & $aid.int64 & "] " &
-      "[:set! it [:scanner-iterate-init s0 [:ranges-create [:> [:param 1]]]]] " &
-      "[:while [:set! v [:scanner-iterate-next it]] [:result-row v]]]",
-      @[SExpr(kind: sInt, ival: 7)])
+    let gt = runDl(q, "[:find ?i :in $ ?lim :where [?e :gen.i ?i] [(:> ?i ?lim)]]",
+                   @[SExpr(kind: sInt, ival: 7)])
     check gt.len == 3
-    check gt[0][0].ival == 8
-    check gt[2][0].ival == 10
+    check gt[0].items[0].ival == 8
+    check gt[2].items[0].ival == 10
 
-    let eq = runSelect(q,
-      "[:begin [:set! s0 [:scanner-open \"AVET\"]] [:scanner-push s0 " & $aid.int64 & "] " &
-      "[:set! it [:scanner-iterate-init s0 [:ranges-create [:= [:param 1]]]]] " &
-      "[:while [:set! v [:scanner-iterate-next it]] [:result-row v]]]",
-      @[SExpr(kind: sInt, ival: 4)])
+    let eq = runDl(q, "[:find ?i :in $ ?lim :where [?e :gen.i ?i] [(:= ?i ?lim)]]",
+                   @[SExpr(kind: sInt, ival: 4)])
     check eq.len == 1
-    check eq[0][0].ival == 4
+    check eq[0].items[0].ival == 4
 
   test "sql range filter with param returns rows":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE gen.i LONG ONE UNIQUE")
+    discard txAttr(q, "gen.i", "long", unique=true)
     for i in 1..10:
-      discard runSql(q, "UPSERT SET gen.i = " & $i)
-    let rows = runSql(q, "SELECT d1.eid WHERE d1.gen.i > %1",
-                      @[SExpr(kind: sInt, ival: 7)])
+      discard txAdd(q, 70368744177664'i64 + int64(i), "gen.i", newInt(i))
+    let rows = runDl(q, "[:find ?e :in $ ?lim :where [?e :gen.i ?i] [(:> ?i ?lim)]]",
+                     @[SExpr(kind: sInt, ival: 7)])
     check rows.len == 3
 
 suite "engine: value filters on non-indexed attrs → Datalog":

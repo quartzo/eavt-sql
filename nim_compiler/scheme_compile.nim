@@ -1,117 +1,9 @@
 import std/[tables, sets, strutils, sequtils, options]
-import ast as sql_ast
 import datalog_ast, pattern, planner_ast, planner
 import scheme
 
 template list*(items: varargs[SExpr]): SExpr =
   newList(@items)
-
-proc compileLiteral*(lit: sql_ast.Literal): SExpr =
-  case lit.lkind
-  of litInt: newInt(lit.ival)
-  of litFloat: newFloat(lit.fval)
-  of litStr: newStr(lit.sval)
-  of litBool: newBool(lit.bval)
-  of litBytes: raise newException(ValueError, "BYTES values not supported in UPSERT")
-
-proc compileValue*(value: sql_ast.Value): SExpr =
-  case value.vkind
-  of valLiteral: compileLiteral(value.vlit)
-  of valParam: list(newKeyword("param"), newInt(value.vparam.int64))
-  of valAliasRef: newSymbol(value.vref)
-  of valEidLookup:
-    list(newKeyword("lookup-entity"), compileValue(value.eidAttr), compileValue(value.eidValue))
-  of valValLookup:
-    let entity = compileValue(value.valEntity)
-    list(newKeyword("lookup-value"), entity, compileValue(value.valAttr))
-  of valBinOp:
-    list(newKeyword(value.binOp), compileValue(value.binLeft), compileValue(value.binRight))
-  of valUnaryOp:
-    # unary "-": emit (- 0 operand) so the VM's binary "-" handles it.
-    list(newKeyword(value.unOp), newInt(0), compileValue(value.unOperand))
-
-proc compileEntityRef(eref: sql_ast.UpsertEntityRef): SExpr =
-  case eref.erefKind
-  of ueNew: list(newKeyword("alloc-entity"), newInt(4))
-  of ueTx: list(newKeyword("tx-entity"))
-  of ueExplicitEid: list(newKeyword("param"), newInt(eref.eidParam.int64))
-  of ueLookup:
-    list(newKeyword("lookup-entity"), compileValue(eref.lookupAttr), compileValue(eref.lookupValue))
-
-proc compileUpsertScheme*(stmt: sql_ast.UpsertStmt): SchemeProgram =
-  var totalValues = 0
-  for clause in stmt.clauses:
-    totalValues += clause.values.len
-
-  var bindings: seq[SExpr]
-  var whenClauses: seq[SExpr]
-  var firstAlias: string
-  var nullableAliases: seq[string]
-
-  for clauseIdx, clause in stmt.clauses:
-    let alias = clause.alias.get(otherwise = "_auto_" & $clauseIdx)
-    if firstAlias == "":
-      firstAlias = alias
-    if clause.entityRef.erefKind == ueLookup:
-      nullableAliases.add(alias)
-
-    bindings.add(list(newSymbol(alias), compileEntityRef(clause.entityRef)))
-
-    var saves: seq[SExpr]
-    for iv in clause.values:
-      let valueExpr = compileValue(iv.value)
-      saves.add(list(newKeyword("save"), newSymbol(alias), newStr(iv.attr), valueExpr))
-
-    let body = if saves.len == 1: saves[0]
-               else: list(@[newKeyword("begin")] & saves)
-
-    whenClauses.add(list(newKeyword("when"), newSymbol(alias), body))
-
-  var resultExpr = list(newKeyword("result"), newSymbol(firstAlias), newInt(totalValues.int64))
-
-  if nullableAliases.len > 0:
-    for i in countdown(nullableAliases.len-1, 0):
-      resultExpr = list(newKeyword("when"), newSymbol(nullableAliases[i]), resultExpr)
-
-  whenClauses.add(resultExpr)
-
-  # Convert let* to begin + set!
-  var upsertBody: seq[SExpr] = @[newKeyword("begin")]
-  for b in bindings:
-    if b.kind == sList and b.items.len >= 2:
-      upsertBody.add(list(newKeyword("set!"), b.items[0], b.items[1]))
-  upsertBody.add(whenClauses)
-  let body = list(upsertBody)
-  SchemeProgram(body: body)
-
-proc compileAttributeScheme*(stmt: sql_ast.AttributeStmt): SchemeProgram =
-  let attr = newStr(stmt.attr)
-  let vt = newStr(stmt.valueType)
-  let body = list(
-    newKeyword("begin"),
-    list(newKeyword("declare-attr"), attr, vt, newBool(stmt.many), newBool(stmt.unique)),
-    list(newKeyword("result"), attr, vt),
-  )
-  SchemeProgram(body: body)
-
-proc compilePartitionScheme*(stmt: sql_ast.PartitionStmt): SchemeProgram =
-  let body = list(
-    newKeyword("begin"),
-    list(newKeyword("set!"), newSymbol("?pid"),
-      list(newKeyword("declare-partition"), newStr(stmt.name))),
-    list(newKeyword("result"), newSymbol("?pid")),
-  )
-  SchemeProgram(body: body)
-
-proc compileDeleteDirectScheme*(entityVal: int64, retractPairs: seq[(string, int64)]): SchemeProgram =
-  let eid = newInt(entityVal)
-  var stmts: seq[SExpr]
-  for (attr, val) in retractPairs:
-    stmts.add(list(newKeyword("retract"), eid, newStr(attr), newInt(val)))
-  stmts.add(list(newKeyword("result"), eid))
-  let body = if stmts.len == 1: stmts[0]
-             else: list(@[newKeyword("begin")] & stmts)
-  SchemeProgram(body: body)
 
 proc planValueToSexpr(pv: PlanValue): SExpr =
   case pv.kind
@@ -120,7 +12,6 @@ proc planValueToSexpr(pv: PlanValue): SExpr =
     elif pv.pvFloat != 0: newFloat(pv.pvFloat)
     else: newInt(pv.pvInt)
   of pvParam: list(newKeyword("param"), newInt(pv.pvParamIdx.int64))
-  of pvExpr: compileValue(pv.exprValue)
 
 proc boundToSexpr(bv: BoundValue): SExpr =
   case bv.kind
@@ -131,7 +22,6 @@ proc boundToSexpr(bv: BoundValue): SExpr =
   of bvParam: list(newKeyword("param"), newInt(bv.paramIdx.int64))
   of bvVar: newSymbol("?" & bv.varName)
   of bvBool: newBool(bv.bval)
-  of bvExpr: compileValue(bv.exprValue)
   else: newSymbol("_")
 
 proc buildRangeTree(branches: seq[seq[(string, PlanValue)]]): SExpr =
@@ -146,8 +36,6 @@ proc buildRangeTree(branches: seq[seq[(string, PlanValue)]]): SExpr =
     if inVals.len == 1:
       otherConds.add(list(newKeyword("="), inVals[0]))
     elif inVals.len > 1:
-      # IN (a, b, c) is the disjunction (= a) OR (= b) OR (= c) — emitting a
-      # single (= a b c) would drop all but the first value.
       var eqs: seq[SExpr] = @[newKeyword("or")]
       for v in inVals:
         eqs.add(list(newKeyword("="), v))
@@ -206,7 +94,6 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
   for d, name in orderedVars:
     depthVarPairs.add((d, varIdMap[name]))
 
-  # Build scanner bindings
   var scannerBindings: seq[SExpr]
   for ipIdx, ip in plan.iterPlans:
     let scannerName = "?s" & $ipIdx
@@ -214,7 +101,6 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
     if plan.history: openArgs.add(newBool(true))
     scannerBindings.add(list(newSymbol(scannerName), list(openArgs)))
 
-  # Build per-depth range trees
   var depthRanges = initTable[int, SExpr]()
   for varName, branches in pairs(plan.rangeBounds):
     var found = -1
@@ -223,7 +109,6 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
     if found >= 0:
       depthRanges[found] = buildRangeTree(branches)
 
-  # Pre-compute bind value expressions
   var bindVals: seq[Table[string, SExpr]]
   for ip in plan.iterPlans:
     var bv = initTable[string, SExpr]()
@@ -235,7 +120,6 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
       bv[posName] = valExpr
     bindVals.add(bv)
 
-  # Build ops
   var ops: seq[SExpr]
   var boundEmitted: seq[HashSet[string]]
   var scanPos: seq[int]
@@ -254,7 +138,6 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
       if found: scanners.add(newSymbol("?s" & $ipIdx))
     if scanners.len == 0: continue
 
-    # Emit scanner-push for bound values before this depth's variable
     for ipIdx, ip in plan.iterPlans:
       var found = false
       for (d, _) in ip.varDepths:
@@ -278,7 +161,6 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
             list(newKeyword("scanner-pop"), scannerSym),
           ))
 
-      # Gap scanning
       var targetIdx = ip.idxOrder.len
       for i, s in ip.idxOrder:
         if s == varPos: targetIdx = i; break
@@ -311,11 +193,9 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
           gapWhile)
         ops.add(gapExpr)
 
-    # Emit while + set! for this variable using LeapIterator
     let rangesTree = if depthRanges.hasKey(depth): depthRanges[depth] else: list()
     let rangesIsEmpty = rangesTree.kind == sList and rangesTree.items.len == 0
 
-    # Build ranges expr
     var rangesExpr: SExpr = list()
     var isSynthetic = false
     for synth in plan.syntheticVars:
@@ -326,7 +206,6 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
     if not isSynthetic and not rangesIsEmpty:
       rangesExpr = list(newKeyword("ranges-create"), rangesTree)
 
-    # Build init args: scanners... ranges
     var initArgs: seq[SExpr] = @[]
     for s in scanners: initArgs.add(s)
     initArgs.add(rangesExpr)
@@ -334,14 +213,9 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
     let iterVar = newSymbol("?it_" & varName)
 
     var innerItems = @[newKeyword("begin")]
-    # Push/pop only needed when there are deeper levels to restrict.
     if depth < numDepths - 1:
       for s in scanners:
         innerItems.add(list(newKeyword("scanner-push"), s, newSymbol(varName)))
-      # Mark the pushed positions as emitted: deeper trailing emissions
-      # consult boundEmitted via prePushes — without this they would re-push
-      # the depth var, duplicating it in the scanner's position stack and
-      # misaligning the prefix (the value slot would receive the eid).
       for ipIdx, ip in plan.iterPlans:
         for (d, p) in ip.varDepths:
           if d == depth: boundEmitted[ipIdx].incl(p); break
@@ -362,10 +236,6 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
       mainWhile)
     ops.add(mainExpr)
 
-  # Trailing bound values and trailing range vars.
-  # A range var (?v of "attr > x") that is not a depth var — e.g. position v
-  # in AEVT after the e depth var — still needs its range applied as a
-  # trailing filter, or rows that should be excluded would pass through.
   var rangeTrees: Table[string, SExpr]
   for varName, branches in pairs(plan.rangeBounds):
     rangeTrees[varName] = buildRangeTree(branches)
@@ -379,10 +249,6 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
 
     if trailing.len == 0: continue
 
-    # Map position -> var symbol for this iter plan (e.g. "e" -> "?_e_d1"
-    # in AEVT when e is an iteration variable). Trailing pushes must first
-    # occupy any intermediate variable positions, or scanner-iterate-init
-    # would iterate the wrong position.
     var posToVar: Table[string, SExpr]
     for (d, p) in ip.varDepths:
       if d < orderedVars.len:
@@ -401,9 +267,6 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
       boundEmitted[ipIdx].incl(posName)
       let scannerSym = newSymbol("?s" & $ipIdx)
       if i == lastIdx:
-        # The last trailing binding may hide further range vars behind it
-        # (e.g. AEVT: a bound, e depth var, v const + range var): prefer the
-        # range var's ranges over a plain equality when both target v.
         var lastRanges = list(newKeyword("="), valExpr)
         for posIdx, pos in ip.idxOrder:
           if pos == posName or posIdx >= ip.idxOrder.len: continue
@@ -447,11 +310,6 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
           pushItems.add(list(newKeyword("scanner-pop"), scannerSym))
         ops.add(list(pushItems))
 
-  # Trailing range vars (no const binding): positions whose spec is a var
-  # with ranges that never became an iterated depth var — the planner's
-  # reachability filter (buildIterPlan) can drop a range var from varDepths
-  # (e.g. v behind e in AEVT); its range must still be applied as a
-  # trailing filter or matching rows would pass through unfiltered.
   var iteratedVars: HashSet[string]
   for ip in plan.iterPlans:
     for (d, p) in ip.varDepths:
@@ -471,7 +329,7 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
       let spec = ip.specs[posIdx]
       if spec.kind != skVar: continue
       if spec.varName notin rangeTrees: continue
-      if spec.varName in iteratedVars: continue  # depth var already ranged
+      if spec.varName in iteratedVars: continue
       if pos in posToVar: continue
       if pos in emittedPos: continue
       emittedPos.incl(pos)
@@ -481,7 +339,6 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
       let iterVar = newSymbol("?it_" & spec.varName)
       let rangesExpr = list(newKeyword("ranges-create"), rangeTrees[spec.varName])
 
-      # Occupy intermediate variable positions before filtering this one.
       var prePushes: seq[string] = @[]
       for checkIdx, checkPos in ip.idxOrder:
         if checkIdx >= posIdx: break
@@ -509,12 +366,10 @@ proc buildTriejoinScheme*(plan: QueryPlanResult, findVars: seq[string],
         items.add(list(newKeyword("scanner-pop"), scannerSym))
       ops.add(list(items))
 
-  # Build nested: start from leaf_body, apply ops in reverse
   var body = leafBody
   for i in countdown(ops.len-1, 0):
     body = replaceBodyPlaceholder(ops[i], body)
 
-  # Handle fully-bound lookup patterns
   for pattern in plan.lookups:
     if not pattern.isLookup(): continue
     let tParam = if pattern.t.kind == dsVar: pattern.t.varName else: "_t"
@@ -607,66 +462,3 @@ proc compileSelectScheme*(plan: QueryPlanResult): tuple[prog: SchemeProgram, var
     buildProjection(plan, plan.findVars.len, constantIndices)
 
   buildTriejoinScheme(plan, findVars, leafBody)
-
-proc compileDeleteScheme*(plan: QueryPlanResult, findVars: seq[string], targetEvar: string,
-    deleteStmt: sql_ast.DeleteStmt): tuple[prog: SchemeProgram, vars: seq[string], depthVarPairs: seq[(int, int)]] =
-  let eidGet = newSymbol(targetEvar)
-  var leafStmts: seq[SExpr]
-
-  for cond in deleteStmt.conditions:
-    if cond.left.field == "eid": continue
-    let attr = cond.left.field
-    let valSexpr = case cond.right.rkind
-      of crParam: list(newKeyword("param"), newInt(cond.right.rparam.int64))
-      of crLiteral:
-        case cond.right.rlit.lkind
-        of litInt: newInt(cond.right.rlit.ival)
-        of litFloat: newFloat(cond.right.rlit.fval)
-        of litStr: newStr(cond.right.rlit.sval)
-        of litBool: newBool(cond.right.rlit.bval)
-        of litBytes: newBytes(cond.right.rlit.bytesval)
-      else: newInt(0)
-
-    leafStmts.add(list(newKeyword("retract"), eidGet, newStr(attr), valSexpr))
-
-  leafStmts.add(list(newKeyword("result-row"), eidGet))
-
-  let leafBody = if leafStmts.len == 1: leafStmts[0]
-                 else: list(@[newKeyword("begin")] & leafStmts)
-
-  buildTriejoinScheme(plan, findVars, leafBody)
-
-proc compileUpdateScheme*(plan: QueryPlanResult, findVars: seq[string],
-    updateStmt: sql_ast.UpdateStmt): tuple[prog: SchemeProgram, vars: seq[string], depthVarPairs: seq[(int, int)]] =
-  var leafStmts: seq[SExpr]
-  var firstEidGet: SExpr
-
-  for clause in updateStmt.clauses:
-    let clauseEvar = "?e_" & toLowerAscii(clause.alias)
-    let eidGet = newSymbol(clauseEvar)
-    if firstEidGet == nil: firstEidGet = eidGet
-
-    for iv in clause.values:
-      let valSexpr = case iv.value.vkind
-        of valLiteral:
-          case iv.value.vlit.lkind
-          of litInt: newInt(iv.value.vlit.ival)
-          of litFloat: newFloat(iv.value.vlit.fval)
-          of litStr: newStr(iv.value.vlit.sval)
-          of litBool: newBool(iv.value.vlit.bval)
-          of litBytes: newBytes(iv.value.vlit.bytesval)
-        of valParam: list(newKeyword("param"), newInt(iv.value.vparam.int64))
-        of valAliasRef:
-          let refEvar = "?e_" & toLowerAscii(iv.value.vref)
-          newSymbol(refEvar)
-        else: newInt(0)
-
-      leafStmts.add(list(newKeyword("save"), eidGet, newStr(iv.attr), valSexpr))
-
-  leafStmts.add(list(newKeyword("result-row"), firstEidGet))
-
-  let leafBody = if leafStmts.len == 1: leafStmts[0]
-                 else: list(@[newKeyword("begin")] & leafStmts)
-
-  buildTriejoinScheme(plan, findVars, leafBody)
-
