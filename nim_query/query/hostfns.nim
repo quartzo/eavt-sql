@@ -65,9 +65,9 @@ proc len*(reg: ScannerRegistry): int = reg.scanners.len
 
 type
   EngineOps* = ref object of RootObj
-    ## Scratch buffers for the EDN tx interpreter — reused across txs so the
-    ## steady-state path performs no per-tx allocation (single event loop).
-    txInfos*: seq[TxOpInfo]     # flat classification, one per op
+    ## Scratch buffers for the flat tx interpreter — reused across txs so
+    ## the steady-state path performs no per-tx allocation (single loop).
+    txSlot*: seq[int32]         # per-op attr-cache slot (classification)
     txAnchorOp*: seq[int32]     # tempid → op index (+1) of its unique anchor
     txAnchorEid*: seq[int64]    # tempid → resolved eid
 
@@ -84,11 +84,18 @@ method saveManyWithT*(ops: EngineOps; attr: string;
 method retract*(ops: EngineOps; eid: int64; attr: string; val: SExpr;
                  t: int64; asOf: int64) {.base, gcsafe.} = discard
 
-method saveBatchEdn*(ops: EngineOps; infos: seq[TxOpInfo];
+method saveBatchEdn*(ops: EngineOps; txops: seq[TxWOp];
                      t: int64; asOf: int64) {.base, gcsafe.} = discard
 
-method retractBatch*(ops: EngineOps; infos: seq[TxOpInfo];
+method retractBatch*(ops: EngineOps; txops: seq[TxWOp];
                      t: int64; asOf: int64) {.base, gcsafe.} = discard
+
+method lookupEntityW*(ops: EngineOps; attrName: string;
+                      value: TxWSlot): Option[int64] {.base, gcsafe.} =
+  none[int64]()
+
+method hasDatomW*(ops: EngineOps; eid: int64; attrId: uint32;
+                  val: TxWSlot): bool {.base, gcsafe.} = false
 
 method lookupAttr*(ops: EngineOps; name: string): Option[uint32] {.base, gcsafe.} =
   none[uint32]()

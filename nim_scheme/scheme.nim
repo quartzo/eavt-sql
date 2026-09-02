@@ -1028,3 +1028,34 @@ proc nextBatch*(sess: VmSession; host: HostFns; maxRows: int): (seq[seq[SExpr]],
       return (rows, false)
 
   (rows, true)
+
+# ── Flat wire tx ops (no intermediate SExpr on the transactor) ──────────────
+
+type
+  TxWSlotKind* = enum
+    tskMissing   # nil / absent
+    tskInt       # tempid (<0) or positive eid — sign decides at use
+    tskFloat
+    tskBool
+    tskStr
+    tskKw        # keyword payload in .s
+    tskBytes
+    tskLookupRef # [attr value] — attr name in refAttr, scalar in refVal
+  TxWSlot* = object
+    kind*: TxWSlotKind
+    i*: int64
+    f*: float64
+    b*: bool
+    s*: string             # tskStr / tskKw / tskLookupRef refAttr+refVal.s
+    bin*: seq[byte]        # tskBytes
+    refAttr*: string       # tskLookupRef: attr name
+    refVal*: ref TxWSlot   # tskLookupRef: scalar value (rare — heap ok)
+  TxWOp* = object
+    isRetract*: bool
+    e*: TxWSlot            # e slot (typed by the decoder; e.i mutated to the
+                           #   resolved eid by the interpreter)
+    attr*: string          # op attr name ("" when not a keyword)
+    v*: TxWSlot            # v slot
+    # interpreter-filled fields (0 = no-op / undeclared marker):
+    attrId*: uint32
+    vresolved*: int64      # v-slot tempid/lookup-ref → resolved eid

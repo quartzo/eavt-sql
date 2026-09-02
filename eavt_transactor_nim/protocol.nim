@@ -13,7 +13,8 @@ type
       mode*: string        ## "query" (streaming) | "exec" (batch)
       params*: seq[SExpr]  ## decoded wire-AST params, 1-indexed via (param N)
     of rkTx:
-      txdata*: seq[SExpr]  ## EDN op vectors (docs/tx-protocol.md §3.1)
+      txdata*: seq[TxWOp]  ## flat op vectors, decoded with no SExpr tree
+                           ## (docs/tx-protocol.md §3.1)
     of rkSchema:
       discard
     of rkAdmin:
@@ -42,7 +43,7 @@ proc parseRequest*(data: string): Request =
         result.params.add(wireFromMsgpackAt(data, s, e))
   of "tx":
     result = Request(kind: rkTx, id: result.id,
-                     txdata: txdataFromMsgpack(data))
+                     txdata: txopsFromMsgpack(data))
   of "schema":
     result = Request(kind: rkSchema, id: result.id)
   of "admin":

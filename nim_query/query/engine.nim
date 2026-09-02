@@ -153,17 +153,51 @@ proc encodeSaveValue(val: SExpr; vt: uint32; mode: EncodeMode; eid: int64): seq[
         "REF value must be an entity id, got: \"" & packed & "\"")
   result = encodeValue(packed, mode, eid)
 
-proc saveResolvedInto(q: QueryStore; eid: int64; attrId: uint32; vt: uint32;
-                      many, indexed: bool; mode: EncodeMode; val: SExpr; t: int64;
-                      entries: var seq[EavtEntry]) =
-  ## Core of saveWithT with attribute metadata pre-resolved — shared by
-  ## save (resolves per datom) and save-many (resolves once per batch).
-  ## Appends to `entries` instead of writing; the caller issues a single
-  ## batchWrite for the accumulated batch (storage-level bulk save).
+# ── Flat wire slot → storage value (tx path, no SExpr) ──
+
+proc slotToPackedValue*(v: TxWSlot): string =
+  case v.kind:
+  of tskInt: result = $v.i
+  of tskFloat: result = $v.f
+  of tskStr, tskKw: result = v.s
+  of tskBool: result = (if v.b: "true" else: "false")
+  of tskBytes:
+    result = newString(v.bin.len)
+    for i, b in v.bin: result[i] = char(b)
+  else: result = ""
+
+proc slotToValueForType(v: TxWSlot; vt: uint32): string =
+  if vt == scanner.DbTypeBoolean:
+    result = if v.kind == tskBool: (if v.b: "1" else: "0") else: "0"
+  elif vt == scanner.DbTypeBytes or vt == scanner.DbTypeBlob:
+    if v.kind == tskBytes:
+      result = newString(v.bin.len)
+      for i, b in v.bin: result[i] = char(b)
+    else:
+      result = "0"
+  else:
+    result = slotToPackedValue(v)
+
+proc encodeSaveValueSlot*(val: TxWSlot; vt: uint32; mode: EncodeMode;
+                          eid: int64): seq[byte] =
+  ## encodeSaveValue for flat wire slots.
+  let packed = slotToValueForType(val, vt)
+  if mode == emRef:
+    try:
+      return encodeValue(packed, mode, parseInt(packed))
+    except ValueError:
+      raise newException(EvalError,
+        "REF value must be an entity id, got: \"" & packed & "\"")
+  result = encodeValue(packed, mode, eid)
+
+proc saveResolvedEncodedInto(q: QueryStore; eid: int64; attrId: uint32;
+                             vt: uint32; many, indexed: bool;
+                             mode: EncodeMode; encoded: seq[byte]; t: int64;
+                             entries: var seq[EavtEntry]) =
+  ## saveResolvedInto minus value conversion — retract scan + entry build
+  ## from a pre-encoded value (shared by SExpr and flat-slot paths).
   q.saveCount += 1
   var t0 = getMonoTime()
-
-  let encoded = encodeSaveValue(val, vt, mode, eid)
 
   q.saveEncodeNs += (getMonoTime().ticks - t0.ticks)
   t0 = getMonoTime()
@@ -210,12 +244,39 @@ proc saveResolvedInto(q: QueryStore; eid: int64; attrId: uint32; vt: uint32;
 
   q.saveBuildEntriesNs += (getMonoTime().ticks - t0.ticks)
 
+proc saveResolvedInto(q: QueryStore; eid: int64; attrId: uint32; vt: uint32;
+                      many, indexed: bool; mode: EncodeMode; val: SExpr; t: int64;
+                      entries: var seq[EavtEntry]) =
+  ## SExpr path — encode then delegate to the encoded core.
+  let encoded = encodeSaveValue(val, vt, mode, eid)
+  q.saveResolvedEncodedInto(eid, attrId, vt, many, indexed, mode, encoded,
+                            t, entries)
+
+proc saveResolvedSlotInto(q: QueryStore; eid: int64; attrId: uint32;
+                          vt: uint32; many, indexed: bool; mode: EncodeMode;
+                          val: TxWSlot; t: int64;
+                          entries: var seq[EavtEntry]) =
+  ## Flat wire slot path — encode then delegate to the encoded core.
+  let encoded = encodeSaveValueSlot(val, vt, mode, eid)
+  q.saveResolvedEncodedInto(eid, attrId, vt, many, indexed, mode, encoded,
+                            t, entries)
+
 proc saveResolved(q: QueryStore; eid: int64; attrId: uint32; vt: uint32;
                   many, indexed: bool; mode: EncodeMode; val: SExpr; t: int64) =
   ## Per-datom path: build + immediate batchWrite (read-your-writes within
   ## the same call chain — retract scans of later datoms see earlier ones).
   var entries: seq[EavtEntry] = @[]
   q.saveResolvedInto(eid, attrId, vt, many, indexed, mode, val, t, entries)
+  var t0 = getMonoTime()
+  q.eavt.batchWrite(entries)
+  q.saveBatchWriteNs += (getMonoTime().ticks - t0.ticks)
+
+proc saveResolvedSlot(q: QueryStore; eid: int64; attrId: uint32; vt: uint32;
+                      many, indexed: bool; mode: EncodeMode; val: TxWSlot;
+                      t: int64) =
+  ## Per-datom path for flat slots (dup-guard fallback).
+  var entries: seq[EavtEntry] = @[]
+  q.saveResolvedSlotInto(eid, attrId, vt, many, indexed, mode, val, t, entries)
   var t0 = getMonoTime()
   q.eavt.batchWrite(entries)
   q.saveBatchWriteNs += (getMonoTime().ticks - t0.ticks)
@@ -299,13 +360,13 @@ method retract(q: QueryStore; eid: int64; attr: string; val: SExpr;
   var entries = buildEavtEntries(q.eavt.kv.mt.hnd.arena, eid, attrId, encoded, t, true, mode, indexed)
   q.eavt.batchWrite(entries)
 
-method saveBatchEdn(q: QueryStore; infos: seq[TxOpInfo];
+method saveBatchEdn(q: QueryStore; txops: seq[TxWOp];
                     t: int64; asOf: int64) =
-  ## Bulk save for EDN tx ops — flat infos from the interpreter scratch.
-  ## Metadata resolved once per distinct attrId; ONE batchWrite for the tx.
-  ## Correctness guard (mirrors saveManyWithT's `bulk`): a duplicate
-  ## (eid, attrId) card-ONE pair in the batch falls back to the per-datom
-  ## path to preserve read-your-writes between the ops.
+  ## Bulk save for flat tx ops — metadata resolved once per distinct attrId;
+  ## ONE batchWrite for the tx.  Correctness guard (mirrors saveManyWithT's
+  ## `bulk`): a duplicate (eid, attrId) card-ONE pair in the batch falls
+  ## back to the per-datom path to preserve read-your-writes.  attrId 0 =
+  ## interpreter-marked no-op (hasDatom hit) or undeclared attr.
   type Meta = tuple[attrId: uint32, vt: uint32, mode: EncodeMode,
                     many, indexed: bool]
   var metaCache: array[64, Meta]
@@ -319,48 +380,56 @@ method saveBatchEdn(q: QueryStore; infos: seq[TxOpInfo];
     if metaN < 64: metaCache[metaN] = m; inc metaN
     m
 
-  var all: seq[EavtEntry]
+  proc isSchema(op: TxWOp): bool =
+    not op.isRetract and op.attr in ["db/ident", "db/valueType",
+                                     "db/cardinality", "db/unique"]
+
+  proc effVal(op: TxWOp): TxWSlot =
+    ## v-slot value for encoding: resolved eid for tempid/lookup-ref slots.
+    if op.v.kind == tskInt and op.v.i < 0:
+      TxWSlot(kind: tskInt, i: op.vresolved)
+    elif op.v.kind == tskLookupRef:
+      TxWSlot(kind: tskInt, i: op.vresolved)
+    else:
+      op.v
+
   var n = 0
-  for info in infos:
-    # attrId 0 = interpreter-marked no-op (hasDatom hit) or undeclared attr
-    if info.kind == tokAdd and not info.schema and info.attrId != 0: inc n
+  for op in txops:
+    if not op.isRetract and not isSchema(op) and op.attrId != 0: inc n
   if n == 0: return
 
   var bulk = true
   if n > 1:
     q.txDupSeen.clear()
-    for info in infos:
-      if info.kind != tokAdd or info.schema or info.attrId == 0: continue
-      if not metaFor(info.attrId).many:   # card-ONE only
-        let key = (info.eid, info.attrId)
+    for op in txops:
+      if op.isRetract or isSchema(op) or op.attrId == 0: continue
+      if not metaFor(op.attrId).many:   # card-ONE only
+        let key = (op.e.i, op.attrId)
         if key in q.txDupSeen:
           bulk = false
           break
         q.txDupSeen[key] = true
 
   if not bulk:
-    for info in infos:
-      if info.kind != tokAdd or info.schema or info.attrId == 0: continue
-      let m = metaFor(info.attrId)
-      let val = if info.vkind == tvScalar: info.vRef
-                else: newInt(info.vresolved)
-      q.saveResolved(info.eid, m.attrId, m.vt, m.many, m.indexed,
-                     m.mode, val, t)
+    for op in txops:
+      if op.isRetract or isSchema(op) or op.attrId == 0: continue
+      let m = metaFor(op.attrId)
+      q.saveResolvedSlot(op.e.i, m.attrId, m.vt, m.many, m.indexed,
+                         m.mode, effVal(op), t)
     return
 
   q.txEntries.setLen(0)
-  for info in infos:
-    if info.kind != tokAdd or info.schema or info.attrId == 0: continue
-    let m = metaFor(info.attrId)
-    let val = if info.vkind == tvScalar: info.vRef
-              else: newInt(info.vresolved)
-    q.saveResolvedInto(info.eid, m.attrId, m.vt, m.many, m.indexed,
-                       m.mode, val, t, q.txEntries)
+  for op in txops:
+    if op.isRetract or isSchema(op) or op.attrId == 0: continue
+    let m = metaFor(op.attrId)
+    q.saveResolvedSlotInto(op.e.i, m.attrId, m.vt, m.many, m.indexed,
+                           m.mode, effVal(op), t, q.txEntries)
   q.eavt.batchWrite(q.txEntries)
 
-method retractBatch(q: QueryStore; infos: seq[TxOpInfo];
+method retractBatch(q: QueryStore; txops: seq[TxWOp];
                     t: int64; asOf: int64) =
-  ## Batch retract for EDN tx ops — ONE batchWrite for all retractions.
+  ## Batch retract for flat tx ops — ONE batchWrite.  attrId 0 = undeclared
+  ## attr → no-op (matches the per-datom retract).
   type Meta = tuple[attrId: uint32, vt: uint32, mode: EncodeMode,
                     indexed: bool]
   var metaCache: array[64, Meta]
@@ -375,12 +444,11 @@ method retractBatch(q: QueryStore; infos: seq[TxOpInfo];
     m
 
   q.txEntries.setLen(0)
-  for info in infos:
-    # attrId 0 = undeclared attr → no-op (matches per-datom retract)
-    if info.kind != tokRetract or info.attrId == 0: continue
-    let m = metaFor(info.attrId)
-    let encoded = encodeSaveValue(info.vRef, m.vt, m.mode, info.eid)
-    let entries = buildEavtEntries(q.eavt.kv.mt.hnd.arena, info.eid,
+  for op in txops:
+    if not op.isRetract or op.attrId == 0: continue
+    let m = metaFor(op.attrId)
+    let encoded = encodeSaveValueSlot(op.v, m.vt, m.mode, op.e.i)
+    let entries = buildEavtEntries(q.eavt.kv.mt.hnd.arena, op.e.i,
                                    m.attrId, encoded, t, true, m.mode,
                                    m.indexed)
     for e in entries: q.txEntries.add(e)
@@ -414,6 +482,21 @@ method isUniqueAttr(q: QueryStore; name: string): bool =
   let aid = q.eavt.lookupAttr(name)
   aid.isSome and q.eavt.isUnique(aid.get)
 
+method hasDatomW(q: QueryStore; eid: int64; attrId: uint32;
+                 val: TxWSlot): bool =
+  ## Active-datom membership for flat slots, keyed by attrId (no name
+  ## resolution).  Used by the tx interpreter for :db/add idempotency.
+  let vt = q.eavt.valueTypeFor(attrId).get(resolver.DbTypeString)
+  let mode = valueTypeToEncodeMode(vt)
+  let encoded = encodeSaveValueSlot(val, vt, mode, eid)
+  var prefix = keys.encodeEid(eid)
+  prefix.add byte(attrId shr 24); prefix.add byte((attrId shr 16) and 0xFF)
+  prefix.add byte((attrId shr 8) and 0xFF); prefix.add byte(attrId and 0xFF)
+  for k in q.eavt.scanPrefixActive(0, prefix):
+    if k.len < 20: continue
+    if k[12 ..< k.len - 8] == encoded: return true
+  return false
+
 method hasDatom(q: QueryStore; eid: int64; attr: string; val: SExpr): bool =
   ## Active-datom membership: true when (eid, attr, val) is currently
   ## asserted.  Works for both cardinalities — the tx interpreter uses it to
@@ -435,6 +518,34 @@ method hasDatom(q: QueryStore; eid: int64; attr: string; val: SExpr): bool =
     if k.len < 20: continue
     if k[12 ..< k.len - 8] == encoded: return true
   return false
+
+method lookupEntityW(q: QueryStore; attrName: string;
+                     value: TxWSlot): Option[int64] =
+  ## Unique-attr lookup for flat wire slots (same as lookupEntity).
+  let t0 = getMonoTime().ticks
+  let aidOpt = q.eavt.lookupAttr(attrName)
+  if aidOpt.isNone:
+    q.lookupNs += getMonoTime().ticks - t0
+    return none[int64]()
+  let aid = aidOpt.get
+  let vt = q.eavt.valueTypeFor(aid).get(resolver.DbTypeString)
+  let mode = valueTypeToEncodeMode(vt)
+  let encoded = encodeValue(slotToValueForType(value, vt), mode, 0)
+  var prefix = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
+                byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
+  prefix.add encoded
+  let tScan = getMonoTime().ticks
+  let scanRes = q.eavt.scanPrefixActive(2, prefix)
+  q.lookupScanNs += getMonoTime().ticks - tScan
+  var found = none[int64]()
+  if scanRes.len > 0:
+    let k = scanRes[0]
+    if k.len >= 20:
+      found = some(decodeEid(beUint64(k, k.len - 16)))
+      q.eavt.hydrateEid(found.get)
+  q.lookupNs += getMonoTime().ticks - t0
+  inc q.lookupCount
+  return found
 
 method lookupEntity(q: QueryStore; attrName: string; value: SExpr): Option[int64] =
   ## Unique-attr lookup: scan avet [attr 4B][val][eid 8B][sf 8B] by prefix.

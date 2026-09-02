@@ -103,10 +103,10 @@ proc allocateTxSafe(eng: SharedEngine): int64 {.raises: [ValueError].} =
   except Exception as e:
     raise (ref ValueError)(msg: e.msg)
 
-proc transactEdnSafe(ops: EngineOps; txdata: seq[SExpr]): edn_tx.TxReport {.
+proc transactTxSafe(ops: EngineOps; txops: seq[TxWOp]): edn_tx.TxReport {.
     raises: [ValueError].} =
   try:
-    transactEdn(ops, txdata)
+    transactTx(ops, txops)
   except Exception as e:
     raise (ref ValueError)(msg: e.msg)
 
@@ -199,7 +199,7 @@ proc execTx(eng: SharedEngine; req: Request; transp: StreamTransport) {.async.} 
   ## vectors against the engine, reply with a tx-report
   ## {tempids: {...}, tx: t} or an error frame.
   logDebug("tx", "execTx: enter, ops=" & $req.txdata.len)
-  let txReport = transactEdnSafe(eng.store, req.txdata)
+  let txReport = transactTxSafe(eng.store, req.txdata)
   logDebug("tx", "execTx: report ready, tempids=" & $txReport.tempids.len)
   var ms = MsgStream.init(256)
   var fieldCount = 3  # tempids + tx + more
