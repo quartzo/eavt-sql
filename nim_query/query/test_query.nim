@@ -9,6 +9,8 @@
 
 import std/[unittest, options, tables, strutils, sequtils]
 import edn
+import edn_tx
+import datalog_compile
 import parser as sql_parser
 import scheme
 import keys
@@ -2268,6 +2270,46 @@ proc runSqlWithStats(q: QueryStore; sql: string; cstats: CompileStats;
 
 proc runSql(q: QueryStore; sql: string; params: seq[SExpr] = @[]): seq[SExpr] =
   runSqlWithStats(q, sql, q.eavt.buildCompileStats(), params)
+
+# ── Datalog test helpers (fase C: para novos testes) ─────────────────────────
+
+proc txAttr(q: QueryStore; name: string; vt: string; many = false; unique = false): int =
+  ## Declare an attribute via the tx protocol (schema-as-data)
+  var ops = @[
+    newList(@[newKeyword("db/add"), newInt(0), newKeyword("db/ident"), newKeyword(name)]),
+    newList(@[newKeyword("db/add"), newInt(0), newKeyword("db/valueType"), newKeyword("db.type/" & vt)]),
+    newList(@[newKeyword("db/add"), newInt(0), newKeyword("db/cardinality"),
+              newKeyword(if many: "db.cardinality/many" else: "db.cardinality/one")]),
+  ]
+  if unique:
+    ops.add(newList(@[newKeyword("db/add"), newInt(0), newKeyword("db/unique"),
+                      newKeyword("db.unique/identity")]))
+  discard transactEdn(q, ops)
+  result = 0
+
+proc txUpsert(q: QueryStore; attr: string; val: SExpr): int =
+  ## Upsert via tx (tempid allocation)
+  discard transactEdn(q, @[newList(@[
+    newKeyword("db/add"), newInt(-1), newKeyword(attr), val])])
+  result = 0
+
+proc txAdd(q: QueryStore; eid: int64; attr: string; val: SExpr): int =
+  ## Write one datom via the tx protocol
+  discard transactEdn(q, @[newList(@[
+    newKeyword("db/add"), newInt(eid), newKeyword(attr), val])])
+  result = 0
+
+proc runDl(q: QueryStore; query: string; params: seq[SExpr] = @[]): seq[SExpr] =
+  ## Compile a Datalog EDN query and execute on the VM
+  var fv: seq[string] = @[]
+  let compiled = compileDatalogQuery(query, q.eavt.buildCompileStats(), fv)
+  let sess = newStreamingSession(newQuerySession(q, compiled.program, params,
+                                                 q.allocateTx(), none[int64]()))
+  while true:
+    let (batch, more) = sess.nextBatch(100)
+    for row in batch:
+      result.add SExpr(kind: sList, items: row)
+    if not more: break
 
 proc expectRows(q: QueryStore; sql: string): seq[SExpr] =
   result = runSql(q, sql)
