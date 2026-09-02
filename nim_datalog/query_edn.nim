@@ -116,7 +116,22 @@ proc predKey(opExpr: SExpr): string =
 
 proc parsePredicate(p: SExpr; ir: var DatalogIR;
                     params: Table[string, uint32]; branch: int) =
-  ## [(op ?var value)] — adds a range condition on the var.
+  ## [(op ?var value)] or [(in ?var v1 v2 ...)] — range conditions on the var.
+  if p.kind == sList and p.items.len >= 3 and
+     ((p.items[0].kind == sSymbol and p.items[0].symval == "in") or
+      (p.items[0].kind == sKeyword and p.items[0].kwval == "in")):
+    # IN predicate: [(in ?var v1 v2 ...)] — disjunction of equalities
+    if not isVar(p.items[1]):
+      raise newException(DatalogSyntaxError,
+        "datalog: IN var must be ?var, got " & $p.items[1])
+    let vn = varName(p.items[1])
+    if vn notin ir.rangeBounds: ir.rangeBounds[vn] = @[]
+    while ir.rangeBounds[vn].len <= branch:
+      ir.rangeBounds[vn].add(@[])
+    for i in 2 ..< p.items.len:
+      let bv = parseValue(p.items[i], params)
+      ir.rangeBounds[vn][branch].add(("in", bv))
+    return
   if p.kind != sList or p.items.len != 3:
     raise newException(DatalogSyntaxError,
       "datalog: predicate must be [(op var value)], got " & $p)
@@ -142,9 +157,11 @@ proc parseWhereElement(p0: SExpr; ir: var DatalogIR;
     let inner = p.items[0]
     let innerIsRoute = inner.items.len > 0 and (
       isOpSym(inner.items[0]) or
-      (inner.items[0].kind == sSymbol and inner.items[0].symval == "or") or
+      (inner.items[0].kind == sSymbol and
+       (inner.items[0].symval == "or" or inner.items[0].symval == "in")) or
       (inner.items[0].kind == sKeyword and
-       (inner.items[0].kwval == "or" or inner.items[0].kwval in RangeOps)))
+       (inner.items[0].kwval == "or" or inner.items[0].kwval == "in" or
+        inner.items[0].kwval in RangeOps)))
     if innerIsRoute:
       p = inner
   let headIsOr = p.kind == sList and p.items.len > 0 and (
@@ -154,7 +171,9 @@ proc parseWhereElement(p0: SExpr; ir: var DatalogIR;
     for i in 1 ..< p.items.len:
       parseWhereElement(p.items[i], ir, params, i - 1)  # each or-item is a branch
   elif p.kind == sList and p.items.len > 0 and
-       (isOpSym(p.items[0]) or (isKeyword(p.items[0]) and p.items[0].kwval in RangeOps)):
+       (isOpSym(p.items[0]) or
+        (p.items[0].kind == sSymbol and p.items[0].symval == "in") or
+        (isKeyword(p.items[0]) and (p.items[0].kwval in RangeOps or p.items[0].kwval == "in"))):
     parsePredicate(p, ir, params, branch)
   else:
     parsePattern(p, ir, params)

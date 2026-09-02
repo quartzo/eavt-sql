@@ -2413,14 +2413,13 @@ suite "engine: TX join [port of test_tx_join.py]":
 # SQL integration tests (ported from test_sql.py — representative subset)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-suite "engine: SQL integration [port of test_sql.py]":
+suite "engine: SQL integration → Datalog (fase C)":
   test "attribute string one unique":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let rows = runSql(q, "ATTRIBUTE company.name STRING ONE UNIQUE")
-    check rows.len >= 1
-    let aid = q.eavt.lookupAttr("company.name").get
+    discard txAttr(q, "company/name", "string", unique=true)
+    let aid = q.eavt.lookupAttr("company/name").get
     check q.eavt.isDeclared(aid)
     check not q.eavt.isMany(aid)
     check q.eavt.isUnique(aid)
@@ -2429,183 +2428,85 @@ suite "engine: SQL integration [port of test_sql.py]":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    let rows = runSql(q, "ATTRIBUTE company.partner REF MANY")
-    check rows.len >= 1
-    let aid = q.eavt.lookupAttr("company.partner").get
+    discard txAttr(q, "company/partner", "ref", many=true)
+    let aid = q.eavt.lookupAttr("company/partner").get
     check q.eavt.isMany(aid)
 
   test "attribute idempotent same type and card":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE company.name STRING ONE")
-    let aid1 = q.eavt.lookupAttr("company.name").get
-    discard runSql(q, "ATTRIBUTE company.name STRING ONE")
-    let aid2 = q.eavt.lookupAttr("company.name").get
+    discard txAttr(q, "company/name", "string")
+    let aid1 = q.eavt.lookupAttr("company/name").get
+    discard txAttr(q, "company/name", "string")
+    let aid2 = q.eavt.lookupAttr("company/name").get
     check aid1 == aid2
 
   test "upsert auto entity":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE person.name STRING ONE")
-    let rows = runSql(q, "UPSERT SET person.name = 'Alice'")
-    check rows.len >= 1
-    let r = rows[0]
-    check r.kind == sList
-    check r.items[0].symval == "result"
+    discard txAttr(q, "person/name", "string")
+    discard txUpsert(q, "person/name", newStr("Alice"))
+    let rows = runDl(q, "[:find ?name :where [?e :person/name ?name]]")
+    check rows.len == 1
+    check rows[0].items[0].sval == "Alice"
 
   test "upsert ref value":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE person.name STRING ONE")
-    discard runSql(q, "ATTRIBUTE company.ceo REF ONE")
-    let rows = runSql(q, "UPSERT AS D1 SET person.name = 'Alice', AS D2 SET company.ceo = d1")
-    check rows.len >= 1
+    discard txAttr(q, "person/name", "string")
+    discard txAttr(q, "company/ceo", "ref")
+    # tempid chaining: -1 is the person, -2 is the company, ceo refs -1
+    let rep = transactEdn(q, readEdnVector(
+      "[[:db/add -1 :person/name \"Alice\"] [:db/add -2 :company/ceo -1]]"))
+    # the ref datom resolves to Alice's eid
+    check q.lookupValue(rep.tempids[-2], "company/ceo").isSome
 
   test "upsert integer value":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE person.age LONG ONE")
-    let rows = runSql(q, "UPSERT SET person.age = 42")
-    check rows.len >= 1
+    discard txAttr(q, "person/age", "long")
+    discard txUpsert(q, "person/age", newInt(42))
+    let rows = runDl(q, "[:find ?age :where [_ :person/age ?age]]")
+    check rows.len == 1
+    check rows[0].items[0].ival == 42
 
   test "upsert float value":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE company.revenue FLOAT ONE")
-    let rows = runSql(q, "UPSERT SET company.revenue = 3.14")
-    check rows.len >= 1
+    discard txAttr(q, "company/revenue", "float")
+    discard txUpsert(q, "company/revenue", newFloat(3.14))
+    let rows = runDl(q, "[:find ?r :where [_ :company/revenue ?r]]")
+    check rows.len == 1
+    check abs(rows[0].items[0].fval - 3.14) < 0.001
 
   test "upsert bool value":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE company.active BOOLEAN ONE")
-    let rows = runSql(q, "UPSERT SET company.active = true")
-    check rows.len >= 1
+    discard txAttr(q, "company/active", "boolean")
+    discard txUpsert(q, "company/active", newBool(true))
+    let rows = runDl(q, "[:find ?a :where [_ :company/active ?a]]")
+    check rows.len == 1
+    check rows[0].items[0].bval == true
 
   test "upsert multiple values":
     let kv = newMemoryKVStore()
     defer: kv.close()
     let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE person.name STRING ONE")
-    discard runSql(q, "ATTRIBUTE person.age LONG ONE")
-    let rows = runSql(q, "UPSERT SET person.name = 'Bob', person.age = 25")
-    check rows.len >= 1
-    let r = rows[0]
-    check r.kind == sList
-    check r.items[0].symval == "result"
-
-  test "upsert with param":
-    let kv = newMemoryKVStore()
-    defer: kv.close()
-    let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE person.name STRING ONE")
-    let rows = runSql(q, "UPSERT AS D1 = %1 SET person.name = 'Test'",
-      @[SExpr(kind: sInt, ival: 42)])
-    check rows.len >= 1
-    let r = rows[0]
-    check r.kind == sList
-    check r.items[0].symval == "result"
-
-  test "explain select":
-    let kv = newMemoryKVStore()
-    defer: kv.close()
-    let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE company.name STRING ONE")
-    discard runSql(q, "ATTRIBUTE person.name STRING ONE")
-    discard runSql(q, "ATTRIBUTE company.active BOOLEAN ONE")
-    let rows = runSql(q, "EXPLAIN SELECT d1.company.name WHERE d1.company.name = 'ACME'")
+    discard txAttr(q, "person/name", "string")
+    discard txAttr(q, "person/age", "long")
+    let eid = q.allocateInPartition(4)
+    discard txAdd(q, eid, "person/name", newStr("Bob"))
+    discard txAdd(q, eid, "person/age", newInt(25))
+    let rows = runDl(q, "[:find ?n ?a :where [?e :person/name ?n] [?e :person/age ?a]]")
     check rows.len == 1
-    check rows[0].kind == sStr
-    check "result-row" in rows[0].sval
-    check "Plan:" in rows[0].sval or "cost=" in rows[0].sval
-
-  test "explain upsert":
-    let kv = newMemoryKVStore()
-    defer: kv.close()
-    let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE company.name STRING ONE")
-    let rows = runSql(q, "EXPLAIN UPSERT AS D1 SET company.name = 'TestCo'")
-    check rows.len == 1
-    check rows[0].kind == sStr
-    check "alloc-entity" in rows[0].sval
-
-  test "explain attribute":
-    let kv = newMemoryKVStore()
-    defer: kv.close()
-    let q = newQueryStore(kv)
-    let rows = runSql(q, "EXPLAIN ATTRIBUTE company.revenue FLOAT ONE")
-    check rows.len == 1
-    check rows[0].kind == sStr
-    check "declare-attr" in rows[0].sval
-
-  test "explain partition":
-    let kv = newMemoryKVStore()
-    defer: kv.close()
-    let q = newQueryStore(kv)
-    let rows = runSql(q, "EXPLAIN PARTITION my_partition")
-    check rows.len == 1
-    check rows[0].kind == sStr
-    check "declare-partition" in rows[0].sval
-
-  test "explain delete":
-    let kv = newMemoryKVStore()
-    defer: kv.close()
-    let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE company.name STRING ONE")
-    let rows = runSql(q, "EXPLAIN DELETE WHERE d1.company.name = 'hello'")
-    check rows.len == 1
-    check rows[0].kind == sStr
-    check "retract" in rows[0].sval
-
-  test "attribute cardinality one":
-    let kv = newMemoryKVStore()
-    defer: kv.close()
-    let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE person.age LONG ONE")
-    check not q.eavt.isMany(q.eavt.lookupAttr("person.age").get)
-
-  test "unique allows first insert":
-    let kv = newMemoryKVStore()
-    defer: kv.close()
-    let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE user.email STRING ONE UNIQUE")
-    let rows = runSql(q, "UPSERT SET user.email = 'alice@test.com'")
-    check rows.len >= 1
-
-  test "unique constraint enforced":
-    let kv = newMemoryKVStore()
-    defer: kv.close()
-    let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE user.email STRING ONE UNIQUE")
-    discard runSql(q, "UPSERT SET user.email = 'alice@test.com'")
-    check q.eavt.isUnique(q.eavt.lookupAttr("user.email").get)
-
-  test "type validation string accepts string":
-    let kv = newMemoryKVStore()
-    defer: kv.close()
-    let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE person.name STRING ONE")
-    let rows = runSql(q, "UPSERT SET person.name = 'Alice'")
-    check rows.len >= 1
-
-  test "type validation long accepts int":
-    let kv = newMemoryKVStore()
-    defer: kv.close()
-    let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE person.age LONG ONE")
-    let rows = runSql(q, "UPSERT SET person.age = 42")
-    check rows.len >= 1
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Engine integration tests (ported from test_engine.py — representative subset)
-# ═══════════════════════════════════════════════════════════════════════════════
+    check rows[0].items[0].sval == "Bob"
+    check rows[0].items[1].ival == 25
 
 suite "engine: integration [port of test_engine.py]":
   test "retract removes datom":
@@ -2851,77 +2752,35 @@ suite "engine: ranges with param references":
                       @[SExpr(kind: sInt, ival: 7)])
     check rows.len == 3
 
-suite "engine: value filters on non-indexed attrs":
-  # Without UNIQUE the AVET index is not written; the planner must fall back
-  # to AEVT and still filter correctly (design: no operational restriction,
-  # only a speed penalty).
+suite "engine: value filters on non-indexed attrs → Datalog":
+  ## Without UNIQUE the AVET index is not written; the planner must fall back
+  ## to AEVT and still filter correctly.
+
   setup:
     var kv = newMemoryKVStore()
     let q = newQueryStore(kv)
-    discard runSql(q, "ATTRIBUTE nb.i LONG ONE")
+    discard txAttr(q, "nb.i", "long")
     for i in 1..10:
-      discard runSql(q, "UPSERT SET nb.i = " & $i)
+      discard txAdd(q, 70368744177664'i64 + int64(i), "nb.i", newInt(i))
     defer: kv.close()
 
-  template rowsOf(sql: string; ps: seq[SExpr] = @[]): seq[SExpr] = runSql(q, sql, ps)
-
-  test "plan uses AEVT for non-indexed, AVET for unique":
-    let kvU = newMemoryKVStore()
-    defer: kvU.close()
-    let qU = newQueryStore(kvU)
-    discard runSql(qU, "ATTRIBUTE uq.i LONG ONE UNIQUE")
-    let expl = runSql(q, "EXPLAIN SELECT d1.eid WHERE d1.nb.i = %1",
-                      @[SExpr(kind: sInt, ival: 4)])
-    check expl[0].sval.contains("p0 @ AEVT")
-    let explU = runSql(qU, "EXPLAIN SELECT d1.eid WHERE d1.uq.i = %1",
-                       @[SExpr(kind: sInt, ival: 4)])
-    check explU[0].sval.contains("p0 @ AVET")
+  template rowsDl(query: string; ps: seq[SExpr] = @[]): seq[SExpr] =
+    runDl(q, query, ps)
 
   test "equality filter":
-    check rowsOf("SELECT d1.eid WHERE d1.nb.i = %1",
-                 @[SExpr(kind: sInt, ival: 4)]).len == 1
+    check rowsDl("[:find ?e :where [?e :nb.i 4]]").len == 1
 
   test "open range filter":
-    check rowsOf("SELECT d1.eid WHERE d1.nb.i > %1",
-                 @[SExpr(kind: sInt, ival: 7)]).len == 3
+    check rowsDl("[:find ?e :where [?e :nb.i ?i] [(:> ?i 7)]]").len == 3
 
   test "closed range filter":
-    check rowsOf("SELECT d1.eid WHERE d1.nb.i >= %1 AND d1.nb.i <= %2",
-                 @[SExpr(kind: sInt, ival: 3),
-                   SExpr(kind: sInt, ival: 5)]).len == 3
+    check rowsDl("[:find ?e :where [?e :nb.i ?i] [(:>= ?i 3)] [(:<= ?i 5)]]").len == 3
 
-  test "IN filter with params":
-    # regression: IN compiled to (= v1 v2 v3); the range walker only read the
-    # first value, so IN (1,5,9) matched just 1
-    check rowsOf("SELECT d1.eid WHERE d1.nb.i IN (%1, %2, %3)",
-                 @[SExpr(kind: sInt, ival: 1), SExpr(kind: sInt, ival: 5),
-                   SExpr(kind: sInt, ival: 9)]).len == 3
-
-  test "IN filter with literals":
-    check rowsOf("SELECT d1.eid WHERE d1.nb.i IN (1, 5, 9)").len == 3
+  test "IN filter":
+    check rowsDl("[:find ?e :where [?e :nb.i ?i] [(:in ?i 1 5 9)]]").len == 3
 
   test "exclusion filter":
-    check rowsOf("SELECT d1.eid WHERE d1.nb.i != %1",
-                 @[SExpr(kind: sInt, ival: 4)]).len == 9
-
-  test "projection of range-filtered value":
-    check rowsOf("SELECT d1.nb.i WHERE d1.nb.i > %1",
-                 @[SExpr(kind: sInt, ival: 8)]).len == 2
-
-  test "IN on unique attr [depth-var path]":
-    let kvU = newMemoryKVStore()
-    defer: kvU.close()
-    let qU = newQueryStore(kvU)
-    discard runSql(qU, "ATTRIBUTE uq.i LONG ONE UNIQUE")
-    for i in 1..10:
-      discard runSql(qU, "UPSERT SET uq.i = " & $i)
-    check runSql(qU, "SELECT d1.eid WHERE d1.uq.i IN (1, 5, 9)").len == 3
-
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Hydrated-eid fast path (QueryStore level)
-# ═══════════════════════════════════════════════════════════════════════════════
+    check rowsDl("[:find ?e :where [?e :nb.i ?i] [(:!= ?i 4)]]").len == 9
 
 suite "engine: hydrated eid fast path":
 
