@@ -2,7 +2,7 @@
 ##
 ## Port of spier-eavt-query/src/engine/query_engine_inner.rs + lib.rs (~1293 lines Rust → Nim).
 
-import std/[options, tables, strutils, sequtils, monotimes]
+import std/[options, tables, strutils, sequtils, monotimes, algorithm]
 import scheme
 import kvstore
 import eavt
@@ -108,6 +108,11 @@ proc printSavePerf*(q: QueryStore) =
     echo "  rest (VM/allocs): ", ms(q.execWallNs - total - q.lookupNs), " ms  (",
       wpct(q.execWallNs - total - q.lookupNs), "% of wall)"
 
+const perfCounters* = false  ## -d:eavtPerfCounters liga os contadores de
+                              ## nanossegundos (custa ~5 clock_gettime por datom)
+when perfCounters:
+  import std/monotimes
+
 # ── SExpr → storage value ──
 
 proc sexprToPackedValue(val: SExpr): string =
@@ -197,10 +202,10 @@ proc saveResolvedEncodedInto(q: QueryStore; eid: int64; attrId: uint32;
   ## saveResolvedInto minus value conversion — retract scan + entry build
   ## from a pre-encoded value (shared by SExpr and flat-slot paths).
   q.saveCount += 1
-  var t0 = getMonoTime()
-
-  q.saveEncodeNs += (getMonoTime().ticks - t0.ticks)
-  t0 = getMonoTime()
+  when perfCounters:
+    var t0 = getMonoTime()
+    q.saveEncodeNs += (getMonoTime().ticks - t0.ticks)
+    t0 = getMonoTime()
 
   if not many:
     # Skip provado: eid HIDRATADO é autoritativo (invariante complete+current);
@@ -212,37 +217,42 @@ proc saveResolvedEncodedInto(q: QueryStore; eid: int64; attrId: uint32;
       q.eavt.hydEnabled and q.eavt.hyd.probe(eid) and
       not q.eavt.hyd.hasAttrKey(eid, attrId))
     if needsRetractScan:
-      var tPrefix = getMonoTime()
+      when perfCounters:
+        var tPrefix = getMonoTime()
       var ePrefix = keys.encodeEid(eid)
       ePrefix.add byte(attrId shr 24); ePrefix.add byte((attrId shr 16) and 0xFF)
       ePrefix.add byte((attrId shr 8) and 0xFF); ePrefix.add byte(attrId and 0xFF)
-      q.saveRetractPrefixNs += (getMonoTime().ticks - tPrefix.ticks)
-
-      var tScan = getMonoTime()
+      when perfCounters:
+        q.saveRetractPrefixNs += (getMonoTime().ticks - tPrefix.ticks)
+        var tScan = getMonoTime()
       var foundKeys: seq[seq[byte]] = @[]
       for ek in q.eavt.scanPrefixActive(0, ePrefix):
         foundKeys.add(ek)
-      q.saveRetractSeekNs += (getMonoTime().ticks - tScan.ticks)
-
-      tScan = getMonoTime()
+      when perfCounters:
+        q.saveRetractSeekNs += (getMonoTime().ticks - tScan.ticks)
+        tScan = getMonoTime()
       var retracted = 0
       for ek in foundKeys:
         if ek.len < 20: continue
         var retEntries = buildEavtEntries(q.eavt.kv.mt.hnd.arena, eid, attrId, ek[12 ..< ek.len - 8], t, true, mode, indexed)
         entries.add retEntries
         retracted += 1
-      q.saveRetractApplyNs += (getMonoTime().ticks - tScan.ticks)
-      q.saveRetractCount += retracted
-      q.saveRetractScans += 1
+      when perfCounters:
+        q.saveRetractApplyNs += (getMonoTime().ticks - tScan.ticks)
+        q.saveRetractCount += retracted
+        q.saveRetractScans += 1
     else:
-      q.saveRetractScans += 1
+      when perfCounters:
+        q.saveRetractScans += 1
 
-  q.saveRetractScanNs += (getMonoTime().ticks - t0.ticks)
-  t0 = getMonoTime()
+  when perfCounters:
+    q.saveRetractScanNs += (getMonoTime().ticks - t0.ticks)
+    t0 = getMonoTime()
 
   entries.add buildEavtEntries(q.eavt.kv.mt.hnd.arena, eid, attrId, encoded, t, false, mode, indexed)
 
-  q.saveBuildEntriesNs += (getMonoTime().ticks - t0.ticks)
+  when perfCounters:
+    q.saveBuildEntriesNs += (getMonoTime().ticks - t0.ticks)
 
 proc saveResolvedInto(q: QueryStore; eid: int64; attrId: uint32; vt: uint32;
                       many, indexed: bool; mode: EncodeMode; val: SExpr; t: int64;
@@ -486,9 +496,23 @@ method hasDatomW(q: QueryStore; eid: int64; attrId: uint32;
                  val: TxWSlot): bool =
   ## Active-datom membership for flat slots, keyed by attrId (no name
   ## resolution).  Used by the tx interpreter for :db/add idempotency.
+  ## Hydrated fast path (same "skip provado" invariant as the retract
+  ## scan): a hydrated eid is authoritative for its CF-0 set — no key for
+  ## (eid, attrId) means the datom cannot exist (bulk-load hot path); with
+  ## keys present, membership is checked in memory via lookupRange.
   let vt = q.eavt.valueTypeFor(attrId).get(resolver.DbTypeString)
   let mode = valueTypeToEncodeMode(vt)
   let encoded = encodeSaveValueSlot(val, vt, mode, eid)
+  if q.eavt.hydEnabled and q.eavt.hyd.probe(eid):
+    if not q.eavt.hyd.hasAttrKey(eid, attrId):
+      return false
+    var prefix = keys.encodeEid(eid)
+    prefix.add byte(attrId shr 24); prefix.add byte((attrId shr 16) and 0xFF)
+    prefix.add byte((attrId shr 8) and 0xFF); prefix.add byte(attrId and 0xFF)
+    prefix.add encoded            # full value segment (any t suffix)
+    for k in q.eavt.hyd.lookupRange(eid, prefix):
+      if k.len >= 20 and k[12 ..< k.len - 8] == encoded: return true
+    return false
   var prefix = keys.encodeEid(eid)
   prefix.add byte(attrId shr 24); prefix.add byte((attrId shr 16) and 0xFF)
   prefix.add byte((attrId shr 8) and 0xFF); prefix.add byte(attrId and 0xFF)
