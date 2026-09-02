@@ -1,6 +1,6 @@
 import std/[unittest, tables, sets, strutils]
 import edn
-import parser as sql_parser, frontend, stats, scheme
+import parser as sql_parser, frontend, compiler, stats, scheme
 
 proc makeStats(): CompileStats =
   var attrs = {

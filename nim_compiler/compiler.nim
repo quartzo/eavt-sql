@@ -6,6 +6,9 @@ import scheme, scheme_compile
 type
   CompileResult* = ref object
     program*: SchemeProgram
+    isSelect*: bool
+    isExplain*: bool
+    selectBody*: SchemeProgram
     traces*: seq[PlanTrace]
     iterPlans*: seq[IterPlanData]
     lookups*: seq[Pattern]

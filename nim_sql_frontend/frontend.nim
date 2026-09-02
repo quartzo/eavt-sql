@@ -1,18 +1,7 @@
 import std/[options, tables, sequtils, sets, strutils]
-import ast, translate, datalog_ast, pattern, resolve, stats, planner, planner_ast, scheme_compile
+import ast, translate, datalog_ast, pattern, resolve, stats, planner, planner_ast, scheme_compile, compiler
 import scheme
 
-type
-  CompileResult* = ref object
-    program*: SchemeProgram
-    isSelect*: bool
-    isExplain*: bool
-    selectBody*: SchemeProgram
-    traces*: seq[PlanTrace]
-    iterPlans*: seq[IterPlanData]
-    orderedVars*: seq[string]
-    history*: bool
-    existsMode*: bool
 
 
 proc isDeleteDirect*(stmt: DeleteStmt): bool =

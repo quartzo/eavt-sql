@@ -5,19 +5,18 @@
 ## Reuses the Datalog IR end-to-end — the SQL AST is not involved.
 
 import std/[options, tables, sets, sequtils]
-import ast as sql_ast
-import scheme, compiler, frontend
+import scheme, compiler
 import datalog_ast, pattern, resolve, planner_ast, planner, scheme_compile
 import stats
 import query_edn
 
 proc compileDatalogQuery*(text: string; cstats: stats.CompileStats;
-                          findVarsOut: var seq[string]): frontend.CompileResult {.
+                          findVarsOut: var seq[string]): CompileResult {.
     raises: [CatchableError], gcsafe.} =
   ## Compile a Datalog EDN query.  findVarsOut receives the :find variable
   ## names (result columns, in order).  Raises ValueError on resolution or
   ## syntax failures.
-  result = frontend.CompileResult()
+  result = CompileResult()
   let ir = parseDatalogQuery(text)
   var resolved = ir
   if not resolveIr(resolved, cstats):

@@ -9,6 +9,7 @@
 
 import std/[unittest, options, tables, strutils, sequtils]
 import edn
+import parser as sql_parser
 import scheme
 import keys
 import kvstore
@@ -19,7 +20,6 @@ import types
 import scanner
 import hostfns
 import engine
-import parser as sql_parser
 import frontend
 import explain
 import planner_ast

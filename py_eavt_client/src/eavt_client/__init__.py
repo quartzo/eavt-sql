@@ -1,3 +1,3 @@
-from eavt_client.client import EavtClient, Sym, to_wire
+from eavt_client.client import EavtClient, Sym, Kw, to_wire
 
-__all__ = ["EavtClient", "Sym", "to_wire"]
+__all__ = ["EavtClient", "Sym", "Kw", "to_wire"]

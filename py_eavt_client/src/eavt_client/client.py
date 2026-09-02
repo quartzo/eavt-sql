@@ -18,6 +18,13 @@ class Sym(str):
     `str` values are encoded as Scheme strings."""
 
 
+class Kw(str):
+    """Marks a string as an EDN keyword (msgpack ext type 0x06).
+    The leading colon is optional: Kw("db/add") or Kw(":db/add")."""
+    def __new__(cls, s):
+        return super().__new__(cls, s.lstrip(":"))
+
+
 def to_wire(v):
     """Convert a Python value to the wire program form (docs/scheme-transport.md §3.3).
 
@@ -25,6 +32,8 @@ def to_wire(v):
     str → str, bool → bool, bytes → bin, None → nil, list/tuple → array.
     Sym → ext type 0x05 (payload = UTF-8 name).
     """
+    if isinstance(v, Kw):
+        return msgpack.ExtType(0x06, str(v).encode("utf-8"))
     if isinstance(v, Sym):
         return msgpack.ExtType(0x05, str(v).encode("utf-8"))
     if isinstance(v, (bytes, bytearray)):
@@ -152,6 +161,21 @@ class EavtClient:
             req["params"] = [to_wire(p) for p in params]
         self._send_msg(_PACKER.pack(req))
         return self._recv_loop()
+
+    def tx(self, txdata: list) -> dict:
+        """Execute an EDN transaction (docs/tx-protocol.md) and return
+        the tx-report {tempids: {...}, tx: txid}.
+
+        txdata: list of op vectors like
+          [[:db/add -1 :person/name "Alice"]]
+          [[:db/add 0 :db/ident :person/email] ...]  (schema)
+        """
+        req = {"type": "tx", "txdata": to_wire(txdata)}
+        self._send_msg(_PACKER.pack(req))
+        resp = msgpack.unpackb(self._recv_msg(), strict_map_key=False)
+        if "error" in resp and resp["error"]:
+            raise RuntimeError(resp["error"])
+        return resp
 
     def q(self, query: str, *args) -> list[tuple]:
         """Execute a Datalog EDN query (docs/datalog-reference.md) and
