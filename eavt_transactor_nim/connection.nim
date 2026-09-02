@@ -345,7 +345,7 @@ proc processFrame(eng: SharedEngine; raw: string; id: string;
   ## correlation id) — nothing escapes this proc.
   try:
     let tDecode = getMonoTime().ticks
-    var req = parseRequest(raw)
+    var req = parseRequest(raw, eng.store.symtab)
     eng.store.decodeNs += getMonoTime().ticks - tDecode
     inc eng.store.decodeCount
     req.id = id  # id from the outer frame header (already parsed)

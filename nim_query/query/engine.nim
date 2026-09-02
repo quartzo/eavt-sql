@@ -3,7 +3,7 @@
 ## Port of spier-eavt-query/src/engine/query_engine_inner.rs + lib.rs (~1293 lines Rust → Nim).
 
 import std/[options, tables, strutils, sequtils, monotimes, algorithm]
-import scheme
+import scheme, symtab
 import kvstore
 import eavt
 import keys
@@ -21,6 +21,7 @@ type
   QueryStore* = ref object of EngineOps
     eavt*: EavtEngine
     kv*: KVStore             # Nim ref — no C-ABI
+
     # perf counters for saveWithT
     saveCount*: int64
     saveLookupAttrNs*: int64    # nanoseconds
@@ -53,7 +54,7 @@ type
 proc newQueryStore*(kv: KVStore): QueryStore =
   let eng = newEavtEngine(kv)
   eng.bootstrapResolver()
-  QueryStore(eavt: eng, kv: kv)
+  QueryStore(eavt: eng, kv: kv, symtab: newSymTab())
 
 proc resetSaveCounters*(q: QueryStore) =
   q.saveCount = 0
@@ -171,7 +172,7 @@ proc slotToPackedValue*(v: TxWSlot): string =
     for i, b in v.bin: result[i] = char(b)
   else: result = ""
 
-proc slotToValueForType(v: TxWSlot; vt: uint32): string =
+proc slotToValueForType*(v: TxWSlot; vt: uint32): string =
   if vt == scanner.DbTypeBoolean:
     result = if v.kind == tskBool: (if v.b: "1" else: "0") else: "0"
   elif vt == scanner.DbTypeBytes or vt == scanner.DbTypeBlob:
@@ -373,7 +374,9 @@ method retract(q: QueryStore; eid: int64; attr: string; val: SExpr;
 method saveBatchEdn(q: QueryStore; txops: seq[TxWOp];
                     t: int64; asOf: int64) =
   ## Bulk save for flat tx ops — metadata resolved once per distinct attrId;
-  ## ONE batchWrite for the tx.  Correctness guard (mirrors saveManyWithT's
+  ## ONE batchWrite for the tx, INCLUDING the deferred db.txInstant datom
+  ## (the tx entity was allocated via allocateTxDeferred — one storage
+  ## cycle per tx, not two).  Correctness guard (mirrors saveManyWithT's
   ## `bulk`): a duplicate (eid, attrId) card-ONE pair in the batch falls
   ## back to the per-datom path to preserve read-your-writes.  attrId 0 =
   ## interpreter-marked no-op (hasDatom hit) or undeclared attr.
@@ -391,8 +394,11 @@ method saveBatchEdn(q: QueryStore; txops: seq[TxWOp];
     m
 
   proc isSchema(op: TxWOp): bool =
-    not op.isRetract and op.attr in ["db/ident", "db/valueType",
-                                     "db/cardinality", "db/unique"]
+    not op.isRetract and
+    (op.attrSym == uint32(q.symtab.dbIdent) or
+     op.attrSym == uint32(q.symtab.dbType) or
+     op.attrSym == uint32(q.symtab.dbCardinality) or
+     op.attrSym == uint32(q.symtab.dbUnique))
 
   proc effVal(op: TxWOp): TxWSlot =
     ## v-slot value for encoding: resolved eid for tempid/lookup-ref slots.
@@ -429,6 +435,7 @@ method saveBatchEdn(q: QueryStore; txops: seq[TxWOp];
     return
 
   q.txEntries.setLen(0)
+  for e in q.eavt.txInstantEntry(t): q.txEntries.add(e)
   for op in txops:
     if op.isRetract or isSchema(op) or op.attrId == 0: continue
     let m = metaFor(op.attrId)
@@ -478,6 +485,16 @@ method declareAttrFromSql(q: QueryStore; attr, typeName: string;
 
 method declarePartition(q: QueryStore; name: string; t: int64): uint64 =
   q.eavt.declarePartition(name)
+
+method allocateTxDeferred(q: QueryStore): int64 =
+  q.eavt.allocateTDeferred()
+
+method isUniqueById(q: QueryStore; attrId: uint32): bool =
+  q.eavt.isUnique(attrId)
+
+method batchLookupAvet(q: QueryStore;
+                       keys: seq[seq[byte]]): seq[Option[int64]] =
+  q.eavt.batchLookupAvet(keys)
 
 method allocateInPartition(q: QueryStore; partitionId: uint64): int64 =
   q.eavt.allocateInPartition(partitionId)

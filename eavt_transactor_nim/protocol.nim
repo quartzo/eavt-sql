@@ -1,6 +1,6 @@
 import std/[nativesockets, posix, streams]
 import msgpack4nim
-import scheme, wire, msgpack_scan
+import scheme, symtab, wire, msgpack_scan
 
 type
   RequestKind* = enum
@@ -25,7 +25,7 @@ type
       kvKey*: seq[byte]
       kvValue*: seq[byte]  ## used for "put"
 
-proc parseRequest*(data: string): Request =
+proc parseRequest*(data: string; tab: SymTab): Request =
   ## Decode a client frame straight from raw msgpack — the tagged-AST
   ## program never materializes as an intermediate JSON tree.
   if not isMsgpackMap(data):
@@ -43,7 +43,7 @@ proc parseRequest*(data: string): Request =
         result.params.add(wireFromMsgpackAt(data, s, e))
   of "tx":
     result = Request(kind: rkTx, id: result.id,
-                     txdata: txopsFromMsgpack(data))
+                     txdata: txopsFromMsgpack(data, tab))
   of "schema":
     result = Request(kind: rkSchema, id: result.id)
   of "admin":

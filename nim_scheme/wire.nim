@@ -20,7 +20,7 @@
 
 import std/[strutils, streams]
 import msgpack4nim
-import scheme, msgpack_scan
+import scheme, symtab, msgpack_scan
 
 type
   WireError* = object of CatchableError
@@ -368,11 +368,13 @@ proc txdataFromMsgpack*(data: string): seq[SExpr] {.raises: [WireError].} =
     result.add(wireFromMsgpackAt(data, sOp, eOp))
 # ── Direct flat tx decode (bytes → TxWOp, no SExpr tree) ────────────────────
 
-proc txSlotFromMsgpack(buf: string; pos: var int; limit: int): TxWSlot {.
+proc txSlotFromMsgpack(buf: string; pos: var int; limit: int;
+                       tab: SymTab): TxWSlot {.
     raises: [WireError].} =
   ## Decode one tx-op slot directly into a flat TxWSlot.  Same accepted
   ## encodings as mpNode; lookup refs (2-element arrays, keyword first)
-  ## become tskLookupRef without building an SExpr list.
+  ## become tskLookupRef without building an SExpr list.  Keywords are
+  ## interned into `tab` at capture.
   if pos >= limit: raise newException(WireError, "truncated tx slot")
   let b = ord(buf[pos])
   case b
@@ -393,8 +395,10 @@ proc txSlotFromMsgpack(buf: string; pos: var int; limit: int): TxWSlot {.
   of 0xd4..0xd8, 0xc7, 0xc8, 0xc9:
     let (exttype, payload) = mpReadExt(buf, pos, limit)
     if exttype == extKeyword:
-      result = TxWSlot(kind: tskKw, s: payload)
+      # interned at capture: identity is a uint32 from here on
+      result = TxWSlot(kind: tskKw, sym: uint32(tab.internSym(payload)))
     elif exttype == extSymbol:
+      # env-variable symbols in the tx path (rare) — keep readable
       result = TxWSlot(kind: tskStr, s: payload)
     else:
       raise newException(WireError,
@@ -404,54 +408,56 @@ proc txSlotFromMsgpack(buf: string; pos: var int; limit: int): TxWSlot {.
     if n != 2:
       raise newException(WireError,
         "tx lookup ref must be a 2-element array")
-    let attrSlot = txSlotFromMsgpack(buf, pos, limit)
+    let attrSlot = txSlotFromMsgpack(buf, pos, limit, tab)
     if attrSlot.kind != tskKw:
       raise newException(WireError,
         "tx lookup ref attr must be a keyword")
-    let vSlot = txSlotFromMsgpack(buf, pos, limit)
+    let vSlot = txSlotFromMsgpack(buf, pos, limit, tab)
     new(result.refVal)
     result.refVal[] = vSlot
     result.kind = tskLookupRef
-    result.refAttr = attrSlot.s
+    result.sym = attrSlot.sym
   else:
     raise newException(WireError,
       "unexpected msgpack byte 0x" & toHex(b, 2) & " in tx op")
 
-proc txOpFromMsgpack(buf: string; pos: var int; limit: int): TxWOp {.
-    raises: [WireError].} =
+proc txOpFromMsgpack(buf: string; pos: var int; limit: int;
+                     tab: SymTab): TxWOp {.raises: [WireError].} =
   ## One op vector: [op-kw, e, attr-kw, v] — flat, no SExpr.
   if pos >= limit: raise newException(WireError, "truncated tx op")
   let n = mpReadArrayHeader(buf, pos, limit)
   if n != 4:
     raise newException(WireError,
       "tx op must be a 4-element vector (got " & $n & ")")
-  let opHead = txSlotFromMsgpack(buf, pos, limit)
+  let opHead = txSlotFromMsgpack(buf, pos, limit, tab)
   if opHead.kind != tskKw:
     raise newException(WireError, "tx op must start with a keyword")
-  if opHead.s == "db/add":
+  if opHead.sym == uint32(tab.dbAdd):
     result.isRetract = false
-  elif opHead.s == "db/retract":
+  elif opHead.sym == uint32(tab.dbRetract):
     result.isRetract = true
   else:
     raise newException(WireError,
-      "tx: unknown op keyword: :" & opHead.s)
-  result.e = txSlotFromMsgpack(buf, pos, limit)
-  let attrSlot = txSlotFromMsgpack(buf, pos, limit)
+      "tx: unknown op keyword: :" & tab.symName(SymId(opHead.sym)))
+  result.e = txSlotFromMsgpack(buf, pos, limit, tab)
+  let attrSlot = txSlotFromMsgpack(buf, pos, limit, tab)
   if attrSlot.kind == tskKw:
-    result.attr = attrSlot.s
+    result.attrSym = attrSlot.sym
   else:
-    result.attr = ""            # interpreter raises "expected keyword"
-  result.v = txSlotFromMsgpack(buf, pos, limit)
+    result.attrSym = 0          # interpreter raises "expected keyword"
+  result.v = txSlotFromMsgpack(buf, pos, limit, tab)
 
-proc txopsFromMsgpack*(data: string): seq[TxWOp] {.raises: [WireError].} =
+proc txopsFromMsgpack*(data: string; tab: SymTab): seq[TxWOp] {.
+    raises: [WireError].} =
   ## Decode the top-level "txdata" array of a `tx` request directly into
   ## flat TxWOp records — no intermediate SExpr tree (one seq + value
   ## strings; per-op cost is O(bytes), no heap objects beyond payloads).
+  ## Keywords interned into `tab` at capture.
   let (found, s, e) = topValue(data, "txdata")
   if not found:
     raise newException(WireError, "tx request is missing txdata")
   for (sOp, eOp) in topArrayElems(data, s, e):
     var pos = sOp
-    result.add(txOpFromMsgpack(data, pos, eOp))
+    result.add(txOpFromMsgpack(data, pos, eOp, tab))
     if pos != eOp:
       raise newException(WireError, "trailing bytes in tx op")

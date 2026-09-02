@@ -3,7 +3,7 @@
 ## Port of spier-eavt-query/src/engine/scheme.rs (~983 lines Rust → Nim).
 
 import std/[options, tables, strutils, sequtils, math]
-import scheme
+import scheme, symtab
 import kvstore
 import keys
 import types
@@ -67,9 +67,11 @@ type
   EngineOps* = ref object of RootObj
     ## Scratch buffers for the flat tx interpreter — reused across txs so
     ## the steady-state path performs no per-tx allocation (single loop).
+    symtab*: SymTab             # keyword interning (per-process ids)
     txSlot*: seq[int32]         # per-op attr-cache slot (classification)
     txAnchorOp*: seq[int32]     # tempid → op index (+1) of its unique anchor
     txAnchorEid*: seq[int64]    # tempid → resolved eid
+    txFresh*: seq[bool]         # tempid → allocated in THIS tx
 
 method openCursor*(ops: EngineOps; cfId: uint32; prefix: seq[byte]): Cursor {.base, gcsafe.} =
   raise newException(EvalError, "not implemented")
@@ -108,6 +110,18 @@ method declareAttrFromSql*(ops: EngineOps; attr, typeName: string;
 method declarePartition*(ops: EngineOps; name: string; t: int64): uint64 {.base, gcsafe.} = 0
 
 method allocateInPartition*(ops: EngineOps; partitionId: uint64): int64 {.base, gcsafe.} = 0
+
+method allocateTxDeferred*(ops: EngineOps): int64 {.base, gcsafe.} = 0
+  ## Allocate the tx entity WITHOUT writing its db.txInstant datom — the
+  ## interpreter appends it to the main batchWrite (one storage cycle).
+
+method isUniqueById*(ops: EngineOps; attrId: uint32): bool {.base, gcsafe.} =
+  false
+
+method batchLookupAvet*(ops: EngineOps;
+                        keys: seq[seq[byte]]): seq[Option[int64]] {.base, gcsafe.} =
+  ## Batched unique-index lookups (positional results).
+  for k in keys: result.add(none[int64]())
 
 method allocateTx*(ops: EngineOps): int64 {.base, gcsafe.} = 0
 

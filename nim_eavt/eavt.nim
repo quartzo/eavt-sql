@@ -812,3 +812,46 @@ iterator scanDatoms*(eng: EavtEngine; cf: int): Datom =
 
     yield Datom(e: eid, a: aid, attrName: attrName,
                 value: valSexpr, t: t, retracted: retracted)
+
+proc allocateTDeferred*(eng: EavtEngine): int64 =
+  ## Allocate a fresh tx entity WITHOUT writing its db.txInstant datom.
+  ## The interpreter appends the datom to the tx's main batchWrite instead
+  ## (one storage cycle per tx, not two).  Callers that want the datom
+  ## written immediately keep using allocateTAndWriteTx.
+  eng.resolver.allocateInPartition(PartTx)
+
+proc txInstantEntry*(eng: EavtEngine; txEid: int64): seq[EavtEntry] =
+  ## The deferred db.txInstant datom for a txEid from allocateTDeferred —
+  ## built like allocateTAndWriteTx writes it.
+  let encoded = encodeValue($nowMicros(), emFixed, 0)
+  buildEavtEntries(eng.kv.mt.hnd.arena, txEid, DbTxInstantAid, encoded, txEid,
+                   false, emFixed, false)
+
+proc batchLookupAvet*(eng: EavtEngine;
+                      keys: seq[seq[byte]]): seq[Option[int64]] =
+  ## Batched unique-index lookups (AVET, CF-2).  `keys` are prefixes
+  ## [aid 4B][value]; results are POSITIONAL — the eid of the first active
+  ## datom with that prefix, or none.  Identical prefixes are deduped and
+  ## scanned in sorted order (seek locality); each distinct prefix reuses
+  ## the scanPrefixActive cursor machinery (in-place update per CF).
+  ## Stateless across txs — concurrency-safe.
+  result = newSeq[Option[int64]](keys.len)
+  if keys.len == 0: return
+  var order = newSeq[int](keys.len)
+  for i in 0 ..< keys.len: order[i] = i
+  order.sort() do(a, b: int) -> int:
+    if keys[a].len != keys[b].len: return cmp(keys[a].len, keys[b].len)
+    for i in 0 ..< keys[a].len:
+      if keys[a][i] != keys[b][i]:
+        return cmp(keys[a][i], keys[b][i])
+    return 0
+  var lastIdx = -1              # dedup: previous sorted entry with same key
+  for oi in 0 ..< order.len:
+    let i = order[oi]
+    if lastIdx >= 0 and keys[order[lastIdx]] == keys[i]:
+      result[i] = result[order[lastIdx]]
+      continue
+    let scanRes = eng.scanPrefixActive(2, keys[i])
+    if scanRes.len > 0 and scanRes[0].len >= 20:
+      result[i] = some(decodeEid(beUint64(scanRes[0], scanRes[0].len - 16)))
+    lastIdx = oi

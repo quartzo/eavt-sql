@@ -1038,23 +1038,23 @@ type
     tskFloat
     tskBool
     tskStr
-    tskKw        # keyword payload in .s
+    tskKw        # keyword interned at transport capture (symtab.nim)
     tskBytes
-    tskLookupRef # [attr value] — attr name in refAttr, scalar in refVal
+    tskLookupRef # [attr value] — attr keyword interned in refSym
   TxWSlot* = object
     kind*: TxWSlotKind
     i*: int64
     f*: float64
     b*: bool
-    s*: string             # tskStr / tskKw / tskLookupRef refAttr+refVal.s
+    s*: string             # tskStr payload
+    sym*: uint32           # tskKw / tskLookupRef refAttr (interned; 0 invalid)
     bin*: seq[byte]        # tskBytes
-    refAttr*: string       # tskLookupRef: attr name
     refVal*: ref TxWSlot   # tskLookupRef: scalar value (rare — heap ok)
   TxWOp* = object
     isRetract*: bool
     e*: TxWSlot            # e slot (typed by the decoder; e.i mutated to the
                            #   resolved eid by the interpreter)
-    attr*: string          # op attr name ("" when not a keyword)
+    attrSym*: uint32       # op attr keyword interned (0 = not a keyword)
     v*: TxWSlot            # v slot
     # interpreter-filled fields (0 = no-op / undeclared marker):
     attrId*: uint32
