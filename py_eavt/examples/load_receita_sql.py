@@ -24,7 +24,7 @@ from pathlib import Path
 _root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_root / "py_eavt_client" / "src"))
 
-from eavt_client.client import EavtClient, Sym  # noqa: E402
+from eavt_client.client import EavtClient, Sym, Kw  # noqa: E402
 
 DEFAULT_DATA = Path("/home/fabio/dev/dagster_flows/tests_data/receita_zip")
 BATCH_SIZE = 500
@@ -40,51 +40,46 @@ ZERO_DATE = "00000000"
 # msgpack serializes each occurrence independently (no cycles by construction).
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_sym_cache: dict[str, list] = {}
-_attr_cache: dict[str, list] = {}
+# ── Wire node constructors (modern transport: native values + ext types) ────
+#
+# The VM is EDN-ized: opcodes are KEYWORDS heading the form — [:begin ...],
+# [:save E :attr v], [:get-or-create-entity :attr "v"].  Env variables (E, G)
+# travel as symbols (ext 0x05); attribute names are plain strings (the
+# hostfns' expectStr normalizes dot→slash at the resolver boundary).
+
+def WSym(name: str):
+    return Sym(name)
 
 
-def WSym(name: str) -> list:
-    n = _sym_cache.get(name)
-    if n is None:
-        n = [3, name]
-        _sym_cache[name] = n
-    return n
+def WAttr(name: str) -> str:
+    return name
 
 
-def WAttr(name: str) -> list:
-    n = _attr_cache.get(name)
-    if n is None:
-        n = [2, name]
-        _attr_cache[name] = n
-    return n
+def WInt(i: int) -> int:
+    return i
 
 
-def WInt(i: int) -> list:
-    return [0, i]
+def WFloat(f: float) -> float:
+    return f
 
 
-def WFloat(f: float) -> list:
-    return [1, f]
-
-
-def WStr(s: str) -> list:
-    return [2, s]
+def WStr(s: str) -> str:
+    return s
 
 
 def WForm(*nodes) -> list:
-    """Wire node for a form: (n0 n1 ...) -> [7, [n0, n1, ...]]"""
-    return [7, list(nodes)]
+    """Form: [kw-head, args...] — the head must already be a Kw()."""
+    return list(nodes)
 
 
 E_SYM = WSym("E")
-SETBANG = WSym("set!")
-SAVE = WSym("save")
-RESULT = WSym("result")
-WHEN = WSym("when")
-BEGIN = WSym("begin")
-GOC = WSym("get-or-create-entity")
-ALLOC_E_4 = WForm(WSym("alloc-entity"), WInt(4))
+SETBANG = Kw("set!")
+SAVE = Kw("save")
+RESULT = Kw("result")
+WHEN = Kw("when")
+BEGIN = Kw("begin")
+GOC = Kw("get-or-create-entity")
+ALLOC_E_4 = WForm(Kw("alloc-entity"), WInt(4))
 
 
 def set_e_alloc() -> list:
@@ -206,7 +201,7 @@ S = Sym  # shorthand for Scheme symbol
 def run_scheme_batch(client: EavtClient, body: list) -> int:
     """Execute a wire-tagged (begin ...) program in exec mode. Returns first EID."""
     program = WForm(BEGIN, *body)
-    results = client.scheme_wire(program, mode="exec")
+    results = client.scheme(program, mode="exec")
     return results[0]["rows"][0][0]
 
 
@@ -473,11 +468,11 @@ def _estab_bulk_phase_a(client, batch, cache):
 def _estab_bulk_phase_b(client, new_keys, cache):
     if not new_keys:
         return
-    qbody = [WForm(WSym("result-row"),
-                   WForm(WSym("lookup-entity"), WAttr(k[0]), WStr(k[1])))
+    qbody = [WForm(Kw("result-row"),
+                   WForm(Kw("lookup-entity"), WAttr(k[0]), WStr(k[1])))
              for k in new_keys]
     rows = []
-    for ch in client.scheme_wire(WForm(BEGIN, *qbody), mode="query"):
+    for ch in client.scheme(WForm(BEGIN, *qbody), mode="query"):
         rows.extend(ch.get("rows", []))
     if len(rows) != len(new_keys):
         raise RuntimeError(
@@ -507,7 +502,7 @@ def _estab_bulk_phase_c(client, batch, cache):
                         [e, WInt(cache[("cnae.codigo", code)])])
     body = []
     for attr, pairs in by_pairs.items():
-        body.append(WForm(WSym("save-many"), WAttr(attr), *pairs))
+        body.append(WForm(Kw("save-many"), WAttr(attr), *pairs))
     body.append(WForm(RESULT, WInt(0)))
     run_scheme_batch(client, body)
 
