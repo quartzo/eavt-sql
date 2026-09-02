@@ -1,5 +1,7 @@
 import std/[nativesockets, posix, json, os, strutils, streams]
 import msgpack4nim, msgpack4nim/msgpack2json
+import scheme, wire, msgpack_scan
+import msgpack_scan
 import logutil
 
 type
@@ -329,16 +331,37 @@ proc txExec*(c: var EavtClient; txdataJson: JsonNode): string =
   sendMsg(c, msgpack2json.fromJsonNode(node))
   let resp = recvMsg(c)
   if resp.len == 0: return "error: transactor disconnected"
-  try:
-    let n = toJsonNode(resp)
-    if n.hasKey("error") and n["error"].getStr.len > 0:
-      return "error: " & n["error"].getStr
-    var parts: seq[string] = @[]
-    if n.hasKey("tempids"):
-      for k, v in n["tempids"]:
-        parts.add(k & "=" & $v.getInt)
-    if n.hasKey("tx"):
-      parts.add("tx=" & $n["tx"].getInt())
-    return "tx-report: " & parts.join(", ")
-  except CatchableError as e:
-    return "error: malformed response (" & e.msg & ")"
+  # The tx-report has integer keys (tempids) — toJsonNode can't handle them.
+  # Use msgpack_scan top-level access instead.
+  let err = getTopStr(resp, "error")
+  if err.len > 0: return "error: " & err
+  let tx = getTopInt(resp, "tx")
+  let (tempidsFound, _, _) = topValue(resp, "tempids")
+  var parts: seq[string] = @[]
+  parts.add("tx=" & $tx)
+  if tempidsFound:
+    parts.add("tempids resolved")
+  return "tx-report: " & parts.join(", ")
+
+
+proc txSExpr*(c: var EavtClient; ops: seq[SExpr]): string =
+  ## Send a tx request with SExpr op vectors — keywords travel as ext 0x06.
+  var ms = MsgStream.init(256)
+  ms.pack_map(2)
+  ms.pack("type"); ms.pack("tx")
+  ms.pack("txdata")
+  ms.pack_array(ops.len)
+  for op in ops:
+    writeSExprWire(ms, op)
+  sendMsg(c, ms.data)
+  let resp = recvMsg(c)
+  if resp.len == 0: return "error: transactor disconnected"
+  let err = getTopStr(resp, "error")
+  if err.len > 0: return "error: " & err
+  let tx = getTopInt(resp, "tx")
+  let (tempidsFound, _, _) = topValue(resp, "tempids")
+  var parts: seq[string] = @[]
+  parts.add("tx=" & $tx)
+  if tempidsFound:
+    parts.add("tempids resolved")
+  return "tx-report: " & parts.join(", ")

@@ -1,11 +1,12 @@
 ## EAVT Datalog REPL (pure Nim, UDS client).
-## Queries: Datalog EDN vectors ending with `;`
+## Queries: Datalog EDN vectors
 ##          e.g. [:find ?name :where [?e :person/name ?name]];
-## Writes: EDN tx-data vectors ending with `;`
+## Writes:  EDN tx-data vectors
 ##          e.g. [[:db/add -1 :person/name "Alice"]];
 ## Dot commands mirror the original SQL REPL (.help/.flush/.status/...).
 
 import std/[strutils, strformat, os, terminal, json]
+import scheme, edn
 import eavt_transactor_nim/client
 import linenoise
 
@@ -29,6 +30,27 @@ proc parseValue*(raw: string): string =
     # Not JSON — the raw text IS the value. Grammar dispatch, not an error.
     return raw
 
+proc bracketDepth(stmt: string): int =
+  var d = 0
+  var inStr = false
+  var esc = false
+  for ch in stmt:
+    if esc: esc = false; continue
+    if inStr:
+      if ch == '\\': esc = true
+      elif ch == '"': inStr = false
+      continue
+    if ch == '"': inStr = true
+    elif ch == '[': inc d
+    elif ch == ']': dec d
+  d
+
+proc isCompleteStatement(stmt: string): bool =
+  stmt.startsWith("[") and bracketDepth(stmt) == 0
+
+proc isTxData(stmt: string): bool =
+  ":db/add" in stmt or ":db/retract" in stmt
+
 # ── command handlers ─────────────────────────────────────────────────
 
 template catchDisconnect(body: untyped) =
@@ -47,16 +69,33 @@ proc executeDatalog(query: string) =
         for v in row: parts.add(parseValue(v))
         echo parts.join("\t")
 
+proc sexprToJson*(e: SExpr): JsonNode =
+  case e.kind
+  of sKeyword: %(e.kwval)
+  of sInt: %(e.ival)
+  of sFloat: %(e.fval)
+  of sStr: %e.sval
+  of sBool: %e.bval
+  of sVoid: newJNull()
+  of sList:
+    var arr = newJArray()
+    for item in e.items: arr.add(sexprToJson(item))
+    arr
+  else:
+    raise newException(ValueError, "cannot encode " & $e.kind & " as tx-data")
+
 proc executeTx(txdataText: string) =
-  ## Parse a tx-data EDN vector and send it via the tx protocol.
-  ## The EDN text is parsed client-side to JSON for the wire (simple values
-  ## only: keywords as ":db/add" strings, ints, strings, negatives).
   catchDisconnect:
-    # The gateway expects txdata as a msgpack array of vectors. We build the
-    # JSON equivalent: keywords as ":db/add" strings, negative ints as-is.
-    # For v1 the REPL sends the tx-data through the datalog-free path.
-    stderr.writeLine "tx: use the Python client (c.tx(...)) for EDN tx-data —"
-    stderr.writeLine "the REPL supports Datalog queries and dot commands."
+    var ops: seq[SExpr]
+    try:
+      ops = readEdnVector(txdataText)
+    except EdnError as e:
+      stderr.writeLine "Error: EDN parse: ", e.msg
+      return
+    var txdata = newJArray()
+    for op in ops:
+      txdata.add(sexprToJson(op))
+    echo gClient.txSExpr(ops)
 
 proc cmdFlush() =
   catchDisconnect:
@@ -271,27 +310,20 @@ proc run*(sockPath: string = getSocketPath()) =
         stderr.writeLine "Error: ", e.msg
       continue
 
+    if stripped.startsWith("--"):
+      continue
+
     accumulated.add(line)
     accumulated.add(' ')
 
-    while true:
-      let semiPos = accumulated.find(';')
-      if semiPos < 0: break
-      let stmt = accumulated[0 ..< semiPos].strip()
-      accumulated = accumulated[semiPos + 1 .. ^1].strip(leading = true)
-      if stmt.len == 0 or stmt.startsWith("--"):
-        continue
-      if isTTY: discard historyAdd((stmt & ";").cstring)
-      try:
-        executeDatalog(stmt)
-      except ServerDisconnectedError as e:
-        stderr.writeLine "\nError: ", e.msg
-        return
-
     let trimmed = accumulated.strip()
-    if trimmed.len > 0 and not trimmed.startsWith("--"):
-      continue
-    accumulated = ""
+    if trimmed.len > 0 and isCompleteStatement(trimmed):
+      if isTTY: discard historyAdd(trimmed.cstring)
+      if isTxData(trimmed):
+        executeTx(trimmed)
+      else:
+        executeDatalog(trimmed)
+      accumulated = ""
 
   if isTTY: discard historySave(histFile.cstring)
   gClient.close()

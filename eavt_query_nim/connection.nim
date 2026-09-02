@@ -27,6 +27,7 @@ import compiler, explain as cexplain  # nim_compiler/explain.nim
 import logutil
 import explain
 import datalog_compile
+import edn
 
 const BatchSize = 100
 
@@ -63,92 +64,6 @@ proc writeSelectFrameCols(transp: StreamTransport; columns: seq[string];
       writeSExprPlain(ms, v)
   ms.pack("more"); ms.pack(more)
   await transp.writeFrameAsync(ms.data)
-
-proc handleDatalog(gw: GatewayState; raw: string;
-                   transp: StreamTransport) {.async.} =
-  ## Datalog EDN query (docs/datalog-reference.md):
-  ##   {"type": "datalog", "query": "[:find ... :where ...]",
-  ##    "params": [wire ASTs], "explain": bool}
-  ## Compiles via the Datalog IR directly (no SQL AST) and streams rows on
-  ## the replica — the same consistency model as SELECT.
-  let queryText = getTopStr(raw, "query")
-  if queryText.len == 0:
-    await transp.writeErrorAsync("datalog request missing query field")
-    return
-  var params: seq[SExpr] = @[]
-  let (pf, ps, pe) = topValue(raw, "params")
-  if pf:
-    for (s, e) in topArrayElems(raw, ps, pe):
-      params.add(wireFromMsgpackAt(raw, s, e))
-  let explain = getTopBool(raw, "explain")
-
-  # Compile with the same stale-schema retry as the SQL path.
-  var findVars: seq[string] = @[]
-  var compiled: CompileResult = nil
-  var lastErr: ref CatchableError = nil
-  for attempt in 0..1:
-    try:
-      var fv: seq[string] = @[]
-      compiled = compileDatalogQuery(queryText, gw.getSnapshot(), fv)
-      findVars = fv
-      break
-    except CatchableError as e:
-      lastErr = e
-      if "attribute resolution failed" in e.msg and attempt == 0:
-        await sleepAsync(15.milliseconds)
-        gw.invalidateSnapshot()
-        try:
-          discard gw.getSnapshot()
-        except CatchableError:
-          discard
-      else:
-        raise
-  if compiled == nil:
-    raise lastErr
-
-  if explain or gw.replica == nil:
-    if explain:
-      var ms = MsgStream.init(4096)
-      ms.pack_map(3)
-      ms.pack("columns"); ms.pack_array(0)
-      ms.pack("rows"); ms.pack_array(1); ms.pack_array(1)
-      let explainStr = cexplain.renderExplain(compiled)
-      ms.pack(explainStr)
-      ms.pack("more"); ms.pack(false)
-      await transp.writeFrameAsync(ms.data)
-      return
-    if gw.replica == nil:
-      await transp.writeErrorAsync("replica unavailable")
-      return
-
-  # Streaming execution on the replica (same as SELECT).
-  let proto = newQuerySession(gw.replica.store, compiled.program, params,
-                              1'i64, none[int64]())
-  let sess = newStreamingSession(proto)
-  var first = true
-  while true:
-    let (rows, more) = nextBatchSafe(sess, 100)
-    var ms = MsgStream.init(256)
-    ms.pack_map(3)
-    ms.pack("columns")
-    if first:
-      ms.pack_array(findVars.len)
-      for v in findVars: ms.pack(v)
-    else:
-      ms.pack_array(0)
-    ms.pack("rows")
-    ms.pack_array(rows.len)
-    for row in rows:
-      ms.pack_array(row.len)
-      for v in row:
-        writeSExprPlain(ms, v)
-    ms.pack("more"); ms.pack(more)
-    await transp.writeFrameAsync(ms.data)
-    first = false
-    if not more: break
-
-
-
 
 proc buildSchemeRequest(program: SExpr; mode: string;
                          params: seq[SExpr]): string =
@@ -247,6 +162,105 @@ proc relayReport(transp: StreamTransport; collected: string) {.async.} =
     if pos + ln > collected.len: break
     await transp.writeFrameAsync(collected[pos ..< pos + ln])
     pos += ln
+
+proc parseEdnOps(text: string): seq[SExpr] =
+  ## Parse a tx-data EDN text (the REPL sends raw EDN) into op vectors.
+  readEdnVector(text)
+
+proc handleDatalog(gw: GatewayState; raw: string;
+                   transp: StreamTransport) {.async.} =
+  ## Datalog EDN query (docs/datalog-reference.md):
+  ##   {"type": "datalog", "query": "[:find ... :where ...]",
+  ##    "params": [wire ASTs], "explain": bool}
+  ## Compiles via the Datalog IR directly (no SQL AST) and streams rows on
+  ## the replica — the same consistency model as SELECT.
+  let queryText = getTopStr(raw, "query")
+  if queryText.len == 0:
+    await transp.writeErrorAsync("datalog request missing query field")
+    return
+  var params: seq[SExpr] = @[]
+  let (pf, ps, pe) = topValue(raw, "params")
+  if pf:
+    for (s, e) in topArrayElems(raw, ps, pe):
+      params.add(wireFromMsgpackAt(raw, s, e))
+  let explain = getTopBool(raw, "explain")
+
+  # Route tx-data to the transactor directly (the REPL sends tx-data EDN
+  # in the same request shape).
+  if ":db/add" in queryText or ":db/retract" in queryText:
+    let ops = parseEdnOps(queryText)
+    let collected = await sendTxCollect(gw, ops)
+    if collected.len == 0:
+      await transp.writeErrorAsync("transactor disconnected")
+      return
+    await relayReport(transp, collected)
+    return
+
+  # Compile with the same stale-schema retry as the SQL path.
+  var findVars: seq[string] = @[]
+  var compiled: CompileResult = nil
+  var lastErr: ref CatchableError = nil
+  for attempt in 0..1:
+    try:
+      var fv: seq[string] = @[]
+      compiled = compileDatalogQuery(queryText, gw.getSnapshot(), fv)
+      findVars = fv
+      break
+    except CatchableError as e:
+      lastErr = e
+      if "attribute resolution failed" in e.msg and attempt == 0:
+        await sleepAsync(15.milliseconds)
+        gw.invalidateSnapshot()
+        try:
+          discard gw.getSnapshot()
+        except CatchableError:
+          discard
+      else:
+        raise
+  if compiled == nil:
+    raise lastErr
+
+  if explain or gw.replica == nil:
+    if explain:
+      var ms = MsgStream.init(4096)
+      ms.pack_map(3)
+      ms.pack("columns"); ms.pack_array(0)
+      ms.pack("rows"); ms.pack_array(1); ms.pack_array(1)
+      let explainStr = cexplain.renderExplain(compiled)
+      ms.pack(explainStr)
+      ms.pack("more"); ms.pack(false)
+      await transp.writeFrameAsync(ms.data)
+      return
+    if gw.replica == nil:
+      await transp.writeErrorAsync("replica unavailable")
+      return
+
+  # Streaming execution on the replica (same as SELECT).
+  let proto = newQuerySession(gw.replica.store, compiled.program, params,
+                              1'i64, none[int64]())
+  let sess = newStreamingSession(proto)
+  var first = true
+  while true:
+    let (rows, more) = nextBatchSafe(sess, 100)
+    var ms = MsgStream.init(256)
+    ms.pack_map(3)
+    ms.pack("columns")
+    if first:
+      ms.pack_array(findVars.len)
+      for v in findVars: ms.pack(v)
+    else:
+      ms.pack_array(0)
+    ms.pack("rows")
+    ms.pack_array(rows.len)
+    for row in rows:
+      ms.pack_array(row.len)
+      for v in row:
+        writeSExprPlain(ms, v)
+    ms.pack("more"); ms.pack(more)
+    await transp.writeFrameAsync(ms.data)
+    first = false
+    if not more: break
+
 proc handleSchema(gw: GatewayState; transp: StreamTransport) {.async.} =
   ## Served from the local replica's stats — never touches the transactor.
   let snap = gw.getSnapshot()
