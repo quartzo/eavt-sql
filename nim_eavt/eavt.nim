@@ -204,12 +204,15 @@ proc batchWrite*(eng: EavtEngine; entries: var seq[EavtEntry]) =
     for e in entries:
       if e.cf == 0:
         let eid = decodeEid(beUint64(e.key.p.toOpenArray(0, e.key.len - 1), 0))
-        if eng.hyd.contains(eid):
-          eng.hyd.applyKey(e.key)
-          # entry is the memtable — no treap CF-0; the WAL record is still
-          # MANDATORY (durability + replica feed) — M1 durability fix
-          journaled.add CfKey(cf: e.cf, key: e.key)
-          continue
+        if not eng.hyd.contains(eid):
+          # M4: cold eid — PARTIAL write-state entry (delta only; base
+          # stays in pagestore).  The treap CF-0 exits the write path.
+          discard eng.hyd.ensurePartial(eid)
+        eng.hyd.applyKey(e.key)
+        # entry is the memtable — no treap CF-0; the WAL record is still
+        # MANDATORY (durability + replica feed) — M1 durability fix
+        journaled.add CfKey(cf: e.cf, key: e.key)
+        continue
       elif e.cf == 1 or e.cf == 3:
         # M2: write-only CFs — deferred append buffer, drained at flush
         let k = keyToSeqEavt(e.key)
@@ -254,12 +257,19 @@ proc scanPrefix*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byte]] =
   ## Scan keys in CF matching prefix. Reuses cursor from previous call —
   ## updates in-place if roots changed, then seeks to new prefix.
   eng.spCount += 1
-  # Hyd fast path (M1): hydrated eids' CF-0 keys live in the entry (the
-  # memtable) — the treap does not have them. Raw view: active + tombstones.
-  if eng.hydEnabled and cf == 0 and prefix.len >= 8:
-    let eid = decodeEid(beUint64(prefix, 0))
-    if eng.hyd.probe(eid):
-      return eng.hyd.lookupRangeRaw(eid, prefix)
+  # Hyd fast path (M1): COMPLETE hydrated eids' CF-0 keys live in the entry
+  # (the memtable). Raw view: active + tombstones.  M4: partial eids and
+  # full-range scans merge hyd keys below (raw view).
+  var deltaKeys: seq[seq[byte]] = @[]
+  if eng.hydEnabled and cf == 0:
+    if prefix.len >= 8:
+      let eid = decodeEid(beUint64(prefix, 0))
+      if eng.hyd.probeComplete(eid):
+        return eng.hyd.lookupRangeRaw(eid, prefix)
+      if eng.hyd.contains(eid):
+        deltaKeys = eng.hyd.lookupRangeRaw(eid, prefix)
+    else:
+      deltaKeys = eng.hyd.allKeys()
   var t0 = getMonoTime()
 
   # Read current roots
@@ -294,6 +304,10 @@ proc scanPrefix*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byte]] =
     let key = k.get
     if key.len < prefix.len or key[0..<prefix.len] != prefix: break
     result.add key
+  # M4: partial/full-range hyd keys join the raw view (sorted)
+  if deltaKeys.len > 0:
+    result &= deltaKeys
+    result.sort(cmpKeysByte)
   eng.spIterateNs += (getMonoTime().ticks - t0.ticks)
   eng.spKeysReturned += result.len
 
@@ -305,13 +319,22 @@ proc scanPrefixActive*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byt
   ## Reuses cursors from previous call (update in-place). Single source fast path
   ## skips sort when only live treap has data.
   ##
-  ## Hydrated fast path: CF-0 scans anchored at a hydrated eid are answered
-  ## entirely from the in-memory key set (complete + current by invariant —
+  ## Hydrated fast path: CF-0 scans anchored at a COMPLETE hydrated eid are
+  ## answered entirely from the in-memory key set (complete + current —
   ## see hydrated.nim). No PageStore descent, no merge.
-  if eng.hydEnabled and cf == 0 and prefix.len >= 8:
-    let eid = decodeEid(beUint64(prefix, 0))
-    if eng.hyd.probe(eid):
-      return eng.hyd.lookupRange(eid, prefix)
+  ## M4: PARTIAL entries (cold-eid deltas) do NOT take the fast path — the
+  ## delta merges with the base below (newest-t wins).  Full-range scans
+  ## (prefix < 8B) merge ALL hyd keys (the treap CF-0 is recovery-only).
+  var deltaKeys: seq[seq[byte]] = @[]
+  if eng.hydEnabled and cf == 0:
+    if prefix.len >= 8:
+      let eid = decodeEid(beUint64(prefix, 0))
+      if eng.hyd.probeComplete(eid):
+        return eng.hyd.lookupRange(eid, prefix)
+      if eng.hyd.contains(eid):
+        deltaKeys = eng.hyd.lookupRangeRaw(eid, prefix)
+    else:
+      deltaKeys = eng.hyd.allKeys()
 
   var psSnap: PageStoreSnapshot
   var flushRoot, liveRoot: TreapNode
@@ -376,11 +399,23 @@ proc scanPrefixActive*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byt
   if eng.saFlush != nil and flushRoot != nil: inc sourceCount
   if eng.saLive != nil and liveRoot != nil: inc sourceCount
 
-  if sourceCount == 0: return
+  if sourceCount == 0:
+    if deltaKeys.len > 0:
+      deltaKeys.sort(cmpKeysByte)
+      var lastPfx: seq[byte] = @[]
+      for j in countdown(deltaKeys.len - 1, 0):
+        let key = deltaKeys[j]
+        let keyPrefix = key[0 ..< key.len - 8]
+        if keyPrefix == lastPfx: continue
+        let sf = beUint64(key, key.len - 8)
+        if (sf and 1) == 0: result.add key
+        lastPfx = keyPrefix
+    return
 
   # ── Fast path: single source (live treap only) ──
-  # Skip sort/merge, just collect + dedup + filter
-  if sourceCount == 1 and eng.saLive != nil and liveRoot != nil:
+  # Skip sort/merge, just collect + dedup + filter.  M4: delta/full-range
+  # scans use the sorted multi-source path below (hyd keys join the merge).
+  if sourceCount == 1 and eng.saLive != nil and liveRoot != nil and deltaKeys.len == 0:
     eng.saLive.seek(prefix)
     var sourceKeys: seq[seq[byte]] = @[]
     while true:
@@ -484,6 +519,11 @@ proc scanPrefixActive*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byt
         collected.add((key, i))
         lastPrefix = keyPrefix
 
+  # M4: delta/full-range hyd keys join the merge (raw; the global sort +
+  # newest-wins resolves delta vs base — delta carries the higher t)
+  for dk in deltaKeys:
+    collected.add((dk, sources.len))
+
   if collected.len == 0: return
 
   # 2. Merge by full key (ascending)
@@ -499,17 +539,22 @@ proc scanPrefixActive*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byt
     return 0
   )
 
-  # 3. Filter: for each unique key-prefix, if most recent is retracted → discard
+  # 3. Filter: for each unique key-prefix, the NEWEST version wins
+  # (ascending sort → walk BACKWARD; first per prefix = highest t).
+  # Fix: o código anterior tomava a PRIMEIRA ocorrência (a mais antiga) —
+  # um retract após flush ressuscitava o datom no scan.
+  var kept: seq[seq[byte]] = @[]
   var lastPrefix: seq[byte] = @[]
-  for (key, srcIdx) in collected:
+  for j in countdown(collected.len - 1, 0):
+    let key = collected[j].key
     let keyPrefix = key[0 ..< key.len - 8]
     if keyPrefix == lastPrefix: continue
     let sf = beUint64(key, key.len - 8)
-    if (sf and 1) == 1:
-      lastPrefix = keyPrefix
-      continue
-    result.add key
+    if (sf and 1) == 0:
+      kept.add key
     lastPrefix = keyPrefix
+  for j in countdown(kept.len - 1, 0):
+    result.add kept[j]
 
 proc resetSpCounters*(eng: EavtEngine) =
   eng.spCount = 0
@@ -579,11 +624,20 @@ proc buildCompileStats*(eng: EavtEngine): CompileStats =
     if eng.resolver.isIndexed(aid):
       s.indexedAttrs.incl(name)
 
-  # Pre-compute index estimates for all 4 indexes (empty prefix = total count)
+  # Pre-compute index estimates for all 4 indexes (empty prefix = total count).
+  # M1..M4: the write state lives OUTSIDE the treap (hyd entries, deferred
+  # buffers, anchor hash) — the treap-only count would clamp everything to 1
+  # and degenerate the planner's join order (blind-var plans crash the VM).
   for index in ["EAVT", "AEVT", "AVET", "VAET"]:
     let cf = keys.cfNameToId(keys.cfForIndex(index))
-    let count = float64(eng.estimateCount(cf, @[]))
-    s.indexEstimates[index & ":"] = count
+    var count = eng.estimateCount(cf, @[])
+    case cf
+    of 0: count += eng.hyd.numKeys
+    of 1: count += eng.deferred[1].len
+    of 2: count += eng.anchorHash.len
+    of 3: count += eng.deferred[3].len
+    else: discard
+    s.indexEstimates[index & ":"] = float64(count)
 
   eng.cachedStats = s
   eng.cachedStatsTime = now

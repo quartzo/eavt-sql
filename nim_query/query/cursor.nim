@@ -3,7 +3,7 @@
 ## Replaces the closure-based NimCursor with a tagged union.
 ## MergedCursor and MinHeap live here to avoid circular imports.
 
-import std/[options, tables]
+import std/[options, tables, algorithm]
 import page_store    # cmpSeq
 import page_cursor   # PageStoreCursor, PageStoreSnapshot
 import treap_cursor  # TreapCursor
@@ -93,6 +93,7 @@ type
     hydMode*: bool
     hydCursor*: Cursor
     baseSources*: seq[Cursor]
+    deltaEid*: int64   ## M4: eid whose partial delta source is attached (0 = none)
 
   Cursor* = ref object
     case kind*: CursorKind
@@ -120,6 +121,7 @@ proc currentPair*(c: Cursor): Option[(seq[byte], seq[byte])] {.gcsafe.}
 proc step*(c: Cursor) {.gcsafe.}
 proc seek*(c: Cursor; target: seq[byte]) {.gcsafe.}
 proc invalidate*(c: Cursor) {.gcsafe.}
+proc mockCursor*(keys: seq[seq[byte]]): Cursor {.gcsafe.}
 
 # ── HydCursor (M1) — iterate a hydrated entry's CF-0 buffer ──
 
@@ -232,11 +234,16 @@ proc nextKv*(mc: MergedCursor): Option[(seq[byte], seq[byte])] {.gcsafe.} =
   mc.advance()
 
 proc seek*(mc: MergedCursor; target: seq[byte]) {.gcsafe.} =
-  # M1 branch: a CF-0 seek anchored at a FULLY hydrated eid is served
+  # M1/M4 branch: a CF-0 seek anchored at a COMPLETE hydrated eid is served
   # exclusively by the entry (the memtable for that eid — complete+current).
+  # A PARTIAL eid gets its DELTA as an extra source (merged with the base
+  # sources — the delta does not supersede them).
   if mc.hyd != nil and mc.cf == 0 and target.len >= 8:
     let eid = decodeEid(beUint64(target, 0))
-    if mc.hyd.probe(eid):
+    if mc.hyd.probeComplete(eid):
+      if mc.deltaEid != 0:
+        mc.sources = mc.baseSources
+        mc.deltaEid = 0
       if not mc.hydMode:
         mc.baseSources = mc.sources
         mc.hydCursor = newHydCursor(mc.hyd.index[eid], target)
@@ -253,9 +260,24 @@ proc seek*(mc: MergedCursor; target: seq[byte]) {.gcsafe.} =
       mc.curPair = none((seq[byte], seq[byte]))
       mc.advance()
       return
-    elif mc.hydMode:
-      mc.hydMode = false
+    # M4: partial delta as an extra source (switched when the eid changes)
+    let needDelta = mc.hyd.contains(eid)
+    if needDelta and mc.deltaEid != eid:
       mc.sources = mc.baseSources
+      mc.hydMode = false
+      let e = mc.hyd.index[eid]
+      var dkeys: seq[seq[byte]] = @[]
+      for i in 0 ..< e.offs.len:
+        let start = e.offs[i].int
+        let klen = (if i + 1 < e.offs.len: e.offs[i + 1].int else: e.buf.len) - start
+        dkeys.add e.buf[start ..< start + klen]
+      dkeys &= e.tombstones
+      if dkeys.len > 1: dkeys.sort(cmpKeysByte)
+      mc.sources = mc.sources & @[mockCursor(dkeys)]
+      mc.deltaEid = eid
+    elif not needDelta and mc.deltaEid != 0:
+      mc.sources = mc.baseSources
+      mc.deltaEid = 0
   for src in mc.sources:
     src.seek(target)
   mc.heap.data = @[]
@@ -399,7 +421,7 @@ proc treapKvCursor*(tc: TreapCursor): Cursor =
 proc mergedCursor*(mc: MergedCursor): Cursor =
   Cursor(kind: ckMerged, mc: mc)
 
-proc mockCursor*(keys: seq[seq[byte]]): Cursor =
+proc mockCursor*(keys: seq[seq[byte]]): Cursor {.gcsafe.} =
   Cursor(kind: ckMock, mockKeys: keys, mockPos: 0)
 
 proc invalidCursor*(): Cursor =

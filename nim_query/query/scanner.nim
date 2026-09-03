@@ -367,6 +367,9 @@ proc advanceToActiveAt*(sc: V2Scanner) =
     return
 
   # normal advance
+  # M1/M4: com o treap CF-0 vazio, o cursor é semeado com as chaves hyd
+  # no openCursor (mock allKeys) — o encontro da primeira chave dispara o
+  # seek ao prefix empurrado (kvpBefore), como sempre.
   while sc.pos.cursor.isValid():
     let key = sc.pos.cursor.currentKey()
     if key.isNone or key.get.len < 8:

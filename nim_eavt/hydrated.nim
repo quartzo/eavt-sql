@@ -69,6 +69,7 @@ type
     dirtyBytes*: int64        ## aproximação do volume não drenado (threshold)
     drains*: int64            ## collectDirty calls that emitted keys
     drainedKeys*: int64       ## keys emitted by collectDirty (cumulative)
+    numKeys*: int64           ## chaves CF-0 retidas (estimativa do planner)
 
 proc newHydratedSet*(maxBytes: int = DefaultMaxBytes): HydratedSet =
   result = HydratedSet(
@@ -107,9 +108,14 @@ proc contains*(h: HydratedSet; eid: int64): bool {.inline.} =
 
 proc probeComplete*(h: HydratedSet; eid: int64): bool {.inline.} =
   ## Membership AND complete+current (M4: partial entries are NOT
-  ## authoritative — reads must merge delta+base).
-  if eid notin h.index: return false
-  not h.index[eid].partial
+  ## authoritative — reads must merge delta+base).  LRU touch + hit/miss
+  ## accounting like probe().
+  if eid in h.index and not h.index[eid].partial:
+    h.touch(h.index[eid])
+    inc h.hits
+    return true
+  inc h.misses
+  false
 
 proc ensurePartial*(h: HydratedSet; eid: int64): HydratedEntry =
   ## The write-state entry for a COLD eid (M4): holds only the write delta.
@@ -341,6 +347,7 @@ proc applyKey*(h: HydratedSet; key: KeyRef) =
       insertKeyAt(e, idx, key.p, klen)
       h.curBytes += klen
       e.bytes += klen
+      inc h.numKeys
       if e.dirty: h.dirtyBytes += klen.int64
     h.markDirty(e, keySuffixT(key))
   else:
@@ -348,11 +355,13 @@ proc applyKey*(h: HydratedSet; key: KeyRef) =
       let oldLen = removeKeyAt(e, pos)
       h.curBytes -= oldLen
       e.bytes -= oldLen
+      dec h.numKeys
       if e.dirty: h.dirtyBytes -= oldLen.int64
     # tombstone records the retraction for the pagestore drain (the active
     # key is gone from buf — without the tombstone the pagestore would
     # keep serving the retracted datom)
     e.tombstones.add(keyToSeq(key))
+    inc h.numKeys
     h.markDirty(e, keySuffixT(key))
 
 # ── Insertion / eviction ──────────────────────────────────────────────────────
@@ -368,6 +377,7 @@ proc drop(h: HydratedSet; eid: int64; e: HydratedEntry) {.inline.} =
   h.index.del(eid)
   unlink(e)
   dec h.curBytes, e.bytes
+  dec h.numKeys, e.offs.len + e.tombstones.len
   h.dirtyUnlink(e)
 
 proc evictLruUntilFits(h: HydratedSet; incomingBytes: int) =
@@ -495,8 +505,11 @@ proc publishWatermark*(h: HydratedSet; maxT: int64) =
     if e.watermark < maxT: e.watermark = maxT
     e.dirty = e.lastWriteT > e.watermark or e.tombstones.len > 0
     if not e.dirty:
-      e.dirtyPrev.dirtyNext = e.dirtyNext
-      e.dirtyNext.dirtyPrev = e.dirtyPrev
+      if e.partial:
+        h.drop(e.eid, e)      # M4: drained partial = dropped (no cache role)
+      else:
+        e.dirtyPrev.dirtyNext = e.dirtyNext
+        e.dirtyNext.dirtyPrev = e.dirtyPrev
     e = nxt
 
 proc lookupRangeRaw*(h: HydratedSet; eid: int64;
@@ -515,7 +528,45 @@ proc lookupRangeRaw*(h: HydratedSet; eid: int64;
   if result.len > 1:
     sort(result, cmpKeysByte)
 
+proc isPartial*(h: HydratedSet; eid: int64): bool {.inline.} =
+  ## True when the entry is an M4 partial (delta-only) write-state entry.
+  if eid notin h.index: return false
+  h.index[eid].partial
+
+proc upgradePartial*(h: HydratedSet; eid: int64; keys: seq[seq[byte]]) =
+  ## M4: replace a partial entry's delta-only content with the COMPLETE
+  ## active set (merged view).  Pending tombstones survive — they belong to
+  ## the drain.  partial → false: the entry becomes the read fast path.
+  if eid notin h.index: return
+  let e = h.index[eid]
+  h.curBytes -= e.bytes
+  dec h.numKeys, e.offs.len + e.tombstones.len
+  var total = 0
+  e.offs = @[]
+  e.buf = @[]
+  for k in keys:
+    e.offs.add(e.buf.len.int32)
+    e.buf.add(k)
+    total += k.len
+  e.bytes = total
+  h.curBytes += total
+  inc h.numKeys, e.offs.len
+  e.partial = false
+
 proc isDirty*(h: HydratedSet; eid: int64): bool {.inline.} =
   ## True when the entry holds unflushed memtable data (or doesn't exist).
   if eid notin h.index: return false
   h.index[eid].dirty
+
+proc allKeys*(h: HydratedSet): seq[seq[byte]] =
+  ## Every CF-0 key held by the set: active buf keys of ALL entries plus
+  ## pending tombstones.  M1/M4 full-range support: the write path no
+  ## longer feeds the treap CF-0, so this set IS the source of in-memory
+  ## keys for prefix-agnostic (full-range) scans.  Unsorted.
+  for e in h.index.values():
+    for i in 0 ..< e.offs.len:
+      let start = e.offs[i].int
+      let klen = (if i + 1 < e.offs.len: e.offs[i + 1].int else: e.buf.len) - start
+      result.add e.buf[start ..< start + klen]
+    for tmb in e.tombstones:
+      result.add(tmb)

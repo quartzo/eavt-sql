@@ -8,6 +8,7 @@ import kvstore
 import eavt
 import keys
 import hydrated
+import nim_memtable/treap_backend
 import resolver
 import types
 import scanner
@@ -147,6 +148,21 @@ method openCursor(q: QueryStore; cfId: uint32; prefix: seq[byte]): Cursor =
   let mc = q.kv.openScanCursor(cfId.int)
   if cfId == 0 and q.eavt.hydEnabled:
     mc.hyd = q.eavt.hyd
+    if prefix.len < 8 and q.eavt.hyd.len > 0:
+      # M1/M4: the treap CF-0 is recovery-only — a full-range query cursor
+      # needs the hyd keys as a sorted snapshot source (snapshot at open;
+      # eid-anchored seeks re-route through the exclusive/delta branches).
+      var all = q.eavt.hyd.allKeys()
+      if all.len > 1: all.sort(cmpKeysByte)
+      if all.len > 0: mc.addSource(mockCursor(all))
+  if cfId == 2'u32 and q.eavt.anchorHash.len > 0:
+    # M3': CF-2 writes live in the anchor hash — a sorted snapshot of the
+    # full CF-2 keys joins the merge (committed data comes from the
+    # pagestore; recovery-replay residue from the treap).
+    var keys: seq[seq[byte]]
+    for v in q.eavt.anchorHash.values(): keys.add(v)
+    if keys.len > 1: keys.sort(cmpKeysByte)
+    mc.addSource(mockCursor(keys))
   if cfId in {1'u32, 3'u32} and q.eavt.deferred[cfId.int].len > 0:
     # M2: deferred CF-1/3 keys never entered the treap — a sorted snapshot
     # joins the merge (legacy exec path / test harness reads on this store;
@@ -228,8 +244,9 @@ proc saveResolvedEncodedInto(q: QueryStore; eid: int64; attrId: uint32;
     # pré-escrita é eliminada por atributo, não só para o primeiro datom da
     # entidade. Cobre a carga bulk (attrs novos de entidades goc/alloc) e
     # upserts de attrs ainda não escritos. Entrada ausente/evictida ⇒ scan.
+    # M4: probeComplete — partial entries are delta-only, not authoritative
     let needsRetractScan = not (
-      q.eavt.hydEnabled and q.eavt.hyd.probe(eid) and
+      q.eavt.hydEnabled and q.eavt.hyd.probeComplete(eid) and
       not q.eavt.hyd.hasAttrKey(eid, attrId))
     if needsRetractScan:
       when perfCounters:
@@ -508,7 +525,24 @@ method isUniqueById(q: QueryStore; attrId: uint32): bool =
 
 method batchLookupAvet(q: QueryStore;
                        keys: seq[seq[byte]]): seq[Option[int64]] =
-  q.eavt.batchLookupAvet(keys)
+  ## M3': the anchor hash is probed FIRST (unflushed unique datoms —
+  ## recency wins); misses fall to the CF-2 scan (treap recovery residue +
+  ## pagestore committed data).
+  result = newSeq[Option[int64]](keys.len)
+  var missIdx: seq[int]
+  var missKeys: seq[seq[byte]]
+  for i, k in keys:
+    if q.eavt.anchorHash.hasKey(k):
+      let full = q.eavt.anchorHash[k]
+      if full.len >= 20:
+        result[i] = some(decodeEid(beUint64(full, full.len - 16)))
+        continue
+    missIdx.add(i)
+    missKeys.add(k)
+  if missIdx.len > 0:
+    let scanRes = q.eavt.batchLookupAvet(missKeys)
+    for j, i in missIdx:
+      result[i] = scanRes[j]
 
 method allocateInPartition(q: QueryStore; partitionId: uint64): int64 =
   q.eavt.allocateInPartition(partitionId)
@@ -534,7 +568,9 @@ method hasDatomW(q: QueryStore; eid: int64; attrId: uint32;
   let vt = q.eavt.valueTypeFor(attrId).get(resolver.DbTypeString)
   let mode = valueTypeToEncodeMode(vt)
   let encoded = encodeSaveValueSlot(val, vt, mode, eid)
-  if q.eavt.hydEnabled and q.eavt.hyd.probe(eid):
+  # M4: partial entries are NOT authoritative — the scan fallback merges
+  # delta+base correctly.
+  if q.eavt.hydEnabled and q.eavt.hyd.probeComplete(eid):
     if not q.eavt.hyd.hasAttrKey(eid, attrId):
       return false
     var prefix = keys.encodeEid(eid)
@@ -576,7 +612,8 @@ method hasDatom(q: QueryStore; eid: int64; attr: string; val: SExpr): bool =
 
 method lookupEntityW(q: QueryStore; attrName: string;
                      value: TxWSlot): Option[int64] =
-  ## Unique-attr lookup for flat wire slots (same as lookupEntity).
+  ## Unique-attr lookup for flat wire slots.  M3': hash probe first
+  ## (unflushed anchors), CF-2 scan fallback (committed).
   let t0 = getMonoTime().ticks
   let aidOpt = q.eavt.lookupAttr(attrName)
   if aidOpt.isNone:
@@ -589,6 +626,13 @@ method lookupEntityW(q: QueryStore; attrName: string;
   var prefix = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
                 byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
   prefix.add encoded
+  if q.eavt.anchorHash.hasKey(prefix):
+    let full = q.eavt.anchorHash[prefix]
+    let found = some(decodeEid(beUint64(full, full.len - 16)))
+    q.eavt.hydrateEid(found.get)
+    q.lookupNs += getMonoTime().ticks - t0
+    inc q.lookupCount
+    return found
   let tScan = getMonoTime().ticks
   let scanRes = q.eavt.scanPrefixActive(2, prefix)
   q.lookupScanNs += getMonoTime().ticks - tScan
@@ -603,7 +647,9 @@ method lookupEntityW(q: QueryStore; attrName: string;
   return found
 
 method lookupEntity(q: QueryStore; attrName: string; value: SExpr): Option[int64] =
-  ## Unique-attr lookup: scan avet [attr 4B][val][eid 8B][sf 8B] by prefix.
+  ## Unique-attr lookup.  M3': the anchor hash is probed FIRST — it holds
+  ## UNFLUSHED unique datoms (recency wins); the CF-2 scan covers committed
+  ## data (pagestore + recovery-replay residue).
   let t0 = getMonoTime().ticks
   let aidOpt = q.eavt.lookupAttr(attrName)
   if aidOpt.isNone:
@@ -616,6 +662,13 @@ method lookupEntity(q: QueryStore; attrName: string; value: SExpr): Option[int64
   var prefix = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
                 byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
   prefix.add encoded
+  if q.eavt.anchorHash.hasKey(prefix):
+    let full = q.eavt.anchorHash[prefix]
+    let found = some(decodeEid(beUint64(full, full.len - 16)))
+    q.eavt.hydrateEid(found.get)
+    q.lookupNs += getMonoTime().ticks - t0
+    inc q.lookupCount
+    return found
   let tScan = getMonoTime().ticks
   let scanRes = q.eavt.scanPrefixActive(2, prefix)
   q.lookupScanNs += getMonoTime().ticks - tScan
