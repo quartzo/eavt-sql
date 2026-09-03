@@ -14,6 +14,8 @@ when defined(eavtTreapDiag):
   var gInsRotMut* = 0'i64    ## rotações in-place (mutável)
   var gInsRotCopy* = 0'i64   ## rotações com path-copy (leitores ativos)
   var gInsNodes* = 0'i64     ## allocNode (folhas novas + path copies)
+  var gInsDepthSum* = 0'i64  ## soma da profundidade de descida por insert
+  var gInsDepthMax* = 0'i64  ## profundidade máxima observada
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Arena allocation (nodes + key/value bytes)
@@ -441,17 +443,21 @@ var gInsKeyBytes* = 0'i64
 
 proc insertOwned(a: Arena; node: TreapNode; key: KeyRef;
                  value: Option[Value] = none(Value);
-                 deleted: bool = false; mutable: bool = false): (TreapNode, bool) =
+                 deleted: bool = false; mutable: bool = false;
+                 depth: int = 0): (TreapNode, bool) =
   ## Load-path variant: the key is ALREADY in the arena (written by
   ## buildEavtEntries), so the leaf references it — no copy.
   when defined(eavtTreapPrefetch):
     if node != nil: prefetchChildren(node)
   if node == nil:
     inc gInsNew; gInsKeyBytes += key.len
+    when defined(eavtTreapDiag):
+      gInsDepthSum += depth
+      if depth > gInsDepthMax: gInsDepthMax = depth
     return (newLeaf(a, key, value, deleted, copyKey=false), true)
   let c = cmpKeyRef(key, node.keyPtr, node.keyLen.int)
   if c < 0:
-    let (nl, wasNew) = insertOwned(a, node.left, key, value, deleted, mutable)
+    let (nl, wasNew) = insertOwned(a, node.left, key, value, deleted, mutable, depth + 1)
     if mutable:
       node.left = nl
       if node.left != nil and node.left.prio > node.prio:
@@ -464,7 +470,7 @@ proc insertOwned(a: Arena; node: TreapNode; key: KeyRef;
         return (rotateRight(a, nn), wasNew)
       return (nn, wasNew)
   elif c > 0:
-    let (nr, wasNew) = insertOwned(a, node.right, key, value, deleted, mutable)
+    let (nr, wasNew) = insertOwned(a, node.right, key, value, deleted, mutable, depth + 1)
     if mutable:
       node.right = nr
       if node.right != nil and node.right.prio > node.prio:
@@ -485,9 +491,17 @@ proc insertOwned(a: Arena; node: TreapNode; key: KeyRef;
     return (node, false)
 
 proc printInsertDiag() =
-    stderr.writeLine("insdiag: new=", gInsNew, " existing=", gInsExisting,
-                     " keyBytes=", gInsKeyBytes,
-                     " bytes/new=", (if gInsNew > 0: gInsKeyBytes div gInsNew else: 0))
+  stderr.writeLine("insdiag: new=", gInsNew, " existing=", gInsExisting,
+                   " keyBytes=", gInsKeyBytes,
+                   " bytes/new=", (if gInsNew > 0: gInsKeyBytes div gInsNew else: 0))
+  when defined(eavtTreapDiag):
+    stderr.writeLine("insdiag2: cmpCalls=", gCmpCalls,
+                     " cmp/node=", (if gCmpCalls > 0: gCmpIters div gCmpCalls else: 0),
+                     " rotMut=", gInsRotMut, " rotCopy=", gInsRotCopy,
+                     " nodes=", gInsNodes,
+                     " copies/node=", (if gInsNew > 0: (gInsNodes - gInsNew) div gInsNew else: 0),
+                     " depthAvg=", (if gInsNew > 0: gInsDepthSum div gInsNew else: 0),
+                     " depthMax=", gInsDepthMax)
 
 proc batchMove*(mt: MemTable; entries: var seq[CfKey]): uint64 =
   if entries.len > 0 and gInsNew mod 100_000 < entries.len:
