@@ -189,6 +189,14 @@ proc advance*(mc: MergedCursor) {.gcsafe.} =
   mc.curKey = none(seq[byte])
   mc.curPair = none((seq[byte], seq[byte]))
 
+proc addSource*(mc: MergedCursor; src: Cursor) {.gcsafe.} =
+  ## Add a source after construction (before iteration starts) — pushes its
+  ## current key into the merge heap.
+  mc.sources.add(src)
+  if src.isValid():
+    let k = src.currentKey()
+    if k.isSome: mc.heap.push((k.get, mc.sources.len - 1))
+
 proc newMergedCursor*(sources: seq[Cursor]): MergedCursor {.gcsafe.} =
   result = MergedCursor(sources: sources, atEnd: false)
   var heap: MinHeap
@@ -345,15 +353,25 @@ proc seek*(c: Cursor; target: seq[byte]) {.gcsafe.} =
   of ckMerged: c.mc.seek(target)
   of ckHyd: hydCursorSeek(c.hc, target)
   of ckMock:
-    while c.mockPos < c.mockKeys.len:
-      let k = c.mockKeys[c.mockPos]
-      if k.len >= target.len:
-        var ge = true
-        for i in 0..<target.len:
-          if k[i] < target[i]: ge = false; break
-          if k[i] > target[i]: break
-        if ge: return
-      inc c.mockPos
+    # Random-access seek (binary search): first key >= target under the
+    # prefix-compare (k vs target up to target.len).  The scanner reuses one
+    # cursor for outer and inner scans — the inner seek goes BACKWARD, so a
+    # forward-only walk is wrong.
+    var lo = 0
+    var hi = c.mockKeys.len
+    while lo < hi:
+      let mid = (lo + hi) shr 1
+      let k = c.mockKeys[mid]
+      var ge = true
+      var f = 0
+      for i in 0..<target.len:
+        if i >= k.len: f = -1; break   # k shorter → k < target
+        if k[i] < target[i]: f = -1; break
+        if k[i] > target[i]: f = 1; break
+      if f != 0: ge = false
+      if ge or f > 0: hi = mid
+      else: lo = mid + 1
+    c.mockPos = lo
   of ckInvalid: discard
 
 proc invalidate*(c: Cursor) {.gcsafe.} =
