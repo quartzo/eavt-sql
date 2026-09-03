@@ -28,22 +28,29 @@
 ## The intrusive LRU list creates reference cycles between entries — benign
 ## under ORC's cycle collector.
 
-import std/[tables]
+import std/[tables, algorithm]
 import keys
 import nim_memtable/treap_backend  # KeyRef
 
 const DefaultMaxBytes* = 1 shl 30          ## 1 GiB — cfg `hydrated_max_bytes`
 
 type
-  HydratedEntry = ref object
-    eid: int64                ## owning entity (O(1) LRU victim removal)
-    buf: seq[byte]            ## concatenated ACTIVE CF-0 keys, ascending
-    offs: seq[int32]          ## start offset of each key (len = nº de chaves)
-    bytes: int                ## == buf.len
+  HydratedEntry* = ref object
+    eid*: int64               ## owning entity (O(1) LRU victim removal)
+    buf*: seq[byte]           ## concatenated ACTIVE CF-0 keys, ascending
+    offs*: seq[int32]         ## start offset of each key (len = nº de chaves)
+    bytes*: int               ## == buf.len
     prev, next: HydratedEntry ## intrusive LRU (sentinel-headed)
+    # memtable role (M1): a dirty entry holds unflushed CF-0 writes — the
+    # entry IS the memtable for this eid; never evicted while dirty.
+    dirty*: bool              ## has keys/tombstones above `watermark`
+    watermark*: int64         ## t of the last successful drain (0 = none)
+    lastWriteT*: int64        ## t of the newest applied key
+    tombstones*: seq[seq[byte]] ## retracted keys pending pagestore drain
+    dirtyPrev, dirtyNext: HydratedEntry ## intrusive dirty list
 
   HydratedSet* = ref object
-    index: Table[int64, HydratedEntry]
+    index*: Table[int64, HydratedEntry]
     head, tail: HydratedEntry ## sentinels: head.next = MRU, tail.prev = LRU
     maxBytes*: int
     curBytes*: int
@@ -52,15 +59,23 @@ type
     hydrations*: int64        ## hydrations accepted into the set
     rejected*: int64          ## hydrations refused (entry > maxBytes)
     evictions*: int64         ## entries dropped by the LRU sweeper
+    # dirty bookkeeping (M1)
+    dirtyHead: HydratedEntry  ## sentinel for the intrusive dirty list
+    dirtyBytes*: int64        ## aproximação do volume não drenado (threshold)
+    drains*: int64            ## collectDirty calls that emitted keys
+    drainedKeys*: int64       ## keys emitted by collectDirty (cumulative)
 
 proc newHydratedSet*(maxBytes: int = DefaultMaxBytes): HydratedSet =
   result = HydratedSet(
     maxBytes: maxBytes,
     head: HydratedEntry(eid: 0, bytes: 0),
     tail: HydratedEntry(eid: 0, bytes: 0),
+    dirtyHead: HydratedEntry(eid: 0, bytes: 0),
   )
   result.head.next = result.tail
   result.tail.prev = result.head
+  result.dirtyHead.dirtyNext = result.dirtyHead
+  result.dirtyHead.dirtyPrev = result.dirtyHead
 
 proc len*(h: HydratedSet): int {.inline.} = h.index.len
 
@@ -256,9 +271,31 @@ proc lookupRange*(h: HydratedSet; eid: int64; prefix: seq[byte]): seq[seq[byte]]
 
 # ── Writes (mirror path) ──────────────────────────────────────────────────────
 
+proc markDirty(h: HydratedSet; e: HydratedEntry; t: int64) {.inline.} =
+  ## Join the dirty list on first sight; the entry's watermark selection
+  ## (sf.t > watermark) makes per-key bookkeeping unnecessary.
+  e.lastWriteT = t
+  if e.dirty: return
+  e.dirty = true
+  e.dirtyNext = h.dirtyHead.dirtyNext
+  e.dirtyPrev = h.dirtyHead
+  h.dirtyHead.dirtyNext.dirtyPrev = e
+  h.dirtyHead.dirtyNext = e
+  h.dirtyBytes += e.bytes.int64
+
+proc keySuffixT(key: KeyRef): int64 {.inline.} =
+  ## The write t carried in the key suffix (sf = t<<1 | retracted).
+  (beUint64(key.p.toOpenArray(0, key.len - 1), key.len - 8) shr 1).int64
+
+proc keyToSeq(key: KeyRef): seq[byte] {.inline.} =
+  result = newSeq[byte](key.len)
+  if key.len > 0:
+    copyMem(addr result[0], unsafeAddr key.p[0], key.len)
+
 proc applyKey*(h: HydratedSet; key: KeyRef) =
-  ## Mirror one CF-0 write (already filtered by the caller). No-op when the
-  ## eid is not hydrated. Active suffix → upsert; retracted → remove.
+  ## Apply one CF-0 write.  When the eid is hydrated the entry IS the
+  ## memtable (M1): active → upsert; retracted → remove + tombstone for the
+  ## pagestore drain.  Selection at drain time is by suffix t > watermark.
   if key.len < 20 or h.index.len == 0: return
   let klen = key.len
   let eid = decodeEid(beUint64(key.p.toOpenArray(0, klen - 1), 0))
@@ -274,34 +311,58 @@ proc applyKey*(h: HydratedSet; key: KeyRef) =
       let delta = klen - oldLen
       h.curBytes += delta
       e.bytes += delta
+      if e.dirty: h.dirtyBytes += delta.int64
     else:
       var idx = e.offs.len
       while idx > 0 and cmpFullAt(e, idx - 1, key.p.toOpenArray(0, klen - 1)) > 0: dec idx
       insertKeyAt(e, idx, key.p, klen)
       h.curBytes += klen
       e.bytes += klen
+      if e.dirty: h.dirtyBytes += klen.int64
+    h.markDirty(e, keySuffixT(key))
   else:
     if pos >= 0:
       let oldLen = removeKeyAt(e, pos)
       h.curBytes -= oldLen
       e.bytes -= oldLen
+      if e.dirty: h.dirtyBytes -= oldLen.int64
+    # tombstone records the retraction for the pagestore drain (the active
+    # key is gone from buf — without the tombstone the pagestore would
+    # keep serving the retracted datom)
+    e.tombstones.add(keyToSeq(key))
+    h.markDirty(e, keySuffixT(key))
 
 # ── Insertion / eviction ──────────────────────────────────────────────────────
+
+proc dirtyUnlink(h: HydratedSet; e: HydratedEntry) {.inline.} =
+  if not e.dirty: return
+  e.dirtyPrev.dirtyNext = e.dirtyNext
+  e.dirtyNext.dirtyPrev = e.dirtyPrev
+  h.dirtyBytes -= e.bytes.int64
+  e.dirty = false
 
 proc drop(h: HydratedSet; eid: int64; e: HydratedEntry) {.inline.} =
   h.index.del(eid)
   unlink(e)
   dec h.curBytes, e.bytes
+  h.dirtyUnlink(e)
 
 proc evictLruUntilFits(h: HydratedSet; incomingBytes: int) =
   ## Evict least-recently-used entries until `incomingBytes` fits alongside
-  ## whatever remains. Stops when nothing but the incoming entry would remain
-  ## (caller rejects that case beforehand).
-  while h.curBytes + incomingBytes > h.maxBytes and h.index.len > 0:
-    let victim = h.tail.prev
+  ## whatever remains.  Dirty entries are SKIPPED: they hold unflushed
+  ## memtable data (M1).  Stops when nothing but the incoming entry would
+  ## remain (caller rejects that case beforehand) or no clean victim exists
+  ## (flush pressure drains the dirty set).
+  var victim = h.tail.prev
+  while h.curBytes + incomingBytes > h.maxBytes and victim != h.head:
     if victim.eid == 0 and victim.offs.len == 0: break  # safety: sentinel/empty
+    if victim.dirty:
+      victim = victim.prev          # pinned até o drain — segue para a LRU anterior
+      continue
+    let nxt = victim.prev
     h.drop(victim.eid, victim)
     inc h.evictions
+    victim = nxt
 
 proc hydrateEmpty*(h: HydratedSet; eid: int64) =
   ## Mark a freshly allocated entity as hydrated (empty until its first save).
@@ -336,7 +397,8 @@ proc hydrate*(h: HydratedSet; eid: int64; keys: seq[seq[byte]]) =
 
 proc evictEid*(h: HydratedSet; eid: int64) =
   ## Explicit removal (future seam for replica WAL invalidation).
-  if eid in h.index:
+  ## A dirty entry holds unflushed memtable data — not evictable.
+  if eid in h.index and not h.index[eid].dirty:
     h.drop(eid, h.index[eid])
 
 proc clear*(h: HydratedSet) =
@@ -345,3 +407,99 @@ proc clear*(h: HydratedSet) =
   h.head.next = h.tail
   h.tail.prev = h.head
   h.curBytes = 0
+
+# ── Memtable drain (M1) ───────────────────────────────────────────────────────
+
+proc collectDirty*(h: HydratedSet): tuple[keysByCf: seq[(int, seq[seq[byte]])],
+                                          maxT: int64, collected: int64] =
+  ## Drain pass: emit every CF-0 key whose suffix t is above the entry's
+  ## watermark, plus pending tombstones.  Selection is by CONTENT (the t
+  ## carried in the key), so it is stable under any insertion/removal.
+  ## Entries that emit nothing leave the dirty list here.  State is NOT
+  ## cleared — publishWatermark commits it after the pagestore accepts the
+  ## data (a failed flush re-collects the same keys; pagestore inserts are
+  ## idempotent).  Runs on the loop (single-thread owner of the set).
+  var keys: seq[seq[byte]]
+  var maxT: int64 = 0
+  var collected: int64 = 0
+  var e = h.dirtyHead.dirtyNext
+  while e != h.dirtyHead:
+    let nxt = e.dirtyNext
+    var emitted = 0
+    for i in 0 ..< e.offs.len:
+      let start = keyStart(e, i)
+      let klen = keyLenAt(e, i)
+      let kt = (beUint64(e.buf.toOpenArray(start, e.buf.len - 1),
+                         klen - 8) shr 1).int64
+      if kt > e.watermark:
+        keys.add(e.buf[start ..< start + klen])
+        inc emitted
+        if kt > maxT: maxT = kt
+    for j in countdown(e.tombstones.len - 1, 0):
+      let tmb = e.tombstones[j]
+      let kt = (beUint64(tmb, tmb.len - 8) shr 1).int64
+      if kt > e.watermark:
+        keys.add(tmb)
+        inc emitted
+        if kt > maxT: maxT = kt
+    if emitted == 0:
+      # everything already drained (or nothing new) — leave the dirty list
+      e.dirty = false
+      e.dirtyPrev.dirtyNext = e.dirtyNext
+      e.dirtyNext.dirtyPrev = e.dirtyPrev
+      if collected >= 0: discard
+    else:
+      collected += emitted.int64
+    e = nxt
+  if keys.len > 0:
+    keys.sort() do(a, b: seq[byte]) -> int:
+      let n = min(a.len, b.len)
+      for i in 0 ..< n:
+        if a[i] != b[i]: return cmp(a[i], b[i])
+      cmp(a.len, b.len)
+    result.keysByCf = @[(0, keys)]
+  result.maxT = maxT
+  result.collected = collected
+  h.drains += 1
+  h.drainedKeys += collected
+
+proc publishWatermark*(h: HydratedSet; maxT: int64) =
+  ## Commit a successful drain: entries' watermark advances to `maxT`;
+  ## entries written AFTER the collect (lastWriteT > maxT) stay dirty and
+  ## will be re-collected next pass.  Tombstones above the new watermark
+  ## remain pending (they were not collected — maxT covers only emitted t).
+  if maxT <= 0: return
+  var e = h.dirtyHead.dirtyNext
+  while e != h.dirtyHead:
+    let nxt = e.dirtyNext
+    if e.watermark < maxT: e.watermark = maxT
+    e.dirty = e.lastWriteT > e.watermark or e.tombstones.len > 0
+    if not e.dirty:
+      e.dirtyPrev.dirtyNext = e.dirtyNext
+      e.dirtyNext.dirtyPrev = e.dirtyPrev
+    e = nxt
+
+proc lookupRangeRaw*(h: HydratedSet; eid: int64;
+                     prefix: seq[byte]): seq[seq[byte]] =
+  ## Raw CF-0 view for a hydrated eid: active keys (buf) + pending
+  ## tombstones, filtered by `prefix`, ascending — mirrors the treap's raw
+  ## scan semantics (old versions superseded by replaceKeyAt are not
+  ## reconstructible, which is fine: they only occur for superseded writes).
+  ## Caller has already probed membership.
+  if eid notin h.index: return
+  let e = h.index[eid]
+  result = h.lookupRange(eid, prefix)
+  for tmb in e.tombstones:
+    if tmb.len >= prefix.len and tmb[0 ..< prefix.len] == prefix:
+      result.add(tmb)
+  if result.len > 1:
+    result.sort() do(a, b: seq[byte]) -> int:
+      let n = min(a.len, b.len)
+      for i in 0 ..< n:
+        if a[i] != b[i]: return cmp(a[i], b[i])
+      cmp(a.len, b.len)
+
+proc isDirty*(h: HydratedSet; eid: int64): bool {.inline.} =
+  ## True when the entry holds unflushed memtable data (or doesn't exist).
+  if eid notin h.index: return false
+  h.index[eid].dirty

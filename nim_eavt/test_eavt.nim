@@ -407,9 +407,15 @@ suite "eavt: hydrated eid source":
     let eid = eng.allocateEntityId()
     discard eng.eavtSave(eid, "hyd.evict", "data", 1)
     check eng.scanPrefixActive(0, encodeEid(eid)).len == 1
+    # M1: a dirty entry IS the memtable for its eid — pinned until drained.
+    eng.hyd.evictEid(eid)
+    check eng.hyd.contains(eid)
+    # flush drains hyd → pagestore (self-installed hooks) → entry clean
+    eng.kv.flush()
+    check not eng.hyd.contains(eid) or not eng.hyd.isDirty(eid)
     eng.hyd.evictEid(eid)
     check not eng.hyd.contains(eid)
-    # slow path answers identically
+    # slow path answers identically from the pagestore
     check eng.scanPrefixActive(0, encodeEid(eid)).len == 1
     # re-hydration on demand restores membership
     eng.hydrateEid(eid)

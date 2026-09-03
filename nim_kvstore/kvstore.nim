@@ -39,6 +39,14 @@ type
     flushThreshold*: uint64
     gcMaxAgeSecs*: uint64
     gcMaxRootCount*: int
+    ## Hyd memtable drain hook (M1): called between capture and commit —
+    ## returns CF-0 keys of hydrated entries above their watermark plus the
+    ## max collected t (commit watermark). Loop-only callback.
+    onFlushCollect*: proc (): tuple[keysByCf: seq[(int, seq[seq[byte]])],
+                                    maxT: int64] {.gcsafe, raises: [].}
+    ## Called after a flush publishes with the collected maxT — the hyd set
+    ## advances watermarks; keys written after collect stay dirty.
+    onFlushPublished*: proc (maxT: int64) {.gcsafe, raises: [].}
     ## Flush arming hook: called when a write crosses flushThreshold and by
     ## requestFlush(). The async server installs a proc that schedules
     ## flushAsync on its event loop; nil (tests, sync callers) means "no
@@ -451,6 +459,14 @@ proc flush*(kv: KVStore) {.gcsafe.} =
     sealBoundary = kv.journalSeal()
     if kv.onFlushSeal != nil: kv.onFlushSeal()
   var keysByCf: seq[(int, seq[seq[byte]])] = @[]
+  # Hyd memtable drain (M1): collect hydrated entries' keys above their
+  # watermark between capture and commit — they never entered the treap.
+  var collectedMaxT: int64 = -1
+  var hydKeysByCf: seq[(int, seq[seq[byte]])] = @[]
+  if kv.onFlushCollect != nil:
+    let c = kv.onFlushCollect()
+    hydKeysByCf = c.keysByCf
+    collectedMaxT = c.maxT
   var pairsByCf: seq[(int, seq[(seq[byte], seq[byte])])] = @[]
   var deletedByCf: seq[(int, seq[seq[byte]])] = @[]
   for cf in 0..<kv.numCf:
@@ -477,12 +493,20 @@ proc flush*(kv: KVStore) {.gcsafe.} =
         while not tc.atEnd:
           let k = tc.next()
           if k.isSome: keys.add(k.get)
-        if keys.len > 0: keysByCf.add (cf, keys)
+        if keys.len > 0:
+          # merge with hyd-collected keys for the same CF (both ascending)
+          for (ecf, ek) in hydKeysByCf:
+            if ecf == cf:
+              keys = mt_be.mergeSortedKeys(keys, ek)
+          keysByCf.add (cf, keys)
   if keysByCf.len > 0: commitMerge(kv.ps[], keysByCf, true)
   if pairsByCf.len > 0 or deletedByCf.len > 0:
     commitMergeKv(kv.ps[], pairsByCf, deletedByCf, true)
   # Single-threaded publish — runs atomically before next await.
   kv.flushRoots = @[]; kv.flushArena = nil; kv.mtSize = 0
+  # Hyd watermarks advance only after the data is durable in the pagestore.
+  if collectedMaxT >= 0 and kv.onFlushPublished != nil:
+    kv.onFlushPublished(collectedMaxT)
   # Publish done: everything before the seal boundary is durable in the
   # PageStore — the sealed WAL segment may be deleted on the next WAL cycle.
   if sealBoundary >= 0:

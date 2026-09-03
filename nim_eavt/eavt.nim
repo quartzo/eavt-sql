@@ -98,6 +98,18 @@ proc newEavtEngine*(kv: KVStore; cfg: Table[string, string]): EavtEngine =
     hydEnabled: enabled,
     hyd: newHydratedSet(maxBytes),
   )
+  # M1: the engine wires its own flush hooks — the hyd set IS the CF-0
+  # memtable for hydrated eids, so every flush must drain it between
+  # capture and commit.  Hooks run on the loop (single-thread owner).
+  if enabled:
+    let self = result
+    self.kv.onFlushCollect = proc (): tuple[
+        keysByCf: seq[(int, seq[seq[byte]])], maxT: int64] {.gcsafe, raises: [].} =
+      let c = self.hyd.collectDirty()
+      result.keysByCf = c.keysByCf
+      result.maxT = c.maxT
+    self.kv.onFlushPublished = proc (maxT: int64) {.gcsafe, raises: [].} =
+      self.hyd.publishWatermark(maxT)
   # bootstrap called after construction (avoids forward ref)
 
 proc newEavtEngine*(kv: KVStore): EavtEngine =
@@ -108,23 +120,45 @@ proc newEavtEngine*(kv: KVStore): EavtEngine =
 proc batchWrite*(eng: EavtEngine; entries: var seq[EavtEntry]) =
   ## Consumes the entries: keys are arena-written by buildEavtEntries and
   ## referenced (ptr+len) into CfKey — zero copy on the load path.
+  ##
+  ## M1 write path: CF-0 datoms of HYDRATED eids go to the hydrated entry
+  ## (which IS the memtable for that eid — dirty until the flush drains
+  ## it); they do NOT enter the treap CF-0.  Non-hydrated eids and every
+  ## secondary CF (1/2/3) go to the treap as before.  Reads are safe: the
+  ## hyd fast path serves hydrated eids including dirty keys.
   if entries.len == 0: return
-  # Mirror CF-0 datoms into the hydrated source BEFORE stealing keys
-  # (no-op for non-member eids). Keeps hydrated entries current — the
-  # read-your-writes guarantee.
+  var cfs = newSeq[CfKey](entries.len)
+  var n = 0
   if eng.hydEnabled:
     for e in entries:
       if e.cf == 0:
-        eng.hyd.applyKey(e.key)
-  var cfs = newSeq[CfKey](entries.len)
-  for i in 0..<entries.len:
-    cfs[i] = CfKey(cf: entries[i].cf, key: entries[i].key)
+        let eid = decodeEid(beUint64(e.key.p.toOpenArray(0, e.key.len - 1), 0))
+        if eng.hyd.contains(eid):
+          eng.hyd.applyKey(e.key)
+          continue              # entry is the memtable — no treap CF-0
+      cfs[n] = CfKey(cf: e.cf, key: e.key)
+      inc n
+  else:
+    for e in entries:
+      cfs[n] = CfKey(cf: e.cf, key: e.key)
+      inc n
+  cfs.setLen(n)
   eng.kv.batchWrite(cfs)
+  # Hyd flush pressure (M1): hydrated CF-0 bytes bypass the memtable, so
+  # the kv threshold alone under-fires — arm on the hyd dirty volume too.
+  if eng.hydEnabled and eng.hyd.dirtyBytes >= eng.kv.flushThreshold.int64:
+    if eng.kv.onFlushRequest != nil: eng.kv.onFlushRequest()
 
 proc scanPrefix*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byte]] =
   ## Scan keys in CF matching prefix. Reuses cursor from previous call —
   ## updates in-place if roots changed, then seeks to new prefix.
   eng.spCount += 1
+  # Hyd fast path (M1): hydrated eids' CF-0 keys live in the entry (the
+  # memtable) — the treap does not have them. Raw view: active + tombstones.
+  if eng.hydEnabled and cf == 0 and prefix.len >= 8:
+    let eid = decodeEid(beUint64(prefix, 0))
+    if eng.hyd.probe(eid):
+      return eng.hyd.lookupRangeRaw(eid, prefix)
   var t0 = getMonoTime()
 
   # Read current roots

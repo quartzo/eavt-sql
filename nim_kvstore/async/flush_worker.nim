@@ -31,6 +31,10 @@ type
     roots: ptr UncheckedArray[mt_be.TreapNode]
     trees: ptr UncheckedArray[CfTree]   ## worker writes new trees here
     blobs: BlobStore                    ## sync trait, plain pointer for worker
+    ## Hyd memtable keys collected on the loop (M1) — merged per CF with the
+    ## treap-drained keys.  GC'd: the loop owns them until done (same
+    ## contract as rootsSeq); the worker reads only.
+    extraKeys: seq[(int, seq[seq[byte]])]
     # result (POD; worker writes)
     rootNameBuf: array[128, char]
     rootNameLen: int
@@ -68,10 +72,20 @@ proc flushWorkerMain(w: ptr FlushWorkerObj) {.thread.} =
       var keysByCf: seq[(int, seq[seq[byte]])] = @[]
       for cf in 0 ..< w.numCf:
         if cf >= 10: break  # key-only CFs only
-        if w.roots[cf] == nil: continue
         var keys: seq[seq[byte]] = @[]
-        drainKeys(w.roots[cf], keys)
+        if w.roots[cf] != nil:
+          drainKeys(w.roots[cf], keys)
+        for (ecf, ek) in w.extraKeys:
+          if ecf == cf:
+            keys = mt_be.mergeSortedKeys(keys, ek)
         if keys.len > 0: keysByCf.add (cf, keys)
+      # CFs with only hyd-collected keys (no treap root) also contribute
+      for (ecf, ek) in w.extraKeys:
+        if ecf < 10 and ek.len > 0:
+          var found = false
+          for i in 0 ..< keysByCf.len:
+            if keysByCf[i][0] == ecf: found = true; break
+          if not found: keysByCf.add (ecf, ek)
       let rootName = commitMergeCore(w.blobs, w.trees, w.numCf, keysByCf)
       let n = min(rootName.len, w.rootNameBuf.len)
       if n > 0: copyMem(addr w.rootNameBuf[0], unsafeAddr rootName[0], n)
@@ -107,12 +121,14 @@ proc closeFlushWorker*(fw: FlushWorker) {.async.} =
   deallocShared(w)
 
 proc runFlush*(fw: FlushWorker; numCf: int; roots: seq[mt_be.TreapNode];
-               trees: seq[CfTree]; blobs: BlobStore; arena: mt_be.Arena):
+               trees: seq[CfTree]; blobs: BlobStore; arena: mt_be.Arena;
+               extraKeys: seq[(int, seq[seq[byte]])] = @[]):
     Future[tuple[rootName: string, trees: seq[CfTree], ok: bool]] {.async.} =
   ## Submit a pure key-only flush, wait for completion, return the result.
-  ## The loop owns `roots`/`trees`/`arena` for the whole call (the caller keeps
-  ## them alive — e.g. via kv.flushRoots / kv.flushArena).
+  ## The loop owns `roots`/`trees`/`arena`/`extraKeys` for the whole call
+  ## (the caller keeps them alive — e.g. via kv.flushRoots / kv.flushArena).
   let w = fw.inner
+  w.extraKeys = extraKeys
   w.rootsSeq = roots
   w.treesSeq = newSeq[CfTree](trees.len)
   if trees.len > 0:

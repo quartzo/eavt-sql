@@ -1389,15 +1389,12 @@ suite "engine: blob type":
     let aid = q.lookupAttr("blob.many").get
     prefix.add byte(aid shr 24); prefix.add byte((aid shr 16) and 0xFF)
     prefix.add byte((aid shr 8) and 0xFF); prefix.add byte(aid and 0xFF)
+    # M1: hydrated eids' CF-0 data lives in the hyd set — read via the
+    # hyd-aware engine scan (active keys only).
     var found = 0
-    let mc = q.kv.openScanCursor(0)
-    while true:
-      let k = mc.next()
-      if k.isNone: break
-      let key = k.get
-      if key.len >= prefix.len and key[0..<prefix.len] == prefix:
-        let sf = beUint64(key, key.len - 8)
-        if (sf and 1) == 0: inc found
+    for k in q.eavt.scanPrefixActive(0, prefix):
+      let sf = beUint64(k, k.len - 8)
+      if (sf and 1) == 0: inc found
     check found == 2
 
   test "blob one cardinality overwrites":
@@ -1479,22 +1476,11 @@ suite "engine: dedup":
     let aid = q.lookupAttr("empresa.tag").get
     prefix.add byte(aid shr 24); prefix.add byte((aid shr 16) and 0xFF)
     prefix.add byte((aid shr 8) and 0xFF); prefix.add byte(aid and 0xFF)
-    let mc = q.kv.openScanCursor(0)
-    # Walk backwards through keys to determine which value-groups are active
-    var retractedGroups: seq[seq[byte]] = @[]
+    # M1: hyd-aware active scan — "a" retracted, "b" active
     var activeGroups: seq[seq[byte]] = @[]
-    while true:
-      let k = mc.next()
-      if k.isNone: break
-      let key = k.get
-      if key.len >= prefix.len and key[0..<prefix.len] == prefix:
-        let group = key[0..<key.len-8]
-        let sf = beUint64(key, key.len - 8)
-        if (sf and 1) == 1:
-          retractedGroups.add group
-        else:
-          if group notin retractedGroups:
-            activeGroups.add group
+    for k in q.eavt.scanPrefixActive(0, prefix):
+      if k.len >= prefix.len and k[0..<prefix.len] == prefix:
+        activeGroups.add k[0..<k.len-8]
     # At least one value should be active (the "b" value)
     check activeGroups.len >= 1
 
@@ -1512,14 +1498,11 @@ suite "engine: dedup":
     let aid = q.lookupAttr("empresa.tag").get
     prefix.add byte(aid shr 24); prefix.add byte((aid shr 16) and 0xFF)
     prefix.add byte((aid shr 8) and 0xFF); prefix.add byte(aid and 0xFF)
+    # M1: hyd-aware active scan — duplicate save stores once
     var count = 0
-    let mc = q.kv.openScanCursor(0)
-    while true:
-      let k = mc.next()
-      if k.isNone: break
-      let key = k.get
-      if key.len >= prefix.len and key[0..<prefix.len] == prefix:
-        let sf = beUint64(key, key.len - 8)
+    for k in q.eavt.scanPrefixActive(0, prefix):
+      if k.len >= prefix.len and k[0..<prefix.len] == prefix:
+        let sf = beUint64(k, k.len - 8)
         if (sf and 1) == 0: inc count
     check count == 1
 
@@ -2713,7 +2696,10 @@ suite "engine: hydrated eid fast path":
     q.declareAttrFromSql("hyd.attr", ":db.type/string", false, false, 1)
     let eid = q.allocateInPartition(4)
     q.saveWithT(eid, "hyd.attr", SExpr(kind: sStr, sval: "v1"), 1, 0)
-    # allocation marked it; drop to simulate a cold (pre-existing) entity
+    # M1: the write landed in the hyd entry (dirty = memtable). Drain via a
+    # real flush (self-installed hooks) so the entry is clean, then drop it
+    # to simulate a cold (pre-existing) entity backed by the pagestore.
+    q.kv.flush()
     q.eavt.hyd.evictEid(eid)
     let missesBefore = q.eavt.hyd.misses
 

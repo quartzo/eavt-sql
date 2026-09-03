@@ -582,6 +582,15 @@ proc flushNowAsync*(f: AsyncFlusher): Future[void] {.async.} =
     # It publishes our writes only if they were captured by it; writes after
     # ITS capture need another pass — the runner re-iterates, so just return.
     return
+  # Hyd memtable drain (M1): collect hydrated entries' keys between capture
+  # and commit (they never entered the treap).  Collected on the loop — the
+  # set's single-thread owner.
+  var extra: seq[(int, seq[seq[byte]])]
+  var collectedMaxT: int64 = -1
+  if kv.onFlushCollect != nil:
+    let c = kv.onFlushCollect()
+    extra = c.keysByCf
+    collectedMaxT = c.maxT
   # Route: pure key-only flushes (no live KV roots) run drain+commit on the
   # flush worker thread; anything with KV data stays on the loop (the worker
   # writes the root once, so it must not race a KV commit's root write).
@@ -590,14 +599,24 @@ proc flushNowAsync*(f: AsyncFlusher): Future[void] {.async.} =
     if roots[cf] != nil: hasKv = true; break
   if hasKv:
     let drained = await drainTreapAsync(kv, roots)
-    if drained.keysByCf.len > 0:
-      await commitMergeAsync(f.pool, kv.ps, drained.keysByCf, true)
+    var keysByCf = drained.keysByCf
+    if extra.len > 0:
+      for (ecf, ek) in extra:
+        var found = false
+        for i in 0 ..< keysByCf.len:
+          if keysByCf[i][0] == ecf:
+            keysByCf[i] = (ecf, mt_be.mergeSortedKeys(keysByCf[i][1], ek))
+            found = true
+            break
+        if not found: keysByCf.add (ecf, ek)
+    if keysByCf.len > 0:
+      await commitMergeAsync(f.pool, kv.ps, keysByCf, true)
     if drained.pairsByCf.len > 0 or drained.deletedByCf.len > 0:
       await commitMergeKvAsync(f.pool, kv.ps, drained.pairsByCf,
                                drained.deletedByCf, true)
   else:
     let res = await f.worker.runFlush(kv.numCf, roots, kv.ps[].trees,
-                                      kv.ps[].blobs, kv.flushArena)
+                                      kv.ps[].blobs, kv.flushArena, extra)
     if res.ok:
       kv.ps[].trees = res.trees
       kv.ps[].currentRoot = res.rootName
@@ -606,6 +625,9 @@ proc flushNowAsync*(f: AsyncFlusher): Future[void] {.async.} =
       raise newException(IOError, "flush worker failed")
   # Single-threaded publish.
   kv.flushRoots = @[]; kv.flushArena = nil; kv.mtSize = 0
+  # Hyd watermarks advance only after the data is durable in the pagestore.
+  if collectedMaxT >= 0 and kv.onFlushPublished != nil:
+    kv.onFlushPublished(collectedMaxT)
   # Publish done: everything before the seal boundary is durable in the
   # PageStore — the sealed WAL segment may be deleted on the next WAL cycle.
   if sealBoundary >= 0:

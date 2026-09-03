@@ -551,3 +551,26 @@ proc countPrefix*(mt: MemTable; cf: int; prefix: openArray[byte]): uint64 =
   var pfx = newSeq[byte](prefix.len)
   if prefix.len > 0: copyMem(addr pfx[0], unsafeAddr prefix[0], prefix.len)
   result = cast[uint64](countInRange(root, pfx, prefixUpperBound(pfx)))
+
+proc mergeSortedKeys*(a, b: seq[seq[byte]]): seq[seq[byte]] =
+  ## Merge two ascending key lists (dedup identical keys — keep one).
+  ## Used by the flush to combine treap-drained and hyd-collected sources.
+  result = newSeqOfCap[seq[byte]](a.len + b.len)
+  var i, j = 0
+  while i < a.len or j < b.len:
+    var c = 0
+    if i >= a.len: c = 1
+    elif j >= b.len: c = -1
+    else:
+      let n = min(a[i].len, b[j].len)
+      var f = 0
+      for k in 0 ..< n:
+        if a[i][k] != b[j][k]:
+          f = if a[i][k] < b[j][k]: -1 else: 1
+          break
+      c = if f != 0: f else: cmp(a[i].len, b[j].len)
+    if c <= 0:
+      result.add a[i]; inc i
+      if c == 0: inc j
+    else:
+      result.add b[j]; inc j

@@ -145,6 +145,8 @@ proc sexprToValueForType(val: SExpr; vt: uint32): string =
 
 method openCursor(q: QueryStore; cfId: uint32; prefix: seq[byte]): Cursor =
   let mc = q.kv.openScanCursor(cfId.int)
+  if cfId == 0 and q.eavt.hydEnabled:
+    mc.hyd = q.eavt.hyd
   mergedCursor(mc)
 
 proc encodeSaveValue(val: SExpr; vt: uint32; mode: EncodeMode; eid: int64): seq[byte] =
