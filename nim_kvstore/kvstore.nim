@@ -148,6 +148,12 @@ proc applyJournalRecords*(kv: KVStore; data: openArray[byte]) {.gcsafe.} =
   if entries.len > 0:
     kv.mtSize = kv.mt.batch(entries)
 
+proc applyJournalRecordsExpanded*(kv: KVStore; entries: seq[mt_be.CfKey]) {.gcsafe.} =
+  ## Apply PRE-PARSED CfKey entries to the memtable (the replica's derived
+  ## set: CF-0 truth + CF-1/2/3 index keys derived at apply time).
+  if entries.len == 0: return
+  kv.mtSize = kv.mt.batch(entries)
+
 proc journalHasSchemaRecords*(data: openArray[byte]; schemaAids: openArray[uint32]): bool =
   ## True se os bytes em formato journal carregam algum registro cuja key
   ## começa com um dos aids de schema (layout AEVT: aid BE nos 4 primeiros
@@ -161,6 +167,14 @@ proc journalHasSchemaRecords*(data: openArray[byte]; schemaAids: openArray[uint3
               (int(data[pos + 2]) shl 8) or int(data[pos + 3])
     if fld < 2 or pos + 9 + fld > data.len:
       return false  # framing inválido — não travar o chamador
+    # WAL CF-0-only: os datoms de schema chegam como CF-0 — o aid fica nos
+    # bytes 8..12 da key ([eid 8B][aid 4B][val][sf]); CF-1 legacy também é
+    # aceito (segmentos de journal pré-upgrade).
+    if data[pos + 4] == 0 and fld >= 13:
+      let aid = (uint32(data[pos + 13]) shl 24) or (uint32(data[pos + 14]) shl 16) or
+                (uint32(data[pos + 15]) shl 8) or uint32(data[pos + 16])
+      if schemaAids.contains(aid):
+        return true
     if data[pos + 4] == 1 and fld >= 5:
       let aid = (uint32(data[pos + 5]) shl 24) or (uint32(data[pos + 6]) shl 16) or
                 (uint32(data[pos + 7]) shl 8) or uint32(data[pos + 8])

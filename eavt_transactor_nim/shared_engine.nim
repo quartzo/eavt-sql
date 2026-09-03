@@ -29,6 +29,8 @@ proc initSharedEngine*(cfg: Table[string, string]): SharedEngine =
     raise newException(IOError, "cannot open store at " & cfg.getOrDefault("path", ""))
   let store = newQueryStore(kv)
   store.eavt.bootstrapSystemAttrs()
+  store.eavt.bootstrapResolver()
+  store.eavt.recoverWriteState()   # WAL CF-0-only: resíduo → estruturas de escrita
   let pool = startBlobPool()
   let flusher = newAsyncFlusher(kv, pool)
   let eng = SharedEngine(kv: kv, store: store, pool: pool, flusher: flusher)

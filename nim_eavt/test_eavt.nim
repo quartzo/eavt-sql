@@ -434,3 +434,46 @@ suite "eavt: hydrated eid source":
     let eid = eng.allocateEntityId()
     check not eng.hyd.contains(eid)
     check eng.scanPrefixActive(0, encodeEid(eid)).len == 0
+
+suite "eavt: recovery CF-0-only (sem flush)":
+  test "write → close sem flush → reopen: resolver + leituras + escrita":
+    let path = "/tmp/eavttest_rec_" & $getTime().toUnix() & "_" & $getTime().nanosecond
+    createDir(path)
+    let eid1 = block:
+      let cfg = {"backend": "file", "path": path}.toTable
+      let kv = newKVStore(cfg)
+      let eng = newEavtEngine(kv)
+      eng.bootstrapResolver()
+      discard eng.eavtDeclareAttr("rec.email", DbTypeString, false, true)
+      let e = eng.allocateEntityId()
+      discard eng.eavtSave(e, "rec.email", "a@b.c", 1)
+      # SEM flush — fecha direto: o journal carrega só CF-0 (WAL CF-0-only)
+      eng.kv.close()
+      e
+    block:
+      let cfg = {"backend": "file", "path": path}.toTable
+      let kv = newKVStore(cfg)
+      let eng = newEavtEngine(kv)
+      eng.bootstrapResolver()
+      eng.recoverWriteState()
+      check eng.lookupAttr("rec.email").isSome()
+      # a leitura merge resíduo treap + base
+      check eng.lookupValueStr(eid1, "rec.email") == some("a@b.c")
+      # a hash reconstruída resolve a âncora (lookup pós-recovery reusa)
+      check eng.lookupEntityByValue("rec.email", "a@b.c") == some(eid1)
+      # escrita pós-recovery visível
+      let e2 = eng.allocateEntityId()
+      discard eng.eavtSave(e2, "rec.email", "x@y.z", 9)
+      check eng.lookupValueStr(e2, "rec.email") == some("x@y.z")
+      eng.kv.flush()
+      eng.kv.close()
+    block:
+      let cfg = {"backend": "file", "path": path}.toTable
+      let kv = newKVStore(cfg)
+      let eng = newEavtEngine(kv)
+      eng.bootstrapResolver()
+      eng.recoverWriteState()
+      check eng.lookupValueStr(eid1, "rec.email").isSome
+      check eng.lookupValueStr(70368744177666'i64, "rec.email") == some("x@y.z")
+      eng.kv.close()
+    removeDir(path)

@@ -8,11 +8,15 @@
 ## Replication events arrive via the onReplicationEvent callback, which
 ## the query server's MultiplexedConn reader task invokes for every "ev" frame.
 
-import std/[tables, streams]
+import std/[tables, streams, options]
 import chronos
 import chronos_file
 import msgpack4nim
-import kvstore, eavt, engine
+import kvstore
+import nim_memtable/treap_backend as mt_be
+import treap_cursor
+import keys as eavt_keys
+import eavt, engine
 import resolver
 import stats
 import msgpack_scan
@@ -49,6 +53,9 @@ proc openReplica*(dir: string): ReplicaEngine =
   store.eavt.bootstrapSystemAttrs()
   ReplicaEngine(kv: kv, store: store, path: dir, connected: false)
 
+proc refreshResolverOnSchemaWal*(r: ReplicaEngine) {.gcsafe, raises: [].}
+proc deriveFromCf0(r: ReplicaEngine; key: seq[byte]): seq[mt_be.CfKey] {.gcsafe.}
+
 proc applySnapshot*(r: ReplicaEngine; sealed: seq[string]; openTail: seq[byte];
                     rootName: string) {.async.} =
   ## Apply the initial snapshot from the transactor.  Sealed segments are
@@ -71,16 +78,112 @@ proc applySnapshot*(r: ReplicaEngine; sealed: seq[string]; openTail: seq[byte];
     except Exception as e:
       logDebug("replica", "snapshot root not publishable (" & excMsg(e) &
         "); stream will deliver a newer one")
+  # WAL CF-0-only: o snapshot/tail tem apenas datoms CF-0 — os índices
+  # CF-1/2/3 precisam ser derivados.  Primeiro o resolver (bootstrap lê
+  # CF-1 do pagestore adotado + CF-0 do treap), depois a derivação.
+  try:
+    r.refreshResolverOnSchemaWal()
+  except CatchableError as e:
+    logWarn("replica", "snapshot resolver bootstrap falhou (" & excMsg(e) & ")")
+  block:
+    let root = r.kv.mt.hnd.live[0]
+    if root != nil:
+      var cf0Keys: seq[seq[byte]]
+      var tc = newTreapCursor(root, r.kv.mt.hnd.arena)
+      while not tc.atEnd:
+        let k = tc.next()
+        if k.isSome: cf0Keys.add(k.get)
+      var derived: seq[mt_be.CfKey]
+      for key in cf0Keys:
+        try:
+          for d in r.deriveFromCf0(key): derived.add d
+        except Exception as e:
+          logWarn("replica", "snapshot derive falhou (" & excMsg(e) & ")")
+      if derived.len > 0: r.kv.applyJournalRecordsExpanded(derived)
   r.connected = true
 
-proc applyWal*(r: ReplicaEngine; data: seq[byte]) =
+proc deriveFromCf0(r: ReplicaEngine; key: seq[byte]): seq[mt_be.CfKey] {.gcsafe.} =
+  ## Derive CF-1/2/3 keys from a CF-0 datom key [eid 8B][aid 4B][val][sf 8B].
+  ## The replica builds its query indexes from the datom truth (WAL CF-0-only):
+  ## CF-1 always; CF-2 when the attr is indexed; CF-3 when it is a ref.
+  ## Metadata comes from the resolver (schema datoms replay before data —
+  ## WAL order; refreshResolverOnSchemaWal runs on schema chunks).
+  result = @[]
+  if key.len < 20: return
+  let aid = (uint32(key[8]) shl 24) or (uint32(key[9]) shl 16) or
+            (uint32(key[10]) shl 8) or uint32(key[11])
+  let vtOpt = r.store.eavt.valueTypeFor(aid)
+  if vtOpt.isNone: return                 # attr desconhecido (schema não chegou)
+  let vlen = key.len - 20
+  let val = key[12 ..< 12 + vlen]
+  let sf = key[key.len - 8 ..< key.len]
+  # CF-1 [aid][eid][val][sf]
+  var k1 = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
+            byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
+  k1.add key[0 ..< 8]; k1.add val; k1.add sf
+  result.add mt_be.CfKey(cf: 1, key: mt_be.toKeyRef(k1))
+  if r.store.eavt.resolver.isIndexed(aid):
+    # CF-2 [aid][val][eid][sf]
+    var k2 = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
+              byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
+    k2.add val; k2.add key[0 ..< 8]; k2.add sf
+    result.add mt_be.CfKey(cf: 2, key: mt_be.toKeyRef(k2))
+  let isRef = valueTypeToEncodeMode(vtOpt.get) == emRef
+  if isRef:
+    # CF-3 [val][aid][eid][sf]
+    var k3 = val
+    k3.add @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
+            byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
+    k3.add key[0 ..< 8]; k3.add sf
+    result.add mt_be.CfKey(cf: 3, key: mt_be.toKeyRef(k3))
+
+proc applyWal*(r: ReplicaEngine; data: seq[byte]) {.gcsafe, raises: [].} =
   ## Apply incoming WAL records to the live treap.
+  ## WAL CF-0-only, applied in TWO PHASES: (1) CF-0 datom truth verbatim;
+  ## (2) schema refresh if the chunk carries db.* datoms (bootstrapResolver
+  ## lê o CF-0 do treap — fases resolvem o chicken-and-egg do schema no
+  ## mesmo chunk); (3) derivação de CF-1/2/3 (o resolver já conhece os
+  ## attrs).  Os treaps CF-1/2/3 da réplica ficam completos para as queries.
   inc r.evWalCount
   r.evWalBytes += data.len
   if r.evWalCount mod 100 == 0:
     logInfo("replica", "wal aplicado: " & $r.evWalCount & " frames / " &
       $r.evWalBytes & " bytes")
-  r.kv.applyJournalRecords(data)
+  let records = parseJournalRecords(data)
+  if records.len == 0: return
+
+  # Fase 1: CF-0 (verdade) + legado verbatim
+  r.kv.applyJournalRecordsExpanded(records)
+
+  # Fase 2: schema no chunk → refresh do resolver (lê CF-0 do treap)
+  var cf0Keys: seq[seq[byte]]
+  var hasSchema = false
+  for rec in records:
+    if rec.cf != 0: continue
+    let key = mt_be.toSeq(rec.key)
+    cf0Keys.add(key)
+    if key.len >= 12:
+      let aid = (uint32(key[8]) shl 24) or (uint32(key[9]) shl 16) or
+                (uint32(key[10]) shl 8) or uint32(key[11])
+      if WalSchemaAids.contains(aid): hasSchema = true
+  if hasSchema:
+    try:
+      r.refreshResolverOnSchemaWal()
+    except CatchableError as e:
+      logWarn("replica", "refresh resolver pós-schema falhou (" & e.msg &
+        "); attrs faltantes re-derivam no próximo chunk de schema")
+
+  # Fase 3: derivação dos índices (o resolver já conhece os attrs).
+  # Falha de metadado p/ um datom (attr ainda desconhecido) → log + skip:
+  # o CF-0 verdade já foi aplicado; o índice faltante materializa no
+  # pagestore pelo flush do primário (adotado pela réplica).
+  var derived: seq[mt_be.CfKey]
+  for key in cf0Keys:
+    try:
+      for d in r.deriveFromCf0(key): derived.add d
+    except CatchableError as e:
+      logWarn("replica", "derive falhou p/ datom CF-0 (" & e.msg & "); índice faltante re-materializa via flush do primário")
+  if derived.len > 0: r.kv.applyJournalRecordsExpanded(derived)
 
 proc applySeal*(r: ReplicaEngine) =
   inc r.evSealCount
@@ -114,7 +217,7 @@ proc getStats*(r: ReplicaEngine): stats.CompileStats =
   r.store.eavt.cachedStatsTime = 0.0  # force rebuild past the engine TTL
   r.store.eavt.buildCompileStats()
 
-proc refreshResolverOnSchemaWal*(r: ReplicaEngine) =
+proc refreshResolverOnSchemaWal(r: ReplicaEngine) {.gcsafe, raises: [].} =
   ## Datoms db.* chegaram via WAL. applyWal só escreve no treap — o resolver
   ## em memória (tabela de attrs, flags UNIQUE) NÃO se atualiza sozinho;
   ## sem este refresh, isUniqueAttr na réplica fica stale até o TTL de 30s

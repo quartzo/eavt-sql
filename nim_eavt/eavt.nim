@@ -7,6 +7,7 @@ import std/[tables, strutils, options, times, sets, monotimes, algorithm, syncio
 import logutil
 import resolver
 import keys
+export keys
 import kvstore
 import page_store     # CfTree
 import page_cursor   # PageStoreSnapshot, PageStoreCursor
@@ -244,7 +245,13 @@ proc batchWrite*(eng: EavtEngine; entries: var seq[EavtEntry]) =
       cfs[n] = CfKey(cf: e.cf, key: e.key)
       inc n
   cfs.setLen(n)
-  if journaled.len > 0: eng.kv.journalOnly(journaled)
+  # WAL CF-0-only: o datom (CF-0) é a verdade — CF-1/2/3 são derivados e
+  # re-derivados no replay (transactor routing + réplica). journalOnly é o
+  # ponto de filtro do caminho de escrita EAVT.
+  var durable: seq[CfKey]
+  for e in journaled:
+    if e.cf == 0: durable.add(e)
+  if durable.len > 0: eng.kv.journalOnly(durable)
   eng.kv.batchWrite(cfs)
   # M1/M2/M3' flush pressure: hydrated CF-0, deferred CF-1/3 and the
   # anchor hash bypass the memtable — arm on their combined volume too.
@@ -708,6 +715,30 @@ proc bootstrapResolver*(eng: EavtEngine) =
     let e = decodeEid(beUint64(k, 4))
     cardMap[e] = cast[uint32](decodeInt64(beUint64(k, 12))) == DbCardinalityManyAid
 
+  # WAL CF-0-only: o resíduo não-flushado (treap CF-0, replay do journal)
+  # carrega os datoms de schema como CF-0 — [eid][db-aid][val][sf]; o aid
+  # fica nos bytes 8..12, o val em 12.. (mesmo offset do CF-1).
+  for k in eng.scanPrefix(0, @[]):
+    if k.len < 24: continue
+    let aid = beUint32(k, 8)
+    let sf = beUint64(k, k.len - 8)
+    if (sf and 1) == 1: continue
+    let e = decodeEid(beUint64(k, 0))
+    case aid
+    of DbIdentAid:
+      if e >= BootstrapFirstUserId.int64:
+        let name = decodeVariableStr(k, 12)
+        if name.len > 0: identMap[e] = name
+    of DbValueTypeAid:
+      if e >= BootstrapFirstUserId.int64:
+        vtMap[e] = cast[uint32](decodeInt64(beUint64(k, 12)))
+    of DbCardinalityAid:
+      if e >= BootstrapFirstUserId.int64:
+        cardMap[e] = cast[uint32](decodeInt64(beUint64(k, 12))) == DbCardinalityManyAid
+    of DbUniqueAid:
+      if e >= BootstrapFirstUserId.int64: uniqueSet.incl(e)
+    else: discard
+
   for k in eng.scanPrefix(1, @[0'u8, 0'u8, 0'u8, byte(DbUniqueAid)]):
     if k.len < 20: continue
     if beUint32(k, 0) != DbUniqueAid: continue
@@ -1044,3 +1075,94 @@ proc batchLookupAvet*(eng: EavtEngine;
     if scanRes.len > 0 and scanRes[0].len >= 20:
       result[i] = some(decodeEid(beUint64(scanRes[0], scanRes[0].len - 16)))
     lastIdx = oi
+
+proc lookupEntityByValue*(eng: EavtEngine; attrName: string; value: string): Option[int64] =
+  ## Unique-attr anchor lookup (test/recovery helper): hash probe first
+  ## (unflushed), CF-2 scan fallback (committed).
+  let aidOpt = eng.lookupAttr(attrName)
+  if aidOpt.isNone: return none[int64]()
+  let aid = aidOpt.get
+  let vt = eng.valueTypeFor(aid).get(DbTypeString)
+  let mode = valueTypeToEncodeMode(vt)
+  var prefix = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
+                byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
+  prefix.add encodeValue(value, mode, 0)
+  if eng.anchorHash.hasKey(prefix):
+    let full = eng.anchorHash[prefix]
+    let eid = decodeEid(beUint64(full, full.len - 16))
+    eng.hydrateEid(eid)
+    return some(eid)
+  for k in eng.scanPrefixActive(2, prefix):
+    if k.len >= 20:
+      let eid = decodeEid(beUint64(k, k.len - 16))
+      eng.hydrateEid(eid)
+      return some(eid)
+  return none[int64]()
+
+proc lookupValueStr*(eng: EavtEngine; eid: int64; attrName: string): Option[string] =
+  ## Read a string attr value for `eid` (test/recovery helper).
+  let aidOpt = eng.lookupAttr(attrName)
+  if aidOpt.isNone: return none[string]()
+  let aid = aidOpt.get
+  var prefix = keys.encodeEid(eid)
+  prefix.add byte(aid shr 24); prefix.add byte((aid shr 16) and 0xFF)
+  prefix.add byte((aid shr 8) and 0xFF); prefix.add byte(aid and 0xFF)
+  for k in eng.scanPrefixActive(0, prefix):
+    if k.len < 20: continue
+    let sf = beUint64(k, k.len - 8)
+    if (sf and 1) == 1: continue
+    let vt = eng.valueTypeFor(aid).get(resolver.DbTypeString)
+    let mode = valueTypeToEncodeMode(vt)
+    let sx = decodeStoredValue(k[12 ..< k.len - 8], vt)
+    if sx.kind == sStr: return some(sx.sval)
+    return none[string]()
+  return none[string]()
+
+proc recoverWriteState*(eng: EavtEngine) =
+  ## WAL CF-0-only recovery: route the journal-replay residue (treap CF-0)
+  ## through the write structures — hyd partial entries + deferred CF-1/3 +
+  ## anchor hash CF-2.  The treap is recovery STAGING only; the write path
+  ## lives in the M1..M3 structures.  Called once at bootstrap, AFTER
+  ## bootstrapResolver (needs isIndexed/ref metadata).  No journaling: the
+  ## journal is the source of these datoms.
+  ## The residue STAYS in the treap (reads merge it; the flush drains both
+  ## — idempotent in the pagestore).
+  let mc = eng.kv.openScanCursor(0)
+  while true:
+    let k = mc.next()
+    if k.isNone: break
+    let key = k.get
+    if key.len < 20: continue
+    let aid = beUint32(key, 8)
+    if aid == DbTxInstantAid: continue      # datoms do tx-entity: ruído de recovery
+    if eng.hydEnabled:
+      let eid = decodeEid(beUint64(key, 0))
+      if not eng.hyd.contains(eid):
+        discard eng.hyd.ensurePartial(eid)
+      eng.hyd.applyKey(KeyRef(p: cast[ptr UncheckedArray[byte]](unsafeAddr key[0]),
+                         len: key.len))
+    # CF-1 [aid][eid][val][sf] — sempre
+    var k1 = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
+              byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
+    k1.add key[0 ..< 8]
+    k1.add key[12 ..< key.len]
+    eng.deferred[1].add(k1)
+    eng.deferredBytes += k1.len.int64
+    if eng.resolver.isIndexed(aid):
+      # CF-2 [aid][val][eid][sf]
+      var k2 = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
+                byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
+      k2.add key[12 ..< key.len - 8]
+      k2.add key[0 ..< 8]
+      k2.add key[key.len - 8 ..< key.len]
+      eng.anchorHash[k2[0 ..< k2.len - 16]] = k2
+      eng.anchorBytes += k2.len.int64
+    if eng.resolver.valueTypeFor(aid).get(0) == DbTypeRef:
+      # CF-3 [val][aid][eid][sf]
+      var k3 = key[12 ..< key.len - 8]
+      k3.add @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
+              byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
+      k3.add key[0 ..< 8]
+      k3.add key[key.len - 8 ..< key.len]
+      eng.deferred[3].add(k3)
+      eng.deferredBytes += k3.len.int64
