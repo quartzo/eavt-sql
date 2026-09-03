@@ -48,6 +48,11 @@ type
     lastWriteT*: int64        ## t of the newest applied key
     tombstones*: seq[seq[byte]] ## retracted keys pending pagestore drain
     dirtyPrev, dirtyNext: HydratedEntry ## intrusive dirty list
+    # M4: a PARTIAL entry holds only the write delta for a cold eid — the
+    # base CF-0 set stays in pagestore/treap.  Reads merge delta+base
+    # (dedup by t: delta wins).  Drained partials are DROPPED (no cache
+    # role), unlike complete entries which stay as the read fast path.
+    partial*: bool
 
   HydratedSet* = ref object
     index*: Table[int64, HydratedEntry]
@@ -99,6 +104,24 @@ proc touch(h: HydratedSet; e: HydratedEntry) {.inline.} =
 
 proc contains*(h: HydratedSet; eid: int64): bool {.inline.} =
   eid in h.index
+
+proc probeComplete*(h: HydratedSet; eid: int64): bool {.inline.} =
+  ## Membership AND complete+current (M4: partial entries are NOT
+  ## authoritative — reads must merge delta+base).
+  if eid notin h.index: return false
+  not h.index[eid].partial
+
+proc ensurePartial*(h: HydratedSet; eid: int64): HydratedEntry =
+  ## The write-state entry for a COLD eid (M4): holds only the write delta.
+  ## Creates it when absent; existing entries (partial or complete) return
+  ## as-is — applyKey keeps working on them.
+  if eid in h.index:
+    result = h.index[eid]
+    return
+  let e = HydratedEntry(eid: eid, partial: true)
+  h.index[eid] = e
+  h.pushFront(e)
+  result = e
 
 proc probe*(h: HydratedSet; eid: int64): bool =
   ## Membership check with LRU touch + hit/miss accounting. This is the

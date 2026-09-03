@@ -81,6 +81,13 @@ type
     # append buffers drained at flush (sorted per CF); WAL covers durability.
     deferred*: array[4, seq[seq[byte]]]
     deferredBytes*: int64
+    # M3': CF-2 anchor index as a HASH on the transactor — the anchor
+    # lookup is a point query (attr,value)→eid; order matters only at
+    # flush (pages) and on the replica (WAL, own treap).  Key = the CF-2
+    # lookup prefix [aid 4B][value]; value = the full CF-2 key (carries t
+    # for the publish filter).  The treap CF-2 exits the write path.
+    anchorHash*: Table[seq[byte], seq[byte]]
+    anchorBytes*: int64
     # TEMP scan diagnostics (-d:eavtScanDiag)
     diagSeekNs*: int64
     diagIterNs*: int64
@@ -103,6 +110,7 @@ proc newEavtEngine*(kv: KVStore; cfg: Table[string, string]): EavtEngine =
     resolver: newResolver(),
     hydEnabled: enabled,
     hyd: newHydratedSet(maxBytes),
+    anchorHash: initTable[seq[byte], seq[byte]](),
   )
   # M1: the engine wires its own flush hooks — the hyd set IS the CF-0
   # memtable for hydrated eids, so every flush must drain it between
@@ -128,6 +136,20 @@ proc newEavtEngine*(kv: KVStore; cfg: Table[string, string]): EavtEngine =
           for k in self.deferred[cf]:
             let kt = (beUint64(k, k.len - 8) shr 1).int64
             if kt > result.maxT: result.maxT = kt
+      # M3': anchor hash values join the drain (raw; worker sorts)
+      if self.anchorHash.len > 0:
+        var akeys: seq[seq[byte]]
+        for v in self.anchorHash.values():
+          akeys.add(v)
+          let kt = (beUint64(v, v.len - 8) shr 1).int64
+          if kt > result.maxT: result.maxT = kt
+        var found2 = false
+        for i in 0 ..< result.keysByCf.len:
+          if result.keysByCf[i][0] == 2:
+            result.keysByCf[i][1] &= akeys
+            found2 = true
+            break
+        if not found2: result.keysByCf.add (2, akeys)
     self.kv.onFlushPublished = proc (maxT: int64) {.gcsafe, raises: [].} =
       self.hyd.publishWatermark(maxT)
       # M2: deferred keys ≤ maxT are durable in the pagestore — drop them;
@@ -140,6 +162,17 @@ proc newEavtEngine*(kv: KVStore; cfg: Table[string, string]): EavtEngine =
           let kt = (beUint64(k, k.len - 8) shr 1).int64
           if kt > maxT: keep.add(k) else: freed += k.len.int64
         self.deferred[cf] = keep
+      self.deferredBytes -= freed
+      if self.deferredBytes < 0: self.deferredBytes = 0
+      # M3': hash entries ≤ maxT are durable in the pagestore — dropped;
+      # keys written during the flush (t > maxT) stay pending.
+      var toDel: seq[seq[byte]]
+      for pfx, full in self.anchorHash:
+        let kt = (beUint64(full, full.len - 8) shr 1).int64
+        if kt <= maxT:
+          toDel.add(pfx)
+          freed += (full.len + pfx.len).int64
+      for pfx in toDel: self.anchorHash.del(pfx)
       self.deferredBytes -= freed
       if self.deferredBytes < 0: self.deferredBytes = 0
   # bootstrap called after construction (avoids forward ref)
@@ -184,6 +217,23 @@ proc batchWrite*(eng: EavtEngine; entries: var seq[EavtEntry]) =
         eng.deferredBytes += e.key.len.int64
         journaled.add CfKey(cf: e.cf, key: e.key)
         continue
+      elif e.cf == 2:
+        # M3': anchor index as a hash — the treap CF-2 exits the write
+        # path.  Hash key = the lookup prefix [aid 4B][value]; value = the
+        # full canonical CF-2 key (carries t for the publish filter).
+        # Retract (sf bit 1) removes the mapping.
+        let k = keyToSeqEavt(e.key)
+        let sf = beUint64(k, k.len - 8)
+        let prefix = k[0 ..< k.len - 16]
+        if (sf and 1) == 0:
+          eng.anchorHash[prefix] = k
+          eng.anchorBytes += (k.len + prefix.len).int64
+        else:
+          if eng.anchorHash.hasKey(prefix):
+            eng.anchorBytes -= (eng.anchorHash[prefix].len + prefix.len).int64
+            eng.anchorHash.del(prefix)
+        journaled.add CfKey(cf: e.cf, key: e.key)
+        continue
       cfs[n] = CfKey(cf: e.cf, key: e.key)
       inc n
   else:
@@ -193,10 +243,10 @@ proc batchWrite*(eng: EavtEngine; entries: var seq[EavtEntry]) =
   cfs.setLen(n)
   if journaled.len > 0: eng.kv.journalOnly(journaled)
   eng.kv.batchWrite(cfs)
-  # M1/M2 flush pressure: hydrated CF-0 and deferred CF-1/3 bypass the
-  # memtable — arm on their combined volume too.
+  # M1/M2/M3' flush pressure: hydrated CF-0, deferred CF-1/3 and the
+  # anchor hash bypass the memtable — arm on their combined volume too.
   if eng.hydEnabled:
-    let pressure = eng.hyd.dirtyBytes + eng.deferredBytes
+    let pressure = eng.hyd.dirtyBytes + eng.deferredBytes + eng.anchorBytes
     if pressure >= eng.kv.flushThreshold.int64:
       if eng.kv.onFlushRequest != nil: eng.kv.onFlushRequest()
 
