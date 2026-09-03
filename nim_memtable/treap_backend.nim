@@ -574,3 +574,10 @@ proc mergeSortedKeys*(a, b: seq[seq[byte]]): seq[seq[byte]] =
       if c == 0: inc j
     else:
       result.add b[j]; inc j
+
+proc cmpKeysByte*(a, b: seq[byte]): int =
+  ## Byte-lexicographic key comparator (sort/merge helper).
+  let n = min(a.len, b.len)
+  for i in 0 ..< n:
+    if a[i] != b[i]: return cmp(a[i], b[i])
+  cmp(a.len, b.len)

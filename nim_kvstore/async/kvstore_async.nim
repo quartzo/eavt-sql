@@ -16,7 +16,7 @@
 ## check and, when roots/blobs are past the retention window, a full pass —
 ## the original Rust poller semantics, minus the thread.
 
-import std/[options, sets, tables, strutils, os]
+import std/[options, sets, tables, strutils, os, algorithm]
 import std/atomics
 import chronos
 import common
@@ -605,10 +605,13 @@ proc flushNowAsync*(f: AsyncFlusher): Future[void] {.async.} =
         var found = false
         for i in 0 ..< keysByCf.len:
           if keysByCf[i][0] == ecf:
-            keysByCf[i] = (ecf, mt_be.mergeSortedKeys(keysByCf[i][1], ek))
+            keysByCf[i][1] &= ek
             found = true
             break
-        if not found: keysByCf.add (ecf, ek)
+        if not found and ek.len > 0: keysByCf.add (ecf, ek)
+      for i in 0 ..< keysByCf.len:
+        if keysByCf[i][1].len > 1:
+          keysByCf[i][1].sort(mt_be.cmpKeysByte)
     if keysByCf.len > 0:
       await commitMergeAsync(f.pool, kv.ps, keysByCf, true)
     if drained.pairsByCf.len > 0 or drained.deletedByCf.len > 0:

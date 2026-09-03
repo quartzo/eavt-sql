@@ -75,6 +75,12 @@ type
     # Hydrated-eid source (CF 0 fast path) — see hydrated.nim
     hydEnabled*: bool
     hyd*: HydratedSet
+    # M2: CF-1/CF-3 are write-only on the transactor — no in-tx reads
+    # (bootstrapResolver scans CF-1 at STARTUP only, when the buffers are
+    # empty; buildCompileStats uses the in-memory resolver).  Deferred
+    # append buffers drained at flush (sorted per CF); WAL covers durability.
+    deferred*: array[4, seq[seq[byte]]]
+    deferredBytes*: int64
     # TEMP scan diagnostics (-d:eavtScanDiag)
     diagSeekNs*: int64
     diagIterNs*: int64
@@ -108,14 +114,45 @@ proc newEavtEngine*(kv: KVStore; cfg: Table[string, string]): EavtEngine =
       let c = self.hyd.collectDirty()
       result.keysByCf = c.keysByCf
       result.maxT = c.maxT
+      # M2: deferred CF-1/3 join the drain (raw order; the worker sorts).
+      # Sorting here would block the loop with large buffers.
+      for cf in [1, 3]:
+        if self.deferred[cf].len > 0:
+          var found = false
+          for i in 0 ..< result.keysByCf.len:
+            if result.keysByCf[i][0] == cf:
+              result.keysByCf[i][1] &= self.deferred[cf]
+              found = true
+              break
+          if not found: result.keysByCf.add (cf, self.deferred[cf])
+          for k in self.deferred[cf]:
+            let kt = (beUint64(k, k.len - 8) shr 1).int64
+            if kt > result.maxT: result.maxT = kt
     self.kv.onFlushPublished = proc (maxT: int64) {.gcsafe, raises: [].} =
       self.hyd.publishWatermark(maxT)
+      # M2: deferred keys ≤ maxT are durable in the pagestore — drop them;
+      # keys written during the flush (t > maxT) stay pending.
+      var freed: int64 = 0
+      for cf in [1, 3]:
+        if self.deferred[cf].len == 0: continue
+        var keep: seq[seq[byte]]
+        for k in self.deferred[cf]:
+          let kt = (beUint64(k, k.len - 8) shr 1).int64
+          if kt > maxT: keep.add(k) else: freed += k.len.int64
+        self.deferred[cf] = keep
+      self.deferredBytes -= freed
+      if self.deferredBytes < 0: self.deferredBytes = 0
   # bootstrap called after construction (avoids forward ref)
 
 proc newEavtEngine*(kv: KVStore): EavtEngine =
   newEavtEngine(kv, initTable[string, string]())
 
 # ── Batch write helper ──
+
+proc keyToSeqEavt(key: KeyRef): seq[byte] {.inline.} =
+  result = newSeq[byte](key.len)
+  if key.len > 0:
+    copyMem(addr result[0], unsafeAddr key.p[0], key.len)
 
 proc batchWrite*(eng: EavtEngine; entries: var seq[EavtEntry]) =
   ## Consumes the entries: keys are arena-written by buildEavtEntries and
@@ -128,6 +165,7 @@ proc batchWrite*(eng: EavtEngine; entries: var seq[EavtEntry]) =
   ## hyd fast path serves hydrated eids including dirty keys.
   if entries.len == 0: return
   var cfs = newSeq[CfKey](entries.len)
+  var journaled = newSeq[CfKey]()
   var n = 0
   if eng.hydEnabled:
     for e in entries:
@@ -135,7 +173,17 @@ proc batchWrite*(eng: EavtEngine; entries: var seq[EavtEntry]) =
         let eid = decodeEid(beUint64(e.key.p.toOpenArray(0, e.key.len - 1), 0))
         if eng.hyd.contains(eid):
           eng.hyd.applyKey(e.key)
-          continue              # entry is the memtable — no treap CF-0
+          # entry is the memtable — no treap CF-0; the WAL record is still
+          # MANDATORY (durability + replica feed) — M1 durability fix
+          journaled.add CfKey(cf: e.cf, key: e.key)
+          continue
+      elif e.cf == 1 or e.cf == 3:
+        # M2: write-only CFs — deferred append buffer, drained at flush
+        let k = keyToSeqEavt(e.key)
+        eng.deferred[e.cf.int].add(k)
+        eng.deferredBytes += e.key.len.int64
+        journaled.add CfKey(cf: e.cf, key: e.key)
+        continue
       cfs[n] = CfKey(cf: e.cf, key: e.key)
       inc n
   else:
@@ -143,11 +191,14 @@ proc batchWrite*(eng: EavtEngine; entries: var seq[EavtEntry]) =
       cfs[n] = CfKey(cf: e.cf, key: e.key)
       inc n
   cfs.setLen(n)
+  if journaled.len > 0: eng.kv.journalOnly(journaled)
   eng.kv.batchWrite(cfs)
-  # Hyd flush pressure (M1): hydrated CF-0 bytes bypass the memtable, so
-  # the kv threshold alone under-fires — arm on the hyd dirty volume too.
-  if eng.hydEnabled and eng.hyd.dirtyBytes >= eng.kv.flushThreshold.int64:
-    if eng.kv.onFlushRequest != nil: eng.kv.onFlushRequest()
+  # M1/M2 flush pressure: hydrated CF-0 and deferred CF-1/3 bypass the
+  # memtable — arm on their combined volume too.
+  if eng.hydEnabled:
+    let pressure = eng.hyd.dirtyBytes + eng.deferredBytes
+    if pressure >= eng.kv.flushThreshold.int64:
+      if eng.kv.onFlushRequest != nil: eng.kv.onFlushRequest()
 
 proc scanPrefix*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byte]] =
   ## Scan keys in CF matching prefix. Reuses cursor from previous call —

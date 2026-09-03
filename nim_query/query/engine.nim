@@ -147,6 +147,18 @@ method openCursor(q: QueryStore; cfId: uint32; prefix: seq[byte]): Cursor =
   let mc = q.kv.openScanCursor(cfId.int)
   if cfId == 0 and q.eavt.hydEnabled:
     mc.hyd = q.eavt.hyd
+  if cfId in {1'u32, 3'u32} and q.eavt.deferred[cfId.int].len > 0:
+    # M2: deferred CF-1/3 keys never entered the treap — a sorted snapshot
+    # joins the merge (legacy exec path / test harness reads on this store;
+    # the replica has no deferred buffers).  Snapshot at open: writes that
+    # land while the cursor is open are picked up by the next cursor.
+    var keys = q.eavt.deferred[cfId.int]
+    keys.sort() do(a, b: seq[byte]) -> int:
+      let n = min(a.len, b.len)
+      for i in 0 ..< n:
+        if a[i] != b[i]: return cmp(a[i], b[i])
+      cmp(a.len, b.len)
+    mc.addSource(mockCursor(keys))
   mergedCursor(mc)
 
 proc encodeSaveValue(val: SExpr; vt: uint32; mode: EncodeMode; eid: int64): seq[byte] =

@@ -28,9 +28,9 @@
 ## The intrusive LRU list creates reference cycles between entries — benign
 ## under ORC's cycle collector.
 
-import std/[tables, algorithm]
+import std/[tables, algorithm, monotimes]
 import keys
-import nim_memtable/treap_backend  # KeyRef
+import nim_memtable/treap_backend  # KeyRef, cmpKeysByte
 
 const DefaultMaxBytes* = 1 shl 30          ## 1 GiB — cfg `hydrated_max_bytes`
 
@@ -452,11 +452,8 @@ proc collectDirty*(h: HydratedSet): tuple[keysByCf: seq[(int, seq[seq[byte]])],
       collected += emitted.int64
     e = nxt
   if keys.len > 0:
-    keys.sort() do(a, b: seq[byte]) -> int:
-      let n = min(a.len, b.len)
-      for i in 0 ..< n:
-        if a[i] != b[i]: return cmp(a[i], b[i])
-      cmp(a.len, b.len)
+    # unsorted — o worker ordena (O(n log n) off-loop; sortar aqui
+    # bloquearia o event loop com buffers grandes)
     result.keysByCf = @[(0, keys)]
   result.maxT = maxT
   result.collected = collected
@@ -493,11 +490,7 @@ proc lookupRangeRaw*(h: HydratedSet; eid: int64;
     if tmb.len >= prefix.len and tmb[0 ..< prefix.len] == prefix:
       result.add(tmb)
   if result.len > 1:
-    result.sort() do(a, b: seq[byte]) -> int:
-      let n = min(a.len, b.len)
-      for i in 0 ..< n:
-        if a[i] != b[i]: return cmp(a[i], b[i])
-      cmp(a.len, b.len)
+    sort(result, cmpKeysByte)
 
 proc isDirty*(h: HydratedSet; eid: int64): bool {.inline.} =
   ## True when the entry holds unflushed memtable data (or doesn't exist).

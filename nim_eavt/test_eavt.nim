@@ -145,9 +145,13 @@ proc walRecord(cf: uint8; key: seq[byte]): seq[byte] =
 
 proc collectSchemaWal(eng: EavtEngine): seq[byte] =
   ## Extrai as keys db.* (cf 1, AEVT) do engine e monta os bytes wal.
+  ## M2: db.* CF-1 pendentes vivem no buffer deferred até o flush.
   for aid in [DbIdentAid, DbValueTypeAid, DbCardinalityAid, DbUniqueAid]:
     for k in eng.scanPrefix(1, @[0'u8, 0'u8, 0'u8, byte(aid)]):
       result.add walRecord(1'u8, k)
+    for k in eng.deferred[1]:
+      if k.len >= 4 and beUint32(k, 0) == aid:
+        result.add walRecord(1'u8, k)
 
 proc schemaAids(): array[4, uint32] =
   [DbIdentAid, DbCardinalityAid, DbValueTypeAid, DbUniqueAid]

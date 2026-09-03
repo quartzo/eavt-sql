@@ -493,12 +493,24 @@ proc flush*(kv: KVStore) {.gcsafe.} =
         while not tc.atEnd:
           let k = tc.next()
           if k.isSome: keys.add(k.get)
-        if keys.len > 0:
-          # merge with hyd-collected keys for the same CF (both ascending)
-          for (ecf, ek) in hydKeysByCf:
-            if ecf == cf:
-              keys = mt_be.mergeSortedKeys(keys, ek)
-          keysByCf.add (cf, keys)
+        for (ecf, ek) in hydKeysByCf:
+          if ecf == cf and ek.len > 0:
+            keys &= ek                   # collected unsorted
+        if keys.len > 1:
+          keys.sort(mt_be.cmpKeysByte)
+        if keys.len > 0: keysByCf.add (cf, keys)
+  # Collected CFs with no treap root (M2 deferred CF-1/3, or M1 hyd-only
+  # CF-0) must still reach the pagestore — SORTED: commitMergeCore assumes
+  # ascending input.
+  for (ecf, ek) in hydKeysByCf:
+    if ek.len == 0: continue
+    var found = false
+    for i in 0 ..< keysByCf.len:
+      if keysByCf[i][0] == ecf: found = true; break
+    if not found:
+      var sk = ek
+      sk.sort(mt_be.cmpKeysByte)
+      keysByCf.add (ecf, sk)
   if keysByCf.len > 0: commitMerge(kv.ps[], keysByCf, true)
   if pairsByCf.len > 0 or deletedByCf.len > 0:
     commitMergeKv(kv.ps[], pairsByCf, deletedByCf, true)
@@ -536,6 +548,14 @@ proc flushSync*(kv: KVStore) {.gcsafe.} =
   ## an inline flush() (kept as a separate name for call-site clarity).
   ## On return, every write prior to the call is durable.
   kv.flush()
+
+proc journalOnly*(kv: KVStore; entries: seq[mt_be.CfKey]) {.gcsafe.} =
+  ## Durability-only path (M1/M2): journal the entries WITHOUT inserting
+  ## them into the memtable — their live data lives in the hyd set
+  ## (hydrated CF-0) / deferred buffers (CF-1/3).  Recovery replay
+  ## (applyJournalRecords) rebuilds them into the treap as before.
+  if journaling(kv) and entries.len > 0:
+    kv.journalDeliver(entries)
 
 proc batchWrite*(kv: KVStore; entries: seq[mt_be.CfKey]) {.gcsafe.} =
   kv.bwCount += 1

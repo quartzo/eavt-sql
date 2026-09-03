@@ -14,6 +14,7 @@
 
 import std/atomics
 import std/locks
+import std/algorithm
 import chronos
 import blobstore
 import nim_memtable/treap_backend as mt_be
@@ -74,18 +75,14 @@ proc flushWorkerMain(w: ptr FlushWorkerObj) {.thread.} =
         if cf >= 10: break  # key-only CFs only
         var keys: seq[seq[byte]] = @[]
         if w.roots[cf] != nil:
-          drainKeys(w.roots[cf], keys)
+          drainKeys(w.roots[cf], keys)   # sorted (in-order traversal)
         for (ecf, ek) in w.extraKeys:
-          if ecf == cf:
-            keys = mt_be.mergeSortedKeys(keys, ek)
+          if ecf == cf and ek.len > 0:
+            keys &= ek                   # extra arrives UNsorted (collected
+                                         # on the loop without sorting)
+        if keys.len > 1:
+          keys.sort(mt_be.cmpKeysByte)
         if keys.len > 0: keysByCf.add (cf, keys)
-      # CFs with only hyd-collected keys (no treap root) also contribute
-      for (ecf, ek) in w.extraKeys:
-        if ecf < 10 and ek.len > 0:
-          var found = false
-          for i in 0 ..< keysByCf.len:
-            if keysByCf[i][0] == ecf: found = true; break
-          if not found: keysByCf.add (ecf, ek)
       let rootName = commitMergeCore(w.blobs, w.trees, w.numCf, keysByCf)
       let n = min(rootName.len, w.rootNameBuf.len)
       if n > 0: copyMem(addr w.rootNameBuf[0], unsafeAddr rootName[0], n)
