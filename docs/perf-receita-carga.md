@@ -1,10 +1,13 @@
 # Carga da Receita Federal — instrumento, referência e knobs
 
 Metodologia oficial para os exercícios de carga (1k→50k empresas) e a
-extrapolação para a base completa. Referência desta rodada: **2026-09-01,
-commit `e73d61d`+** (save-many storage-batched, fix REF, word-store nos
-encoders, skip de retract por (eid, attr) hidratado, fix do rootName do
-flush worker, estabs via carga bulk com cache de eids client-side).
+extrapolação para a base completa. Referência desta rodada: **2026-09-03,
+M1+M2** (EDN tx nativo: entrada hidratada como memtable do CF-0 com
+watermark/tombstones; CF-1/CF-3 deferidos com drain no flush; journal
+completo via journalOnly; interpretador flat sem SExpr; keywords
+internadas).  Referência histórica scheme: **2026-09-01, `e73d61d`+**
+(save-many + cache de eids client-side — loader re-portado em
+`load_receita_sql.py`, roda no build atual a 7,3k estabs/s).
 
 ## Instrumento
 
@@ -27,25 +30,30 @@ para comparações.
 
 ## Referência @50k (todas as taxas em linhas/s)
 
-| estágio | taxa | tempo do estágio |
+| estágio | M1+M2 (EDN tx) | scheme (histórica) |
 |---|---|---|
-| empresas | 26.327 | 1,9 s |
-| estabs   | **8.747** | 7,4 s |
-| simples  | 35.123 | 1,6 s |
-| sócios   | 19.598 | 1,3 s |
+| empresas | **28.089** | 26.327 |
+| estabs   | 5.687 | 8.747¹ |
+| simples  | **35.413** | 35.123 |
+| sócios   | 9.464² | 19.598² |
 
-Degradação suave entre 1k→50k. Estabs usa a carga bulk (`load_estabs_bulk`,
-save-many + cache de eids; `--flat-estabs` mantém o caminho per-datom para
-comparação: 6.577 rows/s).
+¹ o comparador direto hoje: scheme re-medido no build atual = 7.351/s
+(ponto 65k); o 8.747 da doc antiga não é reproduzível (outra condição de
+código/máquina).
+² sócios EDN escreve 2 entidades/linha (pessoa dedup por socio/chave +
+aresta de participação com cargo próprio) — modelo grafo, não comparável.
 
-## Extrapolação da carga completa (@ taxas de 50k)
+Degradação suave entre 1k→50k. Estabs via tx upsert por linha (âncora
+cnpj_completo + empresa), sem cache client-side — seguro sob concorrência.
+
+## Extrapolação da carga completa (@ taxas de 50k, M1+M2)
 
 ```
-empresas   46M / 26.327/s → 0,49 h
-estabs     73M /  8.747/s → 2,32 h   ← domina
-simples    50M / 35.123/s → 0,40 h
-sócios     28M / 19.598/s → 0,40 h
-TOTAL ≈ 3,6 h
+empresas   46M / 28.089/s → 0,45 h
+estabs     73M /  5.687/s → 3,57 h   ← domina
+simples    50M / 35.413/s → 0,39 h
+sócios     28M /  9.464/s → 0,82 h
+TOTAL ≈ 5,2 h
 ```
 
 ## Knobs relevantes
