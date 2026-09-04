@@ -101,35 +101,96 @@ proc readFileBytes*(path: string): seq[byte] =
   result = newSeq[byte](sz)
   discard f.readBuffer(addr result[0], sz)
 
+const
+  MaxJournalKeyLen = 65536  ## datom keys ~30-300B; generous bound keeps the
+                            ## resync scan from misreading garbage as a record
+  MaxJournalValLen = 65536  ## journal records are key-only (vlen=1) — bound is
+                            ## defensive for legacy segments
+  JournalResyncChain = 3    ## consecutive valid records required to accept a
+                            ## resync offset (torn tail garbage must not chain)
+
+proc journalRecordLenAt(data: openArray[byte]; pos: int): int =
+  ## Byte length of the journal record starting at `pos`, or -1 when no
+  ## structurally valid record starts there.
+  ## Format: [4B klen BE][1B cf][key klen-1][4B vlen BE][value vlen].
+  if pos + 10 > data.len: return -1
+  let klen = (int(data[pos]) shl 24) or (int(data[pos + 1]) shl 16) or
+             (int(data[pos + 2]) shl 8) or int(data[pos + 3])
+  if klen < 1 or klen > MaxJournalKeyLen: return -1
+  if pos + 4 + klen + 4 > data.len: return -1
+  if int(data[pos + 4]) > 63: return -1  # cf 0..63
+  let vp = pos + 4 + klen
+  let vlen = (int(data[vp]) shl 24) or (int(data[vp + 1]) shl 16) or
+             (int(data[vp + 2]) shl 8) or int(data[vp + 3])
+  if vlen > MaxJournalValLen: return -1
+  if vp + 4 + vlen > data.len: return -1
+  result = 4 + klen + 4 + vlen
+
+proc journalChainLenAt(data: openArray[byte]; pos: int): int =
+  ## How many consecutive structurally valid records start at `pos`, walking
+  ## until a record breaks or fewer than 10 bytes remain.
+  var p = pos
+  while p + 10 <= data.len:
+    let rl = journalRecordLenAt(data, p)
+    if rl < 0: break
+    p += rl
+    inc result
+
+proc journalResyncFrom(data: openArray[byte]; broken: int): int =
+  ## First offset after `broken` where a valid record chain resumes — either
+  ## a chain of JournalResyncChain+ records (long segments) or any chain that
+  ## runs to within a torn tail of EOF (short segments / segment tail).
+  ## -1 when nothing parses (pure torn tail: stop at the last complete record).
+  var c = broken + 1
+  while c + 10 <= data.len:
+    var p = c
+    var chain = 0
+    while p + 10 <= data.len:
+      let rl = journalRecordLenAt(data, p)
+      if rl < 0: break
+      p += rl
+      inc chain
+    if chain >= JournalResyncChain: return c
+    if chain > 0 and p + 10 > data.len: return c  # chain runs to the torn tail
+    inc c
+  result = -1
+
 proc parseJournalRecords*(data: openArray[byte]): seq[mt_be.CfKey] =
   ## Parse journal records from raw bytes into CfKey entries for memtable batch apply.
   ## Journal format: [4B klen][cf+key][4B vlen][value].
   ## Key-only CFs 0-3: the cf byte is part of the key in the journal, but we
   ## extract it as the CfKey.cf and store the remaining bytes as CfKey.key.
   ## A torn tail (truncated record) stops parsing at the last complete record.
+  ## Resync: garbage at a segment head (torn first write) or mid-stream must
+  ## not drop the REST of the segment — the parser scans forward for the next
+  ## offset where a chain of valid records resumes and logs the skipped bytes
+  ## (durability-relevant: silent loss here loses post-flush writes).
   result = @[]
   var pos = 0
-  while pos + 4 <= data.len:
-    let klen = int(uint32(byte(data[pos])) shl 24 or uint32(byte(data[pos+1])) shl 16 or
-                   uint32(byte(data[pos+2])) shl 8 or uint32(byte(data[pos+3])))
-    pos += 4
-    if pos + klen + 4 > data.len: break
-    let cf = byte(data[pos])
-    pos += klen
-    let vlen = int(uint32(byte(data[pos])) shl 24 or uint32(byte(data[pos+1])) shl 16 or
-                   uint32(byte(data[pos+2])) shl 8 or uint32(byte(data[pos+3])))
-    pos += 4
-    if pos + vlen > data.len: break
-    pos += vlen
-    if klen >= 1 and cf <= 3'u8:
-      let keyStart = pos - 4 - vlen - klen + 1
-      let keyLen = klen - 1
-      # Borrowed ptr into `data` — the caller copies into the arena (batch)
-      # before `data` is released.
-      result.add(mt_be.CfKey(cf: cf,
-        key: mt_be.KeyRef(
-          p: cast[ptr UncheckedArray[byte]](unsafeAddr data[keyStart]),
-          len: keyLen)))
+  while pos + 10 <= data.len:
+    let rl = journalRecordLenAt(data, pos)
+    if rl > 0:
+      let klen = (int(data[pos]) shl 24) or (int(data[pos + 1]) shl 16) or
+                 (int(data[pos + 2]) shl 8) or int(data[pos + 3])
+      let cf = byte(data[pos + 4])
+      if cf <= 3'u8:
+        let keyStart = pos + 5
+        let keyLen = klen - 1
+        # Borrowed ptr into `data` — the caller copies into the arena (batch)
+        # before `data` is released.
+        result.add(mt_be.CfKey(cf: cf,
+          key: mt_be.KeyRef(
+            p: cast[ptr UncheckedArray[byte]](unsafeAddr data[keyStart]),
+            len: keyLen)))
+      pos += rl
+      continue
+    # Broken record: resync forward to the next offset that starts a valid
+    # chain; none found → torn tail, stop at the last complete record.
+    let c = journalResyncFrom(data, pos)
+    if c < 0: break
+    logWarn("kvstore", "journal parse: skipped " & $(c - pos) &
+      " garbage/torn bytes at offset " & $pos & " (resync)")
+    pos = c
 
 proc parseJournalFile*(path: string): seq[mt_be.CfKey] =
   ## Parse a single journal file (used by replay at open).

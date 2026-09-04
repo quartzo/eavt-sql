@@ -54,7 +54,7 @@ proc openReplica*(dir: string): ReplicaEngine =
   ReplicaEngine(kv: kv, store: store, path: dir, connected: false)
 
 proc refreshResolverOnSchemaWal*(r: ReplicaEngine) {.gcsafe, raises: [].}
-proc deriveFromCf0(r: ReplicaEngine; key: seq[byte]): seq[mt_be.CfKey] {.gcsafe.}
+proc deriveFromCf0(r: ReplicaEngine; key: seq[byte]): seq[(uint8, seq[byte])] {.gcsafe.}
 
 proc applySnapshot*(r: ReplicaEngine; sealed: seq[string]; openTail: seq[byte];
                     rootName: string) {.async.} =
@@ -93,21 +93,29 @@ proc applySnapshot*(r: ReplicaEngine; sealed: seq[string]; openTail: seq[byte];
       while not tc.atEnd:
         let k = tc.next()
         if k.isSome: cf0Keys.add(k.get)
-      var derived: seq[mt_be.CfKey]
+      var owned: seq[(uint8, seq[byte])]  # mantém os buffers vivos até o batch copiar
       for key in cf0Keys:
         try:
-          for d in r.deriveFromCf0(key): derived.add d
+          for pair in r.deriveFromCf0(key): owned.add pair
         except Exception as e:
           logWarn("replica", "snapshot derive falhou (" & excMsg(e) & ")")
-      if derived.len > 0: r.kv.applyJournalRecordsExpanded(derived)
+      if owned.len > 0:
+        var derived: seq[mt_be.CfKey]
+        for (cf, k) in owned:
+          derived.add mt_be.CfKey(cf: cf, key: mt_be.toKeyRef(k))
+        r.kv.applyJournalRecordsExpanded(derived)
   r.connected = true
 
-proc deriveFromCf0(r: ReplicaEngine; key: seq[byte]): seq[mt_be.CfKey] {.gcsafe.} =
+proc deriveFromCf0(r: ReplicaEngine; key: seq[byte]): seq[(uint8, seq[byte])] {.gcsafe.} =
   ## Derive CF-1/2/3 keys from a CF-0 datom key [eid 8B][aid 4B][val][sf 8B].
   ## The replica builds its query indexes from the datom truth (WAL CF-0-only):
   ## CF-1 always; CF-2 when the attr is indexed; CF-3 when it is a ref.
   ## Metadata comes from the resolver (schema datoms replay before data —
   ## WAL order; refreshResolverOnSchemaWal runs on schema chunks).
+  ## Returns OWNED (cf, key) pairs: the caller materializes KeyRef borrows
+  ## only after collecting them — returning CfKey(borrowed KeyRef) directly
+  ## dangles the stack-local seq at return (all borrows converge to the
+  ## reused buffer → the treap dedups everything into garbage).
   result = @[]
   if key.len < 20: return
   let aid = (uint32(key[8]) shl 24) or (uint32(key[9]) shl 16) or
@@ -121,13 +129,13 @@ proc deriveFromCf0(r: ReplicaEngine; key: seq[byte]): seq[mt_be.CfKey] {.gcsafe.
   var k1 = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
             byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
   k1.add key[0 ..< 8]; k1.add val; k1.add sf
-  result.add mt_be.CfKey(cf: 1, key: mt_be.toKeyRef(k1))
+  result.add (1'u8, k1)
   if r.store.eavt.resolver.isIndexed(aid):
     # CF-2 [aid][val][eid][sf]
     var k2 = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
               byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
     k2.add val; k2.add key[0 ..< 8]; k2.add sf
-    result.add mt_be.CfKey(cf: 2, key: mt_be.toKeyRef(k2))
+    result.add (2'u8, k2)
   let isRef = valueTypeToEncodeMode(vtOpt.get) == emRef
   if isRef:
     # CF-3 [val][aid][eid][sf]
@@ -135,7 +143,7 @@ proc deriveFromCf0(r: ReplicaEngine; key: seq[byte]): seq[mt_be.CfKey] {.gcsafe.
     k3.add @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
             byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
     k3.add key[0 ..< 8]; k3.add sf
-    result.add mt_be.CfKey(cf: 3, key: mt_be.toKeyRef(k3))
+    result.add (3'u8, k3)
 
 proc applyWal*(r: ReplicaEngine; data: seq[byte]) {.gcsafe, raises: [].} =
   ## Apply incoming WAL records to the live treap.
@@ -177,13 +185,17 @@ proc applyWal*(r: ReplicaEngine; data: seq[byte]) {.gcsafe, raises: [].} =
   # Falha de metadado p/ um datom (attr ainda desconhecido) → log + skip:
   # o CF-0 verdade já foi aplicado; o índice faltante materializa no
   # pagestore pelo flush do primário (adotado pela réplica).
-  var derived: seq[mt_be.CfKey]
+  var owned: seq[(uint8, seq[byte])]   # mantém os buffers vivos até o batch copiar
   for key in cf0Keys:
     try:
-      for d in r.deriveFromCf0(key): derived.add d
+      for pair in r.deriveFromCf0(key): owned.add pair
     except CatchableError as e:
       logWarn("replica", "derive falhou p/ datom CF-0 (" & e.msg & "); índice faltante re-materializa via flush do primário")
-  if derived.len > 0: r.kv.applyJournalRecordsExpanded(derived)
+  if owned.len > 0:
+    var derived: seq[mt_be.CfKey]
+    for (cf, k) in owned:
+      derived.add mt_be.CfKey(cf: cf, key: mt_be.toKeyRef(k))
+    r.kv.applyJournalRecordsExpanded(derived)
 
 proc applySeal*(r: ReplicaEngine) =
   inc r.evSealCount

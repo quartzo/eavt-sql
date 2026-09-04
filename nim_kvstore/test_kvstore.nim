@@ -273,6 +273,55 @@ suite "kvstore: reverse scan":
 
 
 suite "kvstore: journal recovery":
+  proc jrRecord(cf: uint8; key: seq[byte]): seq[byte] =
+    ## One journal-format record: [4B klen][1B cf][key][4B vlen=1][1B val].
+    let klen = 1 + key.len
+    result.add byte((klen shr 24) and 0xFF)
+    result.add byte((klen shr 16) and 0xFF)
+    result.add byte((klen shr 8) and 0xFF)
+    result.add byte(klen and 0xFF)
+    result.add cf
+    result.add key
+    result.add @[byte(0), byte(0), byte(0), byte(1), byte(0)]
+
+  test "journal parse resyncs past garbage segment head":
+    # Regression (restart data loss): a torn record tail from a deleted
+    # predecessor segment can precede the valid records of a segment — the
+    # parser must resync, not drop the whole file.
+    let garbageHead = @[byte(0x36), byte(0xff), byte(0x31), byte(0x38),
+                        byte(0x31), byte(0x36), byte(0x36), byte(0x38),
+                        byte(0x39), byte(0x30), byte(0xff), byte(0x30),
+                        byte(0), byte(0), byte(0), byte(0), byte(0),
+                        byte(0), byte(0), byte(1), byte(0), byte(0),
+                        byte(0x60), byte(0), byte(0), byte(0), byte(1),
+                        byte(0x9a)]  # 28 bytes — real torn head observed
+    var buf = garbageHead
+    buf.add jrRecord(0, @[byte(1), byte(2), byte(3)])
+    buf.add jrRecord(0, @[byte(4), byte(5), byte(6)])
+    buf.add jrRecord(1, @[byte(7), byte(8)])
+    let entries = parseJournalRecords(buf)
+    check entries.len == 3
+    check entries[0].cf == 0 and toSeq(entries[0].key) == @[byte(1), byte(2), byte(3)]
+    check entries[1].cf == 0 and toSeq(entries[1].key) == @[byte(4), byte(5), byte(6)]
+    check entries[2].cf == 1 and toSeq(entries[2].key) == @[byte(7), byte(8)]
+
+  test "journal parse tolerates mid-stream garbage":
+    var buf = jrRecord(0, @[byte(1)])
+    buf.add @[byte(0xDe), byte(0xAD), byte(0xBE), byte(0xEF), byte(0),
+             byte(0), byte(0x99)]  # 7 garbage bytes — not a valid record
+    buf.add jrRecord(0, @[byte(2)])
+    buf.add jrRecord(0, @[byte(3)])
+    let entries = parseJournalRecords(buf)
+    check entries.len == 3
+    check toSeq(entries[2].key) == @[byte(3)]
+
+  test "torn tail stops at last complete record (no garbage injection)":
+    var buf = jrRecord(0, @[byte(1)])
+    buf.add jrRecord(0, @[byte(2)])
+    buf.add @[byte(0), byte(0), byte(0), byte(5), byte(0), byte(9)]  # torn record
+    let entries = parseJournalRecords(buf)
+    check entries.len == 2
+
   test "unflushed data survives close + reopen via journal replay":
     let path = "/tmp/kvtest_jr_" & $getTime().toUnix() & "_" & $getTime().nanosecond
     createDir(path)
