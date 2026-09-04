@@ -47,6 +47,18 @@ the same `kv.lock` (sink first), and the seal runs at capture under that lock
 `writeAt` per group; `fsync` on the timer plus at shutdown. **Process crash
 is always safe; machine crash loses at most the last ~100 ms.**
 
+**ACHADO P1 (2026-09-04, smoke 1M M5 + kill -9):** sob carga contínua
+(1M empresas, 63 s) e `kill -9` do `stop.sh` (SIGTERM sem handler → 0,3 s →
+kill), o tail não-flushado (32 k entidades) foi perdido — o segmento só
+contém ~17 k das ~32 k entidades pendentes. O drain (tick 2 ms) ficou
+atrasado diante do buf crescente (o `writeAt` assíncrono via thread pool
+enfileira; o loop aguarda) e o `kill -9` não deixou o `stop()` do writer
+fazer o drain final + fsync. O contract "process crash is always safe"
+exige drain+fsync pending-buf no caminho de morte — pendência: handler
+SIGTERM/SIGINT no transactor que rode `walw.stop()` (drain final + fsync)
+antes de sair, e/ou drain síncrono sobressalente no `journalSeal` quando o
+buf cresce além de um limite (ex.: 4 MiB).
+
 ## Journal record format (unchanged)
 
 ```
