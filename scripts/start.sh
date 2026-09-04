@@ -34,7 +34,12 @@ if [ "$KEEP_DB" = false ]; then
 fi
 
 # Start transactor
-nohup "$TRANSACTOR" </dev/null >"$LOG_DIR/transactor.log" 2>&1 &
+# Memory guard: heavy processes run with a 3GB virtual memory cap so a
+# pathological write path degrades (allocation failure) instead of OOM-
+# killing the whole machine (seen: 5GB RSS under bulk load, 2026-09-04).
+MEM_GUARD="ulimit -v 3145728; "
+
+nohup bash -c "$MEM_GUARD exec '$TRANSACTOR'" </dev/null >"$LOG_DIR/transactor.log" 2>&1 &
 trans_pid=$!
 echo "transactor started (pid $trans_pid)"
 
@@ -47,7 +52,7 @@ for i in $(seq 1 20); do
 done
 
 # Start query server
-nohup "$QUERY" </dev/null >"$LOG_DIR/query.log" 2>&1 &
+nohup bash -c "$MEM_GUARD exec '$QUERY'" </dev/null >"$LOG_DIR/query.log" 2>&1 &
 query_pid=$!
 echo "query server started (pid $query_pid)"
 
