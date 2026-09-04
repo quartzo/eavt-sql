@@ -1,4 +1,4 @@
-import std/[os, tables, strutils]
+import std/[os, tables, strutils, posix]
 import chronos
 import kvstore
 import shared_engine, connection
@@ -155,7 +155,26 @@ proc main() {.async.} =
   let server = createStreamServer(address, serverCallback, udata = cast[pointer](eng))
   server.start()
   echo "Listening..."
-  await server.loopFuture
+
+  # P1 durability: SIGTERM/SIGINT must complete the WAL cycle — the interval
+  # fsync contract ("process crash is always safe") only holds when the
+  # death path drains the pending buffer + fsyncs. The signal handler is
+  # async-unsafe by design: it only flips a flag the loop polls; the real
+  # stop runs on the loop (walw.stop() → final drain + fsync, then pool,
+  # then store — the same ordered close as a natural shutdown).
+  var stopRequested {.global.} = false
+  onSignal(SIGTERM, SIGINT):
+    stopRequested = true
+
+  # loopFuture never completes on its own; poll the flag in small sleeps
+  # so the check costs nothing per request.
+  while not stopRequested:
+    await sleepAsync(50.milliseconds)
+  echo "Shutdown requested — draining WAL..."
+  # close() é void (o loopFuture era quem esperava); as conexões ativas
+  # morrem com o processo — o wal drain+fsync é o que importa aqui.
+  server.close()
+
   if walw != nil:
     await walw.stop()
   # Order: WAL stops first (final drain + fsync), then the pool (in-flight
