@@ -2,7 +2,7 @@
 ##
 ## Unit tests for the EAVT engine (Nim API, no C-ABI).
 
-import std/[unittest, tables, os, times, options]
+import std/[unittest, tables, os, times, options, algorithm]
 import std/typedthreads
 import eavt
 import kvstore
@@ -12,6 +12,8 @@ import hostfns
 import engine
 import scheme
 import hydrated
+import query/cursor  # mockCursor / mergedCursor (fontes do MergedCursor)
+import nim_memtable/treap_backend  # cmpKeysByte
 
 proc newTestEngine(): EavtEngine =
   let kv = newTempFileKVStore()
@@ -351,6 +353,207 @@ proc runJobs(jobs: openArray[EavtJob]) =
 # ══════════════════════════════════════════════════════════════════════════════
 # Hydrated-eid source (CF 0 fast path)
 # ══════════════════════════════════════════════════════════════════════════════
+
+suite "eavt: cursor semantics under concurrent writes":
+  ## F0 regression lock (M5 pre-work): the HydCursor holds a LIVE entry ref
+  ## and resolves buf/offs at read time. A write to the SAME eid between
+  ## cursor steps mutates offs/buf under the cursor. This test documents
+  ## the CURRENT behavior so M5 (immutable datom chunks + stable slots)
+  ## can be judged against it: today the mid-iteration write MUST NOT
+  ## corrupt the iteration's remaining keys.
+  test "cursor over hydrated entry survives write to same eid mid-scan":
+    let eng = newTestEngine()
+    discard eng.eavtDeclareAttr("cur.attr", DbTypeString, true)  # MANY
+    let eid = eng.allocateEntityId()
+    for i in 1..8:
+      discard eng.eavtSave(eid, "cur.attr", "v" & $i, i.int64)
+    check eng.hyd.probeComplete(eid)
+
+    # open a full-range CF-0 cursor (hyd mock source joins the merge)
+    var mc = eng.kv.openScanCursor(0)
+    mc.hyd = eng.hyd
+    var all = eng.hyd.allKeys()
+    all.sort(cmpKeysByte)
+    mc.addSource(mockCursor(all))
+    discard mergedCursor(mc)
+    mc.seek(@[])
+
+    # drain the first half through the cursor
+    var seen: seq[seq[byte]] = @[]
+    for i in 0 ..< 4:
+      let k = mc.next()
+      check k.isSome
+      seen.add(k.get)
+
+    # concurrent write to the SAME eid while the cursor is open
+    discard eng.eavtSave(eid, "cur.attr", "v9", 9)
+
+    # the cursor must keep yielding valid, correctly-ordered keys
+    var after: seq[seq[byte]] = @[]
+    while true:
+      let k = mc.next()
+      if k.isNone: break
+      after.add(k.get)
+    for i in 1 ..< after.len:
+      check cmpKeysByte(after[i-1], after[i]) < 0
+    # every key is a well-formed datom of this eid (no garbage from
+    # shifted offsets)
+    for k in after:
+      check decodeEid(beUint64(k, 0)) == eid
+    # nothing lost: 8 pre-write keys total seen across both halves
+    check seen.len + after.len >= 8
+
+  test "eid-anchored HydCursor survives write to same eid mid-scan":
+    ## The dangerous route: probeComplete → HydCursor holds the LIVE entry
+    ## (not a snapshot) and resolves buf/offs at read time.
+    let eng = newTestEngine()
+    discard eng.eavtDeclareAttr("cur3.attr", DbTypeString, true)  # MANY
+    let eid = eng.allocateEntityId()
+    for i in 1..8:
+      discard eng.eavtSave(eid, "cur3.attr", "v" & $i, i)
+
+    let qe = newQueryStore(eng.kv)
+    qe.eavt = eng  # cursor opens through the engine's hyd
+    let mc = qe.openCursor(0, encodeEid(eid))
+    mc.seek(encodeEid(eid))  # probeComplete → hydMode (live entry ref)
+
+    var seen: seq[seq[byte]] = @[]
+    for i in 0 ..< 4:
+      let k = mc.currentKey()
+      check k.isSome
+      seen.add(k.get)
+      mc.step()
+
+    # write to the SAME eid while the HydCursor is open — a key that sorts
+    # BEFORE the remaining ones (forces offs shift under the cursor)
+    discard eng.eavtSave(eid, "cur3.attr", "a-mid", 10)
+
+    var after: seq[seq[byte]] = @[]
+    while mc.isValid():
+      let k = mc.currentKey()
+      if k.isNone: break
+      after.add(k.get)
+      mc.step()
+    # no garbage: every key well-formed, this eid, strictly ordered
+    for i in 1 ..< after.len:
+      check cmpKeysByte(after[i-1], after[i]) < 0
+    for k in after:
+      check decodeEid(beUint64(k, 0)) == eid
+    check seen.len + after.len >= 8
+
+  test "HydCursor survives tombstone mid-scan (removeKeyAt shift)":
+    let eng = newTestEngine()
+    discard eng.eavtDeclareAttr("cur4.attr", DbTypeString, true)  # MANY
+    let eid = eng.allocateEntityId()
+    for i in 1..8:
+      discard eng.eavtSave(eid, "cur4.attr", "t" & $i, i)
+
+    let qe = newQueryStore(eng.kv)
+    qe.eavt = eng
+    let mc = qe.openCursor(0, encodeEid(eid))
+    mc.seek(encodeEid(eid))
+    var seen = 0
+    for i in 0 ..< 4:
+      check mc.currentKey().isSome
+      mc.step(); inc seen
+
+    # retract a key that sorts AFTER the cursor position (mid-buf removal)
+    eng.eavtRetract(eid, "cur4.attr", "t2", 100)
+
+    var after: seq[seq[byte]] = @[]
+    while mc.isValid():
+      let k = mc.currentKey()
+      if k.isNone: break
+      after.add(k.get)
+      mc.step()
+    for i in 1 ..< after.len:
+      check cmpKeysByte(after[i-1], after[i]) < 0
+    for k in after:
+      check decodeEid(beUint64(k, 0)) == eid
+    check seen + after.len >= 6
+
+  test "eid-anchored seek route unaffected by mid-scan write":
+    let eng = newTestEngine()
+    discard eng.eavtDeclareAttr("cur2.attr", DbTypeString, true)  # MANY
+    let eid = eng.allocateEntityId()
+    for i in 1..6:
+      discard eng.eavtSave(eid, "cur2.attr", "w" & $i, i)
+    let pfx = encodeEid(eid)
+
+    # route through probeComplete: seek + partial drain, then write, then drain
+    let first = eng.scanPrefixActive(0, pfx)
+    check first.len == 6
+    discard eng.eavtSave(eid, "cur2.attr", "w7", 7)
+    let second = eng.scanPrefixActive(0, pfx)
+    check second.len == 7
+    # all keys well-formed and of this eid
+    for k in second:
+      check decodeEid(beUint64(k, 0)) == eid
+
+suite "eavt: replica stale-hydration invariant (M5 F3 acceptance)":
+  ## F0-b: the latent replica bug. The replica's applyWal writes CF-0 into
+  ## the TREAP while the primary's read path treats a hydrated entry as
+  ## AUTHORITATIVE (probeComplete → exclusive). If a replica read ever
+  ## hydrates an eid (lookup-value hostfn), subsequent WAL datoms for that
+  ## eid are invisible and retracts resurrect. Unreachable through the
+  ## datalog surface today (scanners never hydrate; exec routes to the
+  ## transactor) — but structural. After M5-F3 (applyWal → batchWrite)
+  ## this test MUST stay green on the same code path.
+  proc collectCf0Keys(eng: EavtEngine; fromPrefix: seq[byte] = @[]): seq[seq[byte]] =
+    ## The WAL payload equivalent: the CF-0 keys of A's memtable (hyd is the
+    ## CF-0 memtable under M1..M4 — the treap is recovery staging only).
+    ## Returns OWNED keys — the caller materializes CfKey/KeyRef at the call
+    ## site (a KeyRef into a local that dies at return dangles: the bug
+    ## genre deriveFromCf0 had).
+    result = @[]
+    for k in eng.hyd.allKeys():
+      if fromPrefix.len == 0 or (k.len >= fromPrefix.len and
+                                 k[0 ..< fromPrefix.len] == fromPrefix):
+        result.add k
+
+  test "replica flow: hydrate → wal write same eid → read sees wal datom":
+    let kvA = newTempFileKVStore()
+    let engA = newEavtEngine(kvA)
+    engA.bootstrapResolver()
+    discard engA.eavtDeclareAttr("rep.attr", DbTypeString, true)  # MANY
+    let eid = engA.allocateEntityId()
+    discard engA.eavtSave(eid, "rep.attr", "V1", 1)
+
+    # engine B = replica: apply CF-0 records from A's memtable into B's
+    # treap (what replica applyWal / applyJournalRecordsExpanded does)
+    let kvB = newTempFileKVStore()
+    let engB = newEavtEngine(kvB)
+    engB.bootstrapResolver()
+    block:
+      # the returned seq must be NAMED — its element seqs own the bytes the
+      # KeyRefs borrow; a loop over the temporary dangles at loop end
+      let keysA = engA.collectCf0Keys()
+      var recs: seq[CfKey] = @[]
+      for k in keysA: recs.add CfKey(cf: 0, key: toKeyRef(k))
+      discard engB.kv.mt.batch(recs)
+
+    # first read on B hydrates the eid (lookup-value hostfn path)
+    engB.hydrateEid(eid)
+    check engB.hyd.probeComplete(eid)
+    let v1 = engB.scanPrefixActive(0, encodeEid(eid))
+    check v1.len == 1
+
+    # A writes again (new t); WAL delivers the CF-0 key to B's treap —
+    # exactly what replica applyWal phase 1 does (treap only, no hyd)
+    discard engA.eavtSave(eid, "rep.attr", "V2", 2)
+    block:
+      let keysA2 = engA.collectCf0Keys(encodeEid(eid))
+      var recs2: seq[CfKey] = @[]
+      for k in keysA2: recs2.add CfKey(cf: 0, key: toKeyRef(k))
+      discard engB.kv.mt.batch(recs2)
+
+    # post-WAL read on B: the WAL datom is INVISIBLE today — the hydrated
+    # entry is probed complete and answers exclusively. M5 F3 (applyWal →
+    # batchWrite) flips this check to == 2.
+    let v2 = engB.scanPrefixActive(0, encodeEid(eid))
+    check v2.len == 1  # STALE by design today — F3 must make this 2
+    for k in v2:
+      check k.len >= 20 and decodeEid(beUint64(k, 0)) == eid
 
 suite "eavt: hydrated eid source":
 
