@@ -237,7 +237,7 @@ proc newKVStore*(config: Table[string, string]): KVStore =
   result.path = cfg["path"]
   result.readOnly = readOnly
   result.numCf = numCf
-  result.flushThreshold = parseUInt(config.getOrDefault("flush_threshold", "67108864")).uint64
+  result.flushThreshold = parseUInt(config.getOrDefault("flush_threshold", "16777216")).uint64
   result.gcMaxAgeSecs = parseUInt(config.getOrDefault("gc_max_age_secs", "43200")).uint64
   result.gcMaxRootCount = parseInt(config.getOrDefault("gc_root_count", "10"))
   result.walDurableUpTo.store(-1'i64, moRelaxed)
