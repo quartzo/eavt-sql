@@ -309,7 +309,10 @@ proc scanPrefix*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byte]] =
       if eng.hyd.contains(eid):
         deltaKeys = eng.hyd.lookupRangeRaw(eid, prefix)
     else:
-      deltaKeys = eng.hyd.allKeys()
+      # M5: full-range raw view = the vector's volatile window — the
+      # committed set comes from the pagestore (dumping every entry key
+      # would re-dump durable data per scan).
+      deltaKeys = eng.dvec.drainFromT(eng.dvec.publishedT)
   var t0 = getMonoTime()
 
   # Read current roots
@@ -374,7 +377,10 @@ proc scanPrefixActive*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byt
       if eng.hyd.contains(eid):
         deltaKeys = eng.hyd.lookupRangeRaw(eid, prefix)
     else:
-      deltaKeys = eng.hyd.allKeys()
+      # M5: full-range raw view = the vector's volatile window — the
+      # committed set comes from the pagestore (dumping every entry key
+      # would re-dump durable data per scan).
+      deltaKeys = eng.dvec.drainFromT(eng.dvec.publishedT)
 
   var psSnap: PageStoreSnapshot
   var flushRoot, liveRoot: TreapNode

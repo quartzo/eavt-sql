@@ -53,6 +53,8 @@ type
     publishedT*: int64        ## durability watermark (flush publish)
     volatileBytes*: int       ## bytes with t > publishedT — flush feed
     volatileKeys*: int        ## count of keys with t > publishedT (estimates)
+    windowGen*: uint64        ## bumps only when the VOLATILE window changes
+                              ## (volatile append or publish) — run-cache key
     maxBytes*: int
     chunkBytes: int
 
@@ -94,9 +96,14 @@ proc append*(v: DatomVector; key: openArray[byte]; t: int64): DatomSlot =
   v.cur.lens.add int32(key.len)
   if v.cur.minT == 0 or t < v.cur.minT: v.cur.minT = t
   if t > v.cur.maxT: v.cur.maxT = t
-  inc v.cur.volatileBytes, key.len
-  inc v.volatileBytes, key.len
-  inc v.volatileKeys
+  # only keys above the publish watermark are volatile — a read-time
+  # hydration appends already-durable keys (pagestore copies) and must
+  # not inflate the flush window
+  if t > v.publishedT:
+    inc v.cur.volatileBytes, key.len
+    inc v.volatileBytes, key.len
+    inc v.volatileKeys
+    inc v.windowGen
   inc v.generation
   result = slot
 
@@ -167,6 +174,7 @@ proc publish*(v: DatomVector; watermarkT: int64) =
         if t > v.publishedT: inc vk
   v.volatileBytes = vb
   v.volatileKeys = vk
+  inc v.windowGen
 
 proc sealCurrent*(v: DatomVector) =
   ## Seal the open chunk (flush capture boundary): its bytes become
