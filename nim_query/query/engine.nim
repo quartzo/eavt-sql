@@ -149,32 +149,56 @@ method openCursor(q: QueryStore; cfId: uint32; prefix: seq[byte]): Cursor =
   if cfId == 0 and q.eavt.hydEnabled:
     mc.hyd = q.eavt.hyd
     if prefix.len < 8 and q.eavt.hyd.len > 0:
-      # M1/M4: the treap CF-0 is recovery-only — a full-range query cursor
+      # M1/M5: the treap CF-0 is recovery-only — a full-range query cursor
       # needs the hyd keys as a sorted snapshot source (snapshot at open;
       # eid-anchored seeks re-route through the exclusive/delta branches).
       var all = q.eavt.hyd.allKeys()
       if all.len > 1: all.sort(cmpKeysByte)
       if all.len > 0: mc.addSource(mockCursor(all))
   if cfId == 2'u32 and q.eavt.anchorHash.len > 0:
-    # M3': CF-2 writes live in the anchor hash — a sorted snapshot of the
-    # full CF-2 keys joins the merge (committed data comes from the
-    # pagestore; recovery-replay residue from the treap).
+    # M3'/M5: CF-2 anchors live in the hash — derive the full CF-2 keys
+    # [aid][val][eid][sf] from (prefix, eid, t) for the sorted snapshot
+    # (committed data comes from the pagestore).
     var keys: seq[seq[byte]]
-    for v in q.eavt.anchorHash.values(): keys.add(v)
+    for pfx, meta in q.eavt.anchorHash:
+      var k = pfx
+      k.add encodeEid(meta[0])
+      let sf = (meta[1] shl 1)
+      k.add byte(sf shr 56); k.add byte((sf shr 48) and 0xFF)
+      k.add byte((sf shr 40) and 0xFF); k.add byte((sf shr 32) and 0xFF)
+      k.add byte(sf shr 24); k.add byte((sf shr 16) and 0xFF)
+      k.add byte((sf shr 8) and 0xFF); k.add byte(sf and 0xFF)
+      keys.add(k)
     if keys.len > 1: keys.sort(cmpKeysByte)
     mc.addSource(mockCursor(keys))
-  if cfId in {1'u32, 3'u32} and q.eavt.deferred[cfId.int].len > 0:
-    # M2: deferred CF-1/3 keys never entered the treap — a sorted snapshot
-    # joins the merge (legacy exec path / test harness reads on this store;
-    # the replica has no deferred buffers).  Snapshot at open: writes that
+  if cfId in {1'u32, 3'u32} and q.eavt.dvec.volatileKeys > 0:
+    # M5: CF-1/3 are DERIVED from the volatile datoms — a sorted snapshot
+    # joins the merge (committed data comes from the pagestore; the worker
+    # derives the durable set at flush).  Snapshot at open: writes that
     # land while the cursor is open are picked up by the next cursor.
-    var keys = q.eavt.deferred[cfId.int]
-    keys.sort() do(a, b: seq[byte]) -> int:
-      let n = min(a.len, b.len)
-      for i in 0 ..< n:
-        if a[i] != b[i]: return cmp(a[i], b[i])
-      cmp(a.len, b.len)
-    mc.addSource(mockCursor(keys))
+    var keys: seq[seq[byte]]
+    for k in q.eavt.dvec.drainFromT(q.eavt.dvec.publishedT):
+      if k.len < 20: continue
+      let aid = beUint32(k, 8)
+      if cfId == 1'u32:
+        # CF-1 [aid][eid][val][sf]
+        var k1 = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
+                  byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
+        k1.add k[0 ..< 8]
+        k1.add k[12 ..< k.len]
+        keys.add(k1)
+      else:
+        # CF-3 [val][aid][eid][sf] — refs only
+        let vt = q.eavt.valueTypeFor(aid)
+        if vt.isSome and valueTypeToEncodeMode(vt.get) == emRef:
+          var k3 = k[12 ..< k.len - 8]
+          k3.add @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
+                  byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
+          k3.add k[0 ..< 8]
+          k3.add k[k.len - 8 ..< k.len]
+          keys.add(k3)
+    if keys.len > 1: keys.sort(cmpKeysByte)
+    if keys.len > 0: mc.addSource(mockCursor(keys))
   mergedCursor(mc)
 
 proc encodeSaveValue(val: SExpr; vt: uint32; mode: EncodeMode; eid: int64): seq[byte] =
@@ -533,10 +557,9 @@ method batchLookupAvet(q: QueryStore;
   var missKeys: seq[seq[byte]]
   for i, k in keys:
     if q.eavt.anchorHash.hasKey(k):
-      let full = q.eavt.anchorHash[k]
-      if full.len >= 20:
-        result[i] = some(decodeEid(beUint64(full, full.len - 16)))
-        continue
+      let (eid, _) = q.eavt.anchorHash[k]
+      result[i] = some(eid)
+      continue
     missIdx.add(i)
     missKeys.add(k)
   if missIdx.len > 0:
@@ -627,8 +650,7 @@ method lookupEntityW(q: QueryStore; attrName: string;
                 byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
   prefix.add encoded
   if q.eavt.anchorHash.hasKey(prefix):
-    let full = q.eavt.anchorHash[prefix]
-    let found = some(decodeEid(beUint64(full, full.len - 16)))
+    let found = some(q.eavt.anchorHash[prefix][0])
     q.eavt.hydrateEid(found.get)
     q.lookupNs += getMonoTime().ticks - t0
     inc q.lookupCount
@@ -663,8 +685,7 @@ method lookupEntity(q: QueryStore; attrName: string; value: SExpr): Option[int64
                 byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
   prefix.add encoded
   if q.eavt.anchorHash.hasKey(prefix):
-    let full = q.eavt.anchorHash[prefix]
-    let found = some(decodeEid(beUint64(full, full.len - 16)))
+    let found = some(q.eavt.anchorHash[prefix][0])
     q.eavt.hydrateEid(found.get)
     q.lookupNs += getMonoTime().ticks - t0
     inc q.lookupCount

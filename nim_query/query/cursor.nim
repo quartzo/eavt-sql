@@ -9,6 +9,7 @@ import page_cursor   # PageStoreCursor, PageStoreSnapshot
 import treap_cursor  # TreapCursor
 import nim_memtable/treap_backend  # TreapNode
 import hydrated  # HydratedEntry/HydratedSet (M1)
+import datoms  # DatomSlot/DatomVector (M5)
 import keys  # decodeEid/beUint64
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -70,8 +71,9 @@ type
     ckInvalid
 
   HydCursor* = ref object
+    hs: HydratedSet      ## slot byte resolution goes through its vector
     e: HydratedEntry     ## the entry IS the memtable for this eid
-    pos: int             ## current key index in e.offs
+    pos: int             ## current slot index in e.slots
 
   MergedCursor* = ref object
     sources*: seq[Cursor]
@@ -123,42 +125,32 @@ proc seek*(c: Cursor; target: seq[byte]) {.gcsafe.}
 proc invalidate*(c: Cursor) {.gcsafe.}
 proc mockCursor*(keys: seq[seq[byte]]): Cursor {.gcsafe.}
 
-# ── HydCursor (M1) — iterate a hydrated entry's CF-0 buffer ──
+# ── HydCursor (M1/M5) — iterate a hydrated entry's CF-0 slots ──
 
-proc hydSeekFrom(e: HydratedEntry; target: openArray[byte]): int =
-  ## First key index with key >= target (binary search over offs).
+proc hydSeekFrom(hs: HydratedSet; e: HydratedEntry; target: openArray[byte]): int =
+  ## First slot index with key >= target (binary search; keys resolve
+  ## through the vector's chunks — zero copy).
   var lo, hi = 0
-  hi = e.offs.len
+  hi = e.slots.len
   while lo < hi:
     let mid = (lo + hi) shr 1
-    let start = e.offs[mid].int
-    let klen = (if mid + 1 < e.offs.len: e.offs[mid + 1].int else: e.buf.len) - start
-    var c = 0
-    let n = min(klen, target.len)
-    var f = 0
-    for i in 0 ..< n:
-      if e.buf[start + i] != target[i]:
-        f = if e.buf[start + i] < target[i]: -1 else: 1
-        break
-    c = if f != 0: f else: cmp(klen, target.len)
+    let c = hs.vec.cmpSlotKey(e.slots[mid], target)
     if c < 0: lo = mid + 1
     else: hi = mid
   lo
 
-proc hydKeyAt(e: HydratedEntry; i: int): seq[byte] =
-  let start = e.offs[i].int
-  let klen = (if i + 1 < e.offs.len: e.offs[i + 1].int else: e.buf.len) - start
-  e.buf[start ..< start + klen]
+proc hydKeyAt(hs: HydratedSet; e: HydratedEntry; i: int): seq[byte] =
+  hs.vec.keyCopy(e.slots[i])
 
 proc hydCursorSeek(hc: HydCursor; target: seq[byte]) =
-  hc.pos = hydSeekFrom(hc.e, target)
+  hc.pos = hydSeekFrom(hc.hs, hc.e, target)
 
 proc hydCursorCurrent(hc: HydCursor): Option[seq[byte]] =
-  if hc.pos >= hc.e.offs.len: return none(seq[byte])
-  some(hydKeyAt(hc.e, hc.pos))
+  if hc.pos >= hc.e.slots.len: return none(seq[byte])
+  some(hydKeyAt(hc.hs, hc.e, hc.pos))
 
-proc newHydCursor*(e: HydratedEntry; target: seq[byte]): Cursor =
-  let hc = HydCursor(e: e)
+proc newHydCursor*(hs: HydratedSet; e: HydratedEntry; target: seq[byte]): Cursor =
+  let hc = HydCursor(hs: hs, e: e)
   hydCursorSeek(hc, target)
   Cursor(kind: ckHyd, hc: hc)
 
@@ -246,10 +238,10 @@ proc seek*(mc: MergedCursor; target: seq[byte]) {.gcsafe.} =
         mc.deltaEid = 0
       if not mc.hydMode:
         mc.baseSources = mc.sources
-        mc.hydCursor = newHydCursor(mc.hyd.index[eid], target)
+        mc.hydCursor = newHydCursor(mc.hyd, mc.hyd.index[eid], target)
         mc.sources = @[mc.hydCursor]
         mc.hydMode = true
-      mc.hydCursor.hc.pos = hydSeekFrom(mc.hyd.index[eid], target)
+      mc.hydCursor.hc.pos = hydSeekFrom(mc.hyd, mc.hyd.index[eid], target)
       mc.heap.data = @[]
       if mc.sources[0].isValid():
         let k = mc.sources[0].currentKey()
@@ -267,11 +259,10 @@ proc seek*(mc: MergedCursor; target: seq[byte]) {.gcsafe.} =
       mc.hydMode = false
       let e = mc.hyd.index[eid]
       var dkeys: seq[seq[byte]] = @[]
-      for i in 0 ..< e.offs.len:
-        let start = e.offs[i].int
-        let klen = (if i + 1 < e.offs.len: e.offs[i + 1].int else: e.buf.len) - start
-        dkeys.add e.buf[start ..< start + klen]
-      dkeys &= e.tombstones
+      for s in e.slots:
+        dkeys.add mc.hyd.vec.keyCopy(s)
+      for s in e.tombSlots:
+        dkeys.add mc.hyd.vec.keyCopy(s)
       if dkeys.len > 1: dkeys.sort(cmpKeysByte)
       mc.sources = mc.sources & @[mockCursor(dkeys)]
       mc.deltaEid = eid
@@ -329,7 +320,7 @@ proc isValid*(c: Cursor): bool {.gcsafe.} =
   of ckTreap: not c.tc.atEnd
   of ckTreapKv: not c.tckv.atEnd
   of ckMerged: not c.mc.atEnd
-  of ckHyd: c.hc.pos < c.hc.e.offs.len
+  of ckHyd: c.hc.pos < c.hc.e.slots.len
   of ckMock: c.mockPos < c.mockKeys.len
   of ckInvalid: false
 
@@ -402,7 +393,7 @@ proc invalidate*(c: Cursor) {.gcsafe.} =
   of ckTreap: c.tc.atEnd = true
   of ckTreapKv: c.tckv.atEnd = true
   of ckMerged: c.mc.atEnd = true
-  of ckHyd: c.hc.pos = c.hc.e.offs.len
+  of ckHyd: c.hc.pos = c.hc.e.slots.len
   of ckMock: c.mockPos = c.mockKeys.len
   of ckInvalid: discard
 

@@ -52,6 +52,7 @@ type
     generation*: uint64       ## bumps per append (run-cache validation)
     publishedT*: int64        ## durability watermark (flush publish)
     volatileBytes*: int       ## bytes with t > publishedT — flush feed
+    volatileKeys*: int        ## count of keys with t > publishedT (estimates)
     maxBytes*: int
     chunkBytes: int
 
@@ -95,6 +96,7 @@ proc append*(v: DatomVector; key: openArray[byte]; t: int64): DatomSlot =
   if t > v.cur.maxT: v.cur.maxT = t
   inc v.cur.volatileBytes, key.len
   inc v.volatileBytes, key.len
+  inc v.volatileKeys
   inc v.generation
   result = slot
 
@@ -143,19 +145,28 @@ proc publish*(v: DatomVector; watermarkT: int64) =
   ## next publish reclaims. Recomputes volatileBytes.
   v.publishedT = max(v.publishedT, watermarkT)
   var vb = 0
+  var vk = 0
   for i in 0 ..< v.chunks.len:
     let c = v.chunks[i]
     if c == nil: continue
     if c.sealed and c.maxT <= v.publishedT and c.pinned == 0:
       v.chunks[i] = nil               # fully durable, unpinned → release
+      dec v.volatileKeys, c.offs.len
       continue
     if not c.sealed or c.minT > v.publishedT:
-      discard  # fully volatile (open chunk or above watermark)
       vb += c.volatileBytes
+      vk += c.offs.len
     else:
       c.volatileBytes = c.walkChunkVolatile(v.publishedT)
       vb += c.volatileBytes
+      # straddling chunk: count volatile keys exactly
+      for j in 0 ..< c.offs.len:
+        let off = c.offs[j].int
+        let klen = c.lens[j].int
+        let t = (beUint64(c.buf, off + klen - 8) shr 1).int64
+        if t > v.publishedT: inc vk
   v.volatileBytes = vb
+  v.volatileKeys = vk
 
 proc sealCurrent*(v: DatomVector) =
   ## Seal the open chunk (flush capture boundary): its bytes become
@@ -179,3 +190,16 @@ proc drainVolatile*(v: DatomVector): seq[seq[byte]] =
           result.add c.buf[off ..< off + klen]
 
 proc chunkKeyCount*(c: DatomChunk): int = c.offs.len
+
+proc drainFromT*(v: DatomVector; captureT: int64): seq[seq[byte]] =
+  ## Keys with t > captureT — a precise window (cursor-open snapshots derive
+  ## the CF-1/2/3 delta from this; idempotent against the pagestore merge).
+  ## Owned copies.
+  for c in v.chunks:
+    if c == nil: continue
+    for i in 0 ..< c.offs.len:
+      let off = c.offs[i].int
+      let klen = c.lens[i].int
+      let t = (beUint64(c.buf, off + klen - 8) shr 1).int64
+      if t > captureT:
+        result.add c.buf[off ..< off + klen]

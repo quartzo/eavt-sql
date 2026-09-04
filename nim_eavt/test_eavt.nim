@@ -147,13 +147,18 @@ proc walRecord(cf: uint8; key: seq[byte]): seq[byte] =
 
 proc collectSchemaWal(eng: EavtEngine): seq[byte] =
   ## Extrai as keys db.* (cf 1, AEVT) do engine e monta os bytes wal.
-  ## M2: db.* CF-1 pendentes vivem no buffer deferred até o flush.
+  ## M5: db.* CF-1 pendentes são DERIVADOS do vetor de datoms.
   for aid in [DbIdentAid, DbValueTypeAid, DbCardinalityAid, DbUniqueAid]:
     for k in eng.scanPrefix(1, @[0'u8, 0'u8, 0'u8, byte(aid)]):
       result.add walRecord(1'u8, k)
-    for k in eng.deferred[1]:
-      if k.len >= 4 and beUint32(k, 0) == aid:
-        result.add walRecord(1'u8, k)
+    for d in eng.dvec.drainFromT(0):
+      if d.len >= 12 and beUint32(d, 8) == aid:
+        # derive CF-1 [aid][eid][val][sf] from the canonical datom
+        var k1 = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
+                  byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
+        k1.add d[0 ..< 8]
+        k1.add d[12 ..< d.len]
+        result.add walRecord(1'u8, k1)
 
 proc schemaAids(): array[4, uint32] =
   [DbIdentAid, DbCardinalityAid, DbValueTypeAid, DbUniqueAid]

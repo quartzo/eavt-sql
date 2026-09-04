@@ -1,5 +1,11 @@
 ## hydrated.nim — RAM-resident cache of "hydrated" eids for the EAVT CF.
 ##
+## M5: an entry is a sorted list of SLOTS into the engine's DatomVector
+## (chunks of canonical CF-0 keys). The entry no longer owns key bytes:
+## "hidratado = apenas ptr" — comparisons resolve through the chunk
+## (zero-alloc), reads copy on demand. insertKeyAt (O(k) byte memmove per
+## datom) is gone: a slot insert moves 12-byte fixed records.
+##
 ## A hydrated eid has its COMPLETE set of active CF-0 datom keys in memory.
 ## `scanPrefixActive` serves any CF-0 scan whose prefix anchors at a hydrated
 ## eid entirely from here — no PageStore B-tree descent, no treap cursors,
@@ -14,9 +20,11 @@
 ## Therefore an entry always reflects the latest active state of its eid;
 ## dropping the whole entry at any time just falls back to the slow path.
 ##
-## Storage is a flat byte buffer per entry (concatenated keys) + an offset
-## array — no per-key seq allocation, and every comparison is a zero-alloc
-## openArray view into the buffer.
+## Byte lifetime: every entry slot pins its chunk in the vector. A COMPLETE
+## entry survives flushes (read cache role) — its chunks stay pinned until
+## eviction, which is what makes its keys readable after the watermark
+## passes. A PARTIAL entry is delta-only and dropped at drain. Unpinned
+## durable chunks are reclaimed by the vector's publish.
 ##
 ## Admission: the only criterion is fit — an entry must fit within
 ## `maxBytes` after LRU-evicting older entries. There are no punitive guards:
@@ -30,6 +38,7 @@
 
 import std/[tables, algorithm, monotimes]
 import keys
+import datoms
 import nim_memtable/treap_backend  # KeyRef, cmpKeysByte
 
 const DefaultMaxBytes* = 1 shl 30          ## 1 GiB — cfg `hydrated_max_bytes`
@@ -37,21 +46,20 @@ const DefaultMaxBytes* = 1 shl 30          ## 1 GiB — cfg `hydrated_max_bytes`
 type
   HydratedEntry* = ref object
     eid*: int64               ## owning entity (O(1) LRU victim removal)
-    buf*: seq[byte]           ## concatenated ACTIVE CF-0 keys, ascending
-    offs*: seq[int32]         ## start offset of each key (len = nº de chaves)
-    bytes*: int               ## == buf.len
+    slots*: seq[DatomSlot]    ## active keys, ascending (cmpSlotKey vs chunk)
+    tombSlots*: seq[DatomSlot]## pending tombstones for the pagestore drain
+    bytes*: int               ## sum of slot klens (accounting only)
     prev, next: HydratedEntry ## intrusive LRU (sentinel-headed)
     # memtable role (M1): a dirty entry holds unflushed CF-0 writes — the
     # entry IS the memtable for this eid; never evicted while dirty.
     dirty*: bool              ## has keys/tombstones above `watermark`
     watermark*: int64         ## t of the last successful drain (0 = none)
     lastWriteT*: int64        ## t of the newest applied key
-    tombstones*: seq[seq[byte]] ## retracted keys pending pagestore drain
     dirtyPrev, dirtyNext: HydratedEntry ## intrusive dirty list
     # M4: a PARTIAL entry holds only the write delta for a cold eid — the
-    # base CF-0 set stays in pagestore/treap.  Reads merge delta+base
-    # (dedup by t: delta wins).  Drained partials are DROPPED (no cache
-    # role), unlike complete entries which stay as the read fast path.
+    # base CF-0 set stays in pagestore.  Reads merge delta+base (dedup by
+    # t: delta wins).  Drained partials are DROPPED (no cache role), unlike
+    # complete entries which stay as the read fast path.
     partial*: bool
 
   HydratedSet* = ref object
@@ -59,33 +67,36 @@ type
     head, tail: HydratedEntry ## sentinels: head.next = MRU, tail.prev = LRU
     maxBytes*: int
     curBytes*: int
-    hits*: int64              ## probe() found the eid (fast path taken)
-    misses*: int64            ## probe() missed (normal path)
-    hydrations*: int64        ## hydrations accepted into the set
-    rejected*: int64          ## hydrations refused (entry > maxBytes)
-    evictions*: int64         ## entries dropped by the LRU sweeper
-    # dirty bookkeeping (M1)
-    dirtyHead: HydratedEntry  ## sentinel for the intrusive dirty list
-    dirtyBytes*: int64        ## aproximação do volume não drenado (threshold)
-    drains*: int64            ## collectDirty calls that emitted keys
-    drainedKeys*: int64       ## keys emitted by collectDirty (cumulative)
-    numKeys*: int64           ## chaves CF-0 retidas (estimativa do planner)
+    numKeys*: int
+    dirtyHead*: HydratedEntry ## sentinel of the dirty list
+    dirtyBytes*: int64
+    evictions*: int64
+    hydrations*: int64
+    rejected*: int64
+    drains*: int64
+    drainedKeys*: int64
+    hits*: int64
+    misses*: int64
+    vec*: DatomVector         ## M5: byte storage for every slot (shared)
 
-proc newHydratedSet*(maxBytes: int = DefaultMaxBytes): HydratedSet =
-  result = HydratedSet(
-    maxBytes: maxBytes,
-    head: HydratedEntry(eid: 0, bytes: 0),
-    tail: HydratedEntry(eid: 0, bytes: 0),
-    dirtyHead: HydratedEntry(eid: 0, bytes: 0),
-  )
-  result.head.next = result.tail
-  result.tail.prev = result.head
-  result.dirtyHead.dirtyNext = result.dirtyHead
-  result.dirtyHead.dirtyPrev = result.dirtyHead
+proc newHydratedSet*(maxBytes: int = DefaultMaxBytes;
+                     vec: DatomVector = nil): HydratedSet =
+  let head = HydratedEntry(eid: 0)
+  let tail = HydratedEntry(eid: 0)
+  head.next = tail
+  tail.prev = head
+  let dhead = HydratedEntry(eid: 0)
+  dhead.dirtyNext = dhead
+  dhead.dirtyPrev = dhead
+  result = HydratedSet(index: initTable[int64, HydratedEntry](),
+                       maxBytes: maxBytes, vec: vec)
+  result.head = head
+  result.tail = tail
+  result.dirtyHead = dhead
 
 proc len*(h: HydratedSet): int {.inline.} = h.index.len
 
-# ── LRU plumbing ──────────────────────────────────────────────────────────────
+# ── LRU list ──────────────────────────────────────────────────────────────────
 
 proc unlink(e: HydratedEntry) {.inline.} =
   e.prev.next = e.next
@@ -98,18 +109,19 @@ proc pushFront(h: HydratedSet; e: HydratedEntry) {.inline.} =
   h.head.next = e
 
 proc touch(h: HydratedSet; e: HydratedEntry) {.inline.} =
-  unlink(e)
-  pushFront(h, e)
+  if h.head.next == e: return
+  e.unlink()
+  h.pushFront(e)
 
-# ── Membership / probing ──────────────────────────────────────────────────────
+# ── Membership / probes ───────────────────────────────────────────────────────
 
-proc contains*(h: HydratedSet; eid: int64): bool {.inline.} =
-  eid in h.index
+proc contains*(h: HydratedSet; eid: int64): bool {.inline.} = eid in h.index
 
 proc probeComplete*(h: HydratedSet; eid: int64): bool {.inline.} =
   ## Membership AND complete+current (M4: partial entries are NOT
   ## authoritative — reads must merge delta+base).  LRU touch + hit/miss
-  ## accounting like probe().
+  ## accounting like probe().  Dirty entries are probeComplete: the entry
+  ## IS the memtable for its eid (dirty keys included — read-your-writes).
   if eid in h.index and not h.index[eid].partial:
     h.touch(h.index[eid])
     inc h.hits
@@ -141,164 +153,117 @@ proc probe*(h: HydratedSet; eid: int64): bool =
     false
 
 proc entryBytes*(h: HydratedSet; eid: int64): int =
-  ## Diagnostics: byte size of one hydrated entry (0 when absent).
   if eid in h.index: h.index[eid].bytes else: 0
 
-# ── Flat-buffer helpers ───────────────────────────────────────────────────────
+# ── Slot key resolution (through the chunk — zero copy) ──────────────────────
 
-proc keyStart(e: HydratedEntry; i: int): int {.inline.} = e.offs[i].int
+proc cmpSlotFull(h: HydratedSet; e: HydratedEntry; i: int;
+                 key: openArray[byte]): int {.inline.} =
+  h.vec.cmpSlotKey(e.slots[i], key)
 
-proc keyEnd(e: HydratedEntry; i: int): int {.inline.} =
-  if i + 1 < e.offs.len: e.offs[i + 1].int else: e.buf.len
+proc cmpSlotPrefix(h: HydratedSet; e: HydratedEntry; i: int;
+                   key: openArray[byte]): int {.inline.} =
+  ## Prefix comparison: only the first key.len bytes participate — equal on
+  ## the shared prefix is a MATCH (0), regardless of the slot key's full
+  ## length (range-scan semantics; the old cmpPrefixAt behaved the same).
+  let c = h.vec.chunkAt(e.slots[i])
+  if c == nil: return -1
+  let s = e.slots[i]
+  let n = min(s.klen.int, key.len)
+  for j in 0 ..< n:
+    let a = c.buf[s.off + j]
+    if a != key[j]:
+      return (if a < key[j]: -1 else: 1)
+  0
 
-proc keyLenAt(e: HydratedEntry; i: int): int {.inline.} =
-  keyEnd(e, i) - keyStart(e, i)
-
-proc cmpFullAt(e: HydratedEntry; i: int; key: openArray[byte]): int =
-  ## Lexicographic comparison of the full stored key at `i` with `key`.
-  let start = keyStart(e, i)
-  let klen = keyLenAt(e, i)
-  let n = min(klen, key.len)
-  var j = 0
-  while j < n:
-    if e.buf[start + j] != key[j]:
-      return if e.buf[start + j] < key[j]: -1 else: 1
-    inc j
-  if klen < key.len: -1
-  elif klen > key.len: 1
-  else: 0
-
-proc cmpPrefixAt(e: HydratedEntry; i: int; key: openArray[byte]): int =
+proc cmpSlotDatomPrefix(h: HydratedSet; e: HydratedEntry; i: int;
+                        key: openArray[byte]): int {.inline.} =
   ## Compare the stored key's datom-prefix (all but the last 8 suffix bytes)
-  ## with `key`'s datom-prefix. Zero-allocation.
-  let start = keyStart(e, i)
-  let klen = keyLenAt(e, i)
-  let alen = klen - 8
+  ## with `key`'s — the upsert/retract matcher (old cmpPrefixAt semantics).
+  let c = h.vec.chunkAt(e.slots[i])
+  if c == nil: return -1
+  let s = e.slots[i]
+  let alen = s.klen.int - 8
   let blen = key.len - 8
   let n = min(alen, blen)
-  var j = 0
-  while j < n:
-    if e.buf[start + j] != key[j]:
-      return if e.buf[start + j] < key[j]: -1 else: 1
-    inc j
+  for j in 0 ..< n:
+    let a = c.buf[s.off + j]
+    if a != key[j]:
+      return (if a < key[j]: -1 else: 1)
   if alen < blen: -1
   elif alen > blen: 1
   else: 0
 
-proc findKeyPos(e: HydratedEntry; key: openArray[byte]): int =
-  ## Index of the stored key whose datom-prefix equals `key`'s, or -1.
-  var lo = 0
-  var hi = e.offs.len
+proc findKeyPos(h: HydratedSet; e: HydratedEntry; key: openArray[byte]): int =
+  ## Index of the stored key whose datom-prefix equals `key`'s, or
+  ## -1-(insertion point).  Prefix match (not full-key): an upsert or a
+  ## retract targets the same (eid, aid, val) regardless of its suffix t.
+  var lo, hi = 0
+  hi = e.slots.len
   while lo < hi:
     let mid = (lo + hi) shr 1
-    if cmpPrefixAt(e, mid, key) < 0: lo = mid + 1
+    if h.cmpSlotDatomPrefix(e, mid, key) < 0: lo = mid + 1
     else: hi = mid
-  if lo < e.offs.len and cmpPrefixAt(e, lo, key) == 0: lo
-  else: -1
-
-proc replaceKeyAt(e: HydratedEntry; pos: int; key: ptr UncheckedArray[byte];
-                  klen: int) =
-  let start = keyStart(e, pos)
-  let next = keyEnd(e, pos)
-  let delta = klen - (next - start)
-  if delta != 0:
-    let tail = e.buf.len - next
-    if delta > 0: e.buf.setLen(e.buf.len + delta)
-    if tail > 0: moveMem(addr e.buf[next + delta], addr e.buf[next], tail)
-    if delta < 0: e.buf.setLen(e.buf.len + delta)
-    for j in (pos + 1) ..< e.offs.len:
-      e.offs[j] = (e.offs[j].int + delta).int32
-  copyMem(addr e.buf[start], key, klen)
-
-proc insertKeyAt(e: HydratedEntry; idx: int; key: ptr UncheckedArray[byte];
-                 klen: int) =
-  let ins = (if idx < e.offs.len: keyStart(e, idx) else: e.buf.len)
-  e.buf.setLen(e.buf.len + klen)
-  let tail = e.buf.len - ins - klen
-  if tail > 0: moveMem(addr e.buf[ins + klen], addr e.buf[ins], tail)
-  copyMem(addr e.buf[ins], key, klen)
-  e.offs.insert(ins.int32, idx)
-  for j in (idx + 1) ..< e.offs.len:
-    e.offs[j] = (e.offs[j].int + klen).int32
-
-proc removeKeyAt(e: HydratedEntry; pos: int): int =
-  ## Remove the key at pos; returns its byte length.
-  let start = keyStart(e, pos)
-  let next = keyEnd(e, pos)
-  let oldLen = next - start
-  let tail = e.buf.len - next
-  if tail > 0: moveMem(addr e.buf[start], addr e.buf[next], tail)
-  e.buf.setLen(e.buf.len - oldLen)
-  e.offs.delete(pos)
-  for j in pos ..< e.offs.len:
-    e.offs[j] = (e.offs[j].int - oldLen).int32
-  oldLen
-
-# ── Reads ─────────────────────────────────────────────────────────────────────
+  if lo < e.slots.len and h.cmpSlotDatomPrefix(e, lo, key) == 0: lo
+  else: -1 - lo
 
 proc keyCount*(h: HydratedSet; eid: int64): int {.inline.} =
   ## Nº de chaves CF-0 ativas conhecidas para o eid (0 quando ausente).
   ## Autoritativo enquanto a entrada estiver hidratada (invariante
   ## complete+current — ver cabeçalho do módulo).
   if eid notin h.index: return 0
-  h.index[eid].offs.len
+  h.index[eid].slots.len
 
 proc hasAttrKey*(h: HydratedSet; eid: int64; attrId: uint32): bool =
   ## True quando a entrada hidratada tem chave CF-0 ativa para (eid, attrId).
   ## Exato sob complete+current: a entrada é autoritativa para o eid inteiro,
   ## então "não tem chave para o attr" ⇒ não existe datom ativo a retrair.
-  ## Busca binária pelos primeiros 12B ([eid 8B][aid 4B]) — as chaves estão
-  ## ordenadas e chaves do mesmo (eid, aid) são contíguas.
+  ## Busca binária pelos primeiros 12B ([eid 8B][aid 4B]) — chaves do mesmo
+  ## (eid, aid) são contíguas.
   if eid notin h.index: return false
   let e = h.index[eid]
   var pfx: array[12, byte]
   let ex = cast[uint64](eid) xor (1'u64 shl 63)
   storeBE64(cast[ptr UncheckedArray[byte]](addr pfx[0]), 0, ex)
   storeBE32(cast[ptr UncheckedArray[byte]](addr pfx[0]), 8, attrId)
-
-  proc cmpAttrAt(e: HydratedEntry; i: int; pfx: array[12, byte]): int {.inline.} =
-    let start = keyStart(e, i)
-    let klen = keyLenAt(e, i)
-    let n = min(klen, 12)
-    for j in 0 ..< n:
-      if e.buf[start + j] != pfx[j]:
-        return if e.buf[start + j] < pfx[j]: -1 else: 1
-    if klen < 12: -1 else: 0
-
-  var lo = 0
-  var hi = e.offs.len
+  var lo, hi = 0
+  hi = e.slots.len
   while lo < hi:
     let mid = (lo + hi) shr 1
-    if cmpAttrAt(e, mid, pfx) < 0: lo = mid + 1
+    let c = h.cmpSlotPrefix(e, mid, pfx)
+    if c < 0: lo = mid + 1
     else: hi = mid
-  result = lo < e.offs.len and cmpAttrAt(e, lo, pfx) == 0
+  if lo >= e.slots.len: return false
+  h.cmpSlotPrefix(e, lo, pfx) == 0
 
 proc lookupRange*(h: HydratedSet; eid: int64; prefix: seq[byte]): seq[seq[byte]] =
   ## All stored keys starting with `prefix`, ascending. The caller has already
   ## probed membership for the eid anchored at prefix[0..<8].
   if eid notin h.index: return
   let e = h.index[eid]
-  var lo = 0
-  var hi = e.offs.len
+  var lo, hi = 0
+  hi = e.slots.len
   while lo < hi:
     let mid = (lo + hi) shr 1
-    if cmpFullAt(e, mid, prefix) < 0: lo = mid + 1
+    if h.cmpSlotPrefix(e, mid, prefix) < 0: lo = mid + 1
     else: hi = mid
   var i = lo
-  while i < e.offs.len:
-    let start = keyStart(e, i)
-    let klen = keyLenAt(e, i)
-    if klen < prefix.len: break
-    var matches = true
-    for j in 0 ..< prefix.len:
-      if e.buf[start + j] != prefix[j]:
-        matches = false
-        break
-    if not matches: break
-    result.add(e.buf[start ..< start + klen])
+  while i < e.slots.len:
+    if h.cmpSlotPrefix(e, i, prefix) != 0: break
+    result.add(h.vec.keyCopy(e.slots[i]))
     inc i
 
 # ── Writes (mirror path) ──────────────────────────────────────────────────────
+
+proc entryRemoveSlot(h: HydratedSet; e: HydratedEntry; pos: int): int {.inline.} =
+  ## Remove the slot at pos (unpins the chunk); returns the key length.
+  let klen = e.slots[pos].klen.int
+  h.vec.unpin(e.slots[pos])
+  e.slots.delete(pos)
+  h.curBytes -= klen
+  e.bytes -= klen
+  klen
+
 
 proc markDirty(h: HydratedSet; e: HydratedEntry; t: int64) {.inline.} =
   ## Join the dirty list on first sight; the entry's watermark selection
@@ -316,53 +281,53 @@ proc keySuffixT(key: KeyRef): int64 {.inline.} =
   ## The write t carried in the key suffix (sf = t<<1 | retracted).
   (beUint64(key.p.toOpenArray(0, key.len - 1), key.len - 8) shr 1).int64
 
-proc keyToSeq(key: KeyRef): seq[byte] {.inline.} =
-  result = newSeq[byte](key.len)
-  if key.len > 0:
-    copyMem(addr result[0], unsafeAddr key.p[0], key.len)
+proc slotKeyT(h: HydratedSet; s: DatomSlot): int64 {.inline.} =
+  let c = h.vec.chunkAt(s)
+  if c == nil: return 0
+  (beUint64(c.buf.toOpenArray(s.off, s.off + s.klen.int - 1),
+            s.klen.int - 8) shr 1).int64
 
 proc applyKey*(h: HydratedSet; key: KeyRef) =
   ## Apply one CF-0 write.  When the eid is hydrated the entry IS the
   ## memtable (M1): active → upsert; retracted → remove + tombstone for the
   ## pagestore drain.  Selection at drain time is by suffix t > watermark.
-  if key.len < 20 or h.index.len == 0: return
+  ## M5: the key bytes land in the vector (append) — the entry gets a slot.
+  if key.len < 20 or h.vec == nil: return
   let klen = key.len
   let eid = decodeEid(beUint64(key.p.toOpenArray(0, klen - 1), 0))
   if eid notin h.index: return
   let e = h.index[eid]
   let sf = beUint64(key.p.toOpenArray(0, klen - 1), klen - 8)
-  let pos = findKeyPos(e, key.p.toOpenArray(0, klen - 1))
+  let t = keySuffixT(key)
+  let slot = h.vec.append(key.p.toOpenArray(0, klen - 1), t)
+  h.vec.pin(slot)          # the entry retains its bytes until drop/drain
+  let pos = h.findKeyPos(e, key.p.toOpenArray(0, klen - 1))
   if (sf and 1) == 0:
-    # active: replace in place (new version) or insert sorted
     if pos >= 0:
-      let oldLen = keyLenAt(e, pos)
-      replaceKeyAt(e, pos, key.p, klen)
-      let delta = klen - oldLen
-      h.curBytes += delta
-      e.bytes += delta
+      # replace in place (new version): remove the old slot, insert new
+      let delta = klen - e.slots[pos].klen.int
+      discard h.entryRemoveSlot(e, pos)  # (defined below — forward ref ok)
+      e.slots.insert(slot, pos)
+      h.curBytes += klen
+      e.bytes += klen
+      inc h.numKeys
       if e.dirty: h.dirtyBytes += delta.int64
     else:
-      var idx = e.offs.len
-      while idx > 0 and cmpFullAt(e, idx - 1, key.p.toOpenArray(0, klen - 1)) > 0: dec idx
-      insertKeyAt(e, idx, key.p, klen)
+      let idx = -pos - 1
+      e.slots.insert(slot, idx)
       h.curBytes += klen
       e.bytes += klen
       inc h.numKeys
       if e.dirty: h.dirtyBytes += klen.int64
-    h.markDirty(e, keySuffixT(key))
+    h.markDirty(e, t)
   else:
     if pos >= 0:
-      let oldLen = removeKeyAt(e, pos)
-      h.curBytes -= oldLen
-      e.bytes -= oldLen
+      let oldLen = h.entryRemoveSlot(e, pos)
       dec h.numKeys
       if e.dirty: h.dirtyBytes -= oldLen.int64
-    # tombstone records the retraction for the pagestore drain (the active
-    # key is gone from buf — without the tombstone the pagestore would
-    # keep serving the retracted datom)
-    e.tombstones.add(keyToSeq(key))
+    e.tombSlots.add(slot)
     inc h.numKeys
-    h.markDirty(e, keySuffixT(key))
+    h.markDirty(e, t)
 
 # ── Insertion / eviction ──────────────────────────────────────────────────────
 
@@ -374,10 +339,13 @@ proc dirtyUnlink(h: HydratedSet; e: HydratedEntry) {.inline.} =
   e.dirty = false
 
 proc drop(h: HydratedSet; eid: int64; e: HydratedEntry) {.inline.} =
+  ## Remove the entry entirely and unpin its chunks (M5 byte lifetime).
+  for s in e.slots: h.vec.unpin(s)
+  for s in e.tombSlots: h.vec.unpin(s)
   h.index.del(eid)
-  unlink(e)
+  e.unlink()
   dec h.curBytes, e.bytes
-  dec h.numKeys, e.offs.len + e.tombstones.len
+  dec h.numKeys, e.slots.len + e.tombSlots.len
   h.dirtyUnlink(e)
 
 proc evictLruUntilFits(h: HydratedSet; incomingBytes: int) =
@@ -388,7 +356,7 @@ proc evictLruUntilFits(h: HydratedSet; incomingBytes: int) =
   ## (flush pressure drains the dirty set).
   var victim = h.tail.prev
   while h.curBytes + incomingBytes > h.maxBytes and victim != h.head:
-    if victim.eid == 0 and victim.offs.len == 0: break  # safety: sentinel/empty
+    if victim.eid == 0 and victim.slots.len == 0: break  # safety: sentinel/empty
     if victim.dirty:
       victim = victim.prev          # pinned até o drain — segue para a LRU anterior
       continue
@@ -409,7 +377,8 @@ proc hydrateEmpty*(h: HydratedSet; eid: int64) =
 proc hydrate*(h: HydratedSet; eid: int64; keys: seq[seq[byte]]) =
   ## Install the complete active CF-0 key set for `eid`. `keys` must be the
   ## ascending output of scanPrefixActive(0, encodeEid(eid)) — already deduped
-  ## and retract-filtered.
+  ## and retract-filtered.  M5: keys are appended to the vector (pinned);
+  ## the entry holds slots.
   if eid in h.index:
     h.touch(h.index[eid])
     return
@@ -419,13 +388,18 @@ proc hydrate*(h: HydratedSet; eid: int64; keys: seq[seq[byte]]) =
     inc h.rejected
     return
   h.evictLruUntilFits(total)
-  let e = HydratedEntry(eid: eid, bytes: total)
+  let e = HydratedEntry(eid: eid, bytes: 0)
   for k in keys:
-    e.offs.add(e.buf.len.int32)
-    e.buf.add(k)
+    if k.len < 20: continue
+    let t = (beUint64(k.toOpenArray(0, k.len - 1), k.len - 8) shr 1).int64
+    let s = h.vec.append(k, t)
+    h.vec.pin(s)
+    e.slots.add(s)
+  e.bytes = total
   h.index[eid] = e
   h.pushFront(e)
   inc h.curBytes, total
+  inc h.numKeys, e.slots.len
   inc h.hydrations
 
 proc evictEid*(h: HydratedSet; eid: int64) =
@@ -436,58 +410,40 @@ proc evictEid*(h: HydratedSet; eid: int64) =
 
 proc clear*(h: HydratedSet) =
   ## Drop every entry (config change / tests).
-  h.index.clear()
+  var eids: seq[int64] = @[]
+  for eid in h.index.keys(): eids.add(eid)
+  for eid in eids: h.drop(eid, h.index[eid])
   h.head.next = h.tail
   h.tail.prev = h.head
   h.curBytes = 0
 
 # ── Memtable drain (M1) ───────────────────────────────────────────────────────
 
-proc collectDirty*(h: HydratedSet): tuple[keysByCf: seq[(int, seq[seq[byte]])],
-                                          maxT: int64, collected: int64] =
-  ## Drain pass: emit every CF-0 key whose suffix t is above the entry's
-  ## watermark, plus pending tombstones.  Selection is by CONTENT (the t
-  ## carried in the key), so it is stable under any insertion/removal.
-  ## Entries that emit nothing leave the dirty list here.  State is NOT
-  ## cleared — publishWatermark commits it after the pagestore accepts the
-  ## data (a failed flush re-collects the same keys; pagestore inserts are
-  ## idempotent).  Runs on the loop (single-thread owner of the set).
-  var keys: seq[seq[byte]]
+proc collectDirty*(h: HydratedSet): tuple[maxT: int64, collected: int64] =
+  ## Drain pass (M5): the BYTE source is the vector (`drainVolatile`) — the
+  ## entries' per-key watermark selection is subsumed by publishedT.  What
+  ## remains here is the dirty-list bookkeeping: entries that emitted
+  ## nothing leave the dirty list.  State is NOT cleared — publishWatermark
+  ## commits it after the pagestore accepts the data (a failed flush
+  ## re-collects the same keys; pagestore inserts are idempotent).
   var maxT: int64 = 0
   var collected: int64 = 0
   var e = h.dirtyHead.dirtyNext
   while e != h.dirtyHead:
     let nxt = e.dirtyNext
+    if e.lastWriteT > maxT: maxT = e.lastWriteT
     var emitted = 0
-    for i in 0 ..< e.offs.len:
-      let start = keyStart(e, i)
-      let klen = keyLenAt(e, i)
-      let kt = (beUint64(e.buf.toOpenArray(start, e.buf.len - 1),
-                         klen - 8) shr 1).int64
-      if kt > e.watermark:
-        keys.add(e.buf[start ..< start + klen])
-        inc emitted
-        if kt > maxT: maxT = kt
-    for j in countdown(e.tombstones.len - 1, 0):
-      let tmb = e.tombstones[j]
-      let kt = (beUint64(tmb, tmb.len - 8) shr 1).int64
-      if kt > e.watermark:
-        keys.add(tmb)
-        inc emitted
-        if kt > maxT: maxT = kt
+    for s in e.slots:
+      if h.slotKeyT(s) > e.watermark: inc emitted
+    for s in e.tombSlots:
+      if h.slotKeyT(s) > e.watermark: inc emitted
     if emitted == 0:
-      # everything already drained (or nothing new) — leave the dirty list
       e.dirty = false
       e.dirtyPrev.dirtyNext = e.dirtyNext
       e.dirtyNext.dirtyPrev = e.dirtyPrev
-      if collected >= 0: discard
     else:
       collected += emitted.int64
     e = nxt
-  if keys.len > 0:
-    # unsorted — o worker ordena (O(n log n) off-loop; sortar aqui
-    # bloquearia o event loop com buffers grandes)
-    result.keysByCf = @[(0, keys)]
   result.maxT = maxT
   result.collected = collected
   h.drains += 1
@@ -495,15 +451,21 @@ proc collectDirty*(h: HydratedSet): tuple[keysByCf: seq[(int, seq[seq[byte]])],
 
 proc publishWatermark*(h: HydratedSet; maxT: int64) =
   ## Commit a successful drain: entries' watermark advances to `maxT`;
-  ## entries written AFTER the collect (lastWriteT > maxT) stay dirty and
-  ## will be re-collected next pass.  Tombstones above the new watermark
-  ## remain pending (they were not collected — maxT covers only emitted t).
+  ## entries written AFTER the collect (lastWriteT > maxT) stay dirty.
+  ## Tombstones drained with this flush are cleared.  MUST run BEFORE the
+  ## vector's publish (dropped partial entries unpin their chunks so the
+  ## vector can reclaim them).
   if maxT <= 0: return
   var e = h.dirtyHead.dirtyNext
   while e != h.dirtyHead:
     let nxt = e.dirtyNext
     if e.watermark < maxT: e.watermark = maxT
-    e.dirty = e.lastWriteT > e.watermark or e.tombstones.len > 0
+    var keep: seq[DatomSlot] = @[]
+    for s in e.tombSlots:
+      if h.slotKeyT(s) > maxT: keep.add(s)
+    h.numKeys -= e.tombSlots.len - keep.len
+    e.tombSlots = keep
+    e.dirty = e.lastWriteT > e.watermark or e.tombSlots.len > 0
     if not e.dirty:
       if e.partial:
         h.drop(e.eid, e)      # M4: drained partial = dropped (no cache role)
@@ -514,17 +476,18 @@ proc publishWatermark*(h: HydratedSet; maxT: int64) =
 
 proc lookupRangeRaw*(h: HydratedSet; eid: int64;
                      prefix: seq[byte]): seq[seq[byte]] =
-  ## Raw CF-0 view for a hydrated eid: active keys (buf) + pending
-  ## tombstones, filtered by `prefix`, ascending — mirrors the treap's raw
-  ## scan semantics (old versions superseded by replaceKeyAt are not
+  ## Raw CF-0 view for a hydrated eid: active slots + pending tombstones,
+  ## filtered by `prefix`, ascending — mirrors the treap's raw scan
+  ## semantics (old versions superseded by the upsert are not
   ## reconstructible, which is fine: they only occur for superseded writes).
   ## Caller has already probed membership.
   if eid notin h.index: return
   let e = h.index[eid]
   result = h.lookupRange(eid, prefix)
-  for tmb in e.tombstones:
-    if tmb.len >= prefix.len and tmb[0 ..< prefix.len] == prefix:
-      result.add(tmb)
+  for s in e.tombSlots:
+    let k = h.vec.keyCopy(s)
+    if k.len >= prefix.len and k[0 ..< prefix.len] == prefix:
+      result.add(k)
   if result.len > 1:
     sort(result, cmpKeysByte)
 
@@ -540,17 +503,21 @@ proc upgradePartial*(h: HydratedSet; eid: int64; keys: seq[seq[byte]]) =
   if eid notin h.index: return
   let e = h.index[eid]
   h.curBytes -= e.bytes
-  dec h.numKeys, e.offs.len + e.tombstones.len
+  dec h.numKeys, e.slots.len + e.tombSlots.len
   var total = 0
-  e.offs = @[]
-  e.buf = @[]
+  for s in e.slots: h.vec.unpin(s)  # the merged set replaces the delta
+  e.slots = @[]
+  e.bytes = 0
   for k in keys:
-    e.offs.add(e.buf.len.int32)
-    e.buf.add(k)
+    if k.len < 20: continue
+    let t = (beUint64(k.toOpenArray(0, k.len - 1), k.len - 8) shr 1).int64
+    let s = h.vec.append(k, t)
+    h.vec.pin(s)
+    e.slots.add(s)
     total += k.len
   e.bytes = total
   h.curBytes += total
-  inc h.numKeys, e.offs.len
+  inc h.numKeys, e.slots.len + e.tombSlots.len
   e.partial = false
 
 proc isDirty*(h: HydratedSet; eid: int64): bool {.inline.} =
@@ -559,14 +526,12 @@ proc isDirty*(h: HydratedSet; eid: int64): bool {.inline.} =
   h.index[eid].dirty
 
 proc allKeys*(h: HydratedSet): seq[seq[byte]] =
-  ## Every CF-0 key held by the set: active buf keys of ALL entries plus
+  ## Every CF-0 key held by the set: active slots of ALL entries plus
   ## pending tombstones.  M1/M4 full-range support: the write path no
   ## longer feeds the treap CF-0, so this set IS the source of in-memory
   ## keys for prefix-agnostic (full-range) scans.  Unsorted.
   for e in h.index.values():
-    for i in 0 ..< e.offs.len:
-      let start = e.offs[i].int
-      let klen = (if i + 1 < e.offs.len: e.offs[i + 1].int else: e.buf.len) - start
-      result.add e.buf[start ..< start + klen]
-    for tmb in e.tombstones:
-      result.add(tmb)
+    for s in e.slots:
+      result.add(h.vec.keyCopy(s))
+    for s in e.tombSlots:
+      result.add(h.vec.keyCopy(s))
