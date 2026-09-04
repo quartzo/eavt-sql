@@ -1000,13 +1000,19 @@ proc allocateInPartition*(eng: EavtEngine; pid: uint64): int64 =
 
 proc hydrateEid*(eng: EavtEngine; eid: int64) =
   ## Read-time hydration: install the full active CF-0 key set for `eid`.
-  ## No-op when disabled or already hydrated. The scan itself runs the normal
-  ## multi-source path — the eid is not a member yet, so the fast path skips.
+  ## No-op when disabled or already COMPLETE-hydrated.  A PARTIAL entry
+  ## (M4 delta or F3 replica WAL landing) upgrades to the full merged
+  ## view — probeComplete then serves it exclusively.
   ## Entities with no datoms are left unhydrated (don't spend budget on
   ## phantoms); empty-by-construction entities created via allocateInPartition
   ## are members already.
   if not eng.hydEnabled: return
-  if eng.hyd.contains(eid): return
+  if eng.hyd.contains(eid):
+    if not eng.hyd.isPartial(eid): return
+    let ks = eng.scanPrefixActive(0, keys.encodeEid(eid))
+    if ks.len > 0:
+      eng.hyd.upgradePartial(eid, ks)
+    return
   let ks = eng.scanPrefixActive(0, keys.encodeEid(eid))
   if ks.len > 0:
     eng.hyd.hydrate(eid, ks)

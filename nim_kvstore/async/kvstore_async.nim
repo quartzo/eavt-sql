@@ -639,7 +639,7 @@ proc flushNowAsync*(f: AsyncFlusher): Future[void] {.async.} =
   # as the sync flush path. Sem este broadcast a réplica nunca avança o
   # pagestore (ficava presa no root vazio inicial e perdia gerações).
   if kv.onFlushPublish != nil:
-    kv.onFlushPublish(kv.ps[].currentRoot)
+    kv.onFlushPublish(kv.ps[].currentRoot, collectedMaxT)
 
 proc runner(f: AsyncFlusher) {.async: (raises: []).} =
   ## Drives flush/GC passes while work is requested. Each iteration:

@@ -133,8 +133,8 @@ proc main() {.async.} =
     broadcastSeal(addr eng.hub, walw.segIdx)
   walw.onWal = proc(p: ptr byte; len: int) {.gcsafe, raises: [].} =
     broadcastWal(addr eng.hub, p, len)
-  eng.kv.onFlushPublish = proc(rootName: string) {.gcsafe.} =
-    broadcastRoot(addr eng.hub, rootName)
+  eng.kv.onFlushPublish = proc(rootName: string; maxT: int64) {.gcsafe.} =
+    broadcastRoot(addr eng.hub, rootName, maxT)
   echo "WAL attached: ", dbPath / "journal" / "journal"
 
   # chronos unlinks the stale socket path but does not create its parent

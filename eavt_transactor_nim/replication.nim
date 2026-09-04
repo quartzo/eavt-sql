@@ -39,7 +39,9 @@ type
     case kind: EvKind
     of evWal: data: seq[byte]
     of evSeal: idx: int
-    of evRoot: name: string
+    of evRoot:
+      name*: string
+      maxT*: int64
     of evResponse: body: string
 
   ReplicationHub* = ref object
@@ -113,11 +115,12 @@ proc sealFrame*(idx: int): string =
   ms.pack("idx"); ms.pack(idx)
   ms.data
 
-proc rootFrame*(name: string): string =
-  var ms = MsgStream.init(64)
-  ms.pack_map(2)
+proc rootFrame*(name: string; maxT: int64): string =
+  var ms = MsgStream.init(80)
+  ms.pack_map(4)
   ms.pack("ev"); ms.pack("root")
   ms.pack("name"); ms.pack(name)
+  ms.pack("maxT"); ms.pack(maxT)
   ms.data
 
 ## Monta os frames SAÍDA na ordem exata da fila — sem tocar socket.
@@ -141,7 +144,7 @@ proc collectOutgoing*(s: Subscriber): seq[string] =
     of evSeal:
       result.add sealFrame(ev.idx)
     of evRoot:
-      result.add rootFrame(ev.name)
+      result.add rootFrame(ev.name, ev.maxT)
     of evResponse:
       result.add ev.body
   s.queue.setLen(0)
@@ -293,12 +296,12 @@ proc broadcastSeal*(hub: ptr ReplicationHub; segIdx: int) =
       s.backlogBytes += 48  # marcador — aproximação, geração é rara
       s.pump()
 
-proc broadcastRoot*(hub: ptr ReplicationHub; rootName: string) =
+proc broadcastRoot*(hub: ptr ReplicationHub; rootName: string; maxT: int64) =
   if hub == nil or hub.subscribers.len == 0: return
   pruneClosed(hub)
   for s in hub.subscribers.items:
     if not s.closed:
       s.flushBuf()
-      s.queue.add Ev(kind: evRoot, name: rootName)
+      s.queue.add Ev(kind: evRoot, name: rootName, maxT: maxT)
       s.backlogBytes += 64  # marcador — aproximação
       s.pump()

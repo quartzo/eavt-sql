@@ -51,7 +51,7 @@ type
     ## requestFlush(). The async server installs a proc that schedules
     ## flushAsync on its event loop; nil (tests, sync callers) means "no
     ## background flusher" — call flush()/flushSync() explicitly.
-    onFlushRequest*: proc () {.gcsafe.}
+    onFlushRequest*: proc () {.gcsafe, raises: [].}
     ## Sinaliza CAPTURA de flush na réplica: fronteira de geração — todo wal
     ## entregue depois pertence à geração nova. Deve sair ANTES do root.
     onFlushSeal*: proc () {.gcsafe, raises: [].}
@@ -75,7 +75,7 @@ type
     ## Called after flush publishes a new root (i.e., the root name just
     ## committed to PageStore). The replication hub uses it to broadcast the
     ## new root to replicas. Only memcpy work in the callback.
-    onFlushPublish*: proc (rootName: string) {.gcsafe, raises: [].}
+    onFlushPublish*: proc (rootName: string; maxT: int64) {.gcsafe, raises: [].}
     # perf counters for batchWrite
     bwCount*: int64
     bwJournalNs*: int64
@@ -599,8 +599,10 @@ proc flush*(kv: KVStore) {.gcsafe.} =
   if sealBoundary >= 0:
     kv.walDurableUpTo.store(sealBoundary, moRelease)
   # Notify the replication hub (if installed) of the newly published root.
+  # maxT travels with it: the replica advances its vector's watermark
+  # exactly (datoms after the capture stay volatile there).
   if kv.onFlushPublish != nil:
-    kv.onFlushPublish(kv.ps[].currentRoot)
+    kv.onFlushPublish(kv.ps[].currentRoot, collectedMaxT)
 
 # ── Flush arming ──
 #
@@ -612,7 +614,7 @@ proc flush*(kv: KVStore) {.gcsafe.} =
 # Both use the same capture/publish steps as flush(), so WAL sealing and
 # walDurableUpTo publication behave identically.
 
-proc requestFlush*(kv: KVStore) {.gcsafe.} =
+proc requestFlush*(kv: KVStore) {.gcsafe, raises: [].} =
   ## Ask the installed hook to schedule a flush. Idempotent by contract
   ## (the async flusher collapses concurrent requests). No hook: no-op.
   if kv.onFlushRequest != nil:
@@ -632,7 +634,7 @@ proc journalOnly*(kv: KVStore; entries: seq[mt_be.CfKey]) {.gcsafe.} =
   if journaling(kv) and entries.len > 0:
     kv.journalDeliver(entries)
 
-proc batchWrite*(kv: KVStore; entries: seq[mt_be.CfKey]) {.gcsafe.} =
+proc batchWrite*(kv: KVStore; entries: seq[mt_be.CfKey]) {.gcsafe, raises: [CatchableError].} =
   kv.bwCount += 1
   let t0 = getMonoTime()
   var needsFlush = false

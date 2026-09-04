@@ -495,26 +495,22 @@ suite "eavt: cursor semantics under concurrent writes":
     for k in second:
       check decodeEid(beUint64(k, 0)) == eid
 
-suite "eavt: replica stale-hydration invariant (M5 F3 acceptance)":
-  ## F0-b: the latent replica bug. The replica's applyWal writes CF-0 into
-  ## the TREAP while the primary's read path treats a hydrated entry as
-  ## AUTHORITATIVE (probeComplete → exclusive). If a replica read ever
-  ## hydrates an eid (lookup-value hostfn), subsequent WAL datoms for that
-  ## eid are invisible and retracts resurrect. Unreachable through the
-  ## datalog surface today (scanners never hydrate; exec routes to the
-  ## transactor) — but structural. After M5-F3 (applyWal → batchWrite)
-  ## this test MUST stay green on the same code path.
+suite "eavt: replica write-path unification (M5 F3 acceptance)":
   proc collectCf0Keys(eng: EavtEngine; fromPrefix: seq[byte] = @[]): seq[seq[byte]] =
-    ## The WAL payload equivalent: the CF-0 keys of A's memtable (hyd is the
-    ## CF-0 memtable under M1..M4 — the treap is recovery staging only).
-    ## Returns OWNED keys — the caller materializes CfKey/KeyRef at the call
-    ## site (a KeyRef into a local that dies at return dangles: the bug
-    ## genre deriveFromCf0 had).
+    ## The WAL payload equivalent: the CF-0 keys of A's memtable (the
+    ## vector is the CF-0 memtable under M5).
     result = @[]
     for k in eng.hyd.allKeys():
       if fromPrefix.len == 0 or (k.len >= fromPrefix.len and
                                  k[0 ..< fromPrefix.len] == fromPrefix):
         result.add k
+
+  ## F0-b (latente) → F3 (corrigido): the replica's applyWal now routes
+  ## through the SAME batchWrite as the primary (datom vector + hydrated
+  ## entries + anchor hash) — the read path's invariant (probeComplete →
+  ## authoritative) is maintained by the code that maintains it on the
+  ## primary.  WAL datoms for an already-hydrated eid land in the entry:
+  ## read-your-writes holds on both nodes.
 
   test "replica flow: hydrate → wal write same eid → read sees wal datom":
     let kvA = newTempFileKVStore()
@@ -524,18 +520,19 @@ suite "eavt: replica stale-hydration invariant (M5 F3 acceptance)":
     let eid = engA.allocateEntityId()
     discard engA.eavtSave(eid, "rep.attr", "V1", 1)
 
-    # engine B = replica: apply CF-0 records from A's memtable into B's
-    # treap (what replica applyWal / applyJournalRecordsExpanded does)
+    # engine B = replica: WAL payload routes through batchWrite (what
+    # replica applyWal does since F3)
     let kvB = newTempFileKVStore()
     let engB = newEavtEngine(kvB)
     engB.bootstrapResolver()
     block:
-      # the returned seq must be NAMED — its element seqs own the bytes the
-      # KeyRefs borrow; a loop over the temporary dangles at loop end
       let keysA = engA.collectCf0Keys()
-      var recs: seq[CfKey] = @[]
-      for k in keysA: recs.add CfKey(cf: 0, key: toKeyRef(k))
-      discard engB.kv.mt.batch(recs)
+      var entries: seq[EavtEntry] = @[]
+      for k in keysA:
+        entries.add EavtEntry(cf: 0,
+          key: KeyRef(p: cast[ptr UncheckedArray[byte]](unsafeAddr k[0]),
+                      len: k.len))
+      engB.batchWrite(entries)
 
     # first read on B hydrates the eid (lookup-value hostfn path)
     engB.hydrateEid(eid)
@@ -543,20 +540,21 @@ suite "eavt: replica stale-hydration invariant (M5 F3 acceptance)":
     let v1 = engB.scanPrefixActive(0, encodeEid(eid))
     check v1.len == 1
 
-    # A writes again (new t); WAL delivers the CF-0 key to B's treap —
-    # exactly what replica applyWal phase 1 does (treap only, no hyd)
+    # A writes again (new t); WAL delivers to B via batchWrite — the
+    # entry receives the new slot (the stale-hyd bug of M1..M4 is gone)
     discard engA.eavtSave(eid, "rep.attr", "V2", 2)
     block:
       let keysA2 = engA.collectCf0Keys(encodeEid(eid))
-      var recs2: seq[CfKey] = @[]
-      for k in keysA2: recs2.add CfKey(cf: 0, key: toKeyRef(k))
-      discard engB.kv.mt.batch(recs2)
+      var entries2: seq[EavtEntry] = @[]
+      for k in keysA2:
+        entries2.add EavtEntry(cf: 0,
+          key: KeyRef(p: cast[ptr UncheckedArray[byte]](unsafeAddr k[0]),
+                      len: k.len))
+      engB.batchWrite(entries2)
 
-    # post-WAL read on B: the WAL datom is INVISIBLE today — the hydrated
-    # entry is probed complete and answers exclusively. M5 F3 (applyWal →
-    # batchWrite) flips this check to == 2.
+    # post-WAL read on B: the WAL datom IS visible (unified write path)
     let v2 = engB.scanPrefixActive(0, encodeEid(eid))
-    check v2.len == 1  # STALE by design today — F3 must make this 2
+    check v2.len == 2
     for k in v2:
       check k.len >= 20 and decodeEid(beUint64(k, 0)) == eid
 

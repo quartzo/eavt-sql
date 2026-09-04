@@ -17,6 +17,7 @@ import nim_memtable/treap_backend as mt_be
 import treap_cursor
 import keys as eavt_keys
 import eavt, engine
+import hydrated  # publishWatermark (M5 publish mirror)
 import resolver
 import stats
 import msgpack_scan
@@ -54,7 +55,21 @@ proc openReplica*(dir: string): ReplicaEngine =
   ReplicaEngine(kv: kv, store: store, path: dir, connected: false)
 
 proc refreshResolverOnSchemaWal*(r: ReplicaEngine) {.gcsafe, raises: [].}
-proc deriveFromCf0(r: ReplicaEngine; key: seq[byte]): seq[(uint8, seq[byte])] {.gcsafe.}
+
+proc routeSnapshotBatch(r: ReplicaEngine; entries: var seq[eavt.EavtEntry]) {.
+    gcsafe, raises: [].} =
+  ## batchWrite outside the async macro — the effect system inside async
+  ## does not accept `except CatchableError` for a call whose inferred
+  ## raises is the root Exception.
+  try:
+    r.store.eavt.batchWrite(entries)
+  except CatchableError as e:
+    # routing failure here is fatal to consistency — the CF-0 truth was
+    # NOT stored; log loud (the stream re-snapshots on reconnect)
+    logError("replica", "snapshot batchWrite failed (" & excMsg(e) & ")")
+  except Defect:
+    raise  # fail-fast: defects never swallow
+  {.cast(raises: []).}: discard
 
 proc applySnapshot*(r: ReplicaEngine; sealed: seq[string]; openTail: seq[byte];
                     rootName: string) {.async.} =
@@ -63,95 +78,64 @@ proc applySnapshot*(r: ReplicaEngine; sealed: seq[string]; openTail: seq[byte];
   ## tail bytes are the volatile in-memory WAL buffer at snapshot time.
   ## Segment files are read async (chronos-file thread pool), never
   ## blocking the event loop.
+  ## M5: the snapshot's datoms route through the SAME batchWrite (vector +
+  ## entries + anchor hash) — identical read semantics on both nodes; the
+  ## adopted root supplies the durable set, the volatile window derives.
+  var routed: seq[eavt.EavtEntry]
   for segPath in sealed:
     try:
       let data = await readFileBytesAsync(segPath)  # seq[byte], async
-      r.kv.applyJournalRecords(data)
+      var records = parseJournalRecords(data)
+      for rec in records:
+        if rec.cf == 0 and rec.key.len >= 20:
+          routed.add eavt.EavtEntry(cf: 0, key: rec.key)
     except CatchableError as e:
       # Tolerant by design (stream has what's needed) but durability-relevant.
       logWarn("replica", "snapshot: segment unreadable " & segPath & " (" &
         excMsg(e) & ")")
   if openTail.len > 0:
-    r.kv.applyJournalRecords(openTail)
+    var records = parseJournalRecords(openTail)
+    for rec in records:
+      if rec.cf == 0 and rec.key.len >= 20:
+        routed.add eavt.EavtEntry(cf: 0, key: rec.key)
   if rootName.len > 0:
     try: r.kv.publishRoot(rootName)
     except Exception as e:
       logDebug("replica", "snapshot root not publishable (" & excMsg(e) &
         "); stream will deliver a newer one")
-  # WAL CF-0-only: o snapshot/tail tem apenas datoms CF-0 — os índices
-  # CF-1/2/3 precisam ser derivados.  Primeiro o resolver (bootstrap lê
-  # CF-1 do pagestore adotado + CF-0 do treap), depois a derivação.
+  # WAL CF-0-only: resolver primeiro (bootstrap lê o schema do pagestore
+  # adotado), depois o roteamento batchWrite (batchWrite deriva âncoras).
   try:
     r.refreshResolverOnSchemaWal()
   except CatchableError as e:
     logWarn("replica", "snapshot resolver bootstrap falhou (" & excMsg(e) & ")")
-  block:
-    let root = r.kv.mt.hnd.live[0]
-    if root != nil:
-      var cf0Keys: seq[seq[byte]]
-      var tc = newTreapCursor(root, r.kv.mt.hnd.arena)
-      while not tc.atEnd:
-        let k = tc.next()
-        if k.isSome: cf0Keys.add(k.get)
-      var owned: seq[(uint8, seq[byte])]  # mantém os buffers vivos até o batch copiar
-      for key in cf0Keys:
-        try:
-          for pair in r.deriveFromCf0(key): owned.add pair
-        except Exception as e:
-          logWarn("replica", "snapshot derive falhou (" & excMsg(e) & ")")
-      if owned.len > 0:
-        var derived: seq[mt_be.CfKey]
-        for (cf, k) in owned:
-          derived.add mt_be.CfKey(cf: cf, key: mt_be.toKeyRef(k))
-        r.kv.applyJournalRecordsExpanded(derived)
+  if routed.len > 0:
+    routeSnapshotBatch(r, routed)
   r.connected = true
 
-proc deriveFromCf0(r: ReplicaEngine; key: seq[byte]): seq[(uint8, seq[byte])] {.gcsafe.} =
-  ## Derive CF-1/2/3 keys from a CF-0 datom key [eid 8B][aid 4B][val][sf 8B].
-  ## The replica builds its query indexes from the datom truth (WAL CF-0-only):
-  ## CF-1 always; CF-2 when the attr is indexed; CF-3 when it is a ref.
-  ## Metadata comes from the resolver (schema datoms replay before data —
-  ## WAL order; refreshResolverOnSchemaWal runs on schema chunks).
-  ## Returns OWNED (cf, key) pairs: the caller materializes KeyRef borrows
-  ## only after collecting them — returning CfKey(borrowed KeyRef) directly
-  ## dangles the stack-local seq at return (all borrows converge to the
-  ## reused buffer → the treap dedups everything into garbage).
-  result = @[]
-  if key.len < 20: return
-  let aid = (uint32(key[8]) shl 24) or (uint32(key[9]) shl 16) or
-            (uint32(key[10]) shl 8) or uint32(key[11])
-  let vtOpt = r.store.eavt.valueTypeFor(aid)
-  if vtOpt.isNone: return                 # attr desconhecido (schema não chegou)
-  let vlen = key.len - 20
-  let val = key[12 ..< 12 + vlen]
-  let sf = key[key.len - 8 ..< key.len]
-  # CF-1 [aid][eid][val][sf]
-  var k1 = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
-            byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
-  k1.add key[0 ..< 8]; k1.add val; k1.add sf
-  result.add (1'u8, k1)
-  if r.store.eavt.resolver.isIndexed(aid):
-    # CF-2 [aid][val][eid][sf]
-    var k2 = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
-              byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
-    k2.add val; k2.add key[0 ..< 8]; k2.add sf
-    result.add (2'u8, k2)
-  let isRef = valueTypeToEncodeMode(vtOpt.get) == emRef
-  if isRef:
-    # CF-3 [val][aid][eid][sf]
-    var k3 = val
-    k3.add @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
-            byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
-    k3.add key[0 ..< 8]; k3.add sf
-    result.add (3'u8, k3)
+
+proc routeWalBatch(r: ReplicaEngine; entries: var seq[eavt.EavtEntry]) {.
+    gcsafe, raises: [].} =
+  ## Same effect-system wrapper as routeSnapshotBatch (plain proc: the
+  ## async macro's effect analysis does not accept `except CatchableError`
+  ## for a call whose inferred raises is the root Exception).
+  try:
+    r.store.eavt.batchWrite(entries)
+  except CatchableError as e:
+    # CF-0 truth NOT stored for this chunk — log loud; the reconnect
+    # re-snapshot repairs.
+    logError("replica", "wal batchWrite failed (" & excMsg(e) & ")")
+
 
 proc applyWal*(r: ReplicaEngine; data: seq[byte]) {.gcsafe, raises: [].} =
-  ## Apply incoming WAL records to the live treap.
-  ## WAL CF-0-only, applied in TWO PHASES: (1) CF-0 datom truth verbatim;
-  ## (2) schema refresh if the chunk carries db.* datoms (bootstrapResolver
-  ## lê o CF-0 do treap — fases resolvem o chicken-and-egg do schema no
-  ## mesmo chunk); (3) derivação de CF-1/2/3 (o resolver já conhece os
-  ## attrs).  Os treaps CF-1/2/3 da réplica ficam completos para as queries.
+  ## Apply incoming WAL records — M5: the replica uses the SAME write path
+  ## as the transactor: datoms route through `batchWrite` (datom vector +
+  ## hydrated entries + anchor hash).  The 4 treaps are out of the replica's
+  ## write path too; CF-1/2/3 are derived (worker at the primary's flush —
+  ## the adopted root — and at cursor open from the volatile window).
+  ## This closes the stale-hydration bug: the read path's invariant
+  ## (probeComplete → authoritative) is maintained by the same code that
+  ## maintains it on the primary.
   inc r.evWalCount
   r.evWalBytes += data.len
   if r.evWalCount mod 100 == 0:
@@ -160,19 +144,12 @@ proc applyWal*(r: ReplicaEngine; data: seq[byte]) {.gcsafe, raises: [].} =
   let records = parseJournalRecords(data)
   if records.len == 0: return
 
-  # Fase 1: CF-0 (verdade) + legado verbatim
-  r.kv.applyJournalRecordsExpanded(records)
-
-  # Fase 2: schema no chunk → refresh do resolver (lê CF-0 do treap)
-  var cf0Keys: seq[seq[byte]]
+  # Schema in the chunk → refresh the resolver BEFORE routing (batchWrite's
+  # anchor routing needs isIndexed; cf1-derived reads need the attrs).
   var hasSchema = false
   for rec in records:
-    if rec.cf != 0: continue
-    let key = mt_be.toSeq(rec.key)
-    cf0Keys.add(key)
-    if key.len >= 12:
-      let aid = (uint32(key[8]) shl 24) or (uint32(key[9]) shl 16) or
-                (uint32(key[10]) shl 8) or uint32(key[11])
+    if rec.cf == 0 and rec.key.len >= 12:
+      let aid = beUint32(rec.key.p.toOpenArray(0, rec.key.len - 1), 8)
       if WalSchemaAids.contains(aid): hasSchema = true
   if hasSchema:
     try:
@@ -181,21 +158,15 @@ proc applyWal*(r: ReplicaEngine; data: seq[byte]) {.gcsafe, raises: [].} =
       logWarn("replica", "refresh resolver pós-schema falhou (" & e.msg &
         "); attrs faltantes re-derivam no próximo chunk de schema")
 
-  # Fase 3: derivação dos índices (o resolver já conhece os attrs).
-  # Falha de metadado p/ um datom (attr ainda desconhecido) → log + skip:
-  # o CF-0 verdade já foi aplicado; o índice faltante materializa no
-  # pagestore pelo flush do primário (adotado pela réplica).
-  var owned: seq[(uint8, seq[byte])]   # mantém os buffers vivos até o batch copiar
-  for key in cf0Keys:
-    try:
-      for pair in r.deriveFromCf0(key): owned.add pair
-    except CatchableError as e:
-      logWarn("replica", "derive falhou p/ datom CF-0 (" & e.msg & "); índice faltante re-materializa via flush do primário")
-  if owned.len > 0:
-    var derived: seq[mt_be.CfKey]
-    for (cf, k) in owned:
-      derived.add mt_be.CfKey(cf: cf, key: mt_be.toKeyRef(k))
-    r.kv.applyJournalRecordsExpanded(derived)
+  # Route CF-0 truth through the unified write path (vector + entries +
+  # anchor hash).  The KeyRef borrows into `records`' arena-backed keys —
+  # batchWrite copies them into the vector chunks immediately.
+  var entries: seq[eavt.EavtEntry]
+  for rec in records:
+    if rec.cf == 0 and rec.key.len >= 20:
+      entries.add eavt.EavtEntry(cf: 0, key: rec.key)
+  if entries.len > 0:
+    routeWalBatch(r, entries)
 
 proc applySeal*(r: ReplicaEngine) =
   inc r.evSealCount
@@ -204,12 +175,27 @@ proc applySeal*(r: ReplicaEngine) =
   ## clear the live treap.
   r.kv.sealLiveToFlush()
 
-proc applyRoot*(r: ReplicaEngine; rootName: string) =
-  ## Root event: load the new pagestore root, discard the pending treap.
+proc applyRoot*(r: ReplicaEngine; rootName: string; maxT: int64) =
+  ## Root event: load the new pagestore root, discard the pending treap,
+  ## and advance the vector's watermark exactly (the root carries the
+  ## primary's flush maxT — datoms after the capture stay volatile here).
   inc r.evRootCount
-  logInfo("replica", "root #" & $r.evRootCount & ": " & rootName)
+  logInfo("replica", "root #" & $r.evRootCount & ": " & rootName &
+    " maxT=" & $maxT)
   try:
     r.kv.publishRoot(rootName)
+    # M5: mirror the primary's publish — hyd bookkeeping FIRST (drops
+    # drained partial entries), then the vector's reclaim, then hash
+    # entries ≤ maxT (durable in the adopted root).
+    r.store.eavt.hyd.publishWatermark(maxT)
+    r.store.eavt.dvec.publish(maxT)
+    var toDel: seq[seq[byte]]
+    for pfx, meta in r.store.eavt.anchorHash:
+      if meta[1] <= maxT: toDel.add(pfx)
+    for pfx in toDel:
+      dec r.store.eavt.anchorBytes, (pfx.len + 16).int64
+      r.store.eavt.anchorHash.del(pfx)
+    if r.store.eavt.anchorBytes < 0: r.store.eavt.anchorBytes = 0
   except Exception as e:
     # Falha ao publicar raiz NÃO é operação esperada: a réplica fica presa
     # numa geração antiga (leituras por índice erram pós-flush).
@@ -308,5 +294,5 @@ proc onReplicationEvent*(r: ReplicaEngine; frame: string) {.gcsafe, raises: [].}
   of "seal":
     r.applySeal()
   of "root":
-    r.applyRoot(getTopStr(frame, "name"))
+    r.applyRoot(getTopStr(frame, "name"), getTopInt(frame, "maxT", -1))
   else: discard

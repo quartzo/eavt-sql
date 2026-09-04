@@ -23,7 +23,7 @@ suite "replication: ordem da fila de eventos":
     block:
       var d = @[byte(3)]
       broadcastWal(addr hub, addr d[0], d.len)
-    broadcastRoot(addr hub, "root_x")
+    broadcastRoot(addr hub, "root_x", 0)
 
     let frames = s.collectOutgoing()
     check frames.len == 4
@@ -56,7 +56,7 @@ suite "replication: ordem da fila de eventos":
     hub.register(s)
     var dz: seq[byte] = @[]
     broadcastWal(addr hub, if dz.len > 0: addr dz[0] else: nil, 0)
-    broadcastRoot(addr hub, "r")
+    broadcastRoot(addr hub, "r", 0)
     let frames = s.collectOutgoing()
     check frames.len == 1
     check frames[0].find("\xA4root") >= 0
