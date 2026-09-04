@@ -70,7 +70,13 @@ proc parsePattern(p: SExpr; ir: var DatalogIR; params: Table[string, uint32]) =
 
   # e slot: var, _ or int eid
   let eSlot = p.items[0]
-  if isVar(eSlot): dp.e = slotVar(varName(eSlot))
+  if isVar(eSlot):
+    let vn = varName(eSlot)
+    # :in var no slot E é vinculado em runtime — vira param (probe/seek),
+    # não var livre. Sem isso o plano itera o índice inteiro e o filtro do
+    # param se perde (retornava o attr de TODAS as entidades).
+    if vn in params: dp.e = slotConst(newBoundParam(params[vn]))
+    else: dp.e = slotVar(vn)
   elif isBlank(eSlot): dp.e = slotMissing()
   elif eSlot.kind == sInt: dp.e = slotConst(newBoundInt(eSlot.ival))
   else:

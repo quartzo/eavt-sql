@@ -52,6 +52,25 @@ suite "datalog-edn.params":
     check emailPat.v.constVal.kind == bvParam
     check emailPat.v.constVal.paramIdx == 1
 
+  test ":in var in the e slot binds as param (probe plan, not full scan)":
+    # Regression: an :in var in the E position used to become a free var —
+    # the plan iterated the whole attr index and dropped the filter
+    # (returned every entity's value instead of the bound entity's).
+    let ir = parseQ("[:find ?v :in $ ?e :where [?e :person/name ?v]]")
+    check ir.patterns.len == 1
+    let pat = ir.patterns[0]
+    check pat.e.kind == dsConst
+    check pat.e.constVal.kind == bvParam
+    check pat.e.constVal.paramIdx == 1
+    check pat.v.kind == dsVar and pat.v.varName == "v"
+
+  test ":in var shared by two patterns stays param in both":
+    let ir = parseQ("[:find ?v1 ?v2 :in $ ?e :where [?e :person/name ?v1] [?e :person/age ?v2]]")
+    for pat in ir.patterns:
+      check pat.e.kind == dsConst
+      check pat.e.constVal.kind == bvParam
+      check pat.e.constVal.paramIdx == 1
+
 suite "datalog-edn.ranges":
   test "range predicate on a var":
     let ir = parseQ("[:find ?name :where [?e :fin/price ?p] [(> ?p 5)] [?e :fin/name ?name]]")
