@@ -45,13 +45,22 @@ proc openReplica*(dir: string): ReplicaEngine =
   ## Open a read-only KVStore on the data directory.  The journal replay
   ## happens here (replaying whatever is on disk — harmless with the
   ## replication stream delivering incremental records after this point).
+  ## M5: the journal replay stays OFF (`replay_off`) — the snapshot/WAL
+  ## stream delivers everything through the unified batchWrite; a treap
+  ## replay here would duplicate every datom (treap + vector).
   var cfg = {"backend": "file", "path": dir}.toTable
   cfg["read_only"] = "true"
+  cfg["replay_off"] = "true"
   let kv = newKVStore(cfg)
   if kv == nil:
     return nil
   let store = newQueryStore(kv)
-  store.eavt.bootstrapSystemAttrs()
+  # M5: the replica NEVER invents schema.  With replay_off the adopted root
+  # is empty until the transactor flushes, so the bootstrap probe would see
+  # "unbootstrapped" and write system-attr datoms into the vector — garbage
+  # for the dataset (the real db.* datoms arrive via the snapshot/WAL stream
+  # and refreshResolverOnSchemaWal).  bootstrapResolver only reads.
+  store.eavt.bootstrapResolver()
   ReplicaEngine(kv: kv, store: store, path: dir, connected: false)
 
 proc refreshResolverOnSchemaWal*(r: ReplicaEngine) {.gcsafe, raises: [].}
@@ -81,23 +90,35 @@ proc applySnapshot*(r: ReplicaEngine; sealed: seq[string]; openTail: seq[byte];
   ## M5: the snapshot's datoms route through the SAME batchWrite (vector +
   ## entries + anchor hash) — identical read semantics on both nodes; the
   ## adopted root supplies the durable set, the volatile window derives.
-  var routed: seq[eavt.EavtEntry]
+  # CRITICAL: route PER SEGMENT. `parseJournalRecords` borrows into `data`
+  # (KeyRef pointers into the local seq) and batchWrite copies immediately;
+  # keeping borrows alive across loop iterations past `data`'s scope copied
+  # freed memory (255k zeroed keys on restart).
+  var routedTotal = 0
   for segPath in sealed:
+    var routed: seq[eavt.EavtEntry]
     try:
       let data = await readFileBytesAsync(segPath)  # seq[byte], async
       var records = parseJournalRecords(data)
       for rec in records:
         if rec.cf == 0 and rec.key.len >= 20:
           routed.add eavt.EavtEntry(cf: 0, key: rec.key)
+      if routed.len > 0:
+        routeSnapshotBatch(r, routed)
+        inc routedTotal, routed.len
     except CatchableError as e:
       # Tolerant by design (stream has what's needed) but durability-relevant.
       logWarn("replica", "snapshot: segment unreadable " & segPath & " (" &
         excMsg(e) & ")")
   if openTail.len > 0:
+    var routed: seq[eavt.EavtEntry]
     var records = parseJournalRecords(openTail)
     for rec in records:
       if rec.cf == 0 and rec.key.len >= 20:
         routed.add eavt.EavtEntry(cf: 0, key: rec.key)
+    if routed.len > 0:
+      routeSnapshotBatch(r, routed)
+      inc routedTotal, routed.len
   if rootName.len > 0:
     try: r.kv.publishRoot(rootName)
     except Exception as e:
@@ -109,8 +130,7 @@ proc applySnapshot*(r: ReplicaEngine; sealed: seq[string]; openTail: seq[byte];
     r.refreshResolverOnSchemaWal()
   except CatchableError as e:
     logWarn("replica", "snapshot resolver bootstrap falhou (" & excMsg(e) & ")")
-  if routed.len > 0:
-    routeSnapshotBatch(r, routed)
+  logInfo("replica", "snapshot aplicado: " & $routedTotal & " datoms via batchWrite")
   r.connected = true
 
 
@@ -184,6 +204,14 @@ proc applyRoot*(r: ReplicaEngine; rootName: string; maxT: int64) =
     " maxT=" & $maxT)
   try:
     r.kv.publishRoot(rootName)
+    # Guard: only advance the watermark when the adopted root actually
+    # carries data. The transactor's post-recovery flush can broadcast
+    # (root=h0 empty, maxT=lastReplayT) — publishing that would mark vector
+    # datoms "durable" while the replica's pagestore covers nothing, and
+    # the next run-cache build would drain nothing (rows vanish).
+    if not r.kv.rootHasData():
+      logInfo("replica", "root " & rootName & " is empty — watermark not advanced")
+      return
     # M5: mirror the primary's publish — hyd bookkeeping FIRST (drops
     # drained partial entries), then the vector's reclaim, then hash
     # entries ≤ maxT (durable in the adopted root).

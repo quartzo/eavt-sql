@@ -315,34 +315,35 @@ proc pushScanner*(h: SchemeHostFns; sc: V2Scanner): int =
   h.scanners.add sc
 
 method scannerOpen(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
-    let idxName = expectStr(args[0])
-    let history = args.len > 1 and args[1].kind == sBool and args[1].bval
-    let upper = idxName.toUpperAscii()
-    let baseOrder = case upper:
-      of "EAVT": @["e", "a", "v"]
-      of "AEVT": @["a", "e", "v"]
-      of "AVET": @["a", "v", "e"]
-      of "VAET": @["v", "a", "e"]
-      else: @["e", "a", "v"]
+  let idxName = expectStr(args[0])
+  let history = args.len > 1 and args[1].kind == sBool and args[1].bval
+  let upper = idxName.toUpperAscii()
+  let baseOrder = case upper:
+    of "EAVT": @["e", "a", "v"]
+    of "AEVT": @["a", "e", "v"]
+    of "AVET": @["a", "v", "e"]
+    of "VAET": @["v", "a", "e"]
+    else: @["e", "a", "v"]
 
-    var idxOrder = baseOrder
-    idxOrder.add "t"
-    idxOrder.add "added"
+  var idxOrder = baseOrder
+  idxOrder.add "t"
+  idxOrder.add "added"
 
-    var scanner = newV2Scanner(idxName, idxOrder, h.asOfTx, none[uint32]())
-    if history: scanner.historyMode = true
+  var scanner = newV2Scanner(idxName, idxOrder, h.asOfTx, none[uint32]())
+  if history: scanner.historyMode = true
 
-    let cfId = case upper:
-      of "AEVT": 1'u32
-      of "AVET": 2'u32
-      of "VAET": 3'u32
-      else: 0'u32
+  let cfId = case upper:
+    of "AEVT": 1'u32
+    of "AVET": 2'u32
+    of "VAET": 3'u32
+    else: 0'u32
 
-    scanner.setCursor(h.engine.openCursor(cfId, @[]))
-    scanner.advanceToActiveAt()
+  scanner.setCursor(h.engine.openCursor(cfId, @[]))
+  scanner.advanceToActiveAt()
 
-    let rid = h.pushScanner(scanner)
-    return done(SExpr(kind: sResource, rid: rid))
+  let rid = h.pushScanner(scanner)
+  return done(SExpr(kind: sResource, rid: rid))
+
 
 method scannerRead(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     let sc = h.findScanner(args[0])
@@ -367,26 +368,27 @@ method scannerPrefix(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
   # -- Leapfrog --
 
 method scannerLeapInit(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
-    var scanners: seq[V2Scanner] = @[]
-    for i in 1..<args.len - 1:
-      scanners.add h.findScanner(args[i])
-    let rangesSexpr = args[^1]
+      var scanners: seq[V2Scanner] = @[]
+      for i in 1..<args.len - 1:
+        scanners.add h.findScanner(args[i])
+      let rangesSexpr = args[^1]
 
-    for sc in scanners.mitems:
-      let vtOpt = sc.attrIdFromPrefixBytes()
-      var vt: Option[uint32] = none[uint32]()
-      if vtOpt.isSome:
-        vt = h.engine.valueTypeFor(vtOpt.get)
-      sc.setValueAttrType(vt)
-      sc.advanceToActiveAtPreserving()
-      if sc.valueAttrType.isNone:
-        let aid = sc.attrIdFromKey()
-        if aid.isSome:
-          sc.setValueAttrType(h.engine.valueTypeFor(aid.get))
+      for sc in scanners.mitems:
+        let vtOpt = sc.attrIdFromPrefixBytes()
+        var vt: Option[uint32] = none[uint32]()
+        if vtOpt.isSome:
+          vt = h.engine.valueTypeFor(vtOpt.get)
+        sc.setValueAttrType(vt)
+        sc.advanceToActiveAtPreserving()
+        if sc.valueAttrType.isNone:
+          let aid = sc.attrIdFromKey()
+          if aid.isSome:
+            sc.setValueAttrType(h.engine.valueTypeFor(aid.get))
 
-    let specs = parseRanges(rangesSexpr)
-    let ok = convergeWithRanges(scanners, specs)
-    return done(newBool(ok))
+      let specs = parseRanges(rangesSexpr)
+      let ok = convergeWithRanges(scanners, specs)
+      return done(newBool(ok))
+
 
 method scannerLeapNext(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     var scanners: seq[V2Scanner] = @[]
@@ -414,65 +416,67 @@ method scannerLeapNext(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} 
   # -- LeapIterator hostfns --
 
 method scannerIterateInit(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
-    # (scanner-iterate-init scanner... ranges)
-    # Creates a LeapIterator resource without iterating.
-    var scanners: seq[V2Scanner] = @[]
-    for i in 0..<args.len - 1:
-      scanners.add h.findScanner(args[i])
-    let rangesSexpr = args[^1]
-    if scanners.len == 0: return done(newVoid())
+      # (scanner-iterate-init scanner... ranges)
+      # Creates a LeapIterator resource without iterating.
+      var scanners: seq[V2Scanner] = @[]
+      for i in 0..<args.len - 1:
+        scanners.add h.findScanner(args[i])
+      let rangesSexpr = args[^1]
+      if scanners.len == 0: return done(newVoid())
 
-    for sc in scanners.mitems:
-      let vtOpt = sc.attrIdFromPrefixBytes()
-      var vt: Option[uint32] = none[uint32]()
-      if vtOpt.isSome:
-        vt = h.engine.valueTypeFor(vtOpt.get)
-      sc.setValueAttrType(vt)
-      sc.advanceToActiveAtPreserving()
-      if sc.valueAttrType.isNone:
-        let aid = sc.attrIdFromKey()
-        if aid.isSome:
-          sc.setValueAttrType(h.engine.valueTypeFor(aid.get))
+      for sc in scanners.mitems:
+        let vtOpt = sc.attrIdFromPrefixBytes()
+        var vt: Option[uint32] = none[uint32]()
+        if vtOpt.isSome:
+          vt = h.engine.valueTypeFor(vtOpt.get)
+        sc.setValueAttrType(vt)
+        sc.advanceToActiveAtPreserving()
+        if sc.valueAttrType.isNone:
+          let aid = sc.attrIdFromKey()
+          if aid.isSome:
+            sc.setValueAttrType(h.engine.valueTypeFor(aid.get))
 
-    let specs = parseRanges(rangesSexpr)
-    let it = LeapIterator(scanners: scanners, specs: specs, started: false)
-    let idx = h.leapIters.len
-    h.leapIters[idx] = it
-    return done(SExpr(kind: sResource, rid: idx))
+      let specs = parseRanges(rangesSexpr)
+      let it = LeapIterator(scanners: scanners, specs: specs, started: false)
+      let idx = h.leapIters.len
+      h.leapIters[idx] = it
+      return done(SExpr(kind: sResource, rid: idx))
+
 
 method scannerIterateNext(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
-    # (scanner-iterate-next iter)
-    # On first call: converge + apply ranges, return first value or void.
-    # On subsequent calls: advance + converge + apply ranges, return next value or void.
-    let iter = h.findLeapIterator(args[0])
-    if iter.scanners.len == 0: return done(newVoid())
+      # (scanner-iterate-next iter)
+      # On first call: converge + apply ranges, return first value or void.
+      # On subsequent calls: advance + converge + apply ranges, return next value or void.
+      let iter = h.findLeapIterator(args[0])
+      if iter.scanners.len == 0: return done(newVoid())
 
-    if not iter.started:
-      # First call: converge and apply ranges.
-      let ok = convergeWithRanges(iter.scanners, iter.specs)
-      if not ok: return done(newVoid())
-      iter.started = true
-    else:
-      # Subsequent call: advance the smallest scanner, then converge + ranges.
-      var minIdx = 0
-      var minVal: Option[SExpr] = none[SExpr]()
-      for i, sc in iter.scanners:
-        let val = sc.extractCurrent()
-        if minVal.isNone:
-          minVal = val; minIdx = i
-        elif val.isSome and val.get < minVal.get:
-          minVal = val; minIdx = i
+      if not iter.started:
+        # First call: converge and apply ranges.
+        let ok = convergeWithRanges(iter.scanners, iter.specs)
+        if not ok: return done(newVoid())
+        iter.started = true
+      else:
+        # Subsequent call: advance the smallest scanner, then converge + ranges.
+        var minIdx = 0
+        var minVal: Option[SExpr] = none[SExpr]()
+        for i, sc in iter.scanners:
+          let val = sc.extractCurrent()
+          if minVal.isNone:
+            minVal = val; minIdx = i
+          elif val.isSome and val.get < minVal.get:
+            minVal = val; minIdx = i
 
-      iter.scanners[minIdx].leapNextAt()
-      if iter.scanners[minIdx].atEnd(): return done(newVoid())
-      if not convergeWithRanges(iter.scanners, iter.specs):
-        return done(newVoid())
+        iter.scanners[minIdx].leapNextAt()
+        if iter.scanners[minIdx].atEnd(): return done(newVoid())
+        if not convergeWithRanges(iter.scanners, iter.specs):
+          return done(newVoid())
 
-    let val = iter.scanners[0].extractCurrent()
-    if val.isSome: return done(val.get)
-    return done(newVoid())
+      let val = iter.scanners[0].extractCurrent()
+      if val.isSome: return done(val.get)
+      return done(newVoid())
 
-  # -- Attribute access --
+    # -- Attribute access --
+
 
 method internA(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     let name = expectStr(args[0])
@@ -492,9 +496,10 @@ method param(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     return done(h.params[idx - 1])
 
 method resolveVal(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
-    return done(args[0])
+  return done(args[0])
 
-  # -- DML --
+    # -- DML --
+
 
 method save(h: SchemeHostFns; args: seq[SExpr]): EvalStep {.gcsafe.} =
     let eid = expectInt(args[0])

@@ -256,6 +256,15 @@ proc sealLiveToFlush*(kv: KVStore) {.gcsafe.} =
   kv.mtSize = 0
 
 
+proc rootHasData*(kv: KVStore): bool {.gcsafe.} =
+  ## True when any CF tree in the CURRENT pagestore state carries data.
+  ## A root frame must only advance the replica's durability watermark up
+  ## to what this root actually contains — an empty root (all CFs h0/0)
+  ## covers nothing.
+  for cf in 0..<min(4, kv.ps[].trees.len):
+    if kv.ps[].trees[cf].numLeaves > 0: return true
+  false
+
 proc publishRoot*(kv: KVStore; rootName: string) {.gcsafe.} =
   ## Publish a new root (the second half of kv.flush, minus the blob writes).
   ## The server already committed the root to disk; this loads it into
@@ -306,7 +315,14 @@ proc newKVStore*(config: Table[string, string]): KVStore =
   # segments in numeric order (later segments win — newer records overwrite
   # older ones during batch apply). A torn tail (crash mid-write) ends that
   # file's replay at its last complete record.
+  # `replay_off=true` (the M5 replica): the replication snapshot/WAL stream
+  # delivers everything via the unified batchWrite (vector + entries) — a
+  # treap replay here would DUPLICATE every datom (treap + vector) and make
+  # every merged query pay the double merge.
   block replay:
+    if config.getOrDefault("replay_off", "false") == "true":
+      logInfo("kvstore", "journal replay disabled (replay_off) — replica rebuilds via stream")
+      break replay
     var files: seq[string] = @[]
     let jdir = result.path / "journal"
     let legacy = jdir / "journal"

@@ -97,6 +97,14 @@ type
     baseSources*: seq[Cursor]
     deltaEid*: int64   ## M4: eid whose partial delta source is attached (0 = none)
 
+  RunKeys* = ref object
+    ## Wraps a large sorted key run so sharing it between the store and open
+    ## cursors is a ref bump (O(1)).  A bare seq[seq[byte]] copy/destroy is
+    ## O(n) under ARC/ORC (per-element destructor churn) — measured ~10 ms
+    ## for a 315k-key run, paid PER QUERY when the mock was built from the
+    ## store's seq field directly.
+    keys*: seq[seq[byte]]
+
   Cursor* = ref object
     case kind*: CursorKind
     of ckPageStore:
@@ -110,7 +118,7 @@ type
     of ckHyd:
       hc*: HydCursor
     of ckMock:
-      mockKeys*: seq[seq[byte]]
+      mockKeysRef*: RunKeys
       mockPos*: int
     of ckInvalid:
       discard
@@ -321,7 +329,7 @@ proc isValid*(c: Cursor): bool {.gcsafe.} =
   of ckTreapKv: not c.tckv.atEnd
   of ckMerged: not c.mc.atEnd
   of ckHyd: c.hc.pos < c.hc.e.slots.len
-  of ckMock: c.mockPos < c.mockKeys.len
+  of ckMock: c.mockPos < c.mockKeysRef.keys.len
   of ckInvalid: false
 
 proc currentKey*(c: Cursor): Option[seq[byte]] {.gcsafe.} =
@@ -334,7 +342,7 @@ proc currentKey*(c: Cursor): Option[seq[byte]] {.gcsafe.} =
   of ckMerged: c.mc.peek()
   of ckHyd: hydCursorCurrent(c.hc)
   of ckMock:
-    if c.mockPos < c.mockKeys.len: some(c.mockKeys[c.mockPos])
+    if c.mockPos < c.mockKeysRef.keys.len: some(c.mockKeysRef.keys[c.mockPos])
     else: none[seq[byte]]()
   of ckInvalid: none[seq[byte]]()
 
@@ -371,10 +379,10 @@ proc seek*(c: Cursor; target: seq[byte]) {.gcsafe.} =
     # cursor for outer and inner scans — the inner seek goes BACKWARD, so a
     # forward-only walk is wrong.
     var lo = 0
-    var hi = c.mockKeys.len
+    var hi = c.mockKeysRef.keys.len
     while lo < hi:
       let mid = (lo + hi) shr 1
-      let k = c.mockKeys[mid]
+      let k = c.mockKeysRef.keys[mid]
       var ge = true
       var f = 0
       for i in 0..<target.len:
@@ -394,7 +402,7 @@ proc invalidate*(c: Cursor) {.gcsafe.} =
   of ckTreapKv: c.tckv.atEnd = true
   of ckMerged: c.mc.atEnd = true
   of ckHyd: c.hc.pos = c.hc.e.slots.len
-  of ckMock: c.mockPos = c.mockKeys.len
+  of ckMock: c.mockPos = c.mockKeysRef.keys.len
   of ckInvalid: discard
 
 # ── Constructors ──
@@ -412,8 +420,13 @@ proc treapKvCursor*(tc: TreapCursor): Cursor =
 proc mergedCursor*(mc: MergedCursor): Cursor =
   Cursor(kind: ckMerged, mc: mc)
 
+proc mockCursor*(keys: RunKeys): Cursor {.gcsafe.} =
+  ## O(1): shares the run through the ref (no per-element copy).
+  result = Cursor(kind: ckMock, mockKeysRef: keys, mockPos: 0)
+
 proc mockCursor*(keys: seq[seq[byte]]): Cursor {.gcsafe.} =
-  Cursor(kind: ckMock, mockKeys: keys, mockPos: 0)
+  ## Small key runs (per-eid deltas): wrapping cost is O(k), negligible.
+  result = Cursor(kind: ckMock, mockKeysRef: RunKeys(keys: keys), mockPos: 0)
 
 proc invalidCursor*(): Cursor =
   Cursor(kind: ckInvalid)
