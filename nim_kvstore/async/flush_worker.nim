@@ -39,6 +39,8 @@ type
     # result (POD; worker writes)
     rootNameBuf: array[128, char]
     rootNameLen: int
+    maxT: int64             ## max datom t across the flushed keys (M6: the
+                            ## commit watermark for write-through mirrors)
     ok: bool
     errBuf: array[96, char]
     errLen: int
@@ -83,6 +85,15 @@ proc flushWorkerMain(w: ptr FlushWorkerObj) {.thread.} =
         if keys.len > 1:
           keys.sort(mt_be.cmpKeysByte)
         if keys.len > 0: keysByCf.add (cf, keys)
+      var maxT: int64 = -1
+      for (cf, keys) in keysByCf:
+        for k in keys:
+          if k.len < 8: continue
+          var sf = 0'u64
+          for b in k[k.len - 8 ..< k.len]: sf = (sf shl 8) or uint64(b)
+          let kt = (sf shr 1).int64
+          if kt > maxT: maxT = kt
+      w.maxT = maxT
       let rootName = commitMergeCore(w.blobs, w.trees, w.numCf, keysByCf)
       let n = min(rootName.len, w.rootNameBuf.len)
       if n > 0: copyMem(addr w.rootNameBuf[0], unsafeAddr rootName[0], n)
@@ -93,6 +104,7 @@ proc flushWorkerMain(w: ptr FlushWorkerObj) {.thread.} =
       let n = min(msg.len, w.errBuf.len - 1)
       if n > 0: copyMem(addr w.errBuf[0], unsafeAddr msg[0], n)
       w.errLen = n
+      w.maxT = -1
       w.ok = false
     w.done.store(true, moRelease)
 
@@ -120,7 +132,7 @@ proc closeFlushWorker*(fw: FlushWorker) {.async.} =
 proc runFlush*(fw: FlushWorker; numCf: int; roots: seq[mt_be.TreapNode];
                trees: seq[CfTree]; blobs: BlobStore; arena: mt_be.Arena;
                extraKeys: seq[(int, seq[seq[byte]])] = @[]):
-    Future[tuple[rootName: string, trees: seq[CfTree], ok: bool]] {.async.} =
+    Future[tuple[rootName: string, trees: seq[CfTree], maxT: int64, ok: bool]] {.async.} =
   ## Submit a pure key-only flush, wait for completion, return the result.
   ## The loop owns `roots`/`trees`/`arena`/`extraKeys` for the whole call
   ## (the caller keeps them alive — e.g. via kv.flushRoots / kv.flushArena).
@@ -154,6 +166,6 @@ proc runFlush*(fw: FlushWorker; numCf: int; roots: seq[mt_be.TreapNode];
     var rn = newString(w.rootNameLen)
     if w.rootNameLen > 0:
       copyMem(addr rn[0], addr w.rootNameBuf[0], w.rootNameLen)
-    result = (rootName: rn, trees: w.treesSeq, ok: true)
+    result = (rootName: rn, trees: w.treesSeq, maxT: w.maxT, ok: true)
   else:
-    result = (rootName: "", trees: @[], ok: false)
+    result = (rootName: "", trees: @[], maxT: -1, ok: false)

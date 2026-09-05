@@ -8,8 +8,7 @@ import page_store    # cmpSeq
 import page_cursor   # PageStoreCursor, PageStoreSnapshot
 import treap_cursor  # TreapCursor
 import nim_memtable/treap_backend  # TreapNode
-import hydrated  # HydratedEntry/HydratedSet (M1)
-import datoms  # DatomSlot/DatomVector (M5)
+import hydrated  # HydratedEntry/HydratedSet (M1/M6 flat)
 import keys  # decodeEid/beUint64
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -65,15 +64,16 @@ type
     ckTreap
     ckTreapKv  ## Treap cursor that filters tombstones via peekKv/nextKv
     ckMerged
-    ckHyd      ## Hydrated entry cursor (M1): iterates the entry's CF-0
-               ## buffer — the eid's memtable.  All keys are active.
+    ckHyd      ## Hydrated entry cursor (M1/M6): iterates the entry's flat
+               ## CF-0 buffer — the eid's cached active set.  All keys are
+               ## active.
     ckMock
     ckInvalid
 
   HydCursor* = ref object
-    hs: HydratedSet      ## slot byte resolution goes through its vector
-    e: HydratedEntry     ## the entry IS the memtable for this eid
-    pos: int             ## current slot index in e.slots
+    hs: HydratedSet      ## touched on construction (LRU probe)
+    e: HydratedEntry     ## the entry's flat buffer (buf + offs)
+    pos: int             ## current key index in e.offs
 
   MergedCursor* = ref object
     sources*: seq[Cursor]
@@ -89,13 +89,14 @@ type
     psHeight*: uint8
     flushRoot*: TreapNode
     liveRoot*: TreapNode
-    # M1 hyd mode: CF-0 seeks to a fully hydrated eid are served from the
-    # entry (the memtable for that eid); baseSources are kept for fallback.
+    # M1/M6 hyd mode: CF-0 seeks to a hydrated eid are served from the
+    # entry's flat buffer; baseSources are parked (kept for fallback when
+    # a later seek anchors at a non-hydrated eid... actually M6 entries
+    # never un-hydrate per seek — parking keeps update() correct).
     hyd*: HydratedSet
     hydMode*: bool
     hydCursor*: Cursor
     baseSources*: seq[Cursor]
-    deltaEid*: int64   ## M4: eid whose partial delta source is attached (0 = none)
 
   RunKeys* = ref object
     ## Wraps a large sorted key run so sharing it between the store and open
@@ -133,28 +134,20 @@ proc seek*(c: Cursor; target: seq[byte]) {.gcsafe.}
 proc invalidate*(c: Cursor) {.gcsafe.}
 proc mockCursor*(keys: seq[seq[byte]]): Cursor {.gcsafe.}
 
-# ── HydCursor (M1/M5) — iterate a hydrated entry's CF-0 slots ──
+# ── HydCursor (M1/M6) — iterate a hydrated entry's flat CF-0 buffer ──────────
 
 proc hydSeekFrom(hs: HydratedSet; e: HydratedEntry; target: openArray[byte]): int =
-  ## First slot index with key >= target (binary search; keys resolve
-  ## through the vector's chunks — zero copy).
-  var lo, hi = 0
-  hi = e.slots.len
-  while lo < hi:
-    let mid = (lo + hi) shr 1
-    let c = hs.vec.cmpSlotKey(e.slots[mid], target)
-    if c < 0: lo = mid + 1
-    else: hi = mid
-  lo
+  ## First key index with key >= target (binary search over the flat buffer).
+  hydSeek(hs, e, target)
 
 proc hydKeyAt(hs: HydratedSet; e: HydratedEntry; i: int): seq[byte] =
-  hs.vec.keyCopy(e.slots[i])
+  entryKeyCopy(e, i)
 
 proc hydCursorSeek(hc: HydCursor; target: seq[byte]) =
   hc.pos = hydSeekFrom(hc.hs, hc.e, target)
 
 proc hydCursorCurrent(hc: HydCursor): Option[seq[byte]] =
-  if hc.pos >= hc.e.slots.len: return none(seq[byte])
+  if hc.pos >= entryKeyCount(hc.e): return none(seq[byte])
   some(hydKeyAt(hc.hs, hc.e, hc.pos))
 
 proc newHydCursor*(hs: HydratedSet; e: HydratedEntry; target: seq[byte]): Cursor =
@@ -234,22 +227,18 @@ proc nextKv*(mc: MergedCursor): Option[(seq[byte], seq[byte])] {.gcsafe.} =
   mc.advance()
 
 proc seek*(mc: MergedCursor; target: seq[byte]) {.gcsafe.} =
-  # M1/M4 branch: a CF-0 seek anchored at a COMPLETE hydrated eid is served
-  # exclusively by the entry (the memtable for that eid — complete+current).
-  # A PARTIAL eid gets its DELTA as an extra source (merged with the base
-  # sources — the delta does not supersede them).
+  # M1/M6 branch: a CF-0 seek anchored at a hydrated eid is served
+  # exclusively by the entry's flat buffer (complete + current — the
+  # batchWrite mirror keeps it read-your-writes).
   if mc.hyd != nil and mc.cf == 0 and target.len >= 8:
     let eid = decodeEid(beUint64(target, 0))
     if mc.hyd.probeComplete(eid):
-      if mc.deltaEid != 0:
-        mc.sources = mc.baseSources
-        mc.deltaEid = 0
       if not mc.hydMode:
         mc.baseSources = mc.sources
-        mc.hydCursor = newHydCursor(mc.hyd, mc.hyd.index[eid], target)
+        mc.hydCursor = newHydCursor(mc.hyd, mc.hyd.entryAt(eid), target)
         mc.sources = @[mc.hydCursor]
         mc.hydMode = true
-      mc.hydCursor.hc.pos = hydSeekFrom(mc.hyd, mc.hyd.index[eid], target)
+      mc.hydCursor.hc.pos = hydSeekFrom(mc.hyd, mc.hyd.entryAt(eid), target)
       mc.heap.data = @[]
       if mc.sources[0].isValid():
         let k = mc.sources[0].currentKey()
@@ -260,23 +249,11 @@ proc seek*(mc: MergedCursor; target: seq[byte]) {.gcsafe.} =
       mc.curPair = none((seq[byte], seq[byte]))
       mc.advance()
       return
-    # M4: partial delta as an extra source (switched when the eid changes)
-    let needDelta = mc.hyd.contains(eid)
-    if needDelta and mc.deltaEid != eid:
+    if mc.hydMode:
+      # Exit hyd mode: the seek anchors at a non-hydrated eid — restore the
+      # parked base sources.
       mc.sources = mc.baseSources
       mc.hydMode = false
-      let e = mc.hyd.index[eid]
-      var dkeys: seq[seq[byte]] = @[]
-      for s in e.slots:
-        dkeys.add mc.hyd.vec.keyCopy(s)
-      for s in e.tombSlots:
-        dkeys.add mc.hyd.vec.keyCopy(s)
-      if dkeys.len > 1: dkeys.sort(cmpKeysByte)
-      mc.sources = mc.sources & @[mockCursor(dkeys)]
-      mc.deltaEid = eid
-    elif not needDelta and mc.deltaEid != 0:
-      mc.sources = mc.baseSources
-      mc.deltaEid = 0
   for src in mc.sources:
     src.seek(target)
   mc.heap.data = @[]
@@ -328,7 +305,7 @@ proc isValid*(c: Cursor): bool {.gcsafe.} =
   of ckTreap: not c.tc.atEnd
   of ckTreapKv: not c.tckv.atEnd
   of ckMerged: not c.mc.atEnd
-  of ckHyd: c.hc.pos < c.hc.e.slots.len
+  of ckHyd: c.hc.pos < entryKeyCount(c.hc.e)
   of ckMock: c.mockPos < c.mockKeysRef.keys.len
   of ckInvalid: false
 
@@ -401,7 +378,7 @@ proc invalidate*(c: Cursor) {.gcsafe.} =
   of ckTreap: c.tc.atEnd = true
   of ckTreapKv: c.tckv.atEnd = true
   of ckMerged: c.mc.atEnd = true
-  of ckHyd: c.hc.pos = c.hc.e.slots.len
+  of ckHyd: c.hc.pos = entryKeyCount(c.hc.e)
   of ckMock: c.mockPos = c.mockKeysRef.keys.len
   of ckInvalid: discard
 

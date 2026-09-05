@@ -7,8 +7,6 @@ import std/[tables, strutils, options, times, sets, monotimes, algorithm, syncio
 import logutil
 import resolver
 import keys
-import datoms  # DatomVector/DatomSlot (M5)
-export datoms
 export keys
 import kvstore
 import page_store     # CfTree
@@ -78,21 +76,13 @@ type
     # Hydrated-eid source (CF 0 fast path) — see hydrated.nim
     hydEnabled*: bool
     hyd*: HydratedSet
-    # M5: the canonical volatile datom vector — byte storage for every
-    # CF-0 key of every entry slot (and the flush's volatile window).
-    # The entry IS ptrs (slots) into this vector; deferred CF-1/3 buffers
-    # and CF-2 key copies are gone — CF-1/2/3 are DERIVED from the datoms
-    # (worker at flush; snapshot at cursor open).
-    dvec*: DatomVector
-    # M3'/M5: CF-2 anchor index as a HASH — the anchor lookup is a point
+    # M3': CF-2 anchor index as a HASH — the anchor lookup is a point
     # query (attr,value)→eid.  Key = the CF-2 lookup prefix [aid 4B][value];
     # value = (eid, t) — eid for the probe answer, t for the publish filter.
-    # The treap CF-2 exits the write path.
+    # The treap CF-2 remains the durable write state; the hash is a
+    # write-through read mirror (M6).
     anchorHash*: Table[seq[byte], (int64, int64)]
     anchorBytes*: int64
-    # M5: per-aid derivation flags (bit0 = indexed → CF-2, bit1 = ref → CF-3)
-    # captured at collect time; the flush worker derives without the resolver.
-    aidMeta*: Table[uint32, uint8]
     # TEMP scan diagnostics (-d:eavtScanDiag)
     diagSeekNs*: int64
     diagIterNs*: int64
@@ -110,96 +100,22 @@ proc newEavtEngine*(kv: KVStore; cfg: Table[string, string]): EavtEngine =
   let maxBytes = block:
     let v = cfg.getOrDefault("hydrated_max_bytes", "")
     if v.len > 0: parseInt(v) else: DefaultHydratedMaxBytes
-  # M5: the vector is born with the engine — the set's slots resolve
-  # through it (shared byte storage).
-  let dvec = newDatomVector(maxBytes)
   result = EavtEngine(
     kv: kv,
     resolver: newResolver(),
     hydEnabled: enabled,
-    hyd: newHydratedSet(maxBytes, dvec),
-    dvec: dvec,
+    hyd: newHydratedSet(maxBytes),
     anchorHash: initTable[seq[byte], (int64, int64)](),
-    aidMeta: initTable[uint32, uint8](),
   )
-  # M1/M5: the engine wires its own flush hooks — the hyd set IS the CF-0
-  # memtable for hydrated eids (slots into dvec), so every flush must drain
-  # the volatile window between capture and commit.  Hooks run on the loop
-  # (single-thread owner).
+  # M6: the treap is the memtable for ALL CFs — the generic KVStore flush
+  # (capture roots → pagestore) needs no engine cooperation. The only hook
+  # that survives is the anchor-hash cleanup: hash entries ≤ the flush's
+  # maxT are durable in the pagestore and are dropped (their probe answer
+  # falls back to the CF-2 scan).
   if enabled:
     let self = result
-    self.kv.onFlushCollect = proc (): tuple[
-        keysByCf: seq[(int, seq[seq[byte]])], maxT: int64] {.gcsafe, raises: [].} =
-      # M5: the byte source is the vector's volatile window; the worker
-      # receives the datoms (CF-0) PLUS the derived CF-1/2/3 keys (built
-      # here from aidMeta — the worker never touches the resolver).  The
-      # derivation is memcpy-shaped; sorting stays with the worker.
-      var c: seq[(int, seq[seq[byte]])] = @[]
-      let keys = self.dvec.drainVolatile()
-      # aid metadata first (fill before deriving — the worker never touches
-      # the resolver)
-      var aids: seq[uint32] = @[]
-      for k in keys:
-        if k.len < 12: continue
-        let aid = beUint32(k, 8)
-        if aid notin self.aidMeta: aids.add(aid)
-      for aid in aids:
-        var meta: uint8 = 0
-        if self.resolver.isIndexed(aid): meta = meta or 1
-        var isRef = false
-        try:
-          let vt = self.resolver.valueTypeFor(aid)
-          isRef = vt.isSome and vt.get == DbTypeRef
-        except KeyError:
-          discard  # unknown aid: not a ref (log-free: capture-time only)
-        if isRef: meta = meta or 2
-        self.aidMeta[aid] = meta
-      var k1s: seq[seq[byte]]
-      var k2s: seq[seq[byte]]
-      var k3s: seq[seq[byte]]
-      var maxT = self.dvec.publishedT
-      for k in keys:
-        if k.len < 20: continue
-        let aid = beUint32(k, 8)
-        let sf = beUint64(k, k.len - 8)
-        let meta = self.aidMeta.getOrDefault(aid, 0)
-        # CF-1 [aid][eid][val][sf] — always
-        var k1 = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
-                  byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
-        k1.add k[0 ..< 8]
-        k1.add k[12 ..< k.len]
-        k1s.add(k1)
-        if (meta and 1) != 0:
-          # CF-2 [aid][val][eid][sf]
-          var k2 = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
-                    byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
-          k2.add k[12 ..< k.len - 8]
-          k2.add k[0 ..< 8]
-          k2.add k[k.len - 8 ..< k.len]
-          k2s.add(k2)
-        if (meta and 2) != 0:
-          # CF-3 [val][aid][eid][sf]
-          var k3 = k[12 ..< k.len - 8]
-          k3.add @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
-                  byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
-          k3.add k[0 ..< 8]
-          k3.add k[k.len - 8 ..< k.len]
-          k3s.add(k3)
-        let kt = (sf shr 1).int64
-        if kt > maxT: maxT = kt
-      if keys.len > 0: c.add (0, keys)
-      if k1s.len > 0: c.add (1, k1s)
-      if k2s.len > 0: c.add (2, k2s)
-      if k3s.len > 0: c.add (3, k3s)
-      result.keysByCf = c
-      result.maxT = maxT
     self.kv.onFlushPublished = proc (maxT: int64) {.gcsafe, raises: [].} =
-      # Order matters: the hyd bookkeeping FIRST (drops drained partial
-      # entries, clearing tombstones) — their unpin lets the vector's
-      # publish reclaim unpinned durable chunks.
-      self.hyd.publishWatermark(maxT)
-      self.dvec.publish(maxT)
-      # M5: hash entries ≤ maxT are durable in the pagestore — dropped;
+      # Hash entries ≤ maxT are durable in the pagestore — dropped;
       # keys written during the flush (t > maxT) stay pending.
       var toDel: seq[seq[byte]]
       for pfx, meta in self.anchorHash:
@@ -224,95 +140,84 @@ proc batchWrite*(eng: EavtEngine; entries: var seq[EavtEntry]) =
   ## Consumes the entries: keys are arena-written by buildEavtEntries and
   ## referenced (ptr+len) into CfKey — zero copy on the load path.
   ##
-  ## M1 write path: CF-0 datoms of HYDRATED eids go to the hydrated entry
-  ## (which IS the memtable for that eid — dirty until the flush drains
-  ## it); they do NOT enter the treap CF-0.  Non-hydrated eids and every
-  ## secondary CF (1/2/3) go to the treap as before.  Reads are safe: the
-  ## hyd fast path serves hydrated eids including dirty keys.
+  ## M6 write path: the treap is the memtable for ALL CFs again — every key
+  ## (CF-0 datom + CF-1/2/3 indexes built by buildEavtEntries) enters the
+  ## memtable and the generic flush carries it to the pagestore.  The WAL
+  ## stays CF-0-only (the datom is the truth — CF-1/2/3 are re-derived at
+  ## replay).  CF-2 keys are additionally mirrored into the anchor hash
+  ## (M3' read-side O(1) unique lookup), and CF-0 keys are mirrored into
+  ## the hydrated cache (read-your-writes).
   if entries.len == 0: return
   var cfs = newSeq[CfKey](entries.len)
-  var journaled = newSeq[CfKey]()
+  var durable = newSeq[CfKey]()   # CF-0 → WAL
   var n = 0
-  if eng.hydEnabled:
-    for e in entries:
-      if e.cf == 0:
-        let eid = decodeEid(beUint64(e.key.p.toOpenArray(0, e.key.len - 1), 0))
-        if not eng.hyd.contains(eid):
-          # M4: cold eid — PARTIAL write-state entry (delta only; base
-          # stays in pagestore).  The treap CF-0 exits the write path.
-          discard eng.hyd.ensurePartial(eid)
-        eng.hyd.applyKey(e.key)
-        # entry is the memtable — no treap CF-0; the WAL record is still
-        # MANDATORY (durability + replica feed) — M1 durability fix
-        journaled.add CfKey(cf: e.cf, key: e.key)
-        continue
-      elif e.cf == 1 or e.cf == 3:
-        # M5: write-only CFs — the key is DERIVED from the datom (vector);
-        # no deferred buffer, no byte copy on the write path. The worker
-        # derives CF-1/3 at flush; queries derive the volatile snapshot at
-        # cursor open.
-        continue
-      elif e.cf == 2:
-        # M3'/M5: anchor index as a hash (prefix → (eid, t)).  Retract
-        # (sf bit 1) removes the mapping.  No key copy — the CF-2 key is
-        # derived at flush / cursor open.
-        let k = keyToSeqEavt(e.key)
-        let sf = beUint64(k, k.len - 8)
-        let prefix = k[0 ..< k.len - 16]
-        if (sf and 1) == 0:
-          let eid = decodeEid(beUint64(k, k.len - 16))
-          let kt = (sf shr 1).int64
-          if not eng.anchorHash.hasKey(prefix):
-            inc eng.anchorBytes, (prefix.len + 16).int64
-          eng.anchorHash[prefix] = (eid, kt)
-        else:
-          if eng.anchorHash.hasKey(prefix):
-            dec eng.anchorBytes, (prefix.len + 16).int64
-            eng.anchorHash.del(prefix)
-        journaled.add CfKey(cf: e.cf, key: e.key)
-        continue
-      cfs[n] = CfKey(cf: e.cf, key: e.key)
-      inc n
-  else:
-    for e in entries:
-      cfs[n] = CfKey(cf: e.cf, key: e.key)
-      inc n
+  for e in entries:
+    if e.cf == 2:
+      # M3': anchor hash as a write-through read mirror.  Retract (sf bit 1)
+      # removes the mapping.  No key copy for the treap — the CF-2 key goes
+      # through as referenced.
+      let k = keyToSeqEavt(e.key)
+      let sf = beUint64(k, k.len - 8)
+      let prefix = k[0 ..< k.len - 16]
+      if (sf and 1) == 0:
+        let eid = decodeEid(beUint64(k, k.len - 16))
+        let kt = (sf shr 1).int64
+        if not eng.anchorHash.hasKey(prefix):
+          inc eng.anchorBytes, (prefix.len + 16).int64
+        eng.anchorHash[prefix] = (eid, kt)
+      else:
+        if eng.anchorHash.hasKey(prefix):
+          dec eng.anchorBytes, (prefix.len + 16).int64
+          eng.anchorHash.del(prefix)
+    cfs[n] = CfKey(cf: e.cf, key: e.key)
+    inc n
+    if e.cf == 0:
+      durable.add CfKey(cf: e.cf, key: e.key)
   cfs.setLen(n)
   # WAL CF-0-only: o datom (CF-0) é a verdade — CF-1/2/3 são derivados e
-  # re-derivados no replay (transactor routing + réplica). journalOnly é o
-  # ponto de filtro do caminho de escrita EAVT.
-  var durable: seq[CfKey]
-  for e in journaled:
-    if e.cf == 0: durable.add(e)
+  # re-derivados no replay (transactor routing + réplica).
   if durable.len > 0: eng.kv.journalOnly(durable)
-  eng.kv.batchWrite(cfs)
-  # M1/M5 flush pressure: hyd/vetor CF-0 e o anchor hash bypassam o
-  # memtable — arma no volume combinado (o vetor é o volátil do CF-0).
+  # Mirror de leitura: CF-0 → cache hidratado (read-your-writes). Antes do
+  # batchMove — os bytes emprestados (arena) são copiados pelo applyKey.
   if eng.hydEnabled:
-    let pressure = eng.dvec.volatileBytes + eng.anchorBytes
-    if pressure >= eng.kv.flushThreshold.int64:
-      if eng.kv.onFlushRequest != nil: eng.kv.onFlushRequest()
+    for d in durable:
+      eng.hyd.applyKey(d.key)
+  # M6: journal=false — o journalOnly acima já cobriu o CF-0; CF-1/2/3 não
+  # vão ao WAL.  O treap recebe TODOS os CFs (memtable).
+  eng.kv.batchWrite(cfs, journal = false)
+
+proc batchWriteForeignKeys*(eng: EavtEngine;
+                            keys: openArray[tuple[cf: uint8, key: seq[byte]]]) =
+  ## Route datom/index keys that are NOT arena-owned (replica WAL frames,
+  ## tests) through the write path.  batchWrite REFERENCES the key bytes
+  ## (batchMove contract — arena-written by buildEavtEntries); foreign
+  ## buffers die with their frame, so each key is copied into the memtable
+  ## arena first.  The copy is stable for the memtable's lifetime: the
+  ## flush capture swaps the arena but keeps it alive via flushArena while
+  ## the captured roots reference its bytes.
+  if keys.len == 0: return
+  let arena = eng.kv.mt.hnd.arena
+  var entries = newSeqOfCap[EavtEntry](keys.len)
+  for k in keys:
+    if k.key.len < 20: continue
+    let dst = allocKeyBytes(arena, k.key.len)
+    copyMem(addr dst[0], unsafeAddr k.key[0], k.key.len)
+    entries.add EavtEntry(cf: k.cf, key: KeyRef(p: dst, len: k.key.len))
+  eng.batchWrite(entries)
+
+proc batchWriteForeign*(eng: EavtEngine; keys: openArray[seq[byte]]) =
+  ## CF-0-only convenience wrapper over batchWriteForeignKeys.
+  var expanded = newSeqOfCap[tuple[cf: uint8, key: seq[byte]]](keys.len)
+  for k in keys:
+    expanded.add (0'u8, k)
+  eng.batchWriteForeignKeys(expanded)
 
 proc scanPrefix*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byte]] =
   ## Scan keys in CF matching prefix. Reuses cursor from previous call —
   ## updates in-place if roots changed, then seeks to new prefix.
+  ## M6: raw view is served entirely by the storage cursors — the treap
+  ## CF-0 is the memtable again (active + tombstones + versions).
   eng.spCount += 1
-  # Hyd fast path (M1): COMPLETE hydrated eids' CF-0 keys live in the entry
-  # (the memtable). Raw view: active + tombstones.  M4: partial eids and
-  # full-range scans merge hyd keys below (raw view).
-  var deltaKeys: seq[seq[byte]] = @[]
-  if eng.hydEnabled and cf == 0:
-    if prefix.len >= 8:
-      let eid = decodeEid(beUint64(prefix, 0))
-      if eng.hyd.probeComplete(eid):
-        return eng.hyd.lookupRangeRaw(eid, prefix)
-      if eng.hyd.contains(eid):
-        deltaKeys = eng.hyd.lookupRangeRaw(eid, prefix)
-    else:
-      # M5: full-range raw view = the vector's volatile window — the
-      # committed set comes from the pagestore (dumping every entry key
-      # would re-dump durable data per scan).
-      deltaKeys = eng.dvec.drainFromT(eng.dvec.publishedT)
   var t0 = getMonoTime()
 
   # Read current roots
@@ -347,10 +252,6 @@ proc scanPrefix*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byte]] =
     let key = k.get
     if key.len < prefix.len or key[0..<prefix.len] != prefix: break
     result.add key
-  # M4: partial/full-range hyd keys join the raw view (sorted)
-  if deltaKeys.len > 0:
-    result &= deltaKeys
-    result.sort(cmpKeysByte)
   eng.spIterateNs += (getMonoTime().ticks - t0.ticks)
   eng.spKeysReturned += result.len
 
@@ -362,25 +263,13 @@ proc scanPrefixActive*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byt
   ## Reuses cursors from previous call (update in-place). Single source fast path
   ## skips sort when only live treap has data.
   ##
-  ## Hydrated fast path: CF-0 scans anchored at a COMPLETE hydrated eid are
-  ## answered entirely from the in-memory key set (complete + current —
-  ## see hydrated.nim). No PageStore descent, no merge.
-  ## M4: PARTIAL entries (cold-eid deltas) do NOT take the fast path — the
-  ## delta merges with the base below (newest-t wins).  Full-range scans
-  ## (prefix < 8B) merge ALL hyd keys (the treap CF-0 is recovery-only).
-  var deltaKeys: seq[seq[byte]] = @[]
-  if eng.hydEnabled and cf == 0:
-    if prefix.len >= 8:
-      let eid = decodeEid(beUint64(prefix, 0))
-      if eng.hyd.probeComplete(eid):
-        return eng.hyd.lookupRange(eid, prefix)
-      if eng.hyd.contains(eid):
-        deltaKeys = eng.hyd.lookupRangeRaw(eid, prefix)
-    else:
-      # M5: full-range raw view = the vector's volatile window — the
-      # committed set comes from the pagestore (dumping every entry key
-      # would re-dump durable data per scan).
-      deltaKeys = eng.dvec.drainFromT(eng.dvec.publishedT)
+  ## Hydrated fast path: CF-0 scans anchored at a hydrated eid are answered
+  ## entirely from the in-memory key set (complete + current — see
+  ## hydrated.nim). No PageStore descent, no merge.
+  if eng.hydEnabled and cf == 0 and prefix.len >= 8:
+    let eid = decodeEid(beUint64(prefix, 0))
+    if eng.hyd.probeComplete(eid):
+      return eng.hyd.lookupRange(eid, prefix)
 
   var psSnap: PageStoreSnapshot
   var flushRoot, liveRoot: TreapNode
@@ -446,22 +335,11 @@ proc scanPrefixActive*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byt
   if eng.saLive != nil and liveRoot != nil: inc sourceCount
 
   if sourceCount == 0:
-    if deltaKeys.len > 0:
-      deltaKeys.sort(cmpKeysByte)
-      var lastPfx: seq[byte] = @[]
-      for j in countdown(deltaKeys.len - 1, 0):
-        let key = deltaKeys[j]
-        let keyPrefix = key[0 ..< key.len - 8]
-        if keyPrefix == lastPfx: continue
-        let sf = beUint64(key, key.len - 8)
-        if (sf and 1) == 0: result.add key
-        lastPfx = keyPrefix
     return
 
   # ── Fast path: single source (live treap only) ──
-  # Skip sort/merge, just collect + dedup + filter.  M4: delta/full-range
-  # scans use the sorted multi-source path below (hyd keys join the merge).
-  if sourceCount == 1 and eng.saLive != nil and liveRoot != nil and deltaKeys.len == 0:
+  # Skip sort/merge, just collect + dedup + filter.
+  if sourceCount == 1 and eng.saLive != nil and liveRoot != nil:
     eng.saLive.seek(prefix)
     var sourceKeys: seq[seq[byte]] = @[]
     while true:
@@ -565,11 +443,6 @@ proc scanPrefixActive*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byt
         collected.add((key, i))
         lastPrefix = keyPrefix
 
-  # M4: delta/full-range hyd keys join the merge (raw; the global sort +
-  # newest-wins resolves delta vs base — delta carries the higher t)
-  for dk in deltaKeys:
-    collected.add((dk, sources.len))
-
   if collected.len == 0: return
 
   # 2. Merge by full key (ascending)
@@ -671,17 +544,11 @@ proc buildCompileStats*(eng: EavtEngine): CompileStats =
       s.indexedAttrs.incl(name)
 
   # Pre-compute index estimates for all 4 indexes (empty prefix = total count).
-  # M1..M5: the write state lives OUTSIDE the treap (hyd entries, the datom
-  # vector, anchor hash) — the treap-only count would clamp everything to 1
-  # and degenerate the planner's join order (blind-var plans crash the VM).
+  # M6: the treap is the memtable for all CFs — the storage cursor count is
+  # complete (memtable + flush + pagestore), no write-state adjustments.
   for index in ["EAVT", "AEVT", "AVET", "VAET"]:
     let cf = keys.cfNameToId(keys.cfForIndex(index))
-    var count = eng.estimateCount(cf, @[])
-    case cf
-    of 0: count += eng.hyd.numKeys
-    of 1, 3: count += eng.dvec.volatileKeys  # volatile datoms ≈ per-CF keys
-    of 2: count += eng.anchorHash.len
-    else: discard
+    let count = eng.estimateCount(cf, @[])
     s.indexEstimates[index & ":"] = float64(count)
 
   eng.cachedStats = s
@@ -1006,19 +873,11 @@ proc allocateInPartition*(eng: EavtEngine; pid: uint64): int64 =
 
 proc hydrateEid*(eng: EavtEngine; eid: int64) =
   ## Read-time hydration: install the full active CF-0 key set for `eid`.
-  ## No-op when disabled or already COMPLETE-hydrated.  A PARTIAL entry
-  ## (M4 delta or F3 replica WAL landing) upgrades to the full merged
-  ## view — probeComplete then serves it exclusively.
-  ## Entities with no datoms are left unhydrated (don't spend budget on
-  ## phantoms); empty-by-construction entities created via allocateInPartition
-  ## are members already.
+  ## No-op when disabled or already hydrated.  Entities with no datoms are
+  ## left unhydrated (don't spend budget on phantoms); empty-by-construction
+  ## entities created via allocateInPartition are members already.
   if not eng.hydEnabled: return
-  if eng.hyd.contains(eid):
-    if not eng.hyd.isPartial(eid): return
-    let ks = eng.scanPrefixActive(0, keys.encodeEid(eid))
-    if ks.len > 0:
-      eng.hyd.upgradePartial(eid, ks)
-    return
+  if eng.hyd.contains(eid): return
   let ks = eng.scanPrefixActive(0, keys.encodeEid(eid))
   if ks.len > 0:
     eng.hyd.hydrate(eid, ks)
@@ -1161,17 +1020,46 @@ proc lookupValueStr*(eng: EavtEngine; eid: int64; attrName: string): Option[stri
     return none[string]()
   return none[string]()
 
+proc deriveIndexKeys*(k: seq[byte]; indexed, isRef: bool):
+    seq[tuple[cf: uint8, key: seq[byte]]] =
+  ## Byte reshuffle of one CF-0 datom key ([eid 8B][aid 4B][val][sf 8B]) into
+  ## its derived index keys — CF-1 always, CF-2 if indexed, CF-3 if ref.
+  ## Same derivation the flush worker did under M5; used by recovery (the
+  ## WAL is CF-0-only, the residue needs its index keys rebuilt).  Owned
+  ## copies — the caller borrows them into CfKey just for the mt.batch call
+  ## (which copies into the arena).
+  if k.len < 20: return
+  let aid = beUint32(k, 8)
+  var k1 = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
+            byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
+  k1.add k[0 ..< 8]
+  k1.add k[12 ..< k.len]
+  result.add (1'u8, k1)
+  if indexed:
+    var k2 = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
+              byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
+    k2.add k[12 ..< k.len - 8]
+    k2.add k[0 ..< 8]
+    k2.add k[k.len - 8 ..< k.len]
+    result.add (2'u8, k2)
+  if isRef:
+    var k3 = k[12 ..< k.len - 8]
+    k3.add @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
+            byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
+    k3.add k[0 ..< 8]
+    k3.add k[k.len - 8 ..< k.len]
+    result.add (3'u8, k3)
+
 proc recoverWriteState*(eng: EavtEngine) =
-  ## WAL CF-0-only recovery (M5): route the journal-replay residue (treap
-  ## CF-0) through the write structures — hyd partial entries whose slots
-  ## live in the datom vector, PLUS the anchor hash (O(1) unique lookups —
-  ## the recovery is the only way the hash rebuilds after restart).
-  ## CF-1/3 stay derived (worker at flush, snapshot at cursor open).  The
-  ## treap is recovery STAGING only; the write path lives in vector + entries.
-  ## Called once at bootstrap, AFTER bootstrapResolver.  No journaling: the
-  ## journal is the source of these datoms.
-  ## The residue STAYS in the treap (reads merge it; the flush drains both
-  ## — idempotent in the pagestore).
+  ## WAL CF-0-only recovery (M6): the journal carries the datom (CF-0) only,
+  ## so the replay residue in the treap needs its DERIVED index keys rebuilt
+  ## — CF-1 always, CF-2 if indexed (+ anchor hash for the O(1) probe), CF-3
+  ## if ref — including retracts (index tombstones; otherwise the pagestore's
+  ## older active version resurrects).  The residue STAYS in the treap: with
+  ## M6 the treap IS the memtable.  Called once at bootstrap, AFTER
+  ## bootstrapResolver.  No journaling: the datom is already durable in the
+  ## WAL.
+  var derivedKeys: seq[tuple[cf: uint8, key: seq[byte]]] = @[]
   let mc = eng.kv.openScanCursor(0)
   while true:
     let k = mc.next()
@@ -1180,18 +1068,29 @@ proc recoverWriteState*(eng: EavtEngine) =
     if key.len < 20: continue
     let aid = beUint32(key, 8)
     if aid == DbTxInstantAid: continue      # datoms do tx-entity: ruído de recovery
-    if eng.hydEnabled:
-      let eid = decodeEid(beUint64(key, 0))
-      if not eng.hyd.contains(eid):
-        discard eng.hyd.ensurePartial(eid)
-      eng.hyd.applyKey(KeyRef(p: cast[ptr UncheckedArray[byte]](unsafeAddr key[0]),
-                         len: key.len))
-      if (beUint64(key, key.len - 8) and 1) == 0 and
-         eng.resolver.isIndexed(aid):
-        # anchor hash rebuild: [aid][val] → (eid, t) for the O(1) probe
-        var pfx = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
-                   byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
-        pfx.add key[12 ..< key.len - 8]
-        let kt = (beUint64(key, key.len - 8) shr 1).int64
-        eng.anchorHash[pfx] = (decodeEid(beUint64(key, 0)), kt)
-        inc eng.anchorBytes, (pfx.len + 16).int64
+    let sf = beUint64(key, key.len - 8)
+    let retracted = (sf and 1) == 1
+    let indexed = eng.resolver.isIndexed(aid)
+    var isRef = false
+    if not retracted:
+      try:
+        let vt = eng.resolver.valueTypeFor(aid)
+        isRef = vt.isSome and vt.get == DbTypeRef
+      except KeyError:
+        discard  # unknown aid: not a ref (recovery best-effort)
+    for d in deriveIndexKeys(key, indexed, isRef):
+      derivedKeys.add d
+    if not retracted and indexed:
+      # anchor hash rebuild: [aid][val] → (eid, t) for the O(1) probe
+      var pfx = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
+                 byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
+      pfx.add key[12 ..< key.len - 8]
+      eng.anchorHash[pfx] = (decodeEid(beUint64(key, 0)), (sf shr 1).int64)
+      inc eng.anchorBytes, (pfx.len + 16).int64
+  # Treap insert without journaling (the datom is the durable truth) — the
+  # KeyRefs borrow derivedKeys only for the duration of the batch call,
+  # which copies the bytes into the treap arena.
+  var derived: seq[CfKey] = newSeqOfCap[CfKey](derivedKeys.len)
+  for d in derivedKeys:
+    derived.add CfKey(cf: d.cf, key: toKeyRef(d.key))
+  eng.kv.applyJournalRecordsExpanded(derived)

@@ -52,23 +52,11 @@ type
     # EDN tx scratch (reused across txs — steady-state no allocation)
     txEntries*: seq[EavtEntry]
     txDupSeen*: Table[(int64, uint32), bool]
-    # M5 run cache: sorted snapshots of the volatile window per CF, valid
-    # while (dvec.windowGen, anchorBytes) is unchanged.  Cursor opens
-    # reuse it — the sort is paid once per volatile-epoch, not per open.
-    runGen*: uint64          # dvec.windowGen at cache build
-    runCaptureT*: int64      # max drained t at cache build (delta watermark)
-    runAnchorBytes*: int64   # anchorHash volume at build
-    runCf0*: RunKeys
-    runCf1*: RunKeys
-    runCf2*: RunKeys
-    runCf3*: RunKeys
 
 proc newQueryStore*(kv: KVStore): QueryStore =
   let eng = newEavtEngine(kv)
   eng.bootstrapResolver()
-  QueryStore(eavt: eng, kv: kv, symtab: newSymTab(),
-             runCf0: RunKeys(), runCf1: RunKeys(),
-             runCf2: RunKeys(), runCf3: RunKeys())
+  QueryStore(eavt: eng, kv: kv, symtab: newSymTab())
 
 proc resetSaveCounters*(q: QueryStore) =
   q.saveCount = 0
@@ -157,112 +145,14 @@ proc sexprToValueForType(val: SExpr; vt: uint32): string =
 
 # ── EngineOps implementation ──
 
-proc runCacheValid(q: QueryStore): bool {.inline.} =
-  q.runGen == q.eavt.dvec.windowGen and
-    q.runAnchorBytes == q.eavt.anchorBytes
-
-proc mergeSorted(a, b: seq[seq[byte]]): seq[seq[byte]] =
-  ## Merge two ascending runs (the incremental cache update — O(n + k)
-  ## memmove instead of an O(n log n) re-sort of the whole window).
-  if a.len == 0: return b
-  if b.len == 0: return a
-  result = newSeqOfCap[seq[byte]](a.len + b.len)
-  var i, j = 0
-  while i < a.len and j < b.len:
-    if cmpKeysByte(a[i], b[j]) <= 0: result.add(a[i]); inc i
-    else: result.add(b[j]); inc j
-  while i < a.len: result.add(a[i]); inc i
-  while j < b.len: result.add(b[j]); inc j
-
-proc buildRunCache(q: QueryStore) =
-  ## M5: one sorted snapshot of the write state per write epoch.  The FIRST
-  ## build sorts the full volatile window; the rebuilds drain only the
-  ## delta since the capture watermark and MERGE into the existing sorted
-  ## runs (O(n) memmove, no re-sort).
-  if q.runCf0 == nil: q.runCf0 = RunKeys()
-  if q.runCf1 == nil: q.runCf1 = RunKeys()
-  if q.runCf2 == nil: q.runCf2 = RunKeys()
-  if q.runCf3 == nil: q.runCf3 = RunKeys()
-  let firstBuild = q.runGen == 0
-  let capT = if firstBuild: q.eavt.dvec.publishedT else: q.runCaptureT
-  let delta = q.eavt.dvec.drainFromT(capT)
-  if not firstBuild:
-    if delta.len > 1:
-      var d = delta
-      d.sort(cmpKeysByte)
-      q.runCf0.keys = mergeSorted(q.runCf0.keys, d)
-    elif delta.len == 1:
-      q.runCf0.keys = mergeSorted(q.runCf0.keys, delta)
-  else:
-    q.runCf0.keys = delta
-    if q.runCf0.keys.len > 1: q.runCf0.keys.sort(cmpKeysByte)
-  var newCapT = capT
-  for k in delta:
-    if k.len >= 20:
-      let kt = (beUint64(k, k.len - 8) shr 1).int64
-      if kt > newCapT: newCapT = kt
-  q.runCaptureT = newCapT
-  var k1s, k3s: seq[seq[byte]]
-  for k in delta:
-    if k.len < 20: continue
-    let aid = beUint32(k, 8)
-    var k1 = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
-              byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
-    k1.add k[0 ..< 8]
-    k1.add k[12 ..< k.len]
-    k1s.add(k1)
-    let vt = q.eavt.valueTypeFor(aid)
-    if vt.isSome and valueTypeToEncodeMode(vt.get) == emRef:
-      var k3 = k[12 ..< k.len - 8]
-      k3.add @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
-              byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
-      k3.add k[0 ..< 8]
-      k3.add k[k.len - 8 ..< k.len]
-      k3s.add(k3)
-  if k1s.len > 1: k1s.sort(cmpKeysByte)
-  if k3s.len > 1: k3s.sort(cmpKeysByte)
-  q.runCf1.keys = mergeSorted(q.runCf1.keys, k1s)
-  q.runCf3.keys = mergeSorted(q.runCf3.keys, k3s)
-  var k2s: seq[seq[byte]]
-  for pfx, meta in q.eavt.anchorHash:
-    var k = pfx
-    k.add encodeEid(meta[0])
-    let sf = (meta[1] shl 1)
-    k.add byte(sf shr 56); k.add byte((sf shr 48) and 0xFF)
-    k.add byte((sf shr 40) and 0xFF); k.add byte((sf shr 32) and 0xFF)
-    k.add byte(sf shr 24); k.add byte((sf shr 16) and 0xFF)
-    k.add byte((sf shr 8) and 0xFF); k.add byte(sf and 0xFF)
-    k2s.add(k)
-  if k2s.len > 1: k2s.sort(cmpKeysByte)
-  q.runCf2.keys = k2s
-  q.runGen = q.eavt.dvec.windowGen
-  q.runAnchorBytes = q.eavt.anchorBytes
-
 method openCursor(q: QueryStore; cfId: uint32; prefix: seq[byte]): Cursor =
+  ## M6: the treap is the memtable for all CFs — openScanCursor sees every
+  ## unflushed key (CF-1/2/3 are real treap keys again, no derived run
+  ## cache).  The only extra wiring is the hydrated-eid fast path: the
+  ## merged cursor routes eid-anchored CF-0 seeks through the entry.
   let mc = q.kv.openScanCursor(cfId.int)
   if cfId == 0 and q.eavt.hydEnabled:
     mc.hyd = q.eavt.hyd
-    if prefix.len < 8 and q.eavt.dvec.volatileKeys > 0:
-      # M5: full-range query cursors take the VECTOR's volatile window —
-      # the committed set comes from the pagestore (the merge dedups);
-      # dumping every entry key would re-dump durable data per open.
-      # Snapshot via the run cache (valid while no write/publish occurred);
-      # eid-anchored seeks re-route through the exclusive/delta branches.
-      if not q.runCacheValid(): q.buildRunCache()
-      if q.runCf0.keys.len > 0: mc.addSource(mockCursor(q.runCf0))
-  if cfId == 2'u32 and q.eavt.anchorHash.len > 0:
-    # M3'/M5: CF-2 anchors live in the hash — derived CF-2 keys from
-    # (prefix, eid, t) via the run cache.
-    if not q.runCacheValid(): q.buildRunCache()
-    if q.runCf2.keys.len > 0: mc.addSource(mockCursor(q.runCf2))
-  if cfId in {1'u32, 3'u32} and q.eavt.dvec.volatileKeys > 0:
-    # M5: CF-1/3 are DERIVED from the volatile datoms — a sorted snapshot
-    # joins the merge (committed data comes from the pagestore; the worker
-    # derives the durable set at flush).  Snapshot at open: writes that
-    # land while the cursor is open are picked up by the next cursor.
-    if not q.runCacheValid(): q.buildRunCache()
-    let keys = if cfId == 1'u32: q.runCf1 else: q.runCf3
-    if keys.keys.len > 0: mc.addSource(mockCursor(keys))
   mergedCursor(mc)
 
 proc encodeSaveValue(val: SExpr; vt: uint32; mode: EncodeMode; eid: int64): seq[byte] =

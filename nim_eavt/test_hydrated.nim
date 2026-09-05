@@ -2,6 +2,7 @@
 
 import std/[unittest, options]
 import keys
+import nim_memtable/treap_backend  # toKeyRef
 import hydrated
 
 proc k(eid: int64; attr: uint32; v: string; t: int64; ret = false): seq[byte] =
@@ -62,8 +63,8 @@ suite "hydrated: applyKey mirror":
   test "active key upserts into hydrated entry (sorted)":
     let h = newHydratedSet()
     h.hydrateEmpty(42)
-    h.applyKey(k(42, 200, "late", 10))
-    h.applyKey(k(42, 100, "early", 11))
+    h.applyKey(toKeyRef(k(42, 200, "late", 10)))
+    h.applyKey(toKeyRef(k(42, 100, "early", 11)))
     let got = h.lookupRange(42, encodeEid(42))
     check got.len == 2
     # ascending order by full key: attr 100 before 200
@@ -73,8 +74,8 @@ suite "hydrated: applyKey mirror":
   test "same datom re-saved with newer t replaces in place":
     let h = newHydratedSet()
     h.hydrateEmpty(42)
-    h.applyKey(k(42, 100, "v", 1))
-    h.applyKey(k(42, 100, "v", 5))
+    h.applyKey(toKeyRef(k(42, 100, "v", 1)))
+    h.applyKey(toKeyRef(k(42, 100, "v", 5)))
     let got = h.lookupRange(42, encodeEid(42))
     check got.len == 1
     check got[0] == k(42, 100, "v", 5)
@@ -85,22 +86,22 @@ suite "hydrated: applyKey mirror":
     # retract entry through batchWrite before the new save).
     let h = newHydratedSet()
     h.hydrateEmpty(42)
-    h.applyKey(k(42, 100, "old-value-longer", 1))
-    h.applyKey(k(42, 100, "new", 2))
+    h.applyKey(toKeyRef(k(42, 100, "old-value-longer", 1)))
+    h.applyKey(toKeyRef(k(42, 100, "new", 2)))
     check h.lookupRange(42, encodeEid(42)).len == 2
 
   test "retract removes the active key":
     let h = newHydratedSet()
     h.hydrateEmpty(42)
-    h.applyKey(k(42, 300, "gone", 1))
+    h.applyKey(toKeyRef(k(42, 300, "gone", 1)))
     check h.lookupRange(42, encodeEid(42)).len == 1
-    h.applyKey(k(42, 300, "gone", 2, ret = true))
+    h.applyKey(toKeyRef(k(42, 300, "gone", 2, ret = true)))
     check h.lookupRange(42, encodeEid(42)).len == 0
     check h.curBytes == 0
 
   test "applyKey ignores non-member eids":
     let h = newHydratedSet()
-    h.applyKey(k(55, 1, "x", 1))
+    h.applyKey(toKeyRef(k(55, 1, "x", 1)))
     check h.len == 0
 
 suite "hydrated: LRU eviction / budget":

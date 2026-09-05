@@ -39,13 +39,9 @@ type
     flushThreshold*: uint64
     gcMaxAgeSecs*: uint64
     gcMaxRootCount*: int
-    ## Hyd memtable drain hook (M1): called between capture and commit —
-    ## returns CF-0 keys of hydrated entries above their watermark plus the
-    ## max collected t (commit watermark). Loop-only callback.
-    onFlushCollect*: proc (): tuple[keysByCf: seq[(int, seq[seq[byte]])],
-                                    maxT: int64] {.gcsafe, raises: [].}
-    ## Called after a flush publishes with the collected maxT — the hyd set
-    ## advances watermarks; keys written after collect stay dirty.
+    ## Called after a flush publishes with the flush's maxT (max datom t in
+    ## the flushed keys) — write-through mirrors (anchor hash) drop entries
+    ## that are now durable. Loop-only callback.
     onFlushPublished*: proc (maxT: int64) {.gcsafe, raises: [].}
     ## Flush arming hook: called when a write crosses flushThreshold and by
     ## requestFlush(). The async server installs a proc that schedules
@@ -550,14 +546,7 @@ proc flush*(kv: KVStore) {.gcsafe.} =
     sealBoundary = kv.journalSeal()
     if kv.onFlushSeal != nil: kv.onFlushSeal()
   var keysByCf: seq[(int, seq[seq[byte]])] = @[]
-  # Hyd memtable drain (M1): collect hydrated entries' keys above their
-  # watermark between capture and commit — they never entered the treap.
   var collectedMaxT: int64 = -1
-  var hydKeysByCf: seq[(int, seq[seq[byte]])] = @[]
-  if kv.onFlushCollect != nil:
-    let c = kv.onFlushCollect()
-    hydKeysByCf = c.keysByCf
-    collectedMaxT = c.maxT
   var pairsByCf: seq[(int, seq[(seq[byte], seq[byte])])] = @[]
   var deletedByCf: seq[(int, seq[seq[byte]])] = @[]
   for cf in 0..<kv.numCf:
@@ -584,24 +573,20 @@ proc flush*(kv: KVStore) {.gcsafe.} =
         while not tc.atEnd:
           let k = tc.next()
           if k.isSome: keys.add(k.get)
-        for (ecf, ek) in hydKeysByCf:
-          if ecf == cf and ek.len > 0:
-            keys &= ek                   # collected unsorted
         if keys.len > 1:
           keys.sort(mt_be.cmpKeysByte)
         if keys.len > 0: keysByCf.add (cf, keys)
-  # Collected CFs with no treap root (M2 deferred CF-1/3, or M1 hyd-only
-  # CF-0) must still reach the pagestore — SORTED: commitMergeCore assumes
-  # ascending input.
-  for (ecf, ek) in hydKeysByCf:
-    if ek.len == 0: continue
-    var found = false
-    for i in 0 ..< keysByCf.len:
-      if keysByCf[i][0] == ecf: found = true; break
-    if not found:
-      var sk = ek
-      sk.sort(mt_be.cmpKeysByte)
-      keysByCf.add (ecf, sk)
+  # Commit watermark: the max datom t across the flushed keys (all datom CFs
+  # carry the 8B suffix). Write-through mirrors (anchor hash) drop entries
+  # ≤ maxT — they are durable in the pagestore now.
+  for (cf, keys) in keysByCf:
+    if cf >= 10: continue
+    for k in keys:
+      if k.len < 8: continue
+      var sf = 0'u64
+      for b in k[k.len - 8 ..< k.len]: sf = (sf shl 8) or uint64(b)
+      let kt = (sf shr 1).int64
+      if kt > collectedMaxT: collectedMaxT = kt
   if keysByCf.len > 0: commitMerge(kv.ps[], keysByCf, true)
   if pairsByCf.len > 0 or deletedByCf.len > 0:
     commitMergeKv(kv.ps[], pairsByCf, deletedByCf, true)
@@ -643,18 +628,21 @@ proc flushSync*(kv: KVStore) {.gcsafe.} =
   kv.flush()
 
 proc journalOnly*(kv: KVStore; entries: seq[mt_be.CfKey]) {.gcsafe.} =
-  ## Durability-only path (M1/M2): journal the entries WITHOUT inserting
-  ## them into the memtable — their live data lives in the hyd set
-  ## (hydrated CF-0) / deferred buffers (CF-1/3).  Recovery replay
-  ## (applyJournalRecords) rebuilds them into the treap as before.
+  ## Durability-only path (WAL CF-0-only): journal the entries WITHOUT
+  ## inserting them into the memtable — used by the EAVT engine when the
+  ## same batch goes to the memtable via batchWrite(journal=false).
+  ## Recovery replay (applyJournalRecords) rebuilds them into the treap.
   if journaling(kv) and entries.len > 0:
     kv.journalDeliver(entries)
 
-proc batchWrite*(kv: KVStore; entries: seq[mt_be.CfKey]) {.gcsafe, raises: [CatchableError].} =
+proc batchWrite*(kv: KVStore; entries: seq[mt_be.CfKey]; journal: bool = true) {.gcsafe, raises: [CatchableError].} =
+  ## `journal = false`: skip the WAL for this batch — the caller already
+  ## journaled the durable subset (WAL CF-0-only on the EAVT path: the datom
+  ## is the truth, CF-1/2/3 are re-derived at replay).
   kv.bwCount += 1
   let t0 = getMonoTime()
   var needsFlush = false
-  if journaling(kv) and entries.len > 0:
+  if journal and journaling(kv) and entries.len > 0:
     kv.journalDeliver(entries)
   kv.bwJournalNs += (getMonoTime().ticks - t0.ticks)
   let t1 = getMonoTime()

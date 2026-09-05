@@ -125,6 +125,20 @@ The persistent treap uses ARC-family refcounting (`--mm:orc`), so node lifetime 
 governed by atomic reference counting. `insert` does path-copying — old versions are shared, not mutated.
 Cursors hold a `TreapNode` ref directly. No snapshot registry.
 
+### Hydrated cache (M6)
+
+The treap is the memtable for ALL CFs (M1..M5 unfused — `nim_eavt/datoms.nim`
+deleted). `hydrated.nim` is a pure READ cache: a flat byte buffer per entry
+(concatenated active CF-0 keys + `int32` offsets), LRU-evicted under
+`hydrated_max_bytes`. `batchWrite` mirrors every CF-0 key into the eid's
+entry (`applyKey`: upsert patches the t-suffix in place — O(klen); retract
+removes). `batchWrite` REFERENCES key bytes (treap `batchMove` contract) —
+non-arena keys (replica WAL frames, tests) route through `batchWriteForeign`,
+which copies into the memtable arena. CF-2 keys additionally mirror into the
+anchor hash (write-through, dropped at flush publish). The WAL stays CF-0-only:
+`recoverWriteState` re-derives CF-1/2/3 index keys for the replay residue
+(byte reshuffle, `deriveIndexKeys`).
+
 ### Flush
 
 Flush runs on the event loop (no thread): the `AsyncFlusher` in

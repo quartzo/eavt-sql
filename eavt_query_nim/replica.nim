@@ -17,7 +17,7 @@ import nim_memtable/treap_backend as mt_be
 import treap_cursor
 import keys as eavt_keys
 import eavt, engine
-import hydrated  # publishWatermark (M5 publish mirror)
+import hydrated  # anchor hash mirror cleanup (M6)
 import resolver
 import stats
 import msgpack_scan
@@ -65,13 +65,16 @@ proc openReplica*(dir: string): ReplicaEngine =
 
 proc refreshResolverOnSchemaWal*(r: ReplicaEngine) {.gcsafe, raises: [].}
 
-proc routeSnapshotBatch(r: ReplicaEngine; entries: var seq[eavt.EavtEntry]) {.
+proc routeSnapshotBatch(r: ReplicaEngine;
+                        keys: seq[tuple[cf: uint8, key: seq[byte]]]) {.
     gcsafe, raises: [].} =
   ## batchWrite outside the async macro — the effect system inside async
   ## does not accept `except CatchableError` for a call whose inferred
-  ## raises is the root Exception.
+  ## raises is the root Exception.  M6: owned key copies route through
+  ## batchWriteForeignKeys (batchWrite references bytes; the copies land
+  ## in the memtable arena).
   try:
-    r.store.eavt.batchWrite(entries)
+    r.store.eavt.batchWriteForeignKeys(keys)
   except CatchableError as e:
     # routing failure here is fatal to consistency — the CF-0 truth was
     # NOT stored; log loud (the stream re-snapshots on reconnect)
@@ -96,29 +99,50 @@ proc applySnapshot*(r: ReplicaEngine; sealed: seq[string]; openTail: seq[byte];
   # freed memory (255k zeroed keys on restart).
   var routedTotal = 0
   for segPath in sealed:
-    var routed: seq[eavt.EavtEntry]
+    var routed: seq[seq[byte]]
     try:
       let data = await readFileBytesAsync(segPath)  # seq[byte], async
       var records = parseJournalRecords(data)
+      var expanded: seq[tuple[cf: uint8, key: seq[byte]]]
       for rec in records:
         if rec.cf == 0 and rec.key.len >= 20:
-          routed.add eavt.EavtEntry(cf: 0, key: rec.key)
-      if routed.len > 0:
-        routeSnapshotBatch(r, routed)
-        inc routedTotal, routed.len
+          let k = rec.key.toSeq()
+          expanded.add (0'u8, k)
+          let aid = beUint32(k, 8)
+          var isRef = false
+          try:
+            let vt = r.store.eavt.valueTypeFor(aid)
+            isRef = vt.isSome and vt.get == DbTypeRef
+          except KeyError:
+            discard
+          for d in deriveIndexKeys(k, r.store.eavt.resolver.isIndexed(aid), isRef):
+            expanded.add (d.cf, d.key)
+      if expanded.len > 0:
+        routeSnapshotBatch(r, expanded)
+        inc routedTotal, expanded.len
     except CatchableError as e:
       # Tolerant by design (stream has what's needed) but durability-relevant.
       logWarn("replica", "snapshot: segment unreadable " & segPath & " (" &
         excMsg(e) & ")")
   if openTail.len > 0:
-    var routed: seq[eavt.EavtEntry]
+    var expanded: seq[tuple[cf: uint8, key: seq[byte]]]
     var records = parseJournalRecords(openTail)
     for rec in records:
       if rec.cf == 0 and rec.key.len >= 20:
-        routed.add eavt.EavtEntry(cf: 0, key: rec.key)
-    if routed.len > 0:
-      routeSnapshotBatch(r, routed)
-      inc routedTotal, routed.len
+        let k = rec.key.toSeq()
+        expanded.add (0'u8, k)
+        let aid = beUint32(k, 8)
+        var isRef = false
+        try:
+          let vt = r.store.eavt.valueTypeFor(aid)
+          isRef = vt.isSome and vt.get == DbTypeRef
+        except KeyError:
+          discard
+        for d in deriveIndexKeys(k, r.store.eavt.resolver.isIndexed(aid), isRef):
+          expanded.add (d.cf, d.key)
+    if expanded.len > 0:
+      routeSnapshotBatch(r, expanded)
+      inc routedTotal, expanded.len
   if rootName.len > 0:
     try: r.kv.publishRoot(rootName)
     except Exception as e:
@@ -134,13 +158,32 @@ proc applySnapshot*(r: ReplicaEngine; sealed: seq[string]; openTail: seq[byte];
   r.connected = true
 
 
-proc routeWalBatch(r: ReplicaEngine; entries: var seq[eavt.EavtEntry]) {.
+proc routeWalBatch(r: ReplicaEngine; keys: seq[seq[byte]]) {.
     gcsafe, raises: [].} =
   ## Same effect-system wrapper as routeSnapshotBatch (plain proc: the
   ## async macro's effect analysis does not accept `except CatchableError`
   ## for a call whose inferred raises is the root Exception).
+  ## M6: batchWrite REFERENCES the key bytes (treap memtable contract) —
+  ## WAL frames are transient, so batchWriteForeignKeys copies each key
+  ## into the memtable arena before routing.
   try:
-    r.store.eavt.batchWrite(entries)
+    var expanded: seq[tuple[cf: uint8, key: seq[byte]]]
+    for k in keys:
+      expanded.add (0'u8, k)
+      # M6: the WAL carries the datom (CF-0) only — the replica derives the
+      # index keys for its volatile window (the primary's flush brings the
+      # durable set via the adopted root).  Resolver is fresh: schema
+      # datoms refreshed before routing.
+      let aid = beUint32(k, 8)
+      var isRef = false
+      try:
+        let vt = r.store.eavt.valueTypeFor(aid)
+        isRef = vt.isSome and vt.get == DbTypeRef
+      except KeyError:
+        discard  # unknown aid: not a ref (best-effort derivation)
+      for d in deriveIndexKeys(k, r.store.eavt.resolver.isIndexed(aid), isRef):
+        expanded.add (d.cf, d.key)
+    r.store.eavt.batchWriteForeignKeys(expanded)
   except CatchableError as e:
     # CF-0 truth NOT stored for this chunk — log loud; the reconnect
     # re-snapshot repairs.
@@ -178,15 +221,15 @@ proc applyWal*(r: ReplicaEngine; data: seq[byte]) {.gcsafe, raises: [].} =
       logWarn("replica", "refresh resolver pós-schema falhou (" & e.msg &
         "); attrs faltantes re-derivam no próximo chunk de schema")
 
-  # Route CF-0 truth through the unified write path (vector + entries +
-  # anchor hash).  The KeyRef borrows into `records`' arena-backed keys —
-  # batchWrite copies them into the vector chunks immediately.
-  var entries: seq[eavt.EavtEntry]
+  # Route CF-0 truth through the unified write path (treap memtable +
+  # hydrated mirror + anchor hash).  Owned copies: the borrowed KeyRefs die
+  # with `data`; batchWriteForeign copies into the memtable arena.
+  var keys: seq[seq[byte]]
   for rec in records:
     if rec.cf == 0 and rec.key.len >= 20:
-      entries.add eavt.EavtEntry(cf: 0, key: rec.key)
-  if entries.len > 0:
-    routeWalBatch(r, entries)
+      keys.add rec.key.toSeq()
+  if keys.len > 0:
+    routeWalBatch(r, keys)
 
 proc applySeal*(r: ReplicaEngine) =
   inc r.evSealCount
@@ -212,11 +255,10 @@ proc applyRoot*(r: ReplicaEngine; rootName: string; maxT: int64) =
     if not r.kv.rootHasData():
       logInfo("replica", "root " & rootName & " is empty — watermark not advanced")
       return
-    # M5: mirror the primary's publish — hyd bookkeeping FIRST (drops
-    # drained partial entries), then the vector's reclaim, then hash
-    # entries ≤ maxT (durable in the adopted root).
-    r.store.eavt.hyd.publishWatermark(maxT)
-    r.store.eavt.dvec.publish(maxT)
+    # M6: mirror the primary's publish — the anchor hash entries ≤ maxT are
+    # durable in the adopted root and are dropped (their probe answer falls
+    # back to the CF-2 scan).  The treap is the memtable on both nodes; no
+    # hyd/vector watermark bookkeeping remains.
     var toDel: seq[seq[byte]]
     for pfx, meta in r.store.eavt.anchorHash:
       if meta[1] <= maxT: toDel.add(pfx)

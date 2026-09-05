@@ -582,15 +582,10 @@ proc flushNowAsync*(f: AsyncFlusher): Future[void] {.async.} =
     # It publishes our writes only if they were captured by it; writes after
     # ITS capture need another pass — the runner re-iterates, so just return.
     return
-  # Hyd memtable drain (M1): collect hydrated entries' keys between capture
-  # and commit (they never entered the treap).  Collected on the loop — the
-  # set's single-thread owner.
-  var extra: seq[(int, seq[seq[byte]])]
+  # Commit watermark: computed from the flushed keys (M6 — the treap is the
+  # memtable for all CFs; no engine collect hook).  Write-through mirrors
+  # (anchor hash) drop entries ≤ maxT after publish.
   var collectedMaxT: int64 = -1
-  if kv.onFlushCollect != nil:
-    let c = kv.onFlushCollect()
-    extra = c.keysByCf
-    collectedMaxT = c.maxT
   # Route: pure key-only flushes (no live KV roots) run drain+commit on the
   # flush worker thread; anything with KV data stays on the loop (the worker
   # writes the root once, so it must not race a KV commit's root write).
@@ -599,19 +594,15 @@ proc flushNowAsync*(f: AsyncFlusher): Future[void] {.async.} =
     if roots[cf] != nil: hasKv = true; break
   if hasKv:
     let drained = await drainTreapAsync(kv, roots)
-    var keysByCf = drained.keysByCf
-    if extra.len > 0:
-      for (ecf, ek) in extra:
-        var found = false
-        for i in 0 ..< keysByCf.len:
-          if keysByCf[i][0] == ecf:
-            keysByCf[i][1] &= ek
-            found = true
-            break
-        if not found and ek.len > 0: keysByCf.add (ecf, ek)
-      for i in 0 ..< keysByCf.len:
-        if keysByCf[i][1].len > 1:
-          keysByCf[i][1].sort(mt_be.cmpKeysByte)
+    let keysByCf = drained.keysByCf
+    for (cf, keys) in keysByCf:
+      if cf >= 10: continue
+      for k in keys:
+        if k.len < 8: continue
+        var sf = 0'u64
+        for b in k[k.len - 8 ..< k.len]: sf = (sf shl 8) or uint64(b)
+        let kt = (sf shr 1).int64
+        if kt > collectedMaxT: collectedMaxT = kt
     if keysByCf.len > 0:
       await commitMergeAsync(f.pool, kv.ps, keysByCf, true)
     if drained.pairsByCf.len > 0 or drained.deletedByCf.len > 0:
@@ -619,8 +610,9 @@ proc flushNowAsync*(f: AsyncFlusher): Future[void] {.async.} =
                                drained.deletedByCf, true)
   else:
     let res = await f.worker.runFlush(kv.numCf, roots, kv.ps[].trees,
-                                      kv.ps[].blobs, kv.flushArena, extra)
+                                      kv.ps[].blobs, kv.flushArena, @[])
     if res.ok:
+      collectedMaxT = res.maxT
       kv.ps[].trees = res.trees
       kv.ps[].currentRoot = res.rootName
       journalTruncate(kv.ps[])

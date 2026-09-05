@@ -147,18 +147,10 @@ proc walRecord(cf: uint8; key: seq[byte]): seq[byte] =
 
 proc collectSchemaWal(eng: EavtEngine): seq[byte] =
   ## Extrai as keys db.* (cf 1, AEVT) do engine e monta os bytes wal.
-  ## M5: db.* CF-1 pendentes são DERIVADOS do vetor de datoms.
+  ## M6: CF-1 é chave real no treap — o scan cru direto.
   for aid in [DbIdentAid, DbValueTypeAid, DbCardinalityAid, DbUniqueAid]:
     for k in eng.scanPrefix(1, @[0'u8, 0'u8, 0'u8, byte(aid)]):
       result.add walRecord(1'u8, k)
-    for d in eng.dvec.drainFromT(0):
-      if d.len >= 12 and beUint32(d, 8) == aid:
-        # derive CF-1 [aid][eid][val][sf] from the canonical datom
-        var k1 = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
-                  byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
-        k1.add d[0 ..< 8]
-        k1.add d[12 ..< d.len]
-        result.add walRecord(1'u8, k1)
 
 proc schemaAids(): array[4, uint32] =
   [DbIdentAid, DbCardinalityAid, DbValueTypeAid, DbUniqueAid]
@@ -374,12 +366,8 @@ suite "eavt: cursor semantics under concurrent writes":
       discard eng.eavtSave(eid, "cur.attr", "v" & $i, i.int64)
     check eng.hyd.probeComplete(eid)
 
-    # open a full-range CF-0 cursor (hyd mock source joins the merge)
+    # open a full-range CF-0 cursor (M6: o treap CF-0 tem todas as chaves)
     var mc = eng.kv.openScanCursor(0)
-    mc.hyd = eng.hyd
-    var all = eng.hyd.allKeys()
-    all.sort(cmpKeysByte)
-    mc.addSource(mockCursor(all))
     discard mergedCursor(mc)
     mc.seek(@[])
 
@@ -497,19 +485,15 @@ suite "eavt: cursor semantics under concurrent writes":
 
 suite "eavt: replica write-path unification (M5 F3 acceptance)":
   proc collectCf0Keys(eng: EavtEngine; fromPrefix: seq[byte] = @[]): seq[seq[byte]] =
-    ## The WAL payload equivalent: the CF-0 keys of A's memtable (the
-    ## vector is the CF-0 memtable under M5).
-    result = @[]
-    for k in eng.hyd.allKeys():
-      if fromPrefix.len == 0 or (k.len >= fromPrefix.len and
-                                 k[0 ..< fromPrefix.len] == fromPrefix):
-        result.add k
+    ## The WAL payload equivalent: the CF-0 keys of A's memtable (M6: the
+    ## treap IS the CF-0 memtable).
+    eng.scanPrefix(0, fromPrefix)
 
   ## F0-b (latente) → F3 (corrigido): the replica's applyWal now routes
-  ## through the SAME batchWrite as the primary (datom vector + hydrated
-  ## entries + anchor hash) — the read path's invariant (probeComplete →
+  ## through the SAME batchWrite as the primary (treap memtable + hydrated
+  ## mirror + anchor hash) — the read path's invariant (probeComplete →
   ## authoritative) is maintained by the code that maintains it on the
-  ## primary.  WAL datoms for an already-hydrated eid land in the entry:
+  ## primary.  WAL datoms for an already-hydrated eid land in the mirror:
   ## read-your-writes holds on both nodes.
 
   test "replica flow: hydrate → wal write same eid → read sees wal datom":
@@ -526,13 +510,9 @@ suite "eavt: replica write-path unification (M5 F3 acceptance)":
     let engB = newEavtEngine(kvB)
     engB.bootstrapResolver()
     block:
-      let keysA = engA.collectCf0Keys()
-      var entries: seq[EavtEntry] = @[]
-      for k in keysA:
-        entries.add EavtEntry(cf: 0,
-          key: KeyRef(p: cast[ptr UncheckedArray[byte]](unsafeAddr k[0]),
-                      len: k.len))
-      engB.batchWrite(entries)
+      # M6: batchWrite references bytes — chaves estranhas (não-arena) vão
+      # por batchWriteForeign (cópia para a arena do memtable).
+      engB.batchWriteForeign(engA.collectCf0Keys())
 
     # first read on B hydrates the eid (lookup-value hostfn path)
     engB.hydrateEid(eid)
@@ -544,13 +524,7 @@ suite "eavt: replica write-path unification (M5 F3 acceptance)":
     # entry receives the new slot (the stale-hyd bug of M1..M4 is gone)
     discard engA.eavtSave(eid, "rep.attr", "V2", 2)
     block:
-      let keysA2 = engA.collectCf0Keys(encodeEid(eid))
-      var entries2: seq[EavtEntry] = @[]
-      for k in keysA2:
-        entries2.add EavtEntry(cf: 0,
-          key: KeyRef(p: cast[ptr UncheckedArray[byte]](unsafeAddr k[0]),
-                      len: k.len))
-      engB.batchWrite(entries2)
+      engB.batchWriteForeign(engA.collectCf0Keys(encodeEid(eid)))
 
     # post-WAL read on B: the WAL datom IS visible (unified write path)
     let v2 = engB.scanPrefixActive(0, encodeEid(eid))
@@ -617,15 +591,11 @@ suite "eavt: hydrated eid source":
     let eid = eng.allocateEntityId()
     discard eng.eavtSave(eid, "hyd.evict", "data", 1)
     check eng.scanPrefixActive(0, encodeEid(eid)).len == 1
-    # M1: a dirty entry IS the memtable for its eid — pinned until drained.
-    eng.hyd.evictEid(eid)
-    check eng.hyd.contains(eid)
-    # flush drains hyd → pagestore (self-installed hooks) → entry clean
-    eng.kv.flush()
-    check not eng.hyd.contains(eid) or not eng.hyd.isDirty(eid)
+    # M6: a entrada é cache puro — descartar é sempre seguro (o treap é o
+    # memtable e responde).
     eng.hyd.evictEid(eid)
     check not eng.hyd.contains(eid)
-    # slow path answers identically from the pagestore
+    # slow path answers identically from the treap/pagestore
     check eng.scanPrefixActive(0, encodeEid(eid)).len == 1
     # re-hydration on demand restores membership
     eng.hydrateEid(eid)
