@@ -13,8 +13,7 @@ import chronos
 import chronos_file
 import msgpack4nim
 import kvstore
-import nim_memtable/treap_backend as mt_be
-import treap_cursor
+import nim_memtable/memtypes
 import keys as eavt_keys
 import eavt, engine
 import hydrated  # anchor hash mirror cleanup (M6)

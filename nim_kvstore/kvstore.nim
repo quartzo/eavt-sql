@@ -16,8 +16,9 @@ import logutil
 
 import std/atomics
 
-import nim_memtable/treap_backend as mt_be
-import treap_cursor
+import nim_memtable/memtypes as mt_be
+import nim_memtable/runs
+import nim_memtable/run_cursor
 import page_cursor
 import query/cursor
 export cursor
@@ -28,10 +29,9 @@ export cursor
 type
   KVStore* = ref object
     ps*: ptr PageStoreInner
-    mt*: mt_be.MemTable
+    mt*: runs.MemTable
     mtSize*: uint64
-    flushRoots*: seq[mt_be.TreapNode]
-    flushArena*: mt_be.Arena   ## captured arena held alive during the drain
+    flushActive*: bool         ## capture em voo (runs draining aguardando publish)
     config*: Table[string, string]
     path*: string
     readOnly*: bool
@@ -237,14 +237,12 @@ proc journalHasSchemaRecords*(data: openArray[byte]; schemaAids: openArray[uint3
   false
 
 proc sealLiveToFlush*(kv: KVStore) {.gcsafe.} =
-  ## Seal the live memtable into flushRoots (the first half of kv.flush).
+  ## Seal the live memtable into draining runs (the first half of kv.flush).
   ## Used by the replication replica when the server signals a seal event:
-  ## the current live treap becomes the "pending" treap (will be discarded
-  ## when the next root publish arrives) and a fresh live treap takes over.
-  kv.flushArena = kv.mt.hnd.arena
-  kv.mt.hnd.arena = mt_be.newArena()
-  kv.flushRoots = kv.mt.hnd.live
-  kv.mt.clear()
+  ## os runs ativos viram "pending" (descartados quando o próximo root
+  ## publish chega) e o delta recomeça vazio.
+  kv.mt.freezeAll()
+  kv.flushActive = true
   kv.mtSize = 0
 
 
@@ -274,8 +272,8 @@ proc publishRoot*(kv: KVStore; rootName: string) {.gcsafe.} =
     else:
       logWarn("replica-root", rootName & " LOAD FAILED")
   if loaded:
-    kv.flushRoots = @[]
-    kv.flushArena = nil
+    kv.mt.publish()
+    kv.flushActive = false
     kv.mtSize = 0
 
 
@@ -291,7 +289,7 @@ proc newKVStore*(config: Table[string, string]): KVStore =
   let ps = newPageStore(cfg)
   if ps == nil: return nil
   let numCf = parseInt(cfg["num_cf"])
-  let mt = mt_be.newMemTable(numCf)
+  let mt = runs.newMemTable(numCf)
   if mt == nil: closePageStore(ps); return nil
   result = KVStore()
   result.ps = ps; result.mt = mt
@@ -430,12 +428,7 @@ proc put*(kv: KVStore; cf: int; key: openArray[byte]) {.gcsafe.} =
 proc get*(kv: KVStore; cf: int; key: openArray[byte]): bool {.gcsafe.} =
   var k = newSeq[byte](key.len)
   if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
-  var liveRoot = kv.mt.hnd.live[cf]
-  var flushRoot: mt_be.TreapNode
-  if kv.flushRoots.len > 0:
-    flushRoot = kv.flushRoots[cf]
-  if liveRoot != nil and mt_be.containsKey(liveRoot, k): return true
-  if flushRoot != nil and mt_be.containsKey(flushRoot, k): return true
+  if kv.mt.containsAny(cf, k): return true
   keyExists(kv.ps[], cf, k)
 
 proc putKv*(kv: KVStore; cf: int; key, value: openArray[byte]) {.gcsafe.} =
@@ -479,25 +472,16 @@ proc putKv*(kv: KVStore; cf: int; key, value: openArray[byte]) {.gcsafe.} =
 proc getKv*(kv: KVStore; cf: int; key: openArray[byte]): Option[seq[byte]] {.gcsafe.} =
   var k = newSeq[byte](key.len)
   if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
-  var liveRoot = kv.mt.hnd.live[cf]
-  var flushRoot: mt_be.TreapNode
-  if kv.flushRoots.len > 0:
-    flushRoot = kv.flushRoots[cf]
-  if liveRoot != nil:
-    let v = mt_be.getValue(liveRoot, k)
-    if v.isSome: return v
-    # Check if key exists but is a tombstone
-    if mt_be.containsKey(liveRoot, k): return none(seq[byte])
-  if flushRoot != nil:
-    let v = mt_be.getValue(flushRoot, k)
-    if v.isSome: return v
-    if mt_be.containsKey(flushRoot, k): return none(seq[byte])
+  case kv.mt.lookupKv(cf, k)
+  of klValue: return kv.mt.getValue(cf, k)
+  of klDeleted: return none(seq[byte])
+  of klAbsent: discard
   keyExistsKv(kv.ps[], cf, k)
 
 proc deleteKv*(kv: KVStore; cf: int; key: openArray[byte]) {.gcsafe.} =
   var k = newSeq[byte](key.len)
   if key.len > 0: copyMem(addr k[0], unsafeAddr key[0], key.len)
-  mt_be.deleteKv(kv.mt, cf, k)
+  kv.mt.deleteKv(cf, k)
   if journaling(kv):
     var jk = newSeq[byte](1 + key.len)
     jk[0] = byte(cf)
@@ -526,15 +510,13 @@ proc deleteKv*(kv: KVStore; cf: int; key: openArray[byte]) {.gcsafe.} =
 
 proc flush*(kv: KVStore) {.gcsafe.} =
   if kv.readOnly: return
-  var roots: seq[mt_be.TreapNode]
   var sealBoundary: int64 = -1
   # Single-threaded: capture runs atomically before next await.
-  if kv.flushRoots.len > 0: return
-  roots = kv.mt.hnd.live
-  kv.flushArena = kv.mt.hnd.arena
-  kv.mt.hnd.arena = mt_be.newArena()
-  kv.mt.clear(); kv.mtSize = 0
-  kv.flushRoots = roots
+  if kv.flushActive: return
+  # M8 capture: delta → run, ativos → draining (legíveis até o publish).
+  kv.mt.freezeAll()
+  kv.flushActive = true
+  kv.mtSize = 0
   # Seal the WAL segment at the capture boundary: records applied after
   # this point land in the NEXT segment and survive until their own flush
   # publishes.
@@ -546,32 +528,15 @@ proc flush*(kv: KVStore) {.gcsafe.} =
   var pairsByCf: seq[(int, seq[(seq[byte], seq[byte])])] = @[]
   var deletedByCf: seq[(int, seq[seq[byte]])] = @[]
   for cf in 0..<kv.numCf:
-    if roots[cf] != nil:
-      if cf >= 10:
-        var pairs: seq[(seq[byte], seq[byte])] = @[]
-        var deleted: seq[seq[byte]] = @[]
-        let tc = newTreapCursor(roots[cf], kv.flushArena)
-        while not tc.atEnd:
-          let kvp = tc.nextKv()
-          if kvp.isSome:
-            let (key, val) = kvp.get
-            pairs.add (key, val)
-        # Collect tombstones from the same treap
-        let tc2 = newTreapCursor(roots[cf], kv.flushArena)
-        while not tc2.atEnd:
-          let dk = tc2.nextDeleted()
-          if dk.isSome: deleted.add(dk.get)
-        if pairs.len > 0: pairsByCf.add (cf, pairs)
-        if deleted.len > 0: deletedByCf.add (cf, deleted)
-      else:
-        var keys: seq[seq[byte]] = @[]
-        let tc = newTreapCursor(roots[cf], kv.flushArena)
-        while not tc.atEnd:
-          let k = tc.next()
-          if k.isSome: keys.add(k.get)
-        if keys.len > 1:
-          keys.sort(mt_be.cmpKeysByte)
-        if keys.len > 0: keysByCf.add (cf, keys)
+    let cfRuns = kv.mt.draining[cf]
+    if cfRuns.len == 0: continue
+    if cf >= 10:
+      let (pairs, deleted) = drainKvSorted(cfRuns)
+      if pairs.len > 0: pairsByCf.add (cf, pairs)
+      if deleted.len > 0: deletedByCf.add (cf, deleted)
+    else:
+      let keys = drainSorted(cfRuns)
+      if keys.len > 0: keysByCf.add (cf, keys)
   # Commit watermark: the max datom t across the flushed keys (all datom CFs
   # carry the 8B suffix). Write-through mirrors (anchor hash) drop entries
   # ≤ maxT — they are durable in the pagestore now.
@@ -587,7 +552,9 @@ proc flush*(kv: KVStore) {.gcsafe.} =
   if pairsByCf.len > 0 or deletedByCf.len > 0:
     commitMergeKv(kv.ps[], pairsByCf, deletedByCf, true)
   # Single-threaded publish — runs atomically before next await.
-  kv.flushRoots = @[]; kv.flushArena = nil; kv.mtSize = 0
+  kv.mt.publish()
+  kv.flushActive = false
+  kv.mtSize = 0
   # Publish done: everything before the seal boundary is durable in the
   # PageStore — the sealed WAL segment may be deleted on the next WAL cycle.
   if sealBoundary >= 0:
@@ -667,67 +634,60 @@ proc printBwPerf*(kv: KVStore) =
 
 # ── Streaming scan entry point ──
 
+proc runSources(kv: KVStore; cf: int): seq[Cursor] =
+  ## Fontes de runs de um CF (draining primeiro — mais antiga — depois os
+  ## ativos). RunCursor por run; a ordem é irrelevante para o merge exato
+  ## do MergedCursor.
+  kv.mt.ensureMaterialized(cf)
+  var sources: seq[Cursor] = @[]
+  for r in kv.mt.draining[cf]:
+    sources.add runCursor(newRunCursor(r))
+  for r in kv.mt.runs[cf]:
+    sources.add runCursor(newRunCursor(r))
+  sources
+
 proc openScanCursor*(kv: KVStore; cf: int): MergedCursor {.gcsafe.} =
-  ## Create MergedCursor with fixed layout: 0=PageStore, 1=flush, 2=live.
-  ## update() assumes this layout for in-place source updates.
-  var psSnap: PageStoreSnapshot
-  var flushRoot, liveRoot: mt_be.TreapNode
-
+  ## Create MergedCursor with fixed layout: 0=PageStore, 1..=runs.
+  ## update() assumes this layout for in-place source updates (runs são
+  ## re-coletadas quando mt.gen muda).
   var tree = kv.ps[].trees[cf]
-  psSnap = PageStoreSnapshot(rootUuid: tree.rootUuid, height: tree.height)
-  if kv.flushRoots.len > 0:
-    flushRoot = kv.flushRoots[cf]
-  liveRoot = kv.mt.hnd.live[cf]
+  let psSnap = PageStoreSnapshot(rootUuid: tree.rootUuid, height: tree.height)
 
-  # Always create all 3 sources — update() assumes fixed indices
   var sources: seq[Cursor] = @[]
   sources.add pageStoreCursor(PageStoreCursor(
     s: kv.ps, cf: cf, rootUuid: psSnap.rootUuid, height: psSnap.height,
     isKv: cf >= 10))
-  sources.add treapCursor(newTreapCursor(flushRoot, kv.flushArena))
-  sources.add treapCursor(newTreapCursor(liveRoot, kv.mt.hnd.arena))
+  for src in kv.runSources(cf): sources.add(src)
 
   result = newMergedCursor(sources)
   result.cf = cf
   result.psRootUuid = psSnap.rootUuid
   result.psHeight = psSnap.height
-  result.flushRoot = flushRoot
-  result.liveRoot = liveRoot
+  result.runGen = kv.mt.gen
 
 proc openScanCursorKv*(kv: KVStore; cf: int): MergedCursor {.gcsafe.} =
   ## Open a scan cursor for key-value CFs (>= 10). Returns a MergedCursor
   ## with isKv=true; use peekKv/nextKv to read (key, value) pairs.
-  ##
-  ## Implementation: manually merges PageStore + flushRoot + liveRoot,
-  ## skipping tombstones from Treap sources. The PageStore is assumed to
-  ## have no tombstones (they are removed during flush).
-  var sources: seq[Cursor] = @[]
-
-  var psSnap: PageStoreSnapshot
-  var flushRoot, liveRoot: mt_be.TreapNode
-
+  ## Tombstones são filtradas pelo próprio RunCursor (ckRunKv).  A
+  ## PageStore é assumida sem tombstones (removidas no flush).
+  kv.mt.ensureMaterialized(cf)
   var tree = kv.ps[].trees[cf]
-  psSnap = PageStoreSnapshot(rootUuid: tree.rootUuid, height: tree.height)
-  if kv.flushRoots.len > 0:
-    flushRoot = kv.flushRoots[cf]
-  liveRoot = kv.mt.hnd.live[cf]
+  let psSnap = PageStoreSnapshot(rootUuid: tree.rootUuid, height: tree.height)
 
+  var sources: seq[Cursor] = @[]
   if psSnap.rootUuid != default(array[16, byte]):
     var psc = PageStoreCursor(
       s: kv.ps, cf: cf, rootUuid: psSnap.rootUuid, height: psSnap.height,
       isKv: true)
     sources.add pageStoreCursor(psc)
-
-  if flushRoot != nil:
-    let tc = newTreapCursor(flushRoot, kv.flushArena)
-    if not tc.atEnd:
-      # Wrap in a cursor that filters tombstones via peekKv/nextKv
-      sources.add treapKvCursor(tc)
-
-  if liveRoot != nil:
-    let tc = newTreapCursor(liveRoot, kv.mt.hnd.arena)
-    if not tc.atEnd:
-      sources.add treapKvCursor(tc)
+  for r in kv.mt.draining[cf]:
+    sources.add runKvCursor(newRunCursor(r))
+  for r in kv.mt.runs[cf]:
+    sources.add runKvCursor(newRunCursor(r))
 
   result = newMergedCursor(sources)
   result.isKv = true
+  result.cf = cf
+  result.psRootUuid = psSnap.rootUuid
+  result.psHeight = psSnap.height
+  result.runGen = kv.mt.gen

@@ -5,7 +5,7 @@
 import std/[strutils]
 import resolver
 import scheme  # for PartDb, PartUser, PartTx, partitionOf, makeEntityId
-import nim_memtable/treap_backend  # Arena, KeyRef, allocKeyBytes
+import nim_memtable/memtypes
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Encode mode

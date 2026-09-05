@@ -10,7 +10,7 @@
 # Storage stack
 import nim_blobstore/file/test_file
 import nim_blobstore/journal/test_journal
-import nim_memtable/test_memtable
+import nim_memtable/test_runs
 import nim_page_store/test_page_store
 import nim_kvstore/test_kvstore
 import nim_eavt/test_eavt

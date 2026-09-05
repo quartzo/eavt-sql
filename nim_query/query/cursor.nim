@@ -6,8 +6,9 @@
 import std/[options, tables, algorithm]
 import page_store    # cmpSeq
 import page_cursor   # PageStoreCursor, PageStoreSnapshot
-import treap_cursor  # TreapCursor
-import nim_memtable/treap_backend  # TreapNode
+import nim_memtable/memtypes  # Key/Value, cmpKeysByte
+import nim_memtable/runs  # Run (M8)
+import nim_memtable/run_cursor  # RunCursor
 import hydrated  # HydratedEntry/HydratedSet (M1/M6 flat)
 import keys  # decodeEid/beUint64
 
@@ -61,8 +62,8 @@ proc len*(h: MinHeap): int = h.data.len
 type
   CursorKind* = enum
     ckPageStore
-    ckTreap
-    ckTreapKv  ## Treap cursor that filters tombstones via peekKv/nextKv
+    ckRun
+    ckRunKv  ## Run cursor that filters tombstones via peekKv/nextKv (M8)
     ckMerged
     ckHyd      ## Hydrated entry cursor (M1/M6): iterates the entry's flat
                ## CF-0 buffer — the eid's cached active set.  All keys are
@@ -87,8 +88,7 @@ type
     cf*: int
     psRootUuid*: array[16, byte]
     psHeight*: uint8
-    flushRoot*: TreapNode
-    liveRoot*: TreapNode
+    runGen*: uint64   ## mt.gen na abertura — runs são re-coletadas se mudou
     # M1/M6 hyd mode: CF-0 seeks to a hydrated eid are served from the
     # entry's flat buffer; baseSources are parked (kept for fallback when
     # a later seek anchors at a non-hydrated eid... actually M6 entries
@@ -110,10 +110,10 @@ type
     case kind*: CursorKind
     of ckPageStore:
       ps*: PageStoreCursor
-    of ckTreap:
-      tc*: TreapCursor
-    of ckTreapKv:
-      tckv*: TreapCursor
+    of ckRun:
+      rc*: RunCursor
+    of ckRunKv:
+      rckv*: RunCursor
     of ckMerged:
       mc*: MergedCursor
     of ckHyd:
@@ -132,7 +132,10 @@ proc currentPair*(c: Cursor): Option[(seq[byte], seq[byte])] {.gcsafe.}
 proc step*(c: Cursor) {.gcsafe.}
 proc seek*(c: Cursor; target: seq[byte]) {.gcsafe.}
 proc invalidate*(c: Cursor) {.gcsafe.}
+proc runCursor*(rc: RunCursor): Cursor {.gcsafe.}
+proc runKvCursor*(rc: RunCursor): Cursor {.gcsafe.}
 proc mockCursor*(keys: seq[seq[byte]]): Cursor {.gcsafe.}
+proc mockCursor*(keys: RunKeys): Cursor {.gcsafe.}
 
 # ── HydCursor (M1/M6) — iterate a hydrated entry's flat CF-0 buffer ──────────
 
@@ -267,11 +270,12 @@ proc seek*(mc: MergedCursor; target: seq[byte]) {.gcsafe.} =
   mc.advance()
 
 proc update*(mc: MergedCursor; psRootUuid: array[16, byte]; psHeight: uint8;
-             flushRoot: TreapNode; flushArena: Arena;
-             liveRoot: TreapNode; liveArena: Arena) {.gcsafe.} =
+             draining: seq[Run]; active: seq[Run]; runGen: uint64) {.gcsafe.} =
   ## Update cursor in-place to reflect new roots. Same semantics as creating
   ## a new cursor: reset to initial state, ready to read first element.
   ## Caller must seek() before iterating. Zero allocations when roots unchanged.
+  ## M8: os runs são congelados — fontes só são re-coletadas quando mt.gen
+  ## muda; a PageStore atualiza in-place como antes.
   # In hyd mode the base sources are parked — update their roots so a later
   # exitHydMode resumes from current state.
   let src = if mc.hydMode: mc.baseSources else: mc.sources
@@ -281,15 +285,15 @@ proc update*(mc: MergedCursor; psRootUuid: array[16, byte]; psHeight: uint8;
       src[0].ps.update(psRootUuid, psHeight)
       mc.psRootUuid = psRootUuid
       mc.psHeight = psHeight
-  # Source 1: flush treap
-  if src.len > 1 and src[1].kind == ckTreap:
-    if mc.flushRoot != flushRoot:
-      src[1].tc.update(flushRoot, flushArena)
-      mc.flushRoot = flushRoot
-  # Source 2: live treap — always changes (new datoms written)
-  if src.len > 2 and src[2].kind == ckTreap:
-    src[2].tc.update(liveRoot, liveArena)
-    mc.liveRoot = liveRoot
+  # Sources 1..: runs — re-coletadas apenas quando a geração muda
+  if mc.runGen != runGen:
+    mc.runGen = runGen
+    var target = if mc.hydMode: mc.baseSources else: mc.sources
+    if target.len > 1:
+      target.setLen(1)            # solta os RunCursors antigos, mantém a ps
+    for r in draining: target.add(runCursor(newRunCursor(r)))
+    for r in active: target.add(runCursor(newRunCursor(r)))
+    if mc.hydMode: mc.baseSources = target else: mc.sources = target
   # Reset to initial state — same as newMergedCursor
   mc.heap.data.setLen(0)
   mc.lastKey.setLen(0)
@@ -302,8 +306,8 @@ proc update*(mc: MergedCursor; psRootUuid: array[16, byte]; psHeight: uint8;
 proc isValid*(c: Cursor): bool {.gcsafe.} =
   case c.kind
   of ckPageStore: not c.ps.atEnd
-  of ckTreap: not c.tc.atEnd
-  of ckTreapKv: not c.tckv.atEnd
+  of ckRun: not c.rc.atEnd
+  of ckRunKv: not c.rckv.atEnd
   of ckMerged: not c.mc.atEnd
   of ckHyd: c.hc.pos < entryKeyCount(c.hc.e)
   of ckMock: c.mockPos < c.mockKeysRef.keys.len
@@ -312,9 +316,9 @@ proc isValid*(c: Cursor): bool {.gcsafe.} =
 proc currentKey*(c: Cursor): Option[seq[byte]] {.gcsafe.} =
   case c.kind
   of ckPageStore: c.ps.peek()
-  of ckTreap: c.tc.peek()
-  of ckTreapKv:
-    let kvp = c.tckv.peekKv()
+  of ckRun: c.rc.peek()
+  of ckRunKv:
+    let kvp = c.rckv.peekKv()
     if kvp.isSome: some(kvp.get[0]) else: none[seq[byte]]()
   of ckMerged: c.mc.peek()
   of ckHyd: hydCursorCurrent(c.hc)
@@ -326,8 +330,8 @@ proc currentKey*(c: Cursor): Option[seq[byte]] {.gcsafe.} =
 proc currentPair*(c: Cursor): Option[(seq[byte], seq[byte])] {.gcsafe.} =
   case c.kind
   of ckPageStore: c.ps.peekKv()
-  of ckTreap: c.tc.peekKv()
-  of ckTreapKv: c.tckv.peekKv()
+  of ckRun: none((seq[byte], seq[byte]))
+  of ckRunKv: c.rckv.peekKv()
   of ckMerged: c.mc.peekKv()
   of ckHyd: none((seq[byte], seq[byte]))
   of ckMock: none((seq[byte], seq[byte]))
@@ -336,8 +340,8 @@ proc currentPair*(c: Cursor): Option[(seq[byte], seq[byte])] {.gcsafe.} =
 proc step*(c: Cursor) {.gcsafe.} =
   case c.kind
   of ckPageStore: discard c.ps.next()
-  of ckTreap: discard c.tc.next()
-  of ckTreapKv: discard c.tckv.nextKv()
+  of ckRun: discard c.rc.next()
+  of ckRunKv: discard c.rckv.nextKv()
   of ckMerged: discard c.mc.next()
   of ckHyd: inc c.hc.pos
   of ckMock: inc c.mockPos
@@ -346,8 +350,8 @@ proc step*(c: Cursor) {.gcsafe.} =
 proc seek*(c: Cursor; target: seq[byte]) {.gcsafe.} =
   case c.kind
   of ckPageStore: c.ps.seek(target)
-  of ckTreap: c.tc.seek(target)
-  of ckTreapKv: c.tckv.seek(target)
+  of ckRun: c.rc.seek(target)
+  of ckRunKv: c.rckv.seek(target)
   of ckMerged: c.mc.seek(target)
   of ckHyd: hydCursorSeek(c.hc, target)
   of ckMock:
@@ -375,8 +379,8 @@ proc seek*(c: Cursor; target: seq[byte]) {.gcsafe.} =
 proc invalidate*(c: Cursor) {.gcsafe.} =
   case c.kind
   of ckPageStore: c.ps.atEnd = true
-  of ckTreap: c.tc.atEnd = true
-  of ckTreapKv: c.tckv.atEnd = true
+  of ckRun: c.rc.setAtEnd(true)
+  of ckRunKv: c.rckv.setAtEnd(true)
   of ckMerged: c.mc.atEnd = true
   of ckHyd: c.hc.pos = entryKeyCount(c.hc.e)
   of ckMock: c.mockPos = c.mockKeysRef.keys.len
@@ -387,12 +391,12 @@ proc invalidate*(c: Cursor) {.gcsafe.} =
 proc pageStoreCursor*(psc: PageStoreCursor): Cursor =
   Cursor(kind: ckPageStore, ps: psc)
 
-proc treapCursor*(tc: TreapCursor): Cursor =
-  Cursor(kind: ckTreap, tc: tc)
+proc runCursor*(rc: RunCursor): Cursor =
+  Cursor(kind: ckRun, rc: rc)
 
-proc treapKvCursor*(tc: TreapCursor): Cursor =
-  ## Wrap a TreapCursor for key-value scan, filtering tombstones.
-  Cursor(kind: ckTreapKv, tckv: tc)
+proc runKvCursor*(rc: RunCursor): Cursor =
+  ## Wrap a RunCursor for key-value scan, filtering tombstones.
+  Cursor(kind: ckRunKv, rckv: rc)
 
 proc mergedCursor*(mc: MergedCursor): Cursor =
   Cursor(kind: ckMerged, mc: mc)

@@ -57,7 +57,7 @@ nim_edn/                    # EDN reader → SExpr (Datomic-style tx-data)
 nim_query/                  # Scanner, hostfns (22 ops), leapfrog triejoin
 nim_eavt/                   # EAVT engine: save/retract + resolver + constraints
 nim_kvstore/                # KVStore + MergedCursor (sync + async twin in async/ subdir)
-nim_memtable/               # Per-CF COW treap (ARC-managed)
+nim_memtable/               # Run-ladder memtable (M8) + anchor index packed hash
 nim_page_store/             # COW B-tree, zstd-compressed pages, LRU cache
 nim_blobstore/              # file / S3 backends + journal + async facade (no memory backend)
 build/                      # Compiled binaries (gitignored)
@@ -119,11 +119,17 @@ BlobStore (Memory / File / S3)
 - **Strings:** 8+1 block encoding (`encodeVariable` / `decodeVariableStr`)
 - **Bytes/Blob:** 4-byte length prefix + raw bytes
 
-### MemTable (ARC-driven COW)
+### MemTable — run ladder (M8)
 
-The persistent treap uses ARC-family refcounting (`--mm:orc`), so node lifetime is
-governed by atomic reference counting. `insert` does path-copying — old versions are shared, not mutated.
-Cursors hold a `TreapNode` ref directly. No snapshot registry.
+No treap: writes append O(1) self-contained records (`[flags][klen][key]`,
+KV adds `[vlen][value]`) into the generation arena's delta buffer. A
+materialization (scan/flush/merge, per CF) sorts only the delta into a
+frozen sorted run (bisect-ready); runs merge when the ladder passes 8.
+Capture (`freezeAll`) moves active runs to `draining` — still readable by
+cursors (ARC on the immutable `Run`) until publish. Flush drains the runs
+k-way (newest-wins dedup) into the pagestore. No readerCount, no
+path-copying — the COW treap is gone (`treap_backend.nim`/`treap_cursor.nim`
+deleted).
 
 ### Hydrated cache (M6)
 
@@ -132,12 +138,12 @@ deleted). `hydrated.nim` is a pure READ cache: a flat byte buffer per entry
 (concatenated active CF-0 keys + `int32` offsets), LRU-evicted under
 `hydrated_max_bytes`. `batchWrite` mirrors every CF-0 key into the eid's
 entry (`applyKey`: upsert patches the t-suffix in place — O(klen); retract
-removes). `batchWrite` REFERENCES key bytes (treap `batchMove` contract) —
-non-arena keys (replica WAL frames, tests) route through `batchWriteForeign`,
-which copies into the memtable arena. CF-2 keys additionally mirror into the
-anchor hash (write-through, dropped at flush publish). The WAL stays CF-0-only:
-`recoverWriteState` re-derives CF-1/2/3 index keys for the replay residue
-(byte reshuffle, `deriveIndexKeys`).
+removes). `batchWriteForeign(Keys)` copies non-arena keys (replica WAL frames, tests)
+through the same path — records are self-contained copies, so borrowed bytes
+are always welcome. CF-2 keys additionally mirror into the packed anchor
+index (`anchor_index.nim`, permanent AV→eid with LRU). The WAL stays
+CF-0-only: `recoverWriteState` re-derives CF-1/2/3 index keys for the replay
+residue (byte reshuffle, `deriveIndexKeys`).
 
 ### Flush
 

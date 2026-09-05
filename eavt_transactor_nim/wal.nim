@@ -31,7 +31,7 @@ import chronos
 import chronos_file
 import logutil
 import kvstore
-import nim_memtable/treap_backend
+import nim_memtable/memtypes
 
 const
   FsyncIntervalMs = 100

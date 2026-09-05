@@ -2,7 +2,7 @@
 
 import std/[unittest, options]
 import keys
-import nim_memtable/treap_backend  # toKeyRef
+import nim_memtable/memtypes
 import hydrated
 
 proc k(eid: int64; attr: uint32; v: string; t: int64; ret = false): seq[byte] =

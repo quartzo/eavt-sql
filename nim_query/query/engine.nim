@@ -9,7 +9,8 @@ import eavt
 import keys
 import logutil
 import hydrated
-import nim_memtable/treap_backend
+import nim_memtable/memtypes
+import nim_memtable/runs
 import resolver
 import types
 import scanner
@@ -146,7 +147,7 @@ proc sexprToValueForType(val: SExpr; vt: uint32): string =
 # ── EngineOps implementation ──
 
 method openCursor(q: QueryStore; cfId: uint32; prefix: seq[byte]): Cursor =
-  ## M6: the treap is the memtable for all CFs — openScanCursor sees every
+  ## M6: the run-ladder memtable holds all CFs — openScanCursor sees every
   ## unflushed key (CF-1/2/3 are real treap keys again, no derived run
   ## cache).  The only extra wiring is the hydrated-eid fast path: the
   ## merged cursor routes eid-anchored CF-0 seeks through the entry.
@@ -244,7 +245,7 @@ proc saveResolvedEncodedInto(q: QueryStore; eid: int64; attrId: uint32;
       var retracted = 0
       for ek in foundKeys:
         if ek.len < 20: continue
-        var retEntries = buildEavtEntries(q.eavt.kv.mt.hnd.arena, eid, attrId, ek[12 ..< ek.len - 8], t, true, mode, indexed)
+        var retEntries = buildEavtEntries(q.eavt.kv.mt.arenaScratch(), eid, attrId, ek[12 ..< ek.len - 8], t, true, mode, indexed)
         entries.add retEntries
         retracted += 1
       when perfCounters:
@@ -259,7 +260,7 @@ proc saveResolvedEncodedInto(q: QueryStore; eid: int64; attrId: uint32;
     q.saveRetractScanNs += (getMonoTime().ticks - t0.ticks)
     t0 = getMonoTime()
 
-  entries.add buildEavtEntries(q.eavt.kv.mt.hnd.arena, eid, attrId, encoded, t, false, mode, indexed)
+  entries.add buildEavtEntries(q.eavt.kv.mt.arenaScratch(), eid, attrId, encoded, t, false, mode, indexed)
 
   when perfCounters:
     q.saveBuildEntriesNs += (getMonoTime().ticks - t0.ticks)
@@ -377,7 +378,7 @@ method retract(q: QueryStore; eid: int64; attr: string; val: SExpr;
   let mode = valueTypeToEncodeMode(vt)
   let encoded = encodeSaveValue(val, vt, mode, eid)
   let indexed = q.eavt.resolver.isIndexed(attrId)
-  var entries = buildEavtEntries(q.eavt.kv.mt.hnd.arena, eid, attrId, encoded, t, true, mode, indexed)
+  var entries = buildEavtEntries(q.eavt.kv.mt.arenaScratch(), eid, attrId, encoded, t, true, mode, indexed)
   q.eavt.batchWrite(entries)
 
 method saveBatchEdn(q: QueryStore; txops: seq[TxWOp];
@@ -474,7 +475,7 @@ method retractBatch(q: QueryStore; txops: seq[TxWOp];
     if not op.isRetract or op.attrId == 0: continue
     let m = metaFor(op.attrId)
     let encoded = encodeSaveValueSlot(op.v, m.vt, m.mode, op.e.i)
-    let entries = buildEavtEntries(q.eavt.kv.mt.hnd.arena, op.e.i,
+    let entries = buildEavtEntries(q.eavt.kv.mt.arenaScratch(), op.e.i,
                                    m.attrId, encoded, t, true, m.mode,
                                    m.indexed)
     for e in entries: q.txEntries.add(e)

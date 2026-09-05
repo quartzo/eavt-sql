@@ -1,6 +1,8 @@
 ## all.nim (memtable backend)
 ##
-## Convenience re-export — imports the full backend module.
+## Convenience re-export — imports the full backend modules (M8: runs).
 
-import treap_backend
-export treap_backend
+import memtypes
+import runs
+import run_cursor
+export memtypes, runs, run_cursor

@@ -17,7 +17,8 @@ import std/locks
 import std/algorithm
 import chronos
 import blobstore
-import nim_memtable/treap_backend as mt_be
+import nim_memtable/memtypes
+import nim_memtable/runs
 import page_store
 
 type
@@ -27,15 +28,12 @@ type
     stopping: Atomic[bool]
     requested: Atomic[bool]
     done: Atomic[bool]
-    # job input (POD; loop writes before request, worker reads)
+    # job input (POD + frozen GC refs; loop writes before request, worker
+    # reads — os draining runs são imutáveis e o loop os mantém vivos)
     numCf: int
-    roots: ptr UncheckedArray[mt_be.TreapNode]
     trees: ptr UncheckedArray[CfTree]   ## worker writes new trees here
     blobs: BlobStore                    ## sync trait, plain pointer for worker
-    ## Hyd memtable keys collected on the loop (M1) — merged per CF with the
-    ## treap-drained keys.  GC'd: the loop owns them until done (same
-    ## contract as rootsSeq); the worker reads only.
-    extraKeys: seq[(int, seq[seq[byte]])]
+    runsByCf: seq[seq[Run]]             ## runs congelados por CF (M8)
     # result (POD; worker writes)
     rootNameBuf: array[128, char]
     rootNameLen: int
@@ -44,22 +42,13 @@ type
     ok: bool
     errBuf: array[96, char]
     errLen: int
-    # loop-only (keep the POD owners alive + the thread handle)
-    rootsSeq: seq[mt_be.TreapNode]
+    # loop-only (keep the GC owners alive + the thread handle)
+    runsByCfOwner: seq[seq[Run]]
     treesSeq: seq[CfTree]
-    arena: mt_be.Arena
     thread: Thread[ptr FlushWorkerObj]
 
   FlushWorker* = ref object
     inner: ptr FlushWorkerObj
-
-proc drainKeys(n: mt_be.TreapNode; keys: var seq[seq[byte]]) =
-  ## In-order key materialisation (raw-pointer traversal — no cursor, no
-  ## readerCount). Runs on the worker; every seq dies on the worker frame.
-  if n == nil: return
-  drainKeys(n.left, keys)
-  keys.add(mt_be.toSeq(mt_be.KeyRef(p: n.keyPtr, len: n.keyLen.int)))
-  drainKeys(n.right, keys)
 
 proc flushWorkerMain(w: ptr FlushWorkerObj) {.thread.} =
   while true:
@@ -75,15 +64,8 @@ proc flushWorkerMain(w: ptr FlushWorkerObj) {.thread.} =
       var keysByCf: seq[(int, seq[seq[byte]])] = @[]
       for cf in 0 ..< w.numCf:
         if cf >= 10: break  # key-only CFs only
-        var keys: seq[seq[byte]] = @[]
-        if w.roots[cf] != nil:
-          drainKeys(w.roots[cf], keys)   # sorted (in-order traversal)
-        for (ecf, ek) in w.extraKeys:
-          if ecf == cf and ek.len > 0:
-            keys &= ek                   # extra arrives UNsorted (collected
-                                         # on the loop without sorting)
-        if keys.len > 1:
-          keys.sort(mt_be.cmpKeysByte)
+        # runs congelados já ordenados — k-way merge (newest-wins)
+        let keys = drainSorted(w.runsByCf[cf])
         if keys.len > 0: keysByCf.add (cf, keys)
       var maxT: int64 = -1
       for (cf, keys) in keysByCf:
@@ -129,24 +111,20 @@ proc closeFlushWorker*(fw: FlushWorker) {.async.} =
   deinitLock(w.lock)
   deallocShared(w)
 
-proc runFlush*(fw: FlushWorker; numCf: int; roots: seq[mt_be.TreapNode];
-               trees: seq[CfTree]; blobs: BlobStore; arena: mt_be.Arena;
-               extraKeys: seq[(int, seq[seq[byte]])] = @[]):
+proc runFlush*(fw: FlushWorker; numCf: int; runsByCf: seq[seq[Run]];
+               trees: seq[CfTree]; blobs: BlobStore):
     Future[tuple[rootName: string, trees: seq[CfTree], maxT: int64, ok: bool]] {.async.} =
   ## Submit a pure key-only flush, wait for completion, return the result.
-  ## The loop owns `roots`/`trees`/`arena`/`extraKeys` for the whole call
-  ## (the caller keeps them alive — e.g. via kv.flushRoots / kv.flushArena).
+  ## The loop owns `runsByCf`/`trees` for the whole call (the draining runs
+  ## são imutáveis e mantidos vivos pelo chamador até o done).
   let w = fw.inner
-  w.extraKeys = extraKeys
-  w.rootsSeq = roots
+  w.runsByCfOwner = runsByCf
   w.treesSeq = newSeq[CfTree](trees.len)
   if trees.len > 0:
     copyMem(addr w.treesSeq[0], unsafeAddr trees[0],
             trees.len * sizeof(CfTree))
-  w.arena = arena
   w.numCf = numCf
-  w.roots = (if roots.len > 0:
-    cast[ptr UncheckedArray[mt_be.TreapNode]](unsafeAddr w.rootsSeq[0]) else: nil)
+  w.runsByCf = runsByCf
   w.trees = (if w.treesSeq.len > 0:
     cast[ptr UncheckedArray[CfTree]](addr w.treesSeq[0]) else: nil)
   w.blobs = blobs

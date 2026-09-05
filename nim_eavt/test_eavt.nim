@@ -13,7 +13,7 @@ import engine
 import scheme
 import hydrated
 import query/cursor  # mockCursor / mergedCursor (fontes do MergedCursor)
-import nim_memtable/treap_backend  # cmpKeysByte
+import nim_memtable/memtypes
 
 proc newTestEngine(): EavtEngine =
   let kv = newTempFileKVStore()

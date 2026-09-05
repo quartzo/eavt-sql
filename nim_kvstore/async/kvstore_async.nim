@@ -25,8 +25,8 @@ import page_store
 import pages
 import kvstore
 import logutil
-import nim_memtable/treap_backend as mt_be
-import treap_cursor
+import nim_memtable/memtypes
+import nim_memtable/runs
 import flush_worker
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -409,48 +409,31 @@ type
     pairsByCf: seq[(int, seq[(seq[byte], seq[byte])])]
     deletedByCf: seq[(int, seq[seq[byte]])]
 
-proc drainTreapAsync(kv: KVStore;
-                     roots: seq[mt_be.TreapNode]): Future[DrainOut] {.async.} =
+proc drainRunsAsync(kv: KVStore;
+                    draining: seq[seq[Run]]): Future[DrainOut] {.async.} =
+  ## Drain dos runs congelados (já ordenados) com fatias de loop fairness.
   var res: DrainOut
   for cf in 0..<kv.numCf:
-    if roots[cf] == nil: continue
+    let cfRuns = draining[cf]
+    if cfRuns.len == 0: continue
     if cf >= 10:
-      var pairs: seq[(seq[byte], seq[byte])] = @[]
-      var deleted: seq[seq[byte]] = @[]
       var budget = 0
-      let tc = newTreapCursor(roots[cf], kv.flushArena)
-      while not tc.atEnd:
-        let kvp = tc.nextKv()
-        if kvp.isSome:
-          let (key, val) = kvp.get
-          pairs.add (key, val)
-          budget += key.len + val.len
-          if budget >= DrainChunkBytes:
-            budget = 0
-            await sleepAsync(chronos.milliseconds(0))
-      let tc2 = newTreapCursor(roots[cf], kv.flushArena)
-      while not tc2.atEnd:
-        let dk = tc2.nextDeleted()
-        if dk.isSome:
-          deleted.add(dk.get)
-          budget += dk.get.len
-          if budget >= DrainChunkBytes:
-            budget = 0
-            await sleepAsync(chronos.milliseconds(0))
+      let (pairs, deleted) = drainKvSorted(cfRuns)
+      for p in pairs:
+        budget += p[0].len + p[1].len
+        if budget >= DrainChunkBytes:
+          budget = 0
+          await sleepAsync(chronos.milliseconds(0))
       if pairs.len > 0: res.pairsByCf.add (cf, pairs)
       if deleted.len > 0: res.deletedByCf.add (cf, deleted)
     else:
-      var keys: seq[seq[byte]] = @[]
       var budget = 0
-      let tc = newTreapCursor(roots[cf], kv.flushArena)
-      while not tc.atEnd:
-        let k = tc.next()
-        if k.isSome:
-          keys.add(k.get)
-          budget += k.get.len
-          if budget >= DrainChunkBytes:
-            budget = 0
-            await sleepAsync(chronos.milliseconds(0))
+      let keys = drainSorted(cfRuns)
+      for k in keys:
+        budget += k.len
+        if budget >= DrainChunkBytes:
+          budget = 0
+          await sleepAsync(chronos.milliseconds(0))
       if keys.len > 0: res.keysByCf.add (cf, keys)
   return res
 
@@ -562,15 +545,14 @@ proc flushNowAsync*(f: AsyncFlusher): Future[void] {.async.} =
   ## Same capture/publish semantics as kvstore.flush().
   let kv = f.kv
   if kv.readOnly: return
-  var roots: seq[mt_be.TreapNode]
   var sealBoundary: int64 = -1
   var captured = false
-  if kv.flushRoots.len == 0:
-    roots = kv.mt.hnd.live
-    kv.flushArena = kv.mt.hnd.arena
-    kv.mt.hnd.arena = mt_be.newArena()
-    kv.mt.clear(); kv.mtSize = 0
-    kv.flushRoots = roots
+  if not kv.flushActive:
+    # M8 capture: delta → run, ativos → draining (runs imutáveis, legíveis
+    # até o publish — os runs são os owners da arena da geração).
+    kv.mt.freezeAll()
+    kv.flushActive = true
+    kv.mtSize = 0
     captured = true
     # Seal the WAL segment at the capture boundary (same contract as the
     # sync flush).
@@ -591,9 +573,9 @@ proc flushNowAsync*(f: AsyncFlusher): Future[void] {.async.} =
   # writes the root once, so it must not race a KV commit's root write).
   var hasKv = false
   for cf in 10 ..< kv.numCf:
-    if roots[cf] != nil: hasKv = true; break
+    if kv.mt.draining[cf].len > 0: hasKv = true; break
   if hasKv:
-    let drained = await drainTreapAsync(kv, roots)
+    let drained = await drainRunsAsync(kv, kv.mt.draining)
     let keysByCf = drained.keysByCf
     for (cf, keys) in keysByCf:
       if cf >= 10: continue
@@ -609,8 +591,8 @@ proc flushNowAsync*(f: AsyncFlusher): Future[void] {.async.} =
       await commitMergeKvAsync(f.pool, kv.ps, drained.pairsByCf,
                                drained.deletedByCf, true)
   else:
-    let res = await f.worker.runFlush(kv.numCf, roots, kv.ps[].trees,
-                                      kv.ps[].blobs, kv.flushArena, @[])
+    let res = await f.worker.runFlush(kv.numCf, kv.mt.draining,
+                                      kv.ps[].trees, kv.ps[].blobs)
     if res.ok:
       collectedMaxT = res.maxT
       kv.ps[].trees = res.trees
@@ -619,7 +601,9 @@ proc flushNowAsync*(f: AsyncFlusher): Future[void] {.async.} =
     else:
       raise newException(IOError, "flush worker failed")
   # Single-threaded publish.
-  kv.flushRoots = @[]; kv.flushArena = nil; kv.mtSize = 0
+  kv.mt.publish()
+  kv.flushActive = false
+  kv.mtSize = 0
   # Publish done: everything before the seal boundary is durable in the
   # PageStore — the sealed WAL segment may be deleted on the next WAL cycle.
   if sealBoundary >= 0:

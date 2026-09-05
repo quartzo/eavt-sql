@@ -34,7 +34,7 @@
 
 import std/[tables]
 import keys
-import nim_memtable/treap_backend  # KeyRef
+import nim_memtable/memtypes
 
 const DefaultMaxBytes* = 1 shl 30          ## 1 GiB — cfg `hydrated_max_bytes`
 

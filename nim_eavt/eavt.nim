@@ -11,9 +11,10 @@ export keys
 import kvstore
 import page_store     # CfTree
 import page_cursor   # PageStoreSnapshot, PageStoreCursor
-import treap_cursor   # newTreapCursor
-import query/cursor   # treapCursor constructor
-import nim_memtable/treap_backend
+import query/cursor   # cursor constructors
+import nim_memtable/memtypes  # KeyRef, cmpKeysByte, CfKey
+import nim_memtable/runs  # MemTable/Run (M8)
+import nim_memtable/run_cursor  # RunCursor
 import scheme
 import stats
 import hydrated
@@ -66,9 +67,9 @@ type
     spCf*: int
     # Reusable cursors for scanPrefixActive
     saPs*: PageStoreCursor
-    saFlush*: TreapCursor
-    saLive*: TreapCursor
+    saRunCursors*: seq[RunCursor]  ## draining + active, ordem fixa por chamada
     saCf*: int
+    saGen*: uint64                 ## mt.gen na última coleta de fontes
     # scanPrefix perf counters
     spCount*: int64
     spOpenCursorNs*: int64
@@ -112,7 +113,7 @@ proc newEavtEngine*(kv: KVStore; cfg: Table[string, string]): EavtEngine =
     hyd: newHydratedSet(maxBytes),
     anchors: newAnchorIndex(anchorMax),
   )
-  # M7: the treap is the memtable for ALL CFs and the anchor index is a
+  # M7: the run-ladder memtable holds ALL CFs and the anchor index is a
   # permanent read mirror — the generic KVStore flush needs no engine
   # cooperation, so no flush hooks are installed here.
   # bootstrap called after construction (avoids forward ref)
@@ -126,7 +127,7 @@ proc batchWrite*(eng: EavtEngine; entries: var seq[EavtEntry]) =
   ## Consumes the entries: keys are arena-written by buildEavtEntries and
   ## referenced (ptr+len) into CfKey — zero copy on the load path.
   ##
-  ## M6 write path: the treap is the memtable for ALL CFs again — every key
+  ## M6 write path: the run-ladder memtable holds ALL CFs again — every key
   ## (CF-0 datom + CF-1/2/3 indexes built by buildEavtEntries) enters the
   ## memtable and the generic flush carries it to the pagestore.  The WAL
   ## stays CF-0-only (the datom is the truth — CF-1/2/3 are re-derived at
@@ -165,7 +166,7 @@ proc batchWrite*(eng: EavtEngine; entries: var seq[EavtEntry]) =
     for d in durable:
       eng.hyd.applyKey(d.key)
   # M6: journal=false — o journalOnly acima já cobriu o CF-0; CF-1/2/3 não
-  # vão ao WAL.  O treap recebe TODOS os CFs (memtable).
+  # vão ao WAL.  A escada de runs recebe TODOS os CFs (memtable).
   eng.kv.batchWrite(cfs, journal = false)
 
 proc batchWriteForeignKeys*(eng: EavtEngine;
@@ -178,7 +179,7 @@ proc batchWriteForeignKeys*(eng: EavtEngine;
   ## flush capture swaps the arena but keeps it alive via flushArena while
   ## the captured roots reference its bytes.
   if keys.len == 0: return
-  let arena = eng.kv.mt.hnd.arena
+  let arena = eng.kv.mt.arenaScratch()
   var entries = newSeqOfCap[EavtEntry](keys.len)
   for k in keys:
     if k.key.len < 20: continue
@@ -203,23 +204,19 @@ proc scanPrefix*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byte]] =
   var t0 = getMonoTime()
 
   # Read current roots
-  var psSnap: PageStoreSnapshot
-  var flushRoot, liveRoot: TreapNode
   var tree = eng.kv.ps[].trees[cf]
-  psSnap = PageStoreSnapshot(rootUuid: tree.rootUuid, height: tree.height)
-  if eng.kv.flushRoots.len > 0:
-    flushRoot = eng.kv.flushRoots[cf]
-  liveRoot = eng.kv.mt.hnd.live[cf]
+  let psSnap = PageStoreSnapshot(rootUuid: tree.rootUuid, height: tree.height)
 
   if eng.spCursor == nil or eng.spCf != cf:
     # First call or different CF — create cursor from scratch
     eng.spCursor = eng.kv.openScanCursor(cf)
     eng.spCf = cf
   else:
-    # Same CF — update in-place (zero allocs if roots unchanged)
+    # Same CF — update in-place (runs re-coletadas só quando mt.gen muda)
+    eng.kv.mt.ensureMaterialized(cf)
     eng.spCursor.update(psSnap.rootUuid, psSnap.height,
-                        flushRoot, eng.kv.flushArena,
-                        liveRoot, eng.kv.mt.hnd.arena)
+                        eng.kv.mt.draining[cf], eng.kv.mt.runs[cf],
+                        eng.kv.mt.gen)
 
   eng.spOpenCursorNs += (getMonoTime().ticks - t0.ticks)
 
@@ -253,84 +250,58 @@ proc scanPrefixActive*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byt
     if eng.hyd.probeComplete(eid):
       return eng.hyd.lookupRange(eid, prefix)
 
-  var psSnap: PageStoreSnapshot
-  var flushRoot, liveRoot: TreapNode
   var tree = eng.kv.ps[].trees[cf]
-  psSnap = PageStoreSnapshot(rootUuid: tree.rootUuid, height: tree.height)
-  if eng.kv.flushRoots.len > 0:
-    flushRoot = eng.kv.flushRoots[cf]
-  liveRoot = eng.kv.mt.hnd.live[cf]
+  let psSnap = PageStoreSnapshot(rootUuid: tree.rootUuid, height: tree.height)
 
   # TEMP diagnostics: where do cf≠0 scans spend time post-flush?
 
-  # Reuse or create cursors
-  if eng.saCf == cf and eng.saLive != nil:
-    # Same CF — update in-place. NOTE: pagestore/flush cursors must be CREATED
-    # lazily here too: a CF scanned before its first commitMerge has a default
-    # root (no saPs); after the flush publishes a root, the cached-cursor path
-    # must pick it up — otherwise every seek misses forever (sourceCount 0).
-    if psSnap.rootUuid != default(array[16, byte]):
-      if eng.saPs != nil:
-        eng.saPs.update(psSnap.rootUuid, psSnap.height)
-      else:
-        eng.saPs = PageStoreCursor(
-          s: eng.kv.ps, cf: cf, rootUuid: psSnap.rootUuid, height: psSnap.height,
-          isKv: cf >= 10)
+  # PageStore cursor: reuse in-place (root change é a única invalidação).
+  # Criado LAZILY: um CF antes do primeiro commitMerge tem root default; após
+  # o flush publicar, o caminho cacheado precisa pegá-lo.
+  if psSnap.rootUuid != default(array[16, byte]):
+    if eng.saCf == cf and eng.saPs != nil:
+      eng.saPs.update(psSnap.rootUuid, psSnap.height)
     else:
-      eng.saPs = nil
-    if flushRoot != nil:
-      if eng.saFlush != nil:
-        eng.saFlush.update(flushRoot, eng.kv.flushArena)
-      else:
-        eng.saFlush = newTreapCursor(flushRoot, eng.kv.flushArena)
-    else:
-      eng.saFlush = nil
-    eng.saLive.update(liveRoot, eng.kv.mt.hnd.arena)
-  else:
-    # Different CF or first call — create new cursors
-    if psSnap.rootUuid != default(array[16, byte]):
       eng.saPs = PageStoreCursor(
         s: eng.kv.ps, cf: cf, rootUuid: psSnap.rootUuid, height: psSnap.height,
         isKv: cf >= 10)
-    else:
-      eng.saPs = nil
-    if flushRoot != nil:
-      eng.saFlush = newTreapCursor(flushRoot, eng.kv.flushArena)
-    else:
-      eng.saFlush = nil
-    if liveRoot != nil:
-      eng.saLive = newTreapCursor(liveRoot, eng.kv.mt.hnd.arena)
-    else:
-      eng.saLive = nil
-    eng.saCf = cf
+  else:
+    eng.saPs = nil
 
-  # Release treap reader holds when the scan ends — keeps readerCount at 0
-  # between calls so batchWrite inserts mutate in-place (no COW path-copy).
-  defer:
-    if eng.saLive != nil: eng.saLive.release()
-    if eng.saFlush != nil: eng.saFlush.release()
+  # Run sources: re-coletadas quando o CF muda OU a geração do memtable
+  # mudou (materialize/merge/freeze/publish). RunCursor é barato — refs.
+  eng.kv.mt.ensureMaterialized(cf)
+  if eng.saCf != cf or eng.saGen != eng.kv.mt.gen:
+    eng.saRunCursors = @[]
+    for r in eng.kv.mt.draining[cf]: eng.saRunCursors.add(newRunCursor(r))
+    for r in eng.kv.mt.runs[cf]: eng.saRunCursors.add(newRunCursor(r))
+    eng.saGen = eng.kv.mt.gen
+  eng.saCf = cf
 
-  # Count non-empty sources
+  # Count non-empty sources — re-seek dos runs: cursores reutilizados
+  # chegam consumidos do scan anterior (seek reseta pos/atEnd).
   var sourceCount = 0
   if eng.saPs != nil and psSnap.rootUuid != default(array[16, byte]): inc sourceCount
-  if eng.saFlush != nil and flushRoot != nil: inc sourceCount
-  if eng.saLive != nil and liveRoot != nil: inc sourceCount
+  for rc in eng.saRunCursors:
+    rc.seek(prefix)
+    if not rc.atEnd: inc sourceCount
 
   if sourceCount == 0:
     return
 
-  # ── Fast path: single source (live treap only) ──
+  # ── Fast path: single run, sem pagestore ──
   # Skip sort/merge, just collect + dedup + filter.
-  if sourceCount == 1 and eng.saLive != nil and liveRoot != nil:
-    eng.saLive.seek(prefix)
+  if sourceCount == 1 and eng.saRunCursors.len == 1:
+    let rc = eng.saRunCursors[0]
+    rc.seek(prefix)
     var sourceKeys: seq[seq[byte]] = @[]
     while true:
-      let k = eng.saLive.peek()
+      let k = rc.peek()
       if k.isNone: break
       let key = k.get
       if key.len < prefix.len or key[0..<prefix.len] != prefix: break
       sourceKeys.add key
-      discard eng.saLive.next()
+      discard rc.next()
     # Dedup backward by key-prefix (newest version wins), filter retracted,
     # then emit ASCENDING — same contract as the multi-source path below.
     var kept: seq[seq[byte]] = @[]
@@ -348,11 +319,11 @@ proc scanPrefixActive*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byt
     return
 
   # ── Multi-source path ──
-  type SrcKind = enum skPageStore, skTreap
+  type SrcKind = enum skPageStore, skRun
   type Src = object
     case kind: SrcKind
     of skPageStore: ps: PageStoreCursor
-    of skTreap: tc: TreapCursor
+    of skRun: rc: RunCursor
 
   var sources: seq[Src] = @[]
   when defined(eavtScanDiag):
@@ -364,12 +335,10 @@ proc scanPrefixActive*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byt
         eng.diagDescendNs += eng.saPs.lastSeekDescendNs
         eng.diagCrossNs += eng.saPs.lastSeekCrossNs
     sources.add Src(kind: skPageStore, ps: eng.saPs)
-  if eng.saFlush != nil and flushRoot != nil:
-    eng.saFlush.seek(prefix)
-    sources.add Src(kind: skTreap, tc: eng.saFlush)
-  if eng.saLive != nil and liveRoot != nil:
-    eng.saLive.seek(prefix)
-    sources.add Src(kind: skTreap, tc: eng.saLive)
+  for rc in eng.saRunCursors:
+    if not rc.atEnd:
+      rc.seek(prefix)
+      sources.add Src(kind: skRun, rc: rc)
   when defined(eavtScanDiag):
     if cf != 0: eng.diagSeekNs += getMonoTime().ticks - tSeek
     let tIter = getMonoTime().ticks
@@ -399,12 +368,12 @@ proc scanPrefixActive*(eng: EavtEngine; cf: int; prefix: seq[byte]): seq[seq[byt
   proc currentKey(s: Src): Option[seq[byte]] =
     case s.kind
     of skPageStore: s.ps.peek()
-    of skTreap: s.tc.peek()
+    of skRun: s.rc.peek()
 
   proc advance(s: Src) =
     case s.kind
     of skPageStore: discard s.ps.next()
-    of skTreap: discard s.tc.next()
+    of skRun: discard s.rc.next()
 
   # 1. Collect from each source with dedup by key-prefix
   var collected: seq[CollectEntry] = @[]
@@ -526,7 +495,7 @@ proc buildCompileStats*(eng: EavtEngine): CompileStats =
       s.indexedAttrs.incl(name)
 
   # Pre-compute index estimates for all 4 indexes (empty prefix = total count).
-  # M6: the treap is the memtable for all CFs — the storage cursor count is
+  # M6: the run-ladder memtable holds all CFs — the storage cursor count is
   # complete (memtable + flush + pagestore), no write-state adjustments.
   for index in ["EAVT", "AEVT", "AVET", "VAET"]:
     let cf = keys.cfNameToId(keys.cfForIndex(index))
@@ -676,9 +645,9 @@ proc eavtSave*(eng: EavtEngine; eid: int64; attrName: string;
       if ek.len < 20: continue
       let esf = beUint64(ek, ek.len - 8)
       if (esf and 1) != 0: continue
-      var retEntries = buildEavtEntries(eng.kv.mt.hnd.arena, eid, attrId, ek[12 ..< ek.len - 8], t, true, mode, indexed)
+      var retEntries = buildEavtEntries(eng.kv.mt.arenaScratch(), eid, attrId, ek[12 ..< ek.len - 8], t, true, mode, indexed)
       eng.batchWrite(retEntries)
-  var entries = buildEavtEntries(eng.kv.mt.hnd.arena, eid, attrId, encoded, t, false, mode, indexed)
+  var entries = buildEavtEntries(eng.kv.mt.arenaScratch(), eid, attrId, encoded, t, false, mode, indexed)
   eng.batchWrite(entries)
   return eid
 
@@ -695,7 +664,7 @@ proc eavtRetract*(eng: EavtEngine; eid: int64; attrName: string;
           "REF value must be an entity id, got: \"" & value & "\"")
     else: encodeValue(value, mode, 0)
   let indexed = eng.resolver.isIndexed(attrId)
-  var entries = buildEavtEntries(eng.kv.mt.hnd.arena, eid, attrId, encoded, t, true, mode, indexed)
+  var entries = buildEavtEntries(eng.kv.mt.arenaScratch(), eid, attrId, encoded, t, true, mode, indexed)
   eng.batchWrite(entries)
 
 # ── Tx allocation + as-of resolution ──
@@ -709,7 +678,7 @@ proc allocateTAndWriteTx*(eng: EavtEngine): int64 =
   ## Port of Rust EavtEngine::allocate_t_and_write_tx.
   let txEid = eng.resolver.allocateInPartition(PartTx)
   let encoded = encodeValue($nowMicros(), emFixed, 0)
-  var entries = buildEavtEntries(eng.kv.mt.hnd.arena, txEid, DbTxInstantAid, encoded, txEid,
+  var entries = buildEavtEntries(eng.kv.mt.arenaScratch(), txEid, DbTxInstantAid, encoded, txEid,
                                   false, emFixed, false)
   eng.batchWrite(entries)
   return txEid
@@ -752,14 +721,14 @@ proc eavtDeclareAttr*(eng: EavtEngine; name: string; valueType: uint32;
     # raw name here would make transactor and replica disagree on lookup.
     let t = eng.resolver.allocateInPartition(PartTx)
     let e = aid.int64
-    var bwTmp1 = buildEavtEntries(eng.kv.mt.hnd.arena, e, DbIdentAid,
+    var bwTmp1 = buildEavtEntries(eng.kv.mt.arenaScratch(), e, DbIdentAid,
       encodeValue(canonical, emVariable, 0), e, false, emVariable, true)
     eng.batchWrite(bwTmp1)
-    var bwTmp2 = buildEavtEntries(eng.kv.mt.hnd.arena, e, DbValueTypeAid,
+    var bwTmp2 = buildEavtEntries(eng.kv.mt.arenaScratch(), e, DbValueTypeAid,
       encodeValue($valueType, emFixed, 0), t, false, emFixed, true)
     eng.batchWrite(bwTmp2)
     let cardId = if many: DbCardinalityManyAid else: DbCardinalityOneAid
-    var bwTmp3 = buildEavtEntries(eng.kv.mt.hnd.arena, e, DbCardinalityAid,
+    var bwTmp3 = buildEavtEntries(eng.kv.mt.arenaScratch(), e, DbCardinalityAid,
       encodeValue($cardId, emFixed, 0), t, false, emFixed, true)
     eng.batchWrite(bwTmp3)
   if unique:
@@ -769,7 +738,7 @@ proc eavtDeclareAttr*(eng: EavtEngine; name: string; valueType: uint32;
     # no restart. Gravação idempotente (put).
     let t = eng.resolver.allocateInPartition(PartTx)
     let e = aid.int64
-    var bwTmp4 = buildEavtEntries(eng.kv.mt.hnd.arena, e, DbUniqueAid,
+    var bwTmp4 = buildEavtEntries(eng.kv.mt.arenaScratch(), e, DbUniqueAid,
       encodeValue($DbUniqueIdentityAid, emFixed, 0), t, false, emFixed, true)
     eng.batchWrite(bwTmp4)
   return (aid, isNew)
@@ -804,17 +773,17 @@ proc bootstrapSystemAttrs*(eng: EavtEngine) =
   for (name, aid) in BootstrapSchema:
     let (vt, cardId, uniqueId) = meta(name)
     let e = aid.int64
-    var bwTmp5 = buildEavtEntries(eng.kv.mt.hnd.arena, e, DbIdentAid,
+    var bwTmp5 = buildEavtEntries(eng.kv.mt.arenaScratch(), e, DbIdentAid,
       encodeValue(name, emVariable, 0), tx, false, emVariable, true)
     eng.batchWrite(bwTmp5)
-    var bwTmp6 = buildEavtEntries(eng.kv.mt.hnd.arena, e, DbValueTypeAid,
+    var bwTmp6 = buildEavtEntries(eng.kv.mt.arenaScratch(), e, DbValueTypeAid,
       encodeValue("", emRef, vt.int64), tx, false, emRef, true)
     eng.batchWrite(bwTmp6)
-    var bwTmp7 = buildEavtEntries(eng.kv.mt.hnd.arena, e, DbCardinalityAid,
+    var bwTmp7 = buildEavtEntries(eng.kv.mt.arenaScratch(), e, DbCardinalityAid,
       encodeValue("", emRef, cardId.int64), tx, false, emRef, true)
     eng.batchWrite(bwTmp7)
     if uniqueId != 0:
-      var bwTmp8 = buildEavtEntries(eng.kv.mt.hnd.arena, e, DbUniqueAid,
+      var bwTmp8 = buildEavtEntries(eng.kv.mt.arenaScratch(), e, DbUniqueAid,
         encodeValue("", emRef, uniqueId.int64), tx, false, emRef, true)
       eng.batchWrite(bwTmp8)
 
@@ -929,7 +898,7 @@ proc txInstantEntry*(eng: EavtEngine; txEid: int64): seq[EavtEntry] =
   ## The deferred db.txInstant datom for a txEid from allocateTDeferred —
   ## built like allocateTAndWriteTx writes it.
   let encoded = encodeValue($nowMicros(), emFixed, 0)
-  buildEavtEntries(eng.kv.mt.hnd.arena, txEid, DbTxInstantAid, encoded, txEid,
+  buildEavtEntries(eng.kv.mt.arenaScratch(), txEid, DbTxInstantAid, encoded, txEid,
                    false, emFixed, false)
 
 proc batchLookupAvet*(eng: EavtEngine;
