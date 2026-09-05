@@ -65,7 +65,7 @@ proc recVlen*(p: ptr UncheckedArray[byte]): int {.inline.} =
 proc recValuePtr*(p: ptr UncheckedArray[byte]): ptr UncheckedArray[byte] {.inline.} =
   cast[ptr UncheckedArray[byte]](addr p[9 + recKlen(p)])
 
-proc cmpRec(a, b: ptr UncheckedArray[byte]): int {.inline.} =
+proc cmpRec*(a, b: ptr UncheckedArray[byte]): int {.inline.} =
   ## Byte-lexicográfico pela chave (klen em p+1, key em p+5).
   let alen = recKlen(a)
   let blen = recKlen(b)

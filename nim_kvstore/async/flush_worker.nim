@@ -2,11 +2,12 @@
 ## drain + commitMergeCore) off the event loop.
 ##
 ## Follows the blob pool's cross-thread pattern: the worker touches only the
-## POD half of the job (raw roots, raw CfTree buffer, the BlobStore trait as a
-## plain pointer). Every GC value the worker creates (drained keys, merged
-## pages, backend seqs) lives and dies inside its own frame — only POD crosses
-## the boundary. The loop keeps the GC owners (rootsSeq, treesSeq, arena) alive
-## until the worker signals done.
+## POD half of the job — and M8 keeps it STRICTLY POD: runs cross as raw
+## views (ptr + len sobre o seq de ponteiros de registro do Run), NUNCA
+## como refs GC — inc/dec de refcount do ORC em thread não-dona corrompe o
+## heap do loop (crash do materialize sob carga).  O loop mantém os Run
+## owners (runsByCfOwner) vivos e intocados até o done.  Todo GC value que
+## o worker cria (keys, merged pages) nasce e morre no frame dele.
 ##
 ## KV CFs (>= 10) stay on the loop: the caller only routes a flush here when
 ## it is pure key-only (no live KV roots), so the worker's single root write is
@@ -22,18 +23,26 @@ import nim_memtable/runs
 import page_store
 
 type
+  RunView* = object
+    ## POD view de um run congelado: o buffer de ponteiros de registro do
+    ## Run (cada um aponta para [flags][klen][key] no arena compartilhado —
+    ## memória crua, viva enquanto o loop segurar o Run).
+    ptrs: ptr UncheckedArray[ptr UncheckedArray[byte]]
+    n: int
+    kv: bool
+
   FlushWorkerObj = object
     lock: Lock
     cond: Cond
     stopping: Atomic[bool]
     requested: Atomic[bool]
     done: Atomic[bool]
-    # job input (POD + frozen GC refs; loop writes before request, worker
-    # reads — os draining runs são imutáveis e o loop os mantém vivos)
+    # job input (POD; loop writes before request, worker reads)
     numCf: int
     trees: ptr UncheckedArray[CfTree]   ## worker writes new trees here
     blobs: BlobStore                    ## sync trait, plain pointer for worker
-    runsByCf: seq[seq[Run]]             ## runs congelados por CF (M8)
+    views: ptr UncheckedArray[seq[RunView]]  ## views por CF (buffer do loop)
+    numViews: int
     # result (POD; worker writes)
     rootNameBuf: array[128, char]
     rootNameLen: int
@@ -43,12 +52,44 @@ type
     errBuf: array[96, char]
     errLen: int
     # loop-only (keep the GC owners alive + the thread handle)
-    runsByCfOwner: seq[seq[Run]]
+    runsOwner: seq[seq[Run]]   ## os Run refs — só o loop toca
+    viewsOwner: seq[seq[RunView]]
     treesSeq: seq[CfTree]
     thread: Thread[ptr FlushWorkerObj]
 
   FlushWorker* = ref object
     inner: ptr FlushWorkerObj
+
+proc drainKeys(n: int; views: ptr UncheckedArray[RunView];
+               keys: var seq[seq[byte]]) =
+  ## K-way merge dos runs (ordenados) materializando as chaves — só memória
+  ## crua; as seqs resultantes nascem e morrem no frame do worker.
+  var heads = newSeq[int](n)
+  var total = 0
+  for v in 0 ..< n: total += views[v].n
+  if total == 0: return
+  keys = newSeqOfCap[seq[byte]](total)
+  while true:
+    var best = -1
+    for v in 0 ..< n:
+      if heads[v] >= views[v].n: continue
+      if best < 0:
+        best = v
+        continue
+      let c = cmpRec(views[v].ptrs[heads[v]], views[best].ptrs[heads[best]])
+      if c < 0 or (c == 0 and v > best):
+        best = v
+    if best < 0: break
+    let p = views[best].ptrs[heads[best]]
+    let klen = recKlen(p)
+    var k = newSeq[byte](klen)
+    if klen > 0: copyMem(addr k[0], recKeyPtr(p), klen)
+    keys.add(k)
+    inc heads[best]
+    for v in 0 ..< n:
+      if v == best: continue
+      while heads[v] < views[v].n and cmpRec(views[v].ptrs[heads[v]], p) == 0:
+        inc heads[v]
 
 proc flushWorkerMain(w: ptr FlushWorkerObj) {.thread.} =
   while true:
@@ -64,12 +105,16 @@ proc flushWorkerMain(w: ptr FlushWorkerObj) {.thread.} =
       var keysByCf: seq[(int, seq[seq[byte]])] = @[]
       for cf in 0 ..< w.numCf:
         if cf >= 10: break  # key-only CFs only
-        # runs congelados já ordenados — k-way merge (newest-wins)
-        let keys = drainSorted(w.runsByCf[cf])
+        var keys: seq[seq[byte]] = @[]
+        if cf < w.numViews:
+          drainKeys(w.views[cf].len,
+                    cast[ptr UncheckedArray[RunView]](
+                      if w.views[cf].len > 0: addr w.views[cf][0] else: nil),
+                    keys)
         if keys.len > 0: keysByCf.add (cf, keys)
       var maxT: int64 = -1
-      for (cf, keys) in keysByCf:
-        for k in keys:
+      for (cf, ks) in keysByCf:
+        for k in ks:
           if k.len < 8: continue
           var sf = 0'u64
           for b in k[k.len - 8 ..< k.len]: sf = (sf shl 8) or uint64(b)
@@ -115,16 +160,30 @@ proc runFlush*(fw: FlushWorker; numCf: int; runsByCf: seq[seq[Run]];
                trees: seq[CfTree]; blobs: BlobStore):
     Future[tuple[rootName: string, trees: seq[CfTree], maxT: int64, ok: bool]] {.async.} =
   ## Submit a pure key-only flush, wait for completion, return the result.
-  ## The loop owns `runsByCf`/`trees` for the whole call (the draining runs
-  ## são imutáveis e mantidos vivos pelo chamador até o done).
+  ## M8: os Run refs cruzam como VIEWS POD — o loop materializa os buffers
+  ## de ponteiros crus antes do request e mantém `runsByCf` (os Run refs)
+  ## vivos e intocados até o done; a thread nunca toca refcount do loop.
   let w = fw.inner
-  w.runsByCfOwner = runsByCf
+  w.runsOwner = runsByCf
+  w.viewsOwner = newSeq[seq[RunView]](numCf)
+  for cf in 0 ..< min(numCf, runsByCf.len):
+    let runs = runsByCf[cf]
+    if runs.len == 0: continue
+    var vs = newSeq[RunView](runs.len)
+    for i, r in runs:
+      if r.ptrs.len == 0: continue
+      vs[i] = RunView(ptrs: cast[ptr UncheckedArray[ptr UncheckedArray[byte]]](
+                        addr r.ptrs[0]),
+                      n: r.ptrs.len, kv: r.kv)
+    w.viewsOwner[cf] = vs
+  w.views = (if w.viewsOwner.len > 0:
+    cast[ptr UncheckedArray[seq[RunView]]](addr w.viewsOwner[0]) else: nil)
+  w.numViews = w.viewsOwner.len
   w.treesSeq = newSeq[CfTree](trees.len)
   if trees.len > 0:
     copyMem(addr w.treesSeq[0], unsafeAddr trees[0],
             trees.len * sizeof(CfTree))
   w.numCf = numCf
-  w.runsByCf = runsByCf
   w.trees = (if w.treesSeq.len > 0:
     cast[ptr UncheckedArray[CfTree]](addr w.treesSeq[0]) else: nil)
   w.blobs = blobs

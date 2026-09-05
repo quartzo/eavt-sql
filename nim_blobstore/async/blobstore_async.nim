@@ -21,7 +21,7 @@
 ##
 ## Blueprint: vendor/chronos_file_pkg/chronos_file/thread_pool_io.nim.
 
-import std/[atomics, locks, os, options, sequtils, tables]
+import std/[atomics, locks, os, options, sequtils, tables, strutils]
 import std/typedthreads
 import chronos
 import chronos/threadsync
@@ -128,6 +128,8 @@ proc popAll(head, tail: var BlobJob): BlobJob =
   head = nil
   tail = nil
 
+
+
 proc newJob(pool: ptr BlobPoolObj): BlobJob =
   if pool.freeHead.isNil:
     result = cast[BlobJob](allocShared0(sizeof(BlobJobObj)))
@@ -146,9 +148,13 @@ proc freeJob(pool: ptr BlobPoolObj; job: BlobJob) =
   if pool.closed or pool.freeCount >= MaxFreeJobs:
     deallocShared(job)
   else:
-    zeroMem(addr job.errBuf[0], sizeof(job.errBuf))
-    job.errLen = 0
-    job.cancelRequested = false
+    # M8-fix: zera o registro INTEIRO ao reciclar — o bug clássico era o
+    # `truncated` (e ok/outLen/needLen) atravessando vidas do slot: um list
+    # truncado reciclado fazia o PRÓXIMO list (o auto-GC lista roots após
+    # cada flush) entrar no retry dobrando outCap até ~1 GiB → newSeq(1 GB)
+    # → SIGSEGV.  reset() acima já nilocou os handles GC — zeroMem do POD
+    # restante é seguro.
+    zeroMem(job, sizeof(BlobJobObj))
     job.next = pool.freeHead
     pool.freeHead = job
     inc pool.freeCount
@@ -313,6 +319,9 @@ proc dispatchCompletion(pool: ptr BlobPoolObj; job: BlobJob) {.raises: [].} =
       of bokPutRoot: fut[void]().complete()
       of bokDelete, bokDeleteRoot: fut[void]().complete()
       of bokGet, bokGetRoot:
+        # invariante de ciclo de vida: outLen só pode caber no buffer do job
+        doAssert job.outLen >= 0 and job.outLen <= job.outCap,
+          "blobpool: outLen corrompido no dispatch"
         var outSeq = newSeq[byte](job.outLen)
         if job.outLen > 0:
           copyMem(addr outSeq[0], job.outPtr, job.outLen)
@@ -449,6 +458,13 @@ proc submit(pool: BlobPool; store: BlobStore; kind: BlobOpKind): BlobJob =
   result.kind = kind
   result.store = store
   result.resFut = nil # set by the specific op
+  # defesa de ciclo de vida: estado de execução começa zerado em toda vida
+  # do slot (o zeroMem do freeJob cobre; aqui é cinto e suspensório)
+  result.ok = false
+  result.truncated = false
+  result.outLen = 0
+  result.needLen = 0
+  result.cancelRequested = false
 
 proc enqueueJob(pool: BlobPool; job: BlobJob) =
   let p = pool.inner

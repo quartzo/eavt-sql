@@ -271,11 +271,24 @@ Do not use it for the server's connection loop or for flush.
   no dispatcher de completions (`dispatchCompletion → newSeq[byte](outLen)`
   com outLen corrompido). Reproduz no checkout M7 — não é regressão do
   M8; o smoke histórico de 1M era só empresas (estabs@1M nunca rodou).
-  Suspeito: ciclo de vida de job no pool (cancel/recycle vs completion
-  tardia do worker). Backtraces em coredumpctl; doc em
-  `docs/perf-receita-carga.md`. A extrapolação de carga completa (≈4,9 h
-  @ taxas de 25k) carrega a ressalva de que estabs na escala completa não
-  pode ser validado end-to-end até o fix.
+  Diagnóstico da rodada M8-hardening (2026-09-05) — **descartado**:
+  ciclo de vida de job do pool (canários magic/outLen no dispatch nunca
+  dispararam), OOB/use-after-free em código instrumentado (ASan limpo na
+  carga completa), corrida de refcount ORC (`--mm:atomicArc` também
+  quebra). O crash real (cores com DWARF) está no **alocador Nim na
+  thread do loop** — `newSeqOfCap` dentro de `runs.materialize` (M8) e
+  site equivalente no M7 — consistente com corrupção de heap por escrita
+  em buffer **cru** (arena `allocShared0`) invisível ao ASan quando o
+  write fica dentro do bloco. Ferramentas preparadas para a caça: cores
+  em coredumpctl, canário de arena (poisoning do slack via
+  `__asan_poison_memory_region`) e modo de alocação por registro com
+  redzones a implementar. Doc em `docs/perf-receita-carga.md`. A
+  extrapolação de carga completa (≈4,9 h @ taxas de 25k) carrega a
+  ressalva de que estabs na escala completa não pode ser validado
+  end-to-end até o fix. Hardening commitado junto: flush worker
+  estritamente POD-only (o M8 cruzava refs `Run` GC para a thread —
+  violação da regra de threading) e `freeJob` zerando o registro inteiro
+  no recycle.
 
 - ~~**Replication race on `ATTRIBUTE ... UNIQUE`**~~ **RESOLVIDO** (fila única
   + refresh de resolver na réplica). Diagnóstico real (diferia do registrado):
