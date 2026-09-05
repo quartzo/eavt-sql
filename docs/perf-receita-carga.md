@@ -1,8 +1,10 @@
 # Carga da Receita Federal — instrumento, referência e knobs
 
 Metodologia oficial para os exercícios de carga (1k→50k empresas) e a
-extrapolação para a base completa. Referência desta rodada: **2026-09-04,
-M1..M4 + WAL CF-0-only** (`5e8412c`: entrada hidratada como memtable do
+extrapolação para a base completa. Referência desta rodada: **2026-09-05,
+M6/M7/M8** (treap COW eliminado — escada de runs; instrumento executado
+via wrapper com `ATTRIBUTE` traduzido para tx EDN — a superfície SQL é
+fase C).  Referência anterior: **2026-09-04, M1..M4 + WAL CF-0-only** (`5e8412c`: entrada hidratada como memtable do
 CF-0 com watermark/tombstones; CF-1/CF-3 deferidos; âncora CF-2 como hash;
 entrada parcial para eids frios; journal CF-0-only com replay resiliente;
 `param` no slot E — probes de plano pontual).  Referência histórica scheme:
@@ -27,6 +29,31 @@ re-portado em `load_receita_sql.py`, roda no build atual a 7,3k estabs/s).
 
 `--legacy-filter` preserva o modo antigo (varredura nacional com membership)
 para comparações.
+
+## Referência M6/M7/M8 (@10k e @25k — wrapper tx; 2026-09-05)
+
+| estágio | M8 @10k | M8 @25k | M1..M4 @50k |
+|---|---|---|---|
+| empresas | 28.220 | 28.298 | 24.040 |
+| estabs   | **6.525** | **6.181** | 5.519 |
+| simples  | 36.201 | 30.064 | 29.405 |
+| sócios   | 8.196 | 11.691 | 9.158 |
+
+Probes @25k (p50): eid_lookup 78,5 µs · attr_by_eid **107 µs** (era 143) ·
+attrs_x3 **220 µs** (era 363) · upsert **52 µs** (era 63).
+
+Extrapolação completa (@25k): **empresas 0,45 h · estabs 3,28 h ·
+simples 0,46 h · sócios 0,67 h → TOTAL ≈ 4,9 h** (era 5,5 h).
+
+**BLOCKER na validação de escala**: o ponto 1M quebra no estágio estabs
+com SIGSEGV no dispatcher de completions do blob pool
+(`dispatchCompletion → newSeq[byte](job.outLen)` com outLen corrompido —
+coredump confirmado). **Pré-existente**: reproduz idêntico no checkout
+M7 — não é regressão do M8. O smoke histórico de 1M era só empresas
+(estabs@1M nunca rodou). Empresas 1M + simples 1,1M carregam ilesos em
+ambos (M8: 15,4k/s empresas no debug, 20k/s no M7 release). Investigação
+própria: ciclo de vida de job no pool (cancel/recycle vs completion) —
+arquivo como Known Issue no AGENTS.md.
 
 ## Referência @50k (todas as taxas em linhas/s)
 

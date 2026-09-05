@@ -267,6 +267,16 @@ Do not use it for the server's connection loop or for flush.
 
 ## Known Issues / Open Questions
 
+- **CRASH do transactor em carga estabs@1M (blob pool, pré-M8)**: SIGSEGV
+  no dispatcher de completions (`dispatchCompletion → newSeq[byte](outLen)`
+  com outLen corrompido). Reproduz no checkout M7 — não é regressão do
+  M8; o smoke histórico de 1M era só empresas (estabs@1M nunca rodou).
+  Suspeito: ciclo de vida de job no pool (cancel/recycle vs completion
+  tardia do worker). Backtraces em coredumpctl; doc em
+  `docs/perf-receita-carga.md`. A extrapolação de carga completa (≈4,9 h
+  @ taxas de 25k) carrega a ressalva de que estabs na escala completa não
+  pode ser validado end-to-end até o fix.
+
 - ~~**Replication race on `ATTRIBUTE ... UNIQUE`**~~ **RESOLVIDO** (fila única
   + refresh de resolver na réplica). Diagnóstico real (diferia do registrado):
   a propagação WAL nunca foi o gargalo — o sink transmite no momento do
