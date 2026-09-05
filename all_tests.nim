@@ -15,6 +15,7 @@ import nim_page_store/test_page_store
 import nim_kvstore/test_kvstore
 import nim_eavt/test_eavt
 import nim_eavt/test_hydrated
+import nim_eavt/test_anchor_index
 
 # Query engine
 import nim_scheme/test_scheme

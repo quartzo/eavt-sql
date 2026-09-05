@@ -17,6 +17,8 @@ import nim_memtable/treap_backend
 import scheme
 import stats
 import hydrated
+import anchor_index
+export anchor_index
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Value type mapping
@@ -76,13 +78,12 @@ type
     # Hydrated-eid source (CF 0 fast path) — see hydrated.nim
     hydEnabled*: bool
     hyd*: HydratedSet
-    # M3': CF-2 anchor index as a HASH — the anchor lookup is a point
-    # query (attr,value)→eid.  Key = the CF-2 lookup prefix [aid 4B][value];
-    # value = (eid, t) — eid for the probe answer, t for the publish filter.
-    # The treap CF-2 remains the durable write state; the hash is a
-    # write-through read mirror (M6).
-    anchorHash*: Table[seq[byte], (int64, int64)]
-    anchorBytes*: int64
+    # M7: CF-2 anchor index as a PACKED hash — [aid 4B][val] → eid, permanent
+    # with LRU eviction under `anchor_index_max_bytes`.  The treap CF-2
+    # remains the durable write state; the index is a write-through read
+    # mirror kept current by batchWrite — an evicted (or absent) anchor
+    # falls back to the CF-2 scan.
+    anchors*: AnchorIndex
     # TEMP scan diagnostics (-d:eavtScanDiag)
     diagSeekNs*: int64
     diagIterNs*: int64
@@ -95,46 +96,31 @@ const
 
 proc newEavtEngine*(kv: KVStore; cfg: Table[string, string]): EavtEngine =
   ## cfg keys: `hydrated_enabled` ("true"/"false", default true),
-  ## `hydrated_max_bytes` (bytes, default 1 GiB).
+  ## `hydrated_max_bytes` (bytes, default 1 GiB),
+  ## `anchor_index_max_bytes` (bytes, default 256 MiB).
   let enabled = cfg.getOrDefault("hydrated_enabled", "true") != "false"
   let maxBytes = block:
     let v = cfg.getOrDefault("hydrated_max_bytes", "")
     if v.len > 0: parseInt(v) else: DefaultHydratedMaxBytes
+  let anchorMax = block:
+    let v = cfg.getOrDefault("anchor_index_max_bytes", "")
+    if v.len > 0: parseInt(v) else: DefaultAnchorMaxBytes
   result = EavtEngine(
     kv: kv,
     resolver: newResolver(),
     hydEnabled: enabled,
     hyd: newHydratedSet(maxBytes),
-    anchorHash: initTable[seq[byte], (int64, int64)](),
+    anchors: newAnchorIndex(anchorMax),
   )
-  # M6: the treap is the memtable for ALL CFs — the generic KVStore flush
-  # (capture roots → pagestore) needs no engine cooperation. The only hook
-  # that survives is the anchor-hash cleanup: hash entries ≤ the flush's
-  # maxT are durable in the pagestore and are dropped (their probe answer
-  # falls back to the CF-2 scan).
-  if enabled:
-    let self = result
-    self.kv.onFlushPublished = proc (maxT: int64) {.gcsafe, raises: [].} =
-      # Hash entries ≤ maxT are durable in the pagestore — dropped;
-      # keys written during the flush (t > maxT) stay pending.
-      var toDel: seq[seq[byte]]
-      for pfx, meta in self.anchorHash:
-        if meta[1] <= maxT: toDel.add(pfx)
-      for pfx in toDel:
-        dec self.anchorBytes, (pfx.len + 16).int64
-        self.anchorHash.del(pfx)
-      if self.anchorBytes < 0: self.anchorBytes = 0
+  # M7: the treap is the memtable for ALL CFs and the anchor index is a
+  # permanent read mirror — the generic KVStore flush needs no engine
+  # cooperation, so no flush hooks are installed here.
   # bootstrap called after construction (avoids forward ref)
 
 proc newEavtEngine*(kv: KVStore): EavtEngine =
   newEavtEngine(kv, initTable[string, string]())
 
 # ── Batch write helper ──
-
-proc keyToSeqEavt(key: KeyRef): seq[byte] {.inline.} =
-  result = newSeq[byte](key.len)
-  if key.len > 0:
-    copyMem(addr result[0], unsafeAddr key.p[0], key.len)
 
 proc batchWrite*(eng: EavtEngine; entries: var seq[EavtEntry]) =
   ## Consumes the entries: keys are arena-written by buildEavtEntries and
@@ -153,22 +139,18 @@ proc batchWrite*(eng: EavtEngine; entries: var seq[EavtEntry]) =
   var n = 0
   for e in entries:
     if e.cf == 2:
-      # M3': anchor hash as a write-through read mirror.  Retract (sf bit 1)
-      # removes the mapping.  No key copy for the treap — the CF-2 key goes
-      # through as referenced.
-      let k = keyToSeqEavt(e.key)
-      let sf = beUint64(k, k.len - 8)
-      let prefix = k[0 ..< k.len - 16]
+      # M7: anchor index — write-through mirror of the unique anchors.
+      # Key layout: [aid 4B][val][eid 8B][sf 8B] — parsed in place
+      # (zero copy); put copies into the arena.  Retract (sf bit 1)
+      # removes the mapping.
+      let k = e.key
+      let sf = beUint64(k.p.toOpenArray(0, k.len - 1), k.len - 8)
+      let aid = beUint32(k.p.toOpenArray(0, k.len - 1), 0)
       if (sf and 1) == 0:
-        let eid = decodeEid(beUint64(k, k.len - 16))
-        let kt = (sf shr 1).int64
-        if not eng.anchorHash.hasKey(prefix):
-          inc eng.anchorBytes, (prefix.len + 16).int64
-        eng.anchorHash[prefix] = (eid, kt)
+        let eid = decodeEid(beUint64(k.p.toOpenArray(0, k.len - 1), k.len - 16))
+        eng.anchors.put(aid, k.p.toOpenArray(4, k.len - 17), eid)
       else:
-        if eng.anchorHash.hasKey(prefix):
-          dec eng.anchorBytes, (prefix.len + 16).int64
-          eng.anchorHash.del(prefix)
+        eng.anchors.del(aid, k.p.toOpenArray(4, k.len - 17))
     cfs[n] = CfKey(cf: e.cf, key: e.key)
     inc n
     if e.cf == 0:
@@ -980,20 +962,22 @@ proc batchLookupAvet*(eng: EavtEngine;
     lastIdx = oi
 
 proc lookupEntityByValue*(eng: EavtEngine; attrName: string; value: string): Option[int64] =
-  ## Unique-attr anchor lookup (test/recovery helper): hash probe first
-  ## (unflushed), CF-2 scan fallback (committed).
+  ## Unique-attr anchor lookup (test/recovery helper): anchor index probe
+  ## first (O(1), permanent), CF-2 scan fallback (also correct).
   let aidOpt = eng.lookupAttr(attrName)
   if aidOpt.isNone: return none[int64]()
   let aid = aidOpt.get
   let vt = eng.valueTypeFor(aid).get(DbTypeString)
   let mode = valueTypeToEncodeMode(vt)
-  var prefix = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
-                byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
-  prefix.add encodeValue(value, mode, 0)
-  if eng.anchorHash.hasKey(prefix):
-    let eid = eng.anchorHash[prefix][0]
+  let encoded = encodeValue(value, mode, 0)
+  let hit = eng.anchors.probe(aid, encoded)
+  if hit.isSome:
+    let eid = hit.get
     eng.hydrateEid(eid)
     return some(eid)
+  var prefix = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
+                byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
+  prefix.add encoded
   for k in eng.scanPrefixActive(2, prefix):
     if k.len >= 20:
       let eid = decodeEid(beUint64(k, k.len - 16))
@@ -1081,12 +1065,9 @@ proc recoverWriteState*(eng: EavtEngine) =
     for d in deriveIndexKeys(key, indexed, isRef):
       derivedKeys.add d
     if not retracted and indexed:
-      # anchor hash rebuild: [aid][val] → (eid, t) for the O(1) probe
-      var pfx = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
-                 byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
-      pfx.add key[12 ..< key.len - 8]
-      eng.anchorHash[pfx] = (decodeEid(beUint64(key, 0)), (sf shr 1).int64)
-      inc eng.anchorBytes, (pfx.len + 16).int64
+      # anchor index rebuild: [aid][val] → eid for the O(1) probe
+      eng.anchors.put(aid, key.toOpenArray(12, key.len - 9),
+                      decodeEid(beUint64(key, 0)))
   # Treap insert without journaling (the datom is the durable truth) — the
   # KeyRefs borrow derivedKeys only for the duration of the batch call,
   # which copies the bytes into the treap arena.

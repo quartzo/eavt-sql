@@ -503,17 +503,17 @@ method isUniqueById(q: QueryStore; attrId: uint32): bool =
 
 method batchLookupAvet(q: QueryStore;
                        keys: seq[seq[byte]]): seq[Option[int64]] =
-  ## M3': the anchor hash is probed FIRST (unflushed unique datoms —
-  ## recency wins); misses fall to the CF-2 scan (treap recovery residue +
-  ## pagestore committed data).
+  ## M7: the anchor index is probed FIRST (O(1), zero-alloc); misses fall
+  ## to the CF-2 scan (treap recovery residue + pagestore committed data).
   result = newSeq[Option[int64]](keys.len)
   var missIdx: seq[int]
   var missKeys: seq[seq[byte]]
   for i, k in keys:
-    if q.eavt.anchorHash.hasKey(k):
-      let (eid, _) = q.eavt.anchorHash[k]
-      result[i] = some(eid)
-      continue
+    if k.len > 4:
+      let hit = q.eavt.anchors.probe(beUint32(k, 0), k.toOpenArray(4, k.len - 1))
+      if hit.isSome:
+        result[i] = some(hit.get)
+        continue
     missIdx.add(i)
     missKeys.add(k)
   if missIdx.len > 0:
@@ -600,15 +600,16 @@ method lookupEntityW(q: QueryStore; attrName: string;
   let vt = q.eavt.valueTypeFor(aid).get(resolver.DbTypeString)
   let mode = valueTypeToEncodeMode(vt)
   let encoded = encodeValue(slotToValueForType(value, vt), mode, 0)
-  var prefix = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
-                byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
-  prefix.add encoded
-  if q.eavt.anchorHash.hasKey(prefix):
-    let found = some(q.eavt.anchorHash[prefix][0])
+  let hit = q.eavt.anchors.probe(aid, encoded)
+  if hit.isSome:
+    let found = some(hit.get)
     q.eavt.hydrateEid(found.get)
     q.lookupNs += getMonoTime().ticks - t0
     inc q.lookupCount
     return found
+  var prefix = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
+                byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
+  prefix.add encoded
   let tScan = getMonoTime().ticks
   let scanRes = q.eavt.scanPrefixActive(2, prefix)
   q.lookupScanNs += getMonoTime().ticks - tScan
@@ -635,15 +636,16 @@ method lookupEntity(q: QueryStore; attrName: string; value: SExpr): Option[int64
   let vt = q.eavt.valueTypeFor(aid).get(resolver.DbTypeString)
   let mode = valueTypeToEncodeMode(vt)
   let encoded = encodeValue(sexprToValueForType(value, vt), mode, 0)
-  var prefix = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
-                byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
-  prefix.add encoded
-  if q.eavt.anchorHash.hasKey(prefix):
-    let found = some(q.eavt.anchorHash[prefix][0])
+  let hit = q.eavt.anchors.probe(aid, encoded)
+  if hit.isSome:
+    let found = some(hit.get)
     q.eavt.hydrateEid(found.get)
     q.lookupNs += getMonoTime().ticks - t0
     inc q.lookupCount
     return found
+  var prefix = @[byte(aid shr 24), byte((aid shr 16) and 0xFF),
+                byte((aid shr 8) and 0xFF), byte(aid and 0xFF)]
+  prefix.add encoded
   let tScan = getMonoTime().ticks
   let scanRes = q.eavt.scanPrefixActive(2, prefix)
   q.lookupScanNs += getMonoTime().ticks - tScan

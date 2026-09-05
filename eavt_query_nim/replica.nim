@@ -253,19 +253,11 @@ proc applyRoot*(r: ReplicaEngine; rootName: string; maxT: int64) =
     # datoms "durable" while the replica's pagestore covers nothing, and
     # the next run-cache build would drain nothing (rows vanish).
     if not r.kv.rootHasData():
-      logInfo("replica", "root " & rootName & " is empty — watermark not advanced")
+      logInfo("replica", "root " & rootName & " is empty — root not adopted")
       return
-    # M6: mirror the primary's publish — the anchor hash entries ≤ maxT are
-    # durable in the adopted root and are dropped (their probe answer falls
-    # back to the CF-2 scan).  The treap is the memtable on both nodes; no
-    # hyd/vector watermark bookkeeping remains.
-    var toDel: seq[seq[byte]]
-    for pfx, meta in r.store.eavt.anchorHash:
-      if meta[1] <= maxT: toDel.add(pfx)
-    for pfx in toDel:
-      dec r.store.eavt.anchorBytes, (pfx.len + 16).int64
-      r.store.eavt.anchorHash.del(pfx)
-    if r.store.eavt.anchorBytes < 0: r.store.eavt.anchorBytes = 0
+    # M7: the anchor index is a permanent read mirror on both nodes —
+    # nothing to drop at root adoption (the WAL write-through keeps it
+    # current; evicted/absent anchors fall back to the CF-2 scan).
   except Exception as e:
     # Falha ao publicar raiz NÃO é operação esperada: a réplica fica presa
     # numa geração antiga (leituras por índice erram pós-flush).

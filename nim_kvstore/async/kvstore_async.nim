@@ -620,9 +620,6 @@ proc flushNowAsync*(f: AsyncFlusher): Future[void] {.async.} =
       raise newException(IOError, "flush worker failed")
   # Single-threaded publish.
   kv.flushRoots = @[]; kv.flushArena = nil; kv.mtSize = 0
-  # Hyd watermarks advance only after the data is durable in the pagestore.
-  if collectedMaxT >= 0 and kv.onFlushPublished != nil:
-    kv.onFlushPublished(collectedMaxT)
   # Publish done: everything before the seal boundary is durable in the
   # PageStore — the sealed WAL segment may be deleted on the next WAL cycle.
   if sealBoundary >= 0:

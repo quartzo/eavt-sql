@@ -39,10 +39,6 @@ type
     flushThreshold*: uint64
     gcMaxAgeSecs*: uint64
     gcMaxRootCount*: int
-    ## Called after a flush publishes with the flush's maxT (max datom t in
-    ## the flushed keys) — write-through mirrors (anchor hash) drop entries
-    ## that are now durable. Loop-only callback.
-    onFlushPublished*: proc (maxT: int64) {.gcsafe, raises: [].}
     ## Flush arming hook: called when a write crosses flushThreshold and by
     ## requestFlush(). The async server installs a proc that schedules
     ## flushAsync on its event loop; nil (tests, sync callers) means "no
@@ -592,9 +588,6 @@ proc flush*(kv: KVStore) {.gcsafe.} =
     commitMergeKv(kv.ps[], pairsByCf, deletedByCf, true)
   # Single-threaded publish — runs atomically before next await.
   kv.flushRoots = @[]; kv.flushArena = nil; kv.mtSize = 0
-  # Hyd watermarks advance only after the data is durable in the pagestore.
-  if collectedMaxT >= 0 and kv.onFlushPublished != nil:
-    kv.onFlushPublished(collectedMaxT)
   # Publish done: everything before the seal boundary is durable in the
   # PageStore — the sealed WAL segment may be deleted on the next WAL cycle.
   if sealBoundary >= 0:
