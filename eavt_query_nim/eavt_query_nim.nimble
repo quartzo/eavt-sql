@@ -9,5 +9,5 @@ requires "nim >= 2.0.14"
 requires "chronos >= 4.0.0"
 
 task release, "Build the query server":
-  exec "nim c --mm:orc --threads:on -d:release -d:useMalloc " &
+  exec "nim c --mm:orc --threads:on -d:release " &
        "--out:../build/eavt-sql-query server.nim"

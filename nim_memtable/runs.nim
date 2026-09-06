@@ -25,6 +25,10 @@ import std/[options, algorithm]
 import memtypes
 
 const MaxActiveRuns = 8
+const MaxBufEntries = 65536   ## M9: teto do delta antes de materializar
+                              ## incrementalmente (buf gigante → sort/alloc
+                              ## de 8MB+ num tiro — e o crash do estabs@1M
+                              ## acontece exatamente nesse materialize)
 
 type
   Run* = ref object
@@ -102,8 +106,45 @@ proc arenaScratch*(mt: MemTable): Arena {.inline.} =
 
 # ── escrita (append O(1), registro copiado) ───────────────────────────────────
 
+
+proc sortIdx*(order: var seq[int]; cmp: proc (a, b: int): int {.gcsafe, raises: [].}) =
+  ## Heapsort in-place sobre índices com comparator raises-free — o sort
+  ## da std injeta `raises: Exception` pelo tipo do closure, quebrando a
+  ## inferência de batchMove → put → materialize (contexto restrito).
+  let n = order.len
+  if n < 2: return
+  var start = n div 2 - 1
+  while start >= 0:
+    var root = start
+    while true:
+      let l = 2 * root + 1
+      let r = l + 1
+      var m = root
+      if l < n and cmp(order[l], order[m]) > 0: m = l
+      if r < n and cmp(order[r], order[m]) > 0: m = r
+      if m == root: break
+      swap(order[root], order[m])
+      root = m
+    dec start
+  for e in countdown(n - 1, 1):
+    swap(order[0], order[e])
+    var root = 0
+    while true:
+      let l = 2 * root + 1
+      let r = l + 1
+      var m = root
+      if l < e and cmp(order[l], order[m]) > 0: m = l
+      if r < e and cmp(order[r], order[m]) > 0: m = r
+      if m == root: break
+      swap(order[root], order[m])
+      root = m
+
+proc materialize(mt: MemTable; cf: int) {.gcsafe, raises: [].}   # fwd
+proc maybeMerge(mt: MemTable; cf: int) {.gcsafe, raises: [].}   # forward (definida adiante)
+
 proc appendRec(mt: MemTable; cf: int; klen: int; deleted: bool;
-               key: openArray[byte]; value: openArray[byte]): uint64 =
+               key: openArray[byte]; value: openArray[byte]): uint64 {.
+    gcsafe, raises: [].} =
   let vlen = if cf >= 10: value.len else: 0
   let total = 5 + klen + (if cf >= 10: 4 + vlen else: 0)
   let p = mt.bufArena.allocKeyBytes(total)
@@ -117,9 +158,12 @@ proc appendRec(mt: MemTable; cf: int; klen: int; deleted: bool;
     if vlen > 0: copyMem(addr p[9 + klen], unsafeAddr value[0], vlen)
   mt.buf[cf].add(p)
   mt.cfSize[cf] += klen
+  if mt.buf[cf].len >= MaxBufEntries:
+    mt.materialize(cf)
+    mt.maybeMerge(cf)
   mt.size()
 
-proc put*(mt: MemTable; cf: int; key: openArray[byte]): uint64 =
+proc put*(mt: MemTable; cf: int; key: openArray[byte]): uint64 {.raises: [ValueError].} =
   if cf < 0 or cf >= mt.numCf: raise newException(ValueError, "invalid cf")
   mt.appendRec(cf, key.len, false, key, [])
 
@@ -131,7 +175,7 @@ proc deleteKv*(mt: MemTable; cf: int; key: openArray[byte]) =
   if cf < 0 or cf >= mt.numCf: raise newException(ValueError, "invalid cf")
   discard mt.appendRec(cf, key.len, true, key, [])
 
-proc batchMove*(mt: MemTable; entries: var seq[CfKey]): uint64 =
+proc batchMove*(mt: MemTable; entries: var seq[CfKey]): uint64 {.raises: [ValueError].} =
   ## M8: copia os bytes para o registro (o contrato de referência do treap
   ## morreu — chaves emprestadas de frames WAL/scratch são bem-vindas).
   for i in 0 ..< entries.len:
@@ -158,7 +202,7 @@ proc materialize(mt: MemTable; cf: int) =
   var order = newSeq[int](mt.buf[cf].len)
   for i in 0 ..< order.len: order[i] = i
   let bufAddr = addr mt.buf[cf]
-  sort(order, proc (a, b: int): int =
+  sortIdx(order, proc (a, b: int): int {.gcsafe, raises: [].} =
     let c = cmpRec(bufAddr[][a], bufAddr[][b])
     if c != 0: return c
     return cmp(a, b)   # empate: append mais tarde = mais novo
@@ -181,7 +225,7 @@ proc materialize(mt: MemTable; cf: int) =
   mt.cfSize[cf] -= bufSum - keptBytes
   inc mt.gen
 
-proc maybeMerge(mt: MemTable; cf: int) =
+proc maybeMerge(mt: MemTable; cf: int) {.gcsafe, raises: [].} =
   ## Escada passa de MaxActiveRuns: merge dos ativos (arena compartilhada —
   ## concat+sort de ponteiros; recência: run mais novo ganha no empate).
   if mt.runs[cf].len <= MaxActiveRuns: return
@@ -193,7 +237,7 @@ proc maybeMerge(mt: MemTable; cf: int) =
       origin.add(ri)
   var order = newSeq[int](merged.len)
   for i in 0 ..< order.len: order[i] = i
-  sort(order, proc (a, b: int): int =
+  sortIdx(order, proc (a, b: int): int {.gcsafe, raises: [].} =
     let c = cmpRec(merged[a], merged[b])
     if c != 0: return c
     return cmp(origin[a], origin[b])   # mais novo por último → dedup fica com ele
@@ -215,6 +259,13 @@ proc ensureMaterialized*(mt: MemTable; cf: int) =
   ## fontes (bisect só enxerga runs). Gen bump garante rebuild dos cursores.
   mt.materialize(cf)
   mt.maybeMerge(cf)
+
+proc maybeCapBuf*(mt: MemTable; cf: int) =
+  ## Delta acima do teto → materializa incrementalmente (M9): evita o
+  ## sort/newSeqOfCap gigante que crasha no estabs@1M.
+  if mt.buf[cf].len >= MaxBufEntries:
+    mt.materialize(cf)
+    mt.maybeMerge(cf)
 
 proc materializeAll*(mt: MemTable) =
   for cf in 0 ..< mt.numCf:

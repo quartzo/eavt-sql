@@ -797,7 +797,7 @@ proc attrName*(eng: EavtEngine; aid: uint32): string =
 
 proc allocateEntityId*(eng: EavtEngine): int64 =
   let eid = eng.resolver.allocateInPartition(PartUser)
-  # Mark hydrated (same contract as allocateInPartition below).
+  # Mark hydrated (same contract as allocateInPartition above).
   if eng.hydEnabled:
     eng.hyd.hydrateEmpty(eid)
   eid
@@ -818,6 +818,8 @@ proc allocateInPartition*(eng: EavtEngine; pid: uint64): int64 =
   let eid = eng.resolver.allocateInPartition(pid)
   # New entity starts hydrated (empty): its first saves mirror into the
   # source via batchWrite, so every later lookup hits the fast path.
+  # M9: o orçamento da cache (hydrated_max_bytes) é o que limita a
+  # residentia — com 256 MB o LRU evicta de verdade durante cargas bulk.
   if eng.hydEnabled:
     eng.hyd.hydrateEmpty(eid)
   eid

@@ -9,8 +9,8 @@ requires "nim >= 2.0.14"
 requires "chronos >= 4.2.0"
 
 task test, "Run transactor tests":
-  exec "nim c --mm:orc --threads:on -d:release -d:useMalloc -r tests.nim"
+  exec "nim c --mm:orc --threads:on -d:release -r tests.nim"
 
 task release, "Build the transactor":
-  exec "nim c --mm:orc --threads:on -d:release -d:useMalloc " &
+  exec "nim c --mm:orc --threads:on -d:release " &
        "--out:../build/eavt-sql-transactor server.nim"

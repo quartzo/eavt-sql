@@ -36,10 +36,25 @@ proc `=destroy`(a: var ArenaObj) =
   for b in a.large: deallocShared(b)
   a.keyBlocks = @[]; a.large = @[]
 
+when defined(arenaRedzone):
+  ## Modo de caça M9: cada registro é uma alocação própria com redzones
+  ## envenenadas (ASan) — qualquer write além do `len` pedido dispara com
+  ## o stack do culpado.  Uso: -d:arenaRedzone + ASan.  Perf irrelevante
+  ## (só para depuração).
+  proc asanPoison(p: pointer; size: int) {.importc: "__asan_poison_memory_region", noconv.}
+  proc asanUnpoison(p: pointer; size: int) {.importc: "__asan_unpoison_memory_region", noconv.}
+  const Redzone = 16
+
 proc allocKeyBytes*(a: Arena; len: int): ptr UncheckedArray[byte] =
   ## Reserve `len` bytes in the arena. Records larger than a block get their
   ## own allocation (tracked in `large`, freed with the arena).
   if len <= 0: return nil
+  when defined(arenaRedzone):
+    let raw = cast[ptr UncheckedArray[byte]](allocShared0(len + 2 * Redzone))
+    asanPoison(addr raw[0], Redzone)
+    asanPoison(addr raw[Redzone + len], Redzone)
+    a.large.add(raw)
+    return cast[ptr UncheckedArray[byte]](addr raw[Redzone])
   if len > KeyBlockSize:
     let p = cast[ptr UncheckedArray[byte]](allocShared0(len))
     a.large.add(p)

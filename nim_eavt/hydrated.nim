@@ -36,7 +36,11 @@ import std/[tables]
 import keys
 import nim_memtable/memtypes
 
-const DefaultMaxBytes* = 1 shl 30          ## 1 GiB — cfg `hydrated_max_bytes`
+const DefaultMaxBytes* = 256 * 1024 * 1024  ## 256 MiB — cfg `hydrated_max_bytes`.
+## M9: 1 GiB nunca evictava durante carga bulk (toda entidade nasce
+## hidratada via get-or-create) — o cache virava cópia residente do
+## dataset e o transactor estourava o envelope de 3 GB.  256 MiB faz o
+## LRU trabalhar: cache de entidades RECENTES/quentes, memória limitada.
 
 type
   HydratedEntry* = ref object

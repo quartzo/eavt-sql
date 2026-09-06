@@ -35,7 +35,12 @@ unnecessary recompilation.
 
 ### Prerequisites
 
-- **Nim ≥ 2.0.14** — with `--mm:orc --threads:on -d:useMalloc` for everything (atomic ref counting under threads, plus the cycle collector). Storage is acyclic by design, so it also passes under `--mm:atomicArc` if you ever need a cycle-collector-free build.
+- **Nim ≥ 2.0.14** — with `--mm:orc --threads:on` for everything. **SEM
+  `-d:useMalloc` em produção**: ORC + malloc segfaulta em falha de alocação
+  (OOM vira SIGSEGV — reproduzido isoladamente); o alocador do Nim falha
+  com raise limpo. `-d:useMalloc` fica restrito a builds de debug/ASan
+  (com `-d:arenaRedzone` para caça a overruns de arena). Storage é acíclico
+  por design — também passa sob `--mm:atomicArc`.
 
 ## Project Structure
 
@@ -267,28 +272,21 @@ Do not use it for the server's connection loop or for flush.
 
 ## Known Issues / Open Questions
 
-- **CRASH do transactor em carga estabs@1M (blob pool, pré-M8)**: SIGSEGV
-  no dispatcher de completions (`dispatchCompletion → newSeq[byte](outLen)`
-  com outLen corrompido). Reproduz no checkout M7 — não é regressão do
-  M8; o smoke histórico de 1M era só empresas (estabs@1M nunca rodou).
-  Diagnóstico da rodada M8-hardening (2026-09-05) — **descartado**:
-  ciclo de vida de job do pool (canários magic/outLen no dispatch nunca
-  dispararam), OOB/use-after-free em código instrumentado (ASan limpo na
-  carga completa), corrida de refcount ORC (`--mm:atomicArc` também
-  quebra). O crash real (cores com DWARF) está no **alocador Nim na
-  thread do loop** — `newSeqOfCap` dentro de `runs.materialize` (M8) e
-  site equivalente no M7 — consistente com corrupção de heap por escrita
-  em buffer **cru** (arena `allocShared0`) invisível ao ASan quando o
-  write fica dentro do bloco. Ferramentas preparadas para a caça: cores
-  em coredumpctl, canário de arena (poisoning do slack via
-  `__asan_poison_memory_region`) e modo de alocação por registro com
-  redzones a implementar. Doc em `docs/perf-receita-carga.md`. A
-  extrapolação de carga completa (≈4,9 h @ taxas de 25k) carrega a
-  ressalva de que estabs na escala completa não pode ser validado
-  end-to-end até o fix. Hardening commitado junto: flush worker
-  estritamente POD-only (o M8 cruzava refs `Run` GC para a thread —
-  violação da regra de threading) e `freeJob` zerando o registro inteiro
-  no recycle.
+- ~~**CRASH do transactor em carga estabs@1M**~~ **RESOLVIDO** (2026-09-06, M9).
+  Duas causas independentes: (1) **modo de falha** — com `-d:useMalloc`, o
+  runtime Nim (ORC + malloc) **segfaulta em vez de raise** quando a alocação
+  falha (reproduzido em 15 linhas sob `ulimit -v`; o build do Nim allocator
+  imprime "out of memory" graciosamente) — correção: `-d:useMalloc` removido
+  dos builds de produção (mantido apenas para builds de debug/ASan); (2)
+  **pressão de memória** — a cache hidratada com orçamento de 1 GiB nunca
+  evictava durante carga bulk (toda entidade nasce hidratada via
+  get-or-create) e virava cópia residente do dataset (2,28M entradas) —
+  correção: `hydrated_max_bytes` default 1 GiB → **256 MiB** (LRU evicta de
+  verdade; fast path preservado para entidades recentes). Instrumento
+  permanente: `memledger` no log do transactor (RSS + bytes por componente
+  a cada 10s) — regressões de memória aparecem com números. O crash site
+  do core (materialize/newSeqOfCap) era o alocador sendo corrompido pelo
+  caminho de OOM do useMalloc, não um bug do runs.
 
 - ~~**Replication race on `ATTRIBUTE ... UNIQUE`**~~ **RESOLVIDO** (fila única
   + refresh de resolver na réplica). Diagnóstico real (diferia do registrado):
