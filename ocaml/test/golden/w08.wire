@@ -1,0 +1,2 @@
+ñ«beginì÷set!«?s0í«scanner-open§AEVTì«scanner-push«?s0í◊intern-a∑empresa/optante_simplesì÷set!«?it_eì«scanner-iterate-init«?s0êì«whileì÷set!‘eí«scanner-iterate-next«?it_eï«beginì«scanner-push«?s0‘eì÷set!«?it_sì«scanner-iterate-init«?s0í«ranges-createì’orí‘=°2í‘=°5ì«whileì÷set!‘sí«scanner-iterate-next«?it_sí«beginí«
+result-rowí«resolve-val‘eí«scanner-pop«?s0í«scanner-pop«?s0

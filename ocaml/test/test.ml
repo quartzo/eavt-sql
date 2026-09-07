@@ -129,3 +129,56 @@ let () =
   check "csv eof flushes field" (rows = [ [ "unterminated" ] ]);
   let rows = csv_rows "" in
   check "csv empty input" (rows = [])
+
+(* ── golden: compilador Nim vs OCaml (Fase 2) *)
+
+let read_file (path : string) : string =
+  let ic = open_in_bin path in
+  let n = in_channel_length ic in
+  let s = really_input_string ic n in
+  close_in ic;
+  s
+
+let golden_count = 25
+
+let () =
+  let total = ref 0 in
+  let failed = ref 0 in
+  for i = 1 to golden_count do
+    let n = Printf.sprintf "%02d" i in
+    let query = read_file (Sys.file_exists "golden" |> ignore; "golden/q" ^ n ^ ".q") in
+    let expected = read_file ("golden/w" ^ n ^ ".wire") in
+    let stats_bytes = read_file ("golden/s" ^ n ^ ".stats") in
+    incr total;
+    let result =
+      try
+        let stats =
+          Eavt_lib.Compile_stats.decode (Eavt_lib.Msgpack.decode (Bytes.of_string stats_bytes))
+        in
+        let prog, _find_vars, ordered_vars, iter_plans =
+          Eavt_lib.Datalog_compile.compile_datalog_query_debug query stats
+        in
+        let wire = Eavt_lib.Sexpr.to_wire_bytes prog in
+        if String.of_bytes wire = expected then `Ok
+        else begin
+          let oc = open_out_bin ("golden/q" ^ n ^ ".got") in
+          output_string oc (String.of_bytes wire);
+          close_out oc;
+          `Diff (Bytes.length wire, String.length expected,
+                 String.concat "," ordered_vars ^ " | "
+                 ^ String.concat ","
+                   (List.map (fun ip -> ip.Eavt_lib.Planner.index_name) iter_plans))
+        end
+      with
+      | e -> `Error (Printexc.to_string e)
+    in
+    (match result with
+     | `Ok -> Printf.printf "[GOLDEN OK] q%s\n%!" n
+     | `Diff (got_len, exp_len, fv) ->
+       incr failed;
+       Printf.printf "[GOLDEN FAIL] q%s: %dB vs %dB (find=%s)\n%!" n got_len exp_len fv
+     | `Error msg ->
+       incr failed;
+       Printf.printf "[GOLDEN ERROR] q%s: %s\n%!" n msg)
+  done;
+  Printf.printf "golden: %d/%d vetores byte-identicos\n%!" (!total - !failed) !total

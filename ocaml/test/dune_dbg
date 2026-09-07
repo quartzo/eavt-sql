@@ -1,0 +1,3 @@
+(executable
+ (name stats_dbg)
+ (libraries eavt_lib))

@@ -1,0 +1,2 @@
+ñ«beginì÷set!«?s0í«scanner-open§AVETì«scanner-push«?s0í◊intern-a±empresa/cnpj_baseì÷set!«?it_cì«scanner-iterate-init«?s0í«ranges-createí‘>®40000000ì«whileì÷set!‘cí«scanner-iterate-next«?it_cï«beginì«scanner-push«?s0‘cì÷set!«?it_eì«scanner-iterate-init«?s0êì«whileì÷set!‘eí«scanner-iterate-next«?it_eí«beginí«
+result-rowí«resolve-val‘eí«scanner-pop«?s0í«scanner-pop«?s0

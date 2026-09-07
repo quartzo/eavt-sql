@@ -59,9 +59,10 @@ proc fetchStats(sockPath: string): CompileStats =
 
 let query = stdin.readAll()
 let snap = fetchStats(paramStr(1))
-stderr.writeLine "DEBUG attrIds=" & $snap.attrIds & " estimates=" & $snap.indexEstimates
 var fv: seq[string] = @[]
 let compiled = compileDatalogQuery(query, snap, fv)
+if paramCount() >= 2:
+  writeFile(paramStr(2), statsToMsgpack(snap))
 var ms = MsgStream.init(256)
 writeSExprWire(ms, compiled.program.body)
 stdout.write(ms.data)

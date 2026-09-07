@@ -1,5 +1,6 @@
 (rule
  (alias runtest)
+ (deps (source_tree golden))
  (action
   (run ./test.exe)))
 

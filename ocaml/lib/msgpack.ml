@@ -80,11 +80,25 @@ let encode_map_header buf n =
 
 let encode_ext buf ty payload =
   let len = Bytes.length payload in
-  if len <= 0xff then (add_u8 buf 0xc7; add_u8 buf len)
-  else if len <= 0xffff then (add_u8 buf 0xc8; add_be16 buf len)
-  else (add_u8 buf 0xc9; add_be32 buf len);
-  add_u8 buf (ty land 0xff);
-  Buffer.add_bytes buf payload
+  (* msgpack4nim compat: len 1/2/4/8/16 → fixext (byte-identity com o
+     wire do Nim) *)
+  let fixext base =
+    add_u8 buf base;
+    add_u8 buf ty;
+    Buffer.add_bytes buf payload
+  in
+  match len with
+  | 1 -> fixext 0xd4
+  | 2 -> fixext 0xd5
+  | 4 -> fixext 0xd6
+  | 8 -> fixext 0xd7
+  | 16 -> fixext 0xd8
+  | _ ->
+    if len <= 0xff then (add_u8 buf 0xc7; add_u8 buf len)
+    else if len <= 0xffff then (add_u8 buf 0xc8; add_be16 buf len)
+    else (add_u8 buf 0xc9; add_be32 buf len);
+    add_u8 buf (ty land 0xff);
+    Buffer.add_bytes buf payload
 
 let rec encode buf = function
   | Nil -> add_u8 buf 0xc0
