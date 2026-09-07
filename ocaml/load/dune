@@ -1,7 +1,3 @@
 (executable
  (name load_receita)
  (libraries eavt_lib))
-
-(executable
- (name count_test)
- (libraries eavt_lib))

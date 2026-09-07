@@ -289,7 +289,7 @@ def load_empresas(client, data_dir: Path, n: int, batch_size: int) -> int:
             ops = []
         if total >= n:
             break
-    if ops and total < n:
+    if ops:
         tx_batch(client, ops)
 
     elapsed = time.perf_counter() - t0

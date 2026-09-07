@@ -250,7 +250,7 @@ let load_empresas (client : Client.t) (data_dir : string) (n : int) (batch_size 
         loop ()
   in
   loop ();
-  if Dynarray.length ops > 0 && !total < n then tx_flush client ops;
+  if Dynarray.length ops > 0 then tx_flush client ops;
   close_rows r;
   let elapsed = now () -. t0 in
   Printf.printf "  empresas: %s in %.1fs (%s/s)\n%!" (commas !total) elapsed
