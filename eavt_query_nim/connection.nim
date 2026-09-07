@@ -358,10 +358,12 @@ proc serveGatewayConnection*(gw: GatewayState; transp: StreamTransport) {.
 
 proc serveInternalConnection*(gw: GatewayState; transp: StreamTransport) {.
     async: (raises: []).} =
-  ## Internal executor socket (Fase 1 of the OCaml front split): the OCaml
-  ## front compiles datalog and drives this socket for local execution.
-  ## Only locally-served request types are accepted here — nothing is
-  ## forwarded to the transactor from the internal socket.
+  ## Internal executor socket (Fase 1/3 of the OCaml front split): the
+  ## OCaml front compiles datalog and drives this socket.  Locally-served
+  ## types: datalog (Nim-compile fallback), scheme-local (wire exec),
+  ## schema.  Forwarded types (tx/admin/kv/scheme) pass through to the
+  ## transactor via the back's downstream — the front is a pure
+  ## protocol translator and never reaches the transactor directly.
   try:
     while true:
       var hdr: array[4, byte]
@@ -387,9 +389,11 @@ proc serveInternalConnection*(gw: GatewayState; transp: StreamTransport) {.
           await handleSchemeLocal(gw, raw, transp)
         of "schema":
           await handleSchema(gw, transp)
+        of "tx", "admin", "kv", "scheme":
+          await gw.conn.forwardRaw(raw, transp)
         else:
           await transp.writeErrorAsync(
-            "internal socket serves datalog/scheme-local/schema only, got: " & t)
+            "internal socket: unknown request type: " & t)
       except CatchableError as e:
         await transp.writeErrorAsync(e.msg)
   except CatchableError as e:

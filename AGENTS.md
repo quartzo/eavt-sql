@@ -46,11 +46,12 @@ unnecessary recompilation.
 
 ```
 eavt_transactor_nim/        # Transactor: tx (EDN)/scheme/schema/admin/kv over UDS (chronos loop + blob pool)
-eavt_query_nim/             # Query server: compiles datalog EDN, executes on the local replica (chronos);
+eavt_query_nim/             # Query back: replica + local execution + transactor forwarding (chronos);
                             #   internal executor socket for the OCaml front (see "Two-layer split")
 eavt-repl-nim/              # REPL client (linenoise, tab-separated output; orc, no threads)
-ocaml/                      # OCaml exercise track: lib (msgpack/edn/client/csv/sha256/zipsrc),
-                            #   repl (OCaml CLI client), load (load_receita — 1.8x the Python loader)
+ocaml/                      # OCaml track: lib (msgpack/edn/client/csv/sha256/zipsrc + datalog
+                            #   compiler byte-identical to Nim), repl, load (load_receita — 1.8x
+                            #   the Python loader), query (front server — owns eavt-query.sock)
 py_eavt_client/             # Python UDS client (msgpack; datalog/scheme/schema/admin/tx)
 vendor/chronos_file_pkg/    # Vendored chronos-file (async file I/O; WAL + async blobstore bridge) — see VENDORED.md
 nim_blobstore/async/      # Async blobstore facade (pool bridge over sync trait; file/s3 via same bridge)
@@ -112,13 +113,19 @@ BlobStore (Memory / File / S3)
   The query server additionally accepts `datalog` (EDN text, compiled locally,
   executed on the replica — datoms with `:db/add`/`:db/retract` route to `tx`)
   and `schema` (CompileStats from the local replica).
-- **Two-layer split (Fase 1, in progress):** the query server also listens on
-  `eavt-query-internal.sock` (derived from the client socket; `--internal-path`
-  overrides). The internal executor socket serves `datalog` (Nim compile +
-  local execute), `scheme-local` (pre-compiled wire program + `columns`
-  (:find vars) → local execute; `mode: "exec"` refused) and `schema` —
-  nothing is forwarded. Fase 2/3 move compilation to an OCaml front process
-  that owns `eavt-query.sock` and drives the internal socket (see `ocaml/`).
+- **Two-layer split (Fases 1–3 done):** the Nim query server also listens on
+  `<sock>-internal.sock` (derived from its client socket; `--internal-path`
+  overrides) serving `datalog` (Nim-compile fallback), `scheme-local`
+  (pre-compiled wire program + `columns` (:find vars) → local execute;
+  `mode: "exec"` refused), `schema`, and forwarded `tx`/`admin`/`kv`/`scheme`
+  (via its downstream). The **OCaml front** (`ocaml/query/front.ml`, shipped
+  as `build/eavt-query-front-ocaml`) compiles Datalog EDN **byte-identically**
+  to the Nim compiler (25/25 golden vectors in `ocaml/test/golden/`) and
+  drives the internal socket — reads still execute on the Nim back's replica.
+  A/B mode: front on `eavt-query-ocaml.sock` while Nim owns `eavt-query.sock`;
+  swapped mode: Nim gets `--socket-path .../eavt-query-back.sock` and the
+  front takes `eavt-query.sock` (parity validated: 1918-line client session
+  + probes byte-equal). Rollback = repoint the client socket.
 - **Attribute name canonical form:** `ns/name` (slash, no leading colon) in
   storage and on the wire.
 - **Position-independence rule:** compiled programs never embed attribute ids;

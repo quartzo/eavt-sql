@@ -21,9 +21,13 @@ proc getSocketPath(): string =
   return getHomeDir() / ".local" / "state" / "eavt" / "eavt-query.sock"
 
 proc internalSocketPath(clientPath: string): string =
-  ## Derived from the client socket: .../eavt-query.sock →
-  ## .../eavt-query-internal.sock
-  clientPath.replace("eavt-query.sock", "eavt-query-internal.sock")
+  ## Derived from the client socket: <dir>/<name>.sock →
+  ## <dir>/<name>-internal.sock (works for eavt-query.sock and for a
+  ## back-only socket like eavt-query-back.sock).
+  let dir = clientPath.parentDir()
+  let name = clientPath.extractFilename()
+  let stem = if name.endsWith(".sock"): name[0 ..< name.len - 5] else: name
+  dir / (stem & "-internal.sock")
 
 proc defaultDataDir(): string =
   let xdg = getEnv("XDG_DATA_HOME")

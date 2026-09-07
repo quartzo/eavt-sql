@@ -8,6 +8,7 @@ cd "$(dirname "$0")/.."
 BIN_DIR="build"
 TRANSACTOR="$BIN_DIR/eavt-sql-transactor"
 QUERY="$BIN_DIR/eavt-sql-query"
+FRONT="$BIN_DIR/eavt-query-front-ocaml"
 
 for bin in "$TRANSACTOR" "$QUERY"; do
   if [ ! -x "$bin" ]; then
@@ -22,6 +23,7 @@ query_pid=""
 cleanup() {
   [ -n "$query_pid" ] && kill "$query_pid" 2>/dev/null || true
   [ -n "$trans_pid" ] && kill "$trans_pid" 2>/dev/null || true
+  [ -n "$front_pid" ] && kill "$front_pid" 2>/dev/null || true
   wait 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
@@ -32,6 +34,14 @@ sleep 0.3
 
 "$QUERY" &
 query_pid=$!
+
+# Fase 3 A/B: se o front OCaml estiver compilado, sobe em
+# eavt-query-ocaml.sock (o eavt-query.sock continua no Nim até o swap).
+if [ -x "$FRONT" ]; then
+  "$FRONT" &
+  front_pid=$!
+  echo "front ocaml (A/B) on eavt-query-ocaml.sock"
+fi
 
 echo "stack up: query server on eavt-query.sock → transactor on eavt-transactor.sock"
 wait

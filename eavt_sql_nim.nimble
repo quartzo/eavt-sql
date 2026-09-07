@@ -16,6 +16,7 @@ task dist, "Build transactor, query server and REPL to build/":
   exec "(cd eavt_transactor_nim && nimble release)"
   exec "(cd eavt_query_nim && nimble release)"
   exec "(cd eavt-repl-nim && nimble release)"
+  exec "sh -c \"cd ocaml && dune build @default && cp _build/default/query/front ../build/eavt-query-front-ocaml\""
 
 task dev, "Run transactor + query server in the foreground (Ctrl-C stops both)":
   exec "scripts/dev.sh"
