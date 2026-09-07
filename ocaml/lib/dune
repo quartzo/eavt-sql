@@ -1,0 +1,3 @@
+(library
+ (name eavt_lib)
+ (libraries unix))

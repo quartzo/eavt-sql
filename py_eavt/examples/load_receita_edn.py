@@ -592,7 +592,8 @@ def main():
         load_estabs_bulk(client, args.data_dir, args.max_estabs or 0, args.batch)
 
     print("\n== Socios0 ==")
-    load_socios(client, args.data_dir, args.batch, args.max_socios)
+    if not args.skip_socios:
+        load_socios(client, args.data_dir, args.batch, args.max_socios)
 
     client.close()
     return 0

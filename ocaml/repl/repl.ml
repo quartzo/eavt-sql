@@ -1,3 +1,5 @@
+open Eavt_lib
+
 (* repl.ml — Datalog/tx REPL loop, mirroring eavt-repl-nim/src/repl.nim:
    dot commands, multi-line accumulation on bracket depth, EDN tx-data
    via the wire encoding, tab-separated output. *)

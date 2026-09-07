@@ -1,4 +1,4 @@
 (executable
  (name main)
  (public_name eavt-sql-cli-ocaml)
- (libraries eavt_repl))
+ (libraries eavt_lib linenoise))

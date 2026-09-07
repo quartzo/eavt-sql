@@ -1,3 +1,4 @@
+open Eavt_lib
 (* main.ml — entry point: optional <SOCKET_PATH>, --help, -e "cmd",
    pipe mode (stdin not a TTY), interactive REPL. *)
 
@@ -44,10 +45,10 @@ let () =
   in
   parse args;
   let sock_path =
-    if !sock_path = "" then Eavt_repl.Client.socket_path () else !sock_path
+    if !sock_path = "" then Client.socket_path () else !sock_path
   in
-  let mode = if !exec_cmd = "" then Eavt_repl.Repl.Interactive else Eavt_repl.Repl.Exec !exec_cmd in
-  try Eavt_repl.Repl.run ~sock_path mode with
+  let mode = if !exec_cmd = "" then Repl.Interactive else Repl.Exec !exec_cmd in
+  try Repl.run ~sock_path mode with
   | e ->
     prerr_endline ("Error: " ^ Printexc.to_string e);
     exit 1

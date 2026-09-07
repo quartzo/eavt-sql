@@ -1,5 +1,6 @@
-module M = Eavt_repl.Msgpack
-module Edn = Eavt_repl.Edn
+module M = Eavt_lib.Msgpack
+module Edn = Eavt_lib.Edn
+module Sha = Eavt_lib.Sha256
 
 let check name cond =
   if not cond then (
@@ -81,3 +82,50 @@ let () =
   check "edn maps rejected"
     (try (ignore (read_edn "{:a 1}"); false) with Edn_error _ -> true);
   check "edn empty vector parses" (read_edn_vector "[ ]" = [])
+;;
+
+(* ── sha256 ─────────────────────────────────────────────────────────── *)
+let hex_of s = Sha.hex (Sha.digest s)
+;;
+
+check "sha256 empty" (hex_of "" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+check "sha256 abc" (hex_of "abc" = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+check "sha256 55 bytes" (hex_of (String.make 55 'a') = "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318");
+check "sha256 56 bytes" (hex_of (String.make 56 'a') = "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a");
+check "sha256 64 bytes" (hex_of (String.make 64 'a') = "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb");
+check "sha256 b64url tag exact" (
+  String.sub (Sha.b64url (Sha.digest "abc")) 0 6 = "ungWv4");
+
+(* ── latin1 ─────────────────────────────────────────────────────────── *)
+check "latin1 ascii passthrough" (Eavt_lib.Latin1.to_utf8 "abc" = "abc");
+check "latin1 acentos" (
+  Eavt_lib.Latin1.to_utf8 "A\231\227o" = "A\195\167\195\163o");
+;;
+
+(* ── csv ────────────────────────────────────────────────────────────── *)
+(* write all (small data fits the 64 KiB pipe buffer), close the write
+   end, then read *)
+let csv_rows (data : string) : string list list =
+  let (rfd, wfd) = Unix.pipe () in
+  let w = Unix.out_channel_of_descr wfd in
+  output_string w data;
+  close_out w;
+  let t = Eavt_lib.Csv.create rfd in
+  let rows = ref [] in
+  let rec loop () =
+    match Eavt_lib.Csv.next_row t with
+    | None -> ()
+    | Some row -> rows := row :: !rows; loop ()
+  in
+  loop ();
+  Unix.close rfd;
+  List.rev !rows
+
+let () =
+  let rows = csv_rows "\"a\";\"b;c\";\"d\"\"e\"\n\"f\";;\"h\"\n\n\"i\"\r\n\"multi\nline\";x\n" in
+  check "csv quoted+escape" (
+    rows = [ [ "a"; "b;c"; "d\"e" ]; [ "f"; ""; "h" ]; []; [ "i" ]; [ "multi\nline"; "x" ] ]);
+  let rows = csv_rows "\"unterminated" in
+  check "csv eof flushes field" (rows = [ [ "unterminated" ] ]);
+  let rows = csv_rows "" in
+  check "csv empty input" (rows = [])

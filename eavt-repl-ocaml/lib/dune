@@ -1,3 +1,0 @@
-(library
- (name eavt_repl)
- (libraries unix linenoise))

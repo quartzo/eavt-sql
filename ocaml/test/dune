@@ -5,4 +5,4 @@
 
 (executable
  (name test)
- (libraries eavt_repl))
+ (libraries eavt_lib))

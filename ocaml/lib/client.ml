@@ -106,11 +106,18 @@ let response_error = function
   | _ -> None
 
 let float_str f =
+  (* Nim $float: shortest repr that round-trips, positional notation
+     (sem expoente) para magnitudes moderadas, integral → "N.0" *)
+  let magnitude_ok s =
+    if String.contains s 'e' || String.contains s 'E' then
+      Float.abs f >= 1e16 || (Float.abs f < 1e-4 && f <> 0.0)
+    else true
+  in
   let rec loop p =
     if p >= 17 then Printf.sprintf "%.17g" f
     else
       let s = Printf.sprintf "%.*g" p f in
-      if float_of_string s = f then s else loop (p + 1)
+      if float_of_string s = f && magnitude_ok s then s else loop (p + 1)
   in
   let s = if Float.is_nan f then "nan" else loop 1 in
   if
@@ -228,6 +235,13 @@ let collect_stream t m : chunk list =
   loop []
 
 let datalog t query = collect_stream t (req "datalog" [ (Msgpack.Str "query", Msgpack.Str query) ])
+
+let datalog_params t query (params : Msgpack.t list) =
+  let fields =
+    [ (Msgpack.Str "query", Msgpack.Str query) ]
+    @ if params = [] then [] else [ (Msgpack.Str "params", Msgpack.Array params) ]
+  in
+  collect_stream t (req "datalog" fields)
 
 let dump t index =
   collect_stream t (req "admin" [ (Msgpack.Str "command", Msgpack.Str ("dump " ^ index)) ])
