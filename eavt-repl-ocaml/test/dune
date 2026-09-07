@@ -1,0 +1,8 @@
+(rule
+ (alias runtest)
+ (action
+  (run ./test.exe)))
+
+(executable
+ (name test)
+ (libraries eavt_repl))
