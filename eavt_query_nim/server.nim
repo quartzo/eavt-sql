@@ -1,4 +1,4 @@
-import std/os
+import std/[os, strutils]
 import chronos
 import shared, connection, replica, downstream
 
@@ -7,11 +7,23 @@ proc gatewayCallback(server: StreamServer, transp: StreamTransport) {.
   var gw = cast[GatewayState](server.udata)
   await serveGatewayConnection(gw, transp)
 
+proc internalCallback(server: StreamServer, transp: StreamTransport) {.
+    async: (raises: []).} =
+  ## Internal executor socket — consumed by the OCaml front (Fase 1 of
+  ## the two-layer split: compile in the front, execute on the replica).
+  var gw = cast[GatewayState](server.udata)
+  await serveInternalConnection(gw, transp)
+
 proc getSocketPath(): string =
   let xdg = getEnv("XDG_RUNTIME_DIR")
   if xdg.len > 0:
     return xdg / "eavt" / "eavt-query.sock"
   return getHomeDir() / ".local" / "state" / "eavt" / "eavt-query.sock"
+
+proc internalSocketPath(clientPath: string): string =
+  ## Derived from the client socket: .../eavt-query.sock →
+  ## .../eavt-query-internal.sock
+  clientPath.replace("eavt-query.sock", "eavt-query-internal.sock")
 
 proc defaultDataDir(): string =
   let xdg = getEnv("XDG_DATA_HOME")
@@ -22,6 +34,7 @@ proc defaultDataDir(): string =
 proc main() {.async.} =
   var sockPath = getSocketPath()
   var downstream = downstreamSocketPath()
+  var internalPath = ""
   var dataPath = ""
   var args = commandLineParams()
   var i = 0
@@ -30,6 +43,8 @@ proc main() {.async.} =
       sockPath = args[i + 1]; inc i
     elif args[i] == "--downstream-path" and i + 1 < args.len:
       downstream = args[i + 1]; inc i
+    elif args[i] == "--internal-path" and i + 1 < args.len:
+      internalPath = args[i + 1]; inc i
     elif args[i] == "--data-path" and i + 1 < args.len:
       dataPath = args[i + 1]; inc i
     elif args[i] == "--print-socket-path":
@@ -38,6 +53,8 @@ proc main() {.async.} =
     inc i
   if dataPath.len == 0:
     dataPath = defaultDataDir()
+  if internalPath.len == 0:
+    internalPath = internalSocketPath(sockPath)
   echo "EAVT query server (chronos) starting on ", sockPath, " → ", downstream,
        "  data=", dataPath
 
@@ -78,6 +95,17 @@ proc main() {.async.} =
   let address = initTAddress(sockPath)
   let server = createStreamServer(address, gatewayCallback, udata = cast[pointer](gw))
   server.start()
+
+  # Internal executor socket (Fase 1): always-on, consumed by the OCaml
+  # front.  Stale socket from a crash is removed unconditionally — the
+  # client-socket probe above already guards against a second instance.
+  block internal:
+    removeFile(internalPath)
+    let iaddr = initTAddress(internalPath)
+    let iserver = createStreamServer(iaddr, internalCallback, udata = cast[pointer](gw))
+    iserver.start()
+    echo "Internal executor socket on ", internalPath
+
   echo "Query server initialized"
   echo "Listening..."
   await server.loopFuture

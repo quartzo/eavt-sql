@@ -167,6 +167,71 @@ proc parseEdnOps(text: string): seq[SExpr] =
   ## Parse a tx-data EDN text (the REPL sends raw EDN) into op vectors.
   readEdnVector(text)
 
+proc executeLocalStream(gw: GatewayState; program: SchemeProgram;
+                        params: seq[SExpr]; columns: seq[string];
+                        transp: StreamTransport) {.async.} =
+  ## Compile-agnostic streaming execution of a wire program on the local
+  ## replica — the shared body of handleDatalog and the internal
+  ## scheme-local endpoint (the Fase-1 contract with the OCaml front).
+  if gw.replica == nil:
+    await transp.writeErrorAsync("replica unavailable")
+    return
+  let proto = newQuerySession(gw.replica.store, program, params,
+                              1'i64, none[int64]())
+  let sess = newStreamingSession(proto)
+  var first = true
+  while true:
+    let (rows, more) = nextBatchSafe(sess, 100)
+    var ms = MsgStream.init(256)
+    ms.pack_map(3)
+    ms.pack("columns")
+    if first:
+      ms.pack_array(columns.len)
+      for v in columns: ms.pack(v)
+    else:
+      ms.pack_array(0)
+    ms.pack("rows")
+    ms.pack_array(rows.len)
+    for row in rows:
+      ms.pack_array(row.len)
+      for v in row:
+        writeSExprPlain(ms, v)
+    ms.pack("more"); ms.pack(more)
+    await transp.writeFrameAsync(ms.data)
+    first = false
+    if not more: break
+
+proc handleSchemeLocal(gw: GatewayState; raw: string;
+                       transp: StreamTransport) {.async.} =
+  ## Internal endpoint (Fase 1 of the OCaml front split): execute an
+  ## already-compiled wire program on the local replica.
+  ##   {"type": "scheme-local", "program": <wire AST>,
+  ##    "params": [wire ASTs], "mode": "query", "columns": ["?a", ...]}
+  ## The caller (OCaml front) owns compilation and supplies the :find
+  ## vars as columns.  mode "exec" is refused — writes belong to the
+  ## transactor.
+  let mode = getTopStr(raw, "mode")
+  if mode.len > 0 and mode != "query":
+    await transp.writeErrorAsync("scheme-local: only mode \"query\" is served locally; exec goes to the transactor")
+    return
+  var params: seq[SExpr] = @[]
+  let (pf, ps, pe) = topValue(raw, "params")
+  if pf:
+    for (s, e) in topArrayElems(raw, ps, pe):
+      params.add(wireFromMsgpackAt(raw, s, e))
+  var columns: seq[string] = @[]
+  let (cf, cs, ce) = topValue(raw, "columns")
+  if cf:
+    for (s, e) in topArrayElems(raw, cs, ce):
+      columns.add(getTopStr(raw[s ..< e], ""))
+  var program: SchemeProgram
+  try:
+    program = SchemeProgram(body: programFromMsgpack(raw))
+  except CatchableError as e:
+    await transp.writeErrorAsync("scheme-local: bad program wire (" & e.msg & ")")
+    return
+  await executeLocalStream(gw, program, params, columns, transp)
+
 proc handleDatalog(gw: GatewayState; raw: string;
                    transp: StreamTransport) {.async.} =
   ## Datalog EDN query (docs/datalog-reference.md):
@@ -236,30 +301,7 @@ proc handleDatalog(gw: GatewayState; raw: string;
       return
 
   # Streaming execution on the replica (same as SELECT).
-  let proto = newQuerySession(gw.replica.store, compiled.program, params,
-                              1'i64, none[int64]())
-  let sess = newStreamingSession(proto)
-  var first = true
-  while true:
-    let (rows, more) = nextBatchSafe(sess, 100)
-    var ms = MsgStream.init(256)
-    ms.pack_map(3)
-    ms.pack("columns")
-    if first:
-      ms.pack_array(findVars.len)
-      for v in findVars: ms.pack(v)
-    else:
-      ms.pack_array(0)
-    ms.pack("rows")
-    ms.pack_array(rows.len)
-    for row in rows:
-      ms.pack_array(row.len)
-      for v in row:
-        writeSExprPlain(ms, v)
-    ms.pack("more"); ms.pack(more)
-    await transp.writeFrameAsync(ms.data)
-    first = false
-    if not more: break
+  await executeLocalStream(gw, compiled.program, params, findVars, transp)
 
 proc handleSchema(gw: GatewayState; transp: StreamTransport) {.async.} =
   ## Served from the local replica's stats — never touches the transactor.
@@ -313,3 +355,43 @@ proc serveGatewayConnection*(gw: GatewayState; transp: StreamTransport) {.
   except CatchableError as e:
     # Expected: client disconnected mid-frame.
     logDebug("query", "client handler ended (" & excMsg(e) & ")")
+
+proc serveInternalConnection*(gw: GatewayState; transp: StreamTransport) {.
+    async: (raises: []).} =
+  ## Internal executor socket (Fase 1 of the OCaml front split): the OCaml
+  ## front compiles datalog and drives this socket for local execution.
+  ## Only locally-served request types are accepted here — nothing is
+  ## forwarded to the transactor from the internal socket.
+  try:
+    while true:
+      var hdr: array[4, byte]
+      await transp.readExactly(addr hdr[0], 4)
+      let len = int(hdr[0]) shl 24 or int(hdr[1]) shl 16 or
+                int(hdr[2]) shl 8 or int(hdr[3])
+      if len <= 0 or len > 100_000_000:
+        break
+      let raw = newString(len)
+      if len > 0:
+        await transp.readExactly(addr raw[0], len)
+
+      if not isMsgpackMap(raw):
+        await transp.writeErrorAsync("parse error: request must be an object")
+        continue
+
+      let t = getTopStr(raw, "type")
+      try:
+        case t
+        of "datalog":
+          await handleDatalog(gw, raw, transp)
+        of "scheme-local":
+          await handleSchemeLocal(gw, raw, transp)
+        of "schema":
+          await handleSchema(gw, transp)
+        else:
+          await transp.writeErrorAsync(
+            "internal socket serves datalog/scheme-local/schema only, got: " & t)
+      except CatchableError as e:
+        await transp.writeErrorAsync(e.msg)
+  except CatchableError as e:
+    # Expected: front disconnected mid-frame.
+    logDebug("query", "internal handler ended (" & excMsg(e) & ")")

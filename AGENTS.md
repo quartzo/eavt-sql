@@ -46,17 +46,19 @@ unnecessary recompilation.
 
 ```
 eavt_transactor_nim/        # Transactor: tx (EDN)/scheme/schema/admin/kv over UDS (chronos loop + blob pool)
-eavt_query_nim/             # Query server: compiles SQL→tx-data/Scheme (chronos), routes writes to transactor
+eavt_query_nim/             # Query server: compiles datalog EDN, executes on the local replica (chronos);
+                            #   internal executor socket for the OCaml front (see "Two-layer split")
 eavt-repl-nim/              # REPL client (linenoise, tab-separated output; orc, no threads)
-py_eavt_client/             # Python UDS client (msgpack; sql/scheme/schema/admin)
+ocaml/                      # OCaml exercise track: lib (msgpack/edn/client/csv/sha256/zipsrc),
+                            #   repl (OCaml CLI client), load (load_receita — 1.8x the Python loader)
+py_eavt_client/             # Python UDS client (msgpack; datalog/scheme/schema/admin/tx)
 vendor/chronos_file_pkg/    # Vendored chronos-file (async file I/O; WAL + async blobstore bridge) — see VENDORED.md
 nim_blobstore/async/      # Async blobstore facade (pool bridge over sync trait; file/s3 via same bridge)
 nim_kvstore/async/        # Async KVStore twin: flush + GC on the event loop (chronos, blob pool)
-nim_sql_parse/              # D.1 — SQL lexer + recursive-descent parser
-nim_datalog/                # D.2 — SQL AST → Datalog IR (EAVT patterns)
+tools/                      # dump_wire.nim — compile datalog → wire-AST on stdout (Fase-2 golden seed)
+nim_datalog/                # Datalog EDN reader → IR (EAVT patterns) + resolve + CompileStats
 nim_planner/                # D.3 — Cost-based join ordering (EAVT/AEVT/AVET/VAET)
-nim_compiler/               # D.4 — Datalog IR → Scheme S-exprs + SQL → tx-data (tx_compile)
-nim_sql_frontend/           # Orchestration: parse → compile → SchemeProgram
+nim_compiler/               # Datalog IR → Scheme S-exprs (scheme_compile, datalog_compile, explain)
 nim_scheme/                 # S-expr parser + stack VM with yield/resume
 nim_edn/                    # EDN reader → SExpr (Datomic-style tx-data)
 nim_query/                  # Scanner, hostfns (22 ops), leapfrog triejoin
@@ -69,16 +71,19 @@ build/                      # Compiled binaries (gitignored)
 tests/                      # Python benchmarks
 ```
 
+NOTE: the SQL surface (`nim_sql_parse`/`nim_sql_frontend`, `type: "sql"`)
+was removed in fase C (commit d2f7539) — Datalog EDN is the only query
+surface.
+
 ## Architecture
 
 ### Compiler Pipeline (Pure Nim)
 
 ```
-SQL text
-  → nim_sql_parse    (lexer + parser → AST)
-  → nim_datalog      (AST → Datalog IR)
+Datalog EDN text
+  → nim_datalog      (query_edn reader → IR; resolveIr + CompileStats)
   → nim_planner      (join ordering + index selection)
-  → nim_compiler     (Datalog IR → Scheme S-expressions)
+  → nim_compiler     (IR → Scheme S-expressions)
   → nim_scheme       (stack VM with yield/resume)
   → nim_query        (scanner, hostfns, leapfrog triejoin)
   → nim_eavt         (save/retract + resolver)
@@ -98,17 +103,24 @@ BlobStore (Memory / File / S3)
 ### Server Protocol
 
 - **Processes:** query server owns `eavt-query.sock` (clients connect here); transactor
-  listens on `eavt-transactor.sock`. SQL is compiled to Scheme **at the query server**
+  listens on `eavt-transactor.sock`. Datalog EDN is compiled to Scheme **at the query server**
   (`docs/scheme-transport.md`); the transactor is a pure execution engine.
 - **Request types (transactor):** `tx` (EDN tx-data, docs/tx-protocol.md —
   the write path: tempids, lookup refs, schema-as-data, `:db/current-tx`),
   `scheme` (wire-AST program + `mode` query|exec + `params`; query passthrough
   for the Python client), `schema` (CompileStats snapshot), `admin`, `kv`.
-  The query server additionally accepts `sql` (text + params): queries execute
-  on the replica; writes compile to `tx`.
+  The query server additionally accepts `datalog` (EDN text, compiled locally,
+  executed on the replica — datoms with `:db/add`/`:db/retract` route to `tx`)
+  and `schema` (CompileStats from the local replica).
+- **Two-layer split (Fase 1, in progress):** the query server also listens on
+  `eavt-query-internal.sock` (derived from the client socket; `--internal-path`
+  overrides). The internal executor socket serves `datalog` (Nim compile +
+  local execute), `scheme-local` (pre-compiled wire program + `columns`
+  (:find vars) → local execute; `mode: "exec"` refused) and `schema` —
+  nothing is forwarded. Fase 2/3 move compilation to an OCaml front process
+  that owns `eavt-query.sock` and drives the internal socket (see `ocaml/`).
 - **Attribute name canonical form:** `ns/name` (slash, no leading colon) in
-  storage and on the wire; the SQL dot surface normalizes at the resolver
-  boundary (`normalizeAttr`).
+  storage and on the wire.
 - **Position-independence rule:** compiled programs never embed attribute ids;
   attributes resolve by name at execution time (`intern-a`).
 - **Transport:** Unix Domain Socket (`$XDG_RUNTIME_DIR/eavt/`)
@@ -179,7 +191,7 @@ Re-bootstrap is prevented by scanning for existing `db.ident` datom (aid=1).
 
 ## Conventions
 
-- Nim module names: snake_case (`nim_sql_parse`, `nim_blobstore`)
+- Nim module names: snake_case (`nim_blobstore`, `nim_page_store`)
 - Config: `Table[string, string]` (no CStringArr, no C-ABI)
 - Journal: `ref object` with direct methods (no vtable, no cdecl)
 - Binary output: `build/` directory (gitignored)
