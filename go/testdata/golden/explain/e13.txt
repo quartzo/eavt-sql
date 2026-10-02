@@ -1,0 +1,48 @@
+Plan:
+  Join order: [m, e]
+  p0 @ AEVT
+    a = e
+    e = attr(id=141) [depth 1]
+    v = "SP"
+    t = _
+    added = _
+  p1 @ VAET
+    v = e [depth 0]
+    a = attr(id=142)
+    e = m [depth 1]
+    t = _
+    added = _
+
+[e, m] cost=105120.0
+  depth 0: e | clauses=[p0@AEVT, p1@AEVT] | est=21024.0 ×2cl = 84096.0
+  depth 1: m | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+→ [m, e] cost=46304.0
+  depth 0: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: e | clauses=[p0@AEVT, p1@VAET] | est=21024.0 ×2cl = 42048.0
+
+(:begin
+  [:set! ?s0 [:scanner-open "AEVT"]]
+  [:set! ?s1 [:scanner-open "VAET"]]
+  [:set! ?it_m [:scanner-iterate-init ?s1 []]]
+  (:while
+    [:set! m [:scanner-iterate-next ?it_m]]
+    (:begin
+      [:scanner-push ?s1 m]
+      [:scanner-push ?s0 [:intern-a "estab/uf"]]
+      [:scanner-push ?s1 [:intern-a "estab/municipio"]]
+      [:set! ?it_e [:scanner-iterate-init ?s0 ?s1 []]]
+      (:while
+        [:set! e [:scanner-iterate-next ?it_e]]
+        (:begin
+          [:scanner-push ?s0 e]
+          [:set! ?it__v_trail [:scanner-iterate-init ?s0 [:ranges-create [:= "SP"]]]]
+          (:while
+            [:set! _v_trail [:scanner-iterate-next ?it__v_trail]]
+            (:begin
+              [:scanner-push ?s0 _v_trail]
+              [:result-row [:resolve-val e] [:resolve-val m]]
+              [:scanner-pop ?s0]))
+          [:scanner-pop ?s0]))
+      [:scanner-pop ?s1]
+      [:scanner-pop ?s0]
+      [:scanner-pop ?s1])))

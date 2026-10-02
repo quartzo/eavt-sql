@@ -1,0 +1,64 @@
+Plan:
+  Join order: [e, rs, cnpj]
+  p0 @ AEVT
+    a = e
+    e = attr(id=112) [depth 0]
+    v = cnpj [depth 2]
+    t = _
+    added = _
+  p1 @ AEVT
+    a = e
+    e = attr(id=113) [depth 0]
+    v = rs [depth 1]
+    t = _
+    added = _
+
+[rs, cnpj, e] cost=442092672.0
+  depth 0: rs | blind | est=21024.0
+  depth 1: cnpj | clauses=[p0@AVET] | est=21024.0 ×1cl = 42048.0
+  depth 2: e | clauses=[p0@AVET, p1@AEVT] | est=21024.0 ×2cl = 42048.0
+PRUNED [rs, e] cost=442092672.0
+  depth 0: rs | blind | est=21024.0
+  depth 1: e | clauses=[p0@AEVT, p1@AEVT] | est=21024.0 ×2cl = 84096.0
+[cnpj, rs, e] cost=442092672.0
+  depth 0: cnpj | clauses=[p0@AVET] | est=21024.0 ×1cl = 42048.0
+  depth 1: rs | blind | est=21024.0
+  depth 2: e | clauses=[p0@AVET, p1@AEVT] | est=21024.0 ×2cl = 42048.0
+[cnpj, e, rs] cost=147168.0
+  depth 0: cnpj | clauses=[p0@AVET] | est=21024.0 ×1cl = 42048.0
+  depth 1: e | clauses=[p0@AVET, p1@AEVT] | est=21024.0 ×2cl = 84096.0
+  depth 2: rs | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+→ [e, rs, cnpj] cost=126144.0
+  depth 0: e | clauses=[p0@AEVT, p1@AEVT] | est=21024.0 ×2cl = 84096.0
+  depth 1: rs | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 2: cnpj | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+[e, cnpj, rs] cost=126144.0
+  depth 0: e | clauses=[p0@AEVT, p1@AEVT] | est=21024.0 ×2cl = 84096.0
+  depth 1: cnpj | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 2: rs | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+
+(:begin
+  [:set! ?s0 [:scanner-open "AEVT"]]
+  [:set! ?s1 [:scanner-open "AEVT"]]
+  [:scanner-push ?s0 [:intern-a "empresa/cnpj_base"]]
+  [:scanner-push ?s1 [:intern-a "empresa/razao_social"]]
+  [:set! ?it_e [:scanner-iterate-init ?s0 ?s1 []]]
+  (:while
+    [:set! e [:scanner-iterate-next ?it_e]]
+    (:begin
+      [:scanner-push ?s0 e]
+      [:scanner-push ?s1 e]
+      [:set! ?it_rs [:scanner-iterate-init ?s1 []]]
+      (:while
+        [:set! rs [:scanner-iterate-next ?it_rs]]
+        (:begin
+          [:scanner-push ?s1 rs]
+          [:set! ?it_cnpj [:scanner-iterate-init ?s0 []]]
+          (:while
+            [:set! cnpj [:scanner-iterate-next ?it_cnpj]]
+            [:begin [:result-row [:resolve-val rs]]])
+          [:scanner-pop ?s1]))
+      [:scanner-pop ?s0]
+      [:scanner-pop ?s1]))
+  [:scanner-pop ?s1]
+  [:scanner-pop ?s0])

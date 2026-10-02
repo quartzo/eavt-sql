@@ -1,0 +1,32 @@
+Plan:
+  Join order: [e, cap]
+  p0 @ AEVT
+    a = e
+    e = attr(id=116) [depth 0]
+    v = cap [depth 1]
+    t = _
+    added = _
+
+[cap, e] cost=4441109.8
+  depth 0: cap | blind | est=2102.4
+  depth 1: e | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+→ [e, cap] cost=44150.4
+  depth 0: e | clauses=[p0@AEVT] | est=21024.0 ×1cl = 42048.0
+  depth 1: cap | clauses=[p0@AEVT] | est=2102.4 ×1cl = 2102.4
+
+(:begin
+  [:set! ?s0 [:scanner-open "AEVT"]]
+  [:scanner-push ?s0 [:intern-a "empresa/capital_social"]]
+  [:set! ?it_e [:scanner-iterate-init ?s0 []]]
+  (:while
+    [:set! e [:scanner-iterate-next ?it_e]]
+    (:begin
+      [:scanner-push ?s0 e]
+      (:set!
+        ?it_cap
+        [:scanner-iterate-init ?s0 [:ranges-create [:and [:>= 1000000.0] [:< 50000000.0]]]])
+      (:while
+        [:set! cap [:scanner-iterate-next ?it_cap]]
+        [:begin [:result-row [:resolve-val e] [:resolve-val cap]]])
+      [:scanner-pop ?s0]))
+  [:scanner-pop ?s0])

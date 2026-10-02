@@ -1,0 +1,53 @@
+Plan:
+  Join order: [e, rs, cap]
+  p0 @ AEVT
+    a = e
+    e = attr(id=113) [depth 0]
+    v = rs [depth 1]
+    t = _
+    added = _
+  p1 @ AEVT
+    a = e
+    e = attr(id=116) [depth 0]
+    v = cap [depth 2]
+    t = _
+    added = _
+
+→ [e, rs, cap] cost=126144.0
+  depth 0: e | clauses=[p0@AEVT, p1@AEVT] | est=21024.0 ×2cl = 84096.0
+  depth 1: rs | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 2: cap | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+[e, cap, rs] cost=126144.0
+  depth 0: e | clauses=[p0@AEVT, p1@AEVT] | est=21024.0 ×2cl = 84096.0
+  depth 1: cap | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 2: rs | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [rs] cost=442008576.0
+  depth 0: rs | blind | est=21024.0
+PRUNED [cap] cost=442008576.0
+  depth 0: cap | blind | est=21024.0
+
+(:begin
+  [:set! ?s0 [:scanner-open "AEVT"]]
+  [:set! ?s1 [:scanner-open "AEVT"]]
+  [:scanner-push ?s0 [:intern-a "empresa/razao_social"]]
+  [:scanner-push ?s1 [:intern-a "empresa/capital_social"]]
+  [:set! ?it_e [:scanner-iterate-init ?s0 ?s1 []]]
+  (:while
+    [:set! e [:scanner-iterate-next ?it_e]]
+    (:begin
+      [:scanner-push ?s0 e]
+      [:scanner-push ?s1 e]
+      [:set! ?it_rs [:scanner-iterate-init ?s0 []]]
+      (:while
+        [:set! rs [:scanner-iterate-next ?it_rs]]
+        (:begin
+          [:scanner-push ?s0 rs]
+          [:set! ?it_cap [:scanner-iterate-init ?s1 []]]
+          (:while
+            [:set! cap [:scanner-iterate-next ?it_cap]]
+            [:begin [:result-row [:resolve-val e] [:resolve-val rs]]])
+          [:scanner-pop ?s0]))
+      [:scanner-pop ?s0]
+      [:scanner-pop ?s1]))
+  [:scanner-pop ?s1]
+  [:scanner-pop ?s0])

@@ -1,0 +1,55 @@
+Plan:
+  Join order: [e, c, d]
+  p0 @ AEVT
+    a = e
+    e = attr(id=100) [depth 0]
+    v = c [depth 1]
+    t = _
+    added = _
+  p1 @ AEVT
+    a = e
+    e = attr(id=101) [depth 0]
+    v = d [depth 2]
+    t = _
+    added = _
+
+→ [e, c, d] cost=88300.8
+  depth 0: e | clauses=[p0@AEVT, p1@AEVT] | est=21024.0 ×2cl = 84096.0
+  depth 1: c | clauses=[p0@AEVT] | est=2102.4 ×1cl = 2102.4
+  depth 2: d | clauses=[p1@AEVT] | est=2102.4 ×1cl = 2102.4
+[e, d, c] cost=88300.8
+  depth 0: e | clauses=[p0@AEVT, p1@AEVT] | est=21024.0 ×2cl = 84096.0
+  depth 1: d | clauses=[p1@AEVT] | est=2102.4 ×1cl = 2102.4
+  depth 2: c | clauses=[p0@AEVT] | est=2102.4 ×1cl = 2102.4
+PRUNED [c, e] cost=88300.8
+  depth 0: c | clauses=[p0@AVET] | est=2102.4 ×1cl = 4204.8
+  depth 1: e | clauses=[p0@AVET, p1@AEVT] | est=21024.0 ×2cl = 84096.0
+PRUNED [c, d] cost=4424290.6
+  depth 0: c | clauses=[p0@AVET] | est=2102.4 ×1cl = 4204.8
+  depth 1: d | blind | est=2102.4
+PRUNED [d] cost=4420085.8
+  depth 0: d | blind | est=2102.4
+
+(:begin
+  [:set! ?s0 [:scanner-open "AEVT"]]
+  [:set! ?s1 [:scanner-open "AEVT"]]
+  [:scanner-push ?s0 [:intern-a "cnae/codigo"]]
+  [:scanner-push ?s1 [:intern-a "cnae/descricao"]]
+  [:set! ?it_e [:scanner-iterate-init ?s0 ?s1 []]]
+  (:while
+    [:set! e [:scanner-iterate-next ?it_e]]
+    (:begin
+      [:scanner-push ?s0 e]
+      [:scanner-push ?s1 e]
+      [:set! ?it_c [:scanner-iterate-init ?s0 [:ranges-create [:< "5000000"]]]]
+      (:while
+        [:set! c [:scanner-iterate-next ?it_c]]
+        (:begin
+          [:scanner-push ?s0 c]
+          [:set! ?it_d [:scanner-iterate-init ?s1 [:ranges-create [:> "B"]]]]
+          [:while [:set! d [:scanner-iterate-next ?it_d]] [:begin [:result-row [:resolve-val e]]]]
+          [:scanner-pop ?s0]))
+      [:scanner-pop ?s0]
+      [:scanner-pop ?s1]))
+  [:scanner-pop ?s1]
+  [:scanner-pop ?s0])

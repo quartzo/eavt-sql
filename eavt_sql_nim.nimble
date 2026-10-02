@@ -17,6 +17,10 @@ task dist, "Build transactor, query server and REPL to build/":
   exec "(cd eavt_query_nim && nimble release)"
   exec "(cd eavt-repl-nim && nimble release)"
   exec "sh -c \"cd ocaml && dune build @default && cp _build/default/query/front ../build/eavt-query-front-ocaml\""
+  exec "sh -c 'if command -v go >/dev/null 2>&1; then (cd go && go build -o ../build/eavt-sql-cli-go ./cmd/eavt-repl && go build -o ../build/eavt-sql-query-front-go ./cmd/eavt-query-front && go build -o ../build/eavt-sql-query-go ./cmd/eavt-query); fi'"
+
+task go_test, "Run Go tests (gofmt check + vet + go test)":
+  exec "sh -c 'cd go && test -z \"$(gofmt -l .)\" && go vet ./... && go test ./...'"
 
 task dev, "Run transactor + query server in the foreground (Ctrl-C stops both)":
   exec "scripts/dev.sh"

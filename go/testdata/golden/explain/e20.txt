@@ -1,0 +1,386 @@
+Plan:
+  Join order: [emp, m, nat, e, rs]
+  p0 @ VAET
+    v = e [depth 0]
+    a = attr(id=125)
+    e = emp [depth 3]
+    t = _
+    added = _
+  p1 @ VAET
+    v = e [depth 1]
+    a = attr(id=142)
+    e = m [depth 3]
+    t = _
+    added = _
+  p2 @ AEVT
+    a = e
+    e = attr(id=113) [depth 3]
+    v = rs [depth 4]
+    t = _
+    added = _
+  p3 @ VAET
+    v = e [depth 2]
+    a = attr(id=114)
+    e = nat [depth 3]
+    t = _
+    added = _
+
+[emp, m, e, nat, rs] cost=218752.0
+  depth 0: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: e | clauses=[p0@VAET, p1@VAET, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 3: nat | clauses=[p3@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 4: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+[emp, m, e, rs, nat] cost=218752.0
+  depth 0: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: e | clauses=[p0@VAET, p1@VAET, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 3: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 4: nat | clauses=[p3@AEVT] | est=21024.0 ×1cl = 21024.0
+→ [emp, m, nat, e, rs] cost=201984.0
+  depth 0: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 3: e | clauses=[p0@VAET, p1@VAET, p2@AEVT, p3@VAET] | est=21024.0 ×4cl = 168192.0
+  depth 4: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [emp, m, nat, rs] cost=44751840.0
+  depth 0: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 3: rs | blind | est=21024.0
+PRUNED [emp, m, rs] cost=44747584.0
+  depth 0: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: rs | blind | est=21024.0
+PRUNED [emp, e, m, nat] cost=214496.0
+  depth 0: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: e | clauses=[p0@VAET, p1@AEVT, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 2: m | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 3: nat | clauses=[p3@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [emp, e, m, rs] cost=214496.0
+  depth 0: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: e | clauses=[p0@VAET, p1@AEVT, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 2: m | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 3: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [emp, e, nat, m] cost=214496.0
+  depth 0: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: e | clauses=[p0@VAET, p1@AEVT, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 2: nat | clauses=[p3@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 3: m | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [emp, e, nat, rs] cost=214496.0
+  depth 0: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: e | clauses=[p0@VAET, p1@AEVT, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 2: nat | clauses=[p3@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 3: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [emp, e, rs, m] cost=214496.0
+  depth 0: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: e | clauses=[p0@VAET, p1@AEVT, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 2: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 3: m | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [emp, e, rs, nat] cost=214496.0
+  depth 0: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: e | clauses=[p0@VAET, p1@AEVT, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 2: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 3: nat | clauses=[p3@AEVT] | est=21024.0 ×1cl = 21024.0
+[emp, nat, m, e, rs] cost=201984.0
+  depth 0: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 3: e | clauses=[p0@VAET, p1@VAET, p2@AEVT, p3@VAET] | est=21024.0 ×4cl = 168192.0
+  depth 4: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [emp, nat, m, rs] cost=44751840.0
+  depth 0: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 3: rs | blind | est=21024.0
+[emp, nat, e, m, rs] cost=218752.0
+  depth 0: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: e | clauses=[p0@VAET, p1@AEVT, p2@AEVT, p3@VAET] | est=21024.0 ×4cl = 168192.0
+  depth 3: m | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 4: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+[emp, nat, e, rs, m] cost=218752.0
+  depth 0: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: e | clauses=[p0@VAET, p1@AEVT, p2@AEVT, p3@VAET] | est=21024.0 ×4cl = 168192.0
+  depth 3: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 4: m | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [emp, nat, rs] cost=44747584.0
+  depth 0: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: rs | blind | est=21024.0
+PRUNED [emp, rs] cost=44743328.0
+  depth 0: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: rs | blind | est=21024.0
+[m, emp, e, nat, rs] cost=218752.0
+  depth 0: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: e | clauses=[p0@VAET, p1@VAET, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 3: nat | clauses=[p3@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 4: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+[m, emp, e, rs, nat] cost=218752.0
+  depth 0: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: e | clauses=[p0@VAET, p1@VAET, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 3: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 4: nat | clauses=[p3@AEVT] | est=21024.0 ×1cl = 21024.0
+[m, emp, nat, e, rs] cost=201984.0
+  depth 0: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 3: e | clauses=[p0@VAET, p1@VAET, p2@AEVT, p3@VAET] | est=21024.0 ×4cl = 168192.0
+  depth 4: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [m, emp, nat, rs] cost=44751840.0
+  depth 0: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 3: rs | blind | est=21024.0
+PRUNED [m, emp, rs] cost=44747584.0
+  depth 0: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: rs | blind | est=21024.0
+PRUNED [m, e, emp, nat] cost=214496.0
+  depth 0: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: e | clauses=[p0@AEVT, p1@VAET, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 2: emp | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 3: nat | clauses=[p3@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [m, e, emp, rs] cost=214496.0
+  depth 0: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: e | clauses=[p0@AEVT, p1@VAET, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 2: emp | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 3: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [m, e, nat, emp] cost=214496.0
+  depth 0: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: e | clauses=[p0@AEVT, p1@VAET, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 2: nat | clauses=[p3@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 3: emp | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [m, e, nat, rs] cost=214496.0
+  depth 0: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: e | clauses=[p0@AEVT, p1@VAET, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 2: nat | clauses=[p3@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 3: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [m, e, rs, emp] cost=214496.0
+  depth 0: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: e | clauses=[p0@AEVT, p1@VAET, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 2: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 3: emp | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [m, e, rs, nat] cost=214496.0
+  depth 0: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: e | clauses=[p0@AEVT, p1@VAET, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 2: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 3: nat | clauses=[p3@AEVT] | est=21024.0 ×1cl = 21024.0
+[m, nat, emp, e, rs] cost=201984.0
+  depth 0: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 3: e | clauses=[p0@VAET, p1@VAET, p2@AEVT, p3@VAET] | est=21024.0 ×4cl = 168192.0
+  depth 4: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [m, nat, emp, rs] cost=44751840.0
+  depth 0: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 3: rs | blind | est=21024.0
+[m, nat, e, emp, rs] cost=218752.0
+  depth 0: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: e | clauses=[p0@AEVT, p1@VAET, p2@AEVT, p3@VAET] | est=21024.0 ×4cl = 168192.0
+  depth 3: emp | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 4: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+[m, nat, e, rs, emp] cost=218752.0
+  depth 0: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: e | clauses=[p0@AEVT, p1@VAET, p2@AEVT, p3@VAET] | est=21024.0 ×4cl = 168192.0
+  depth 3: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 4: emp | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [m, nat, rs] cost=44747584.0
+  depth 0: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: rs | blind | est=21024.0
+PRUNED [m, rs] cost=44743328.0
+  depth 0: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: rs | blind | est=21024.0
+PRUNED [e, emp, m] cost=210240.0
+  depth 0: e | clauses=[p0@AEVT, p1@AEVT, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 1: emp | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 2: m | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [e, emp, nat] cost=210240.0
+  depth 0: e | clauses=[p0@AEVT, p1@AEVT, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 1: emp | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 2: nat | clauses=[p3@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [e, emp, rs] cost=210240.0
+  depth 0: e | clauses=[p0@AEVT, p1@AEVT, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 1: emp | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 2: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [e, m, emp] cost=210240.0
+  depth 0: e | clauses=[p0@AEVT, p1@AEVT, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 1: m | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 2: emp | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [e, m, nat] cost=210240.0
+  depth 0: e | clauses=[p0@AEVT, p1@AEVT, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 1: m | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 2: nat | clauses=[p3@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [e, m, rs] cost=210240.0
+  depth 0: e | clauses=[p0@AEVT, p1@AEVT, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 1: m | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 2: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [e, nat, emp] cost=210240.0
+  depth 0: e | clauses=[p0@AEVT, p1@AEVT, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 1: nat | clauses=[p3@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 2: emp | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [e, nat, m] cost=210240.0
+  depth 0: e | clauses=[p0@AEVT, p1@AEVT, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 1: nat | clauses=[p3@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 2: m | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [e, nat, rs] cost=210240.0
+  depth 0: e | clauses=[p0@AEVT, p1@AEVT, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 1: nat | clauses=[p3@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 2: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [e, rs, emp] cost=210240.0
+  depth 0: e | clauses=[p0@AEVT, p1@AEVT, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 1: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 2: emp | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [e, rs, m] cost=210240.0
+  depth 0: e | clauses=[p0@AEVT, p1@AEVT, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 1: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 2: m | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [e, rs, nat] cost=210240.0
+  depth 0: e | clauses=[p0@AEVT, p1@AEVT, p2@AEVT, p3@AEVT] | est=21024.0 ×4cl = 168192.0
+  depth 1: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 2: nat | clauses=[p3@AEVT] | est=21024.0 ×1cl = 21024.0
+[nat, emp, m, e, rs] cost=201984.0
+  depth 0: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 3: e | clauses=[p0@VAET, p1@VAET, p2@AEVT, p3@VAET] | est=21024.0 ×4cl = 168192.0
+  depth 4: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [nat, emp, m, rs] cost=44751840.0
+  depth 0: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 3: rs | blind | est=21024.0
+[nat, emp, e, m, rs] cost=218752.0
+  depth 0: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: e | clauses=[p0@VAET, p1@AEVT, p2@AEVT, p3@VAET] | est=21024.0 ×4cl = 168192.0
+  depth 3: m | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 4: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+[nat, emp, e, rs, m] cost=218752.0
+  depth 0: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: e | clauses=[p0@VAET, p1@AEVT, p2@AEVT, p3@VAET] | est=21024.0 ×4cl = 168192.0
+  depth 3: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 4: m | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [nat, emp, rs] cost=44747584.0
+  depth 0: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: rs | blind | est=21024.0
+[nat, m, emp, e, rs] cost=201984.0
+  depth 0: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 3: e | clauses=[p0@VAET, p1@VAET, p2@AEVT, p3@VAET] | est=21024.0 ×4cl = 168192.0
+  depth 4: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [nat, m, emp, rs] cost=44751840.0
+  depth 0: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 3: rs | blind | est=21024.0
+[nat, m, e, emp, rs] cost=218752.0
+  depth 0: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: e | clauses=[p0@AEVT, p1@VAET, p2@AEVT, p3@VAET] | est=21024.0 ×4cl = 168192.0
+  depth 3: emp | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 4: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+[nat, m, e, rs, emp] cost=218752.0
+  depth 0: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: e | clauses=[p0@AEVT, p1@VAET, p2@AEVT, p3@VAET] | est=21024.0 ×4cl = 168192.0
+  depth 3: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 4: emp | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [nat, m, rs] cost=44747584.0
+  depth 0: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: m | clauses=[p1@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 2: rs | blind | est=21024.0
+PRUNED [nat, e, emp, m] cost=214496.0
+  depth 0: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: e | clauses=[p0@AEVT, p1@AEVT, p2@AEVT, p3@VAET] | est=21024.0 ×4cl = 168192.0
+  depth 2: emp | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 3: m | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [nat, e, emp, rs] cost=214496.0
+  depth 0: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: e | clauses=[p0@AEVT, p1@AEVT, p2@AEVT, p3@VAET] | est=21024.0 ×4cl = 168192.0
+  depth 2: emp | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 3: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [nat, e, m, emp] cost=214496.0
+  depth 0: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: e | clauses=[p0@AEVT, p1@AEVT, p2@AEVT, p3@VAET] | est=21024.0 ×4cl = 168192.0
+  depth 2: m | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 3: emp | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [nat, e, m, rs] cost=214496.0
+  depth 0: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: e | clauses=[p0@AEVT, p1@AEVT, p2@AEVT, p3@VAET] | est=21024.0 ×4cl = 168192.0
+  depth 2: m | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 3: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [nat, e, rs, emp] cost=214496.0
+  depth 0: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: e | clauses=[p0@AEVT, p1@AEVT, p2@AEVT, p3@VAET] | est=21024.0 ×4cl = 168192.0
+  depth 2: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 3: emp | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [nat, e, rs, m] cost=214496.0
+  depth 0: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: e | clauses=[p0@AEVT, p1@AEVT, p2@AEVT, p3@VAET] | est=21024.0 ×4cl = 168192.0
+  depth 2: rs | clauses=[p2@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 3: m | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [nat, rs] cost=44743328.0
+  depth 0: nat | clauses=[p3@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: rs | blind | est=21024.0
+PRUNED [rs] cost=442008576.0
+  depth 0: rs | blind | est=21024.0
+
+(:begin
+  [:set! ?s0 [:scanner-open "VAET"]]
+  [:set! ?s1 [:scanner-open "VAET"]]
+  [:set! ?s2 [:scanner-open "AEVT"]]
+  [:set! ?s3 [:scanner-open "VAET"]]
+  [:set! ?it_emp [:scanner-iterate-init ?s0 []]]
+  (:while
+    [:set! emp [:scanner-iterate-next ?it_emp]]
+    (:begin
+      [:scanner-push ?s0 emp]
+      [:set! ?it_m [:scanner-iterate-init ?s1 []]]
+      (:while
+        [:set! m [:scanner-iterate-next ?it_m]]
+        (:begin
+          [:scanner-push ?s1 m]
+          [:set! ?it_nat [:scanner-iterate-init ?s3 []]]
+          (:while
+            [:set! nat [:scanner-iterate-next ?it_nat]]
+            (:begin
+              [:scanner-push ?s3 nat]
+              [:scanner-push ?s0 [:intern-a "estab/empresa"]]
+              [:scanner-push ?s1 [:intern-a "estab/municipio"]]
+              [:scanner-push ?s2 [:intern-a "empresa/razao_social"]]
+              [:scanner-push ?s3 [:intern-a "empresa/natureza_juridica"]]
+              [:set! ?it_e [:scanner-iterate-init ?s0 ?s1 ?s2 ?s3 []]]
+              (:while
+                [:set! e [:scanner-iterate-next ?it_e]]
+                (:begin
+                  [:scanner-push ?s0 e]
+                  [:scanner-push ?s1 e]
+                  [:scanner-push ?s2 e]
+                  [:scanner-push ?s3 e]
+                  [:set! ?it_rs [:scanner-iterate-init ?s2 []]]
+                  (:while
+                    [:set! rs [:scanner-iterate-next ?it_rs]]
+                    [:begin [:result-row [:resolve-val emp] [:resolve-val m]]])
+                  [:scanner-pop ?s0]
+                  [:scanner-pop ?s1]
+                  [:scanner-pop ?s2]
+                  [:scanner-pop ?s3]))
+              [:scanner-pop ?s3]
+              [:scanner-pop ?s2]
+              [:scanner-pop ?s1]
+              [:scanner-pop ?s0]
+              [:scanner-pop ?s3]))
+          [:scanner-pop ?s1]))
+      [:scanner-pop ?s0])))

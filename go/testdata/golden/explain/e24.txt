@@ -1,0 +1,30 @@
+Plan:
+  Join order: [e, v]
+  p0 @ AEVT
+    a = e
+    e = attr(id=112) [depth 0]
+    v = v [depth 1]
+    t = _
+    added = _
+
+→ [e, v] cost=63072.0
+  depth 0: e | clauses=[p0@AEVT] | est=21024.0 ×1cl = 42048.0
+  depth 1: v | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+[v, e] cost=63072.0
+  depth 0: v | clauses=[p0@AVET] | est=21024.0 ×1cl = 42048.0
+  depth 1: e | clauses=[p0@AVET] | est=21024.0 ×1cl = 21024.0
+
+(:begin
+  [:set! ?s0 [:scanner-open "AEVT"]]
+  [:scanner-push ?s0 [:intern-a "empresa/cnpj_base"]]
+  [:set! ?it_e [:scanner-iterate-init ?s0 []]]
+  (:while
+    [:set! e [:scanner-iterate-next ?it_e]]
+    (:begin
+      [:scanner-push ?s0 e]
+      [:set! ?it_v [:scanner-iterate-init ?s0 []]]
+      (:while
+        [:set! v [:scanner-iterate-next ?it_v]]
+        [:begin [:result-row [:resolve-val e] [:resolve-val v]]])
+      [:scanner-pop ?s0]))
+  [:scanner-pop ?s0])

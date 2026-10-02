@@ -1,0 +1,37 @@
+Plan:
+  Join order: [x, e]
+  p0 @ AVET
+    a = e
+    v = attr(id=100) [depth 0]
+    e = x [depth 1]
+    t = _
+    added = _
+  p1 @ AEVT
+    a = e
+    e = attr(id=101) [depth 1]
+    v = x
+    t = _
+    added = _
+
+[e, x] cost=126144.0
+  depth 0: e | clauses=[p0@AEVT, p1@AEVT] | est=21024.0 ×2cl = 84096.0
+  depth 1: x | clauses=[p0@AEVT, p1@AEVT] | est=21024.0 ×2cl = 42048.0
+→ [x, e] cost=84096.0
+  depth 0: x | clauses=[p0@AVET] | est=21024.0 ×1cl = 42048.0
+  depth 1: e | clauses=[p0@AVET, p1@AEVT] | est=21024.0 ×2cl = 42048.0
+
+(:begin
+  [:set! ?s0 [:scanner-open "AVET"]]
+  [:set! ?s1 [:scanner-open "AEVT"]]
+  [:scanner-push ?s0 [:intern-a "cnae/codigo"]]
+  [:set! ?it_x [:scanner-iterate-init ?s0 []]]
+  (:while
+    [:set! x [:scanner-iterate-next ?it_x]]
+    (:begin
+      [:scanner-push ?s0 x]
+      [:scanner-push ?s1 [:intern-a "cnae/descricao"]]
+      [:set! ?it_e [:scanner-iterate-init ?s0 ?s1 []]]
+      [:while [:set! e [:scanner-iterate-next ?it_e]] [:begin [:result-row [:resolve-val e]]]]
+      [:scanner-pop ?s1]
+      [:scanner-pop ?s0]))
+  [:scanner-pop ?s0])

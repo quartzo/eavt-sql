@@ -1,0 +1,26 @@
+Plan:
+  Join order: [e]
+  p0 @ AEVT
+    a = e
+    e = attr(id=117) [depth 0]
+    v = "05"
+    t = _
+    added = _
+
+→ [e] cost=21024.0
+  depth 0: e | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+
+(:begin
+  [:set! ?s0 [:scanner-open "AEVT"]]
+  [:scanner-push ?s0 [:intern-a "empresa/porte"]]
+  [:set! ?it_e [:scanner-iterate-init ?s0 []]]
+  (:while
+    [:set! e [:scanner-iterate-next ?it_e]]
+    (:begin
+      [:scanner-push ?s0 e]
+      [:set! ?it__v_trail [:scanner-iterate-init ?s0 [:ranges-create [:= "05"]]]]
+      (:while
+        [:set! _v_trail [:scanner-iterate-next ?it__v_trail]]
+        [:begin [:scanner-push ?s0 _v_trail] [:result-row [:resolve-val e]] [:scanner-pop ?s0]])
+      [:scanner-pop ?s0]))
+  [:scanner-pop ?s0])

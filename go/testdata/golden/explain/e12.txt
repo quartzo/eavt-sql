@@ -1,0 +1,59 @@
+Plan:
+  Join order: [emp, e, uf]
+  p0 @ VAET
+    v = e [depth 0]
+    a = attr(id=125)
+    e = emp [depth 1]
+    t = _
+    added = _
+  p1 @ AEVT
+    a = e
+    e = attr(id=141) [depth 1]
+    v = uf [depth 2]
+    t = _
+    added = _
+
+[emp, uf, e] cost=44785376.0
+  depth 0: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: uf | blind | est=21024.0
+  depth 2: e | clauses=[p0@VAET, p1@AEVT] | est=21024.0 ×2cl = 42048.0
+→ [emp, e, uf] cost=109376.0
+  depth 0: emp | clauses=[p0@VAET] | est=2128.0 ×1cl = 4256.0
+  depth 1: e | clauses=[p0@VAET, p1@AEVT] | est=21024.0 ×2cl = 84096.0
+  depth 2: uf | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+PRUNED [uf] cost=442008576.0
+  depth 0: uf | blind | est=21024.0
+[e, emp, uf] cost=126144.0
+  depth 0: e | clauses=[p0@AEVT, p1@AEVT] | est=21024.0 ×2cl = 84096.0
+  depth 1: emp | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 2: uf | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+[e, uf, emp] cost=126144.0
+  depth 0: e | clauses=[p0@AEVT, p1@AEVT] | est=21024.0 ×2cl = 84096.0
+  depth 1: uf | clauses=[p1@AEVT] | est=21024.0 ×1cl = 21024.0
+  depth 2: emp | clauses=[p0@AEVT] | est=21024.0 ×1cl = 21024.0
+
+(:begin
+  [:set! ?s0 [:scanner-open "VAET"]]
+  [:set! ?s1 [:scanner-open "AEVT"]]
+  [:set! ?it_emp [:scanner-iterate-init ?s0 []]]
+  (:while
+    [:set! emp [:scanner-iterate-next ?it_emp]]
+    (:begin
+      [:scanner-push ?s0 emp]
+      [:scanner-push ?s0 [:intern-a "estab/empresa"]]
+      [:scanner-push ?s1 [:intern-a "estab/uf"]]
+      [:set! ?it_e [:scanner-iterate-init ?s0 ?s1 []]]
+      (:while
+        [:set! e [:scanner-iterate-next ?it_e]]
+        (:begin
+          [:scanner-push ?s0 e]
+          [:scanner-push ?s1 e]
+          [:set! ?it_uf [:scanner-iterate-init ?s1 []]]
+          (:while
+            [:set! uf [:scanner-iterate-next ?it_uf]]
+            [:begin [:result-row [:resolve-val emp] [:resolve-val uf]]])
+          [:scanner-pop ?s0]
+          [:scanner-pop ?s1]))
+      [:scanner-pop ?s1]
+      [:scanner-pop ?s0]
+      [:scanner-pop ?s0])))
