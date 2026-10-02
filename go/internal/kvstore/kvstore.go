@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"eavt-go/internal/cursor"
 	"eavt-go/internal/memtable"
@@ -79,6 +80,12 @@ type KVStore struct {
 	// JournalSink, when set, receives journal entries instead of the file
 	// fallback (the transactor wires it to the WAL).
 	JournalSink func(entries []memtable.CfKey)
+	// JournalSeal is called at flush capture time; it returns the logical WAL
+	// boundary whose records the flush makes durable.
+	JournalSeal func() int64
+	// WalDurableUpTo holds the logical WAL position made durable by the last
+	// published flush (the WAL deletes covered segments).
+	WalDurableUpTo *atomic.Int64
 	// OnFlushRequest arms a background flusher (server). nil => explicit Flush.
 	OnFlushRequest func()
 	// OnFlushPublish is called after a flush publishes a new root.
@@ -457,6 +464,10 @@ func (kv *KVStore) Flush() error {
 	kv.MT.FreezeAll()
 	kv.flushActive = true
 	kv.memSize = 0
+	sealBoundary := int64(-1)
+	if kv.JournalSeal != nil {
+		sealBoundary = kv.JournalSeal()
+	}
 
 	keysByCf := map[int][][]byte{}
 	pairsByCf := map[int][][2][]byte{}
@@ -513,6 +524,9 @@ func (kv *KVStore) Flush() error {
 	kv.MT.Publish()
 	kv.flushActive = false
 	kv.memSize = 0
+	if sealBoundary >= 0 && kv.WalDurableUpTo != nil {
+		kv.WalDurableUpTo.Store(sealBoundary)
+	}
 	if kv.OnFlushPublish != nil {
 		kv.OnFlushPublish(kv.PS.CurrentRoot(), collectedMaxT)
 	}

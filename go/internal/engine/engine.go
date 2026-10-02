@@ -16,13 +16,14 @@ import (
 
 // QueryStore implements query.EngineOps over a KVStore + EAVT engine.
 type QueryStore struct {
-	Eavt *eavt.Engine
-	KV   *kvstore.KVStore
+	Eavt   *eavt.Engine
+	KV     *kvstore.KVStore
+	symtab *scheme.SymTab
 }
 
 // New creates a QueryStore and bootstraps its resolver.
 func New(kv *kvstore.KVStore) *QueryStore {
-	return &QueryStore{Eavt: eavt.NewEngine(kv), KV: kv}
+	return &QueryStore{Eavt: eavt.NewEngine(kv), KV: kv, symtab: scheme.NewSymTab()}
 }
 
 // OpenCursor opens a merged scan cursor over a CF.

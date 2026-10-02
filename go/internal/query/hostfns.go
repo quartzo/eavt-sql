@@ -10,8 +10,8 @@ import (
 	"eavt-go/internal/sexpr"
 )
 
-// EngineOps is the engine surface the query host functions need.  Write
-// operations are not part of it — the query server rejects exec mode.
+// EngineOps is the engine surface the host functions and the tx interpreter
+// need (read + write).
 type EngineOps interface {
 	OpenCursor(cfID uint32, prefix []byte) cursor.Cursor
 	LookupAttr(name string) (uint32, bool)
@@ -20,6 +20,28 @@ type EngineOps interface {
 	IsUniqueAttr(name string) bool
 	LookupEntity(attrName string, value sexpr.Expr) (int64, bool)
 	LookupValue(eid int64, attrName string) (sexpr.Expr, bool)
+
+	// Write path (exec mode + tx interpreter).
+	Symtab() *scheme.SymTab
+	AllocateTxDeferred() int64
+	AllocateTx() int64
+	AllocateInPartition(pid uint64) int64
+	IsUniqueByID(aid uint32) bool
+	BatchLookupAvet(keys [][]byte) []int64
+	HasDatomW(eid int64, attrID uint32, v scheme.TxWSlot) bool
+	SaveBatchEdn(txops []scheme.TxWOp, t int64)
+	RetractBatch(txops []scheme.TxWOp, t int64)
+	DeclareAttrFromSQL(attr, typeName string, many, unique bool, t int64) error
+	SaveWithT(eid int64, attr string, val sexpr.Expr, t, asOf int64) error
+	SaveManyWithT(attr string, pairs []Pair, t, asOf int64) error
+	Retract(eid int64, attr string, val sexpr.Expr, t, asOf int64) error
+	DeclarePartition(name string, t int64) uint64
+}
+
+// Pair is an (eid, value) save pair for save-many.
+type Pair struct {
+	Eid int64
+	Val sexpr.Expr
 }
 
 // LeapIterator carries leapfrog state across yield/resume.
@@ -193,9 +215,110 @@ func (h *SchemeHostFns) Call(name string, args []sexpr.Expr) (scheme.EvalStep, e
 			return scheme.Done(sexpr.Int(eid)), nil
 		}
 		return scheme.Done(sexpr.Void{}), nil
-	case "save", "save-many", "retract", "get-or-create-entity", "declare-attr",
-		"declare-partition", "alloc-entity", "tx-entity":
-		return scheme.EvalStep{}, scheme.EvalError("host function not available in query mode: " + name)
+	case "save":
+		eid, err := expectInt(args[0])
+		if err != nil {
+			return scheme.EvalStep{}, err
+		}
+		attr, err := expectStr(args[1])
+		if err != nil {
+			return scheme.EvalStep{}, err
+		}
+		if err := h.Engine.SaveWithT(eid, attr, args[2], h.Tx, h.AsOfTx); err != nil {
+			return scheme.EvalStep{}, err
+		}
+		return scheme.Done(sexpr.Void{}), nil
+	case "save-many":
+		if len(args) < 3 || len(args)%2 == 0 {
+			return scheme.EvalStep{}, scheme.EvalError("save-many expects an attribute name followed by eid/value pairs")
+		}
+		attr, err := expectStr(args[0])
+		if err != nil {
+			return scheme.EvalStep{}, err
+		}
+		var pairs []Pair
+		for i := 1; i < len(args); i += 2 {
+			eid, err := expectInt(args[i])
+			if err != nil {
+				return scheme.EvalStep{}, err
+			}
+			pairs = append(pairs, Pair{Eid: eid, Val: args[i+1]})
+		}
+		if err := h.Engine.SaveManyWithT(attr, pairs, h.Tx, h.AsOfTx); err != nil {
+			return scheme.EvalStep{}, err
+		}
+		return scheme.Done(sexpr.Void{}), nil
+	case "retract":
+		eid, err := expectInt(args[0])
+		if err != nil {
+			return scheme.EvalStep{}, err
+		}
+		attr, err := expectStr(args[1])
+		if err != nil {
+			return scheme.EvalStep{}, err
+		}
+		if err := h.Engine.Retract(eid, attr, args[2], h.Tx, h.AsOfTx); err != nil {
+			return scheme.EvalStep{}, err
+		}
+		return scheme.Done(sexpr.Void{}), nil
+	case "get-or-create-entity":
+		attr, err := expectStr(args[0])
+		if err != nil {
+			return scheme.EvalStep{}, err
+		}
+		if !h.Engine.IsUniqueAttr(attr) {
+			return scheme.EvalStep{}, scheme.EvalError("get-or-create-entity: attribute is not UNIQUE")
+		}
+		if found, ok := h.Engine.LookupEntity(attr, args[1]); ok {
+			return scheme.Done(sexpr.Int(found)), nil
+		}
+		partition := uint64(4)
+		if len(args) > 2 {
+			n, err := expectInt(args[2])
+			if err != nil {
+				return scheme.EvalStep{}, err
+			}
+			partition = uint64(n)
+		}
+		eid := h.Engine.AllocateInPartition(partition)
+		if err := h.Engine.SaveWithT(eid, attr, args[1], h.Tx, h.AsOfTx); err != nil {
+			return scheme.EvalStep{}, err
+		}
+		return scheme.Done(sexpr.Int(eid)), nil
+	case "declare-attr":
+		attr, err := expectStr(args[0])
+		if err != nil {
+			return scheme.EvalStep{}, err
+		}
+		vtName, err := expectStr(args[1])
+		if err != nil {
+			return scheme.EvalStep{}, err
+		}
+		many := len(args) > 2 && args[2] == sexpr.Bool(true)
+		unique := len(args) > 3 && args[3] == sexpr.Bool(true)
+		if err := h.Engine.DeclareAttrFromSQL(attr, vtName, many, unique, h.Tx); err != nil {
+			return scheme.EvalStep{}, err
+		}
+		return scheme.Done(sexpr.Void{}), nil
+	case "declare-partition":
+		name, err := expectStr(args[0])
+		if err != nil {
+			return scheme.EvalStep{}, err
+		}
+		pid := h.Engine.DeclarePartition(name, h.Tx)
+		return scheme.Done(sexpr.Int(int64(pid))), nil
+	case "alloc-entity":
+		partition := uint64(4)
+		if len(args) > 0 {
+			n, err := expectInt(args[0])
+			if err != nil {
+				return scheme.EvalStep{}, err
+			}
+			partition = uint64(n)
+		}
+		return scheme.Done(sexpr.Int(h.Engine.AllocateInPartition(partition))), nil
+	case "tx-entity":
+		return scheme.Done(sexpr.Int(h.Tx)), nil
 	case "dbg-scanners":
 		for i, sc := range h.Scanners {
 			fmt.Printf("scanner[%d] at_end=%v\n", i, sc.AtEnd())

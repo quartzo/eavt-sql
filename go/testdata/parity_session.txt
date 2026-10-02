@@ -1,6 +1,6 @@
 [[:db/add 0 :db/ident :person/name] [:db/add 0 :db/valueType :db.type/string] [:db/add 0 :db/cardinality :db.cardinality/one]]
 [[:db/add 0 :db/ident :person/age] [:db/add 0 :db/valueType :db.type/long] [:db/add 0 :db/cardinality :db.cardinality/one]]
-[[:db/add 0 :db/ident :fin/price] [:db/add 0 :db/valueType :db.type/double] [:db/add 0 :db/cardinality :db.cardinality/one]]
+[[:db/add 0 :db/ident :fin/price] [:db/add 0 :db/valueType :db.type/float] [:db/add 0 :db/cardinality :db.cardinality/one]]
 [[:db/add 0 :db/ident :person/employer] [:db/add 0 :db/valueType :db.type/ref] [:db/add 0 :db/cardinality :db.cardinality/one]]
 [[:db/add -1 :person/name "Alice"] [:db/add -1 :person/age 30] [:db/add -1 :fin/price 1234.5678]]
 [[:db/add -2 :person/name "Bob"] [:db/add -2 :fin/price 0.1] [:db/add -2 :person/age 25]]
