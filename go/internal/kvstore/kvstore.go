@@ -34,6 +34,8 @@ type Config struct {
 	ReplayOff      bool
 	PageCacheSize  int
 	OwnsPath       bool
+	GcMaxAgeSecs   uint64
+	GcMaxRootCount int
 }
 
 // FromMap builds a Config from a string map (server config shape).
@@ -52,6 +54,8 @@ func FromMap(m map[string]string) Config {
 		OwnsPath:       get("owns_path", "false") == "true",
 		FlushThreshold: 16777216,
 		NumCf:          64,
+		GcMaxAgeSecs:   43200,
+		GcMaxRootCount: 10,
 	}
 	if v, err := strconv.ParseUint(get("flush_threshold", "16777216"), 10, 64); err == nil {
 		cfg.FlushThreshold = v
@@ -61,6 +65,12 @@ func FromMap(m map[string]string) Config {
 	}
 	if v, err := strconv.Atoi(get("page_cache_size", "0")); err == nil {
 		cfg.PageCacheSize = v
+	}
+	if v, err := strconv.ParseUint(get("gc_max_age_secs", "43200"), 10, 64); err == nil {
+		cfg.GcMaxAgeSecs = v
+	}
+	if v, err := strconv.Atoi(get("gc_root_count", "10")); err == nil {
+		cfg.GcMaxRootCount = v
 	}
 	return cfg
 }
@@ -73,6 +83,8 @@ type KVStore struct {
 	ReadOnly       bool
 	NumCf          int
 	FlushThreshold uint64
+	GcMaxAgeSecs   uint64
+	GcMaxRootCount int
 	flushActive    bool
 	path           string
 	ownsPath       bool
@@ -123,6 +135,8 @@ func New(cfg Config) (*KVStore, error) {
 		ReadOnly:       cfg.ReadOnly,
 		NumCf:          cfg.NumCf,
 		FlushThreshold: cfg.FlushThreshold,
+		GcMaxAgeSecs:   cfg.GcMaxAgeSecs,
+		GcMaxRootCount: cfg.GcMaxRootCount,
 		path:           cfg.Path,
 		ownsPath:       cfg.OwnsPath,
 	}

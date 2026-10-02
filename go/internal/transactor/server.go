@@ -4,6 +4,7 @@
 package transactor
 
 import (
+	"encoding/binary"
 	"net"
 	"os"
 	"path/filepath"
@@ -58,7 +59,13 @@ func NewEngine(dbPath, blobDir string) (*Engine, error) {
 	kv.WalDurableUpTo = durable
 	w.OnWal = e.Hub.BroadcastWal
 	w.OnSeal = e.Hub.BroadcastSeal
-	kv.OnFlushPublish = func(root string, maxT int64) { e.Hub.BroadcastRoot(root, maxT) }
+	kv.OnFlushPublish = func(root string, maxT int64) {
+		e.Hub.BroadcastRoot(root, maxT)
+		// Post-flush auto-GC: cheap root-only check, then a full pass.
+		if e.KV.PS.HasOldRoots(e.KV.GcMaxAgeSecs, e.KV.GcMaxRootCount) {
+			_, _ = e.KV.PS.GcFull(e.KV.GcMaxAgeSecs, e.KV.GcMaxRootCount, false)
+		}
+	}
 	return e, nil
 }
 
@@ -310,7 +317,11 @@ func (e *Engine) handleAdmin(conn net.Conn, command, id string) {
 		if e.KV.ReadOnly {
 			output = "error: read-only"
 		} else {
-			go func() { _ = e.KV.Flush() }()
+			go func() {
+				e.mu.Lock()
+				defer e.mu.Unlock()
+				_ = e.KV.Flush()
+			}()
 			output = "ok: flush requested"
 		}
 	case "flush-sync":
@@ -323,7 +334,18 @@ func (e *Engine) handleAdmin(conn net.Conn, command, id string) {
 			output = "ok: flushed"
 		}
 	case "gc", "gc-dry":
-		output = "error: gc not implemented"
+		if e.KV.ReadOnly {
+			output = "error: read-only"
+		} else {
+			e.mu.Lock()
+			rep, err := e.KV.PS.GcFull(e.KV.GcMaxAgeSecs, e.KV.GcMaxRootCount, command == "gc-dry")
+			e.mu.Unlock()
+			if err != nil {
+				output = "error: " + err.Error()
+			} else {
+				output = gcReportText(rep)
+			}
+		}
 	case "status":
 		output = "memtable: " + strconv.FormatUint(e.KV.MemtableSize(), 10) + " bytes"
 	case "memtable":
@@ -393,6 +415,19 @@ func (e *Engine) handleKv(conn net.Conn, m msgpack.Map, id string) {
 	default:
 		e.writeResponse(conn, id, nil, nil, false, "unknown kv op: "+op)
 	}
+}
+
+func gcReportText(rep []byte) string {
+	if len(rep) < 41 {
+		return "gc: no report"
+	}
+	u64 := func(off int) uint64 { return binary.LittleEndian.Uint64(rep[off:]) }
+	return "roots_scanned=" + strconv.FormatUint(u64(0), 10) +
+		" roots_removed=" + strconv.FormatUint(u64(8), 10) +
+		" blobs_scanned=" + strconv.FormatUint(u64(16), 10) +
+		" blobs_removed=" + strconv.FormatUint(u64(24), 10) +
+		" live_blobs=" + strconv.FormatUint(u64(32), 10) +
+		" dry_run=" + strconv.Itoa(int(rep[40]))
 }
 
 func bytesField(m msgpack.Map, key string) []byte {
