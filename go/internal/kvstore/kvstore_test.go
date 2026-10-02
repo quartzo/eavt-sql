@@ -2,8 +2,11 @@ package kvstore
 
 import (
 	"bytes"
+	"sync"
 	"testing"
+	"time"
 
+	"eavt-go/internal/cursor"
 	"eavt-go/internal/memtable"
 )
 
@@ -165,4 +168,92 @@ func TestPhasedFlushMatchesSync(t *testing.T) {
 	if n := len(scanKeys(t, kv, 0)); n != 100 {
 		t.Fatalf("scan = %d, want 100", n)
 	}
+}
+
+// TestSnapshotIsolation verifies a cursor keeps its snapshot across a
+// concurrent flush (COW root + frozen runs).
+func TestSnapshotIsolation(t *testing.T) {
+	kv := newStore(t)
+	for i := 0; i < 100; i++ {
+		kv.Put(0, []byte{byte(i)})
+	}
+	if err := kv.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	old := kv.OpenScanCursor(0) // snapshot after the first flush (100 keys)
+	// More writes + a second flush while the old cursor is still open.
+	for i := 100; i < 150; i++ {
+		kv.Put(0, []byte{byte(i)})
+	}
+	if err := kv.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(drainCursor(old)); n != 100 {
+		t.Fatalf("old cursor after flush = %d, want 100 (snapshot)", n)
+	}
+	fresh := kv.OpenScanCursor(0)
+	if n := len(drainCursor(fresh)); n != 150 {
+		t.Fatalf("fresh cursor = %d, want 150", n)
+	}
+}
+
+func drainCursor(mc *cursor.MergedCursor) [][]byte {
+	var out [][]byte
+	for {
+		k, ok := mc.Next()
+		if !ok {
+			break
+		}
+		out = append(out, k)
+	}
+	return out
+}
+
+// TestConcurrentWriteAndScan runs writers and scanner openers together.
+func TestConcurrentWriteAndScan(t *testing.T) {
+	kv := newStore(t)
+	for i := 0; i < 200; i++ {
+		kv.Put(0, []byte{byte(i), byte(i >> 8)})
+	}
+	if err := kv.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		i := 0
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			kv.Put(0, []byte{byte(i), byte(i >> 8), 0xAA})
+			i++
+		}
+	}()
+	for r := 0; r < 4; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				mc := kv.OpenScanCursor(0)
+				for {
+					if _, ok := mc.Next(); !ok {
+						break
+					}
+				}
+			}
+		}()
+	}
+	time.Sleep(100 * time.Millisecond)
+	close(stop)
+	wg.Wait()
 }

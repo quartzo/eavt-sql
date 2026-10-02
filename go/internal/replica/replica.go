@@ -6,6 +6,7 @@ package replica
 
 import (
 	"os"
+	"sync/atomic"
 
 	"eavt-go/internal/datalog"
 	"eavt-go/internal/eavt"
@@ -23,7 +24,7 @@ type ReplicaEngine struct {
 	Store       *engine.QueryStore
 	Path        string
 	Connected   bool
-	SchemaDirty bool
+	schemaDirty atomic.Bool
 
 	EvWalCount  int64
 	EvWalBytes  int64
@@ -64,8 +65,14 @@ func (r *ReplicaEngine) GetStats() *datalog.CompileStats {
 // RefreshResolverOnSchemaWal re-bootstraps the resolver after schema datoms.
 func (r *ReplicaEngine) RefreshResolverOnSchemaWal() {
 	r.Store.Eavt.BootstrapResolver()
-	r.SchemaDirty = true
+	r.schemaDirty.Store(true)
 }
+
+// SchemaDirty reports whether schema datoms arrived since the last stats snapshot.
+func (r *ReplicaEngine) SchemaDirty() bool { return r.schemaDirty.Load() }
+
+// ClearSchemaDirty resets the schema-dirty flag after a stats refresh.
+func (r *ReplicaEngine) ClearSchemaDirty() { r.schemaDirty.Store(false) }
 
 func (r *ReplicaEngine) expand(recs []memtable.CfKey) []memtable.CfKey {
 	var out []memtable.CfKey

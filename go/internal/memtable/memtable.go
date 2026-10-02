@@ -3,9 +3,19 @@
 // delta into a frozen sorted run; runs merge past 8.  Port of nim_memtable
 // (runs.nim + run_cursor.nim).  Go slices replace the arena/borrowed-key
 // machinery (records are owned byte slices).
+//
+// Threading: a single mutex guards the ladder (buf/runs/draining/cfSize).
+// Runs are IMMUTABLE once materialized, so a snapshot ([SnapshotRuns] /
+// [FreezeAllCapture]) hands out *Run pointers that readers may iterate
+// concurrently with later writes/flushes without holding the lock — this is
+// the memtable half of the snapshot contract (nim_memtable's ARC-frozen
+// runs).
 package memtable
 
-import "sort"
+import (
+	"sort"
+	"sync"
+)
 
 const (
 	MaxActiveRuns = 8
@@ -16,7 +26,6 @@ const (
 type Run struct {
 	Records [][]byte // sorted by key
 	KV      bool
-	// Key counts for size accounting are not needed here.
 }
 
 // KvLookup is the result of a point lookup.
@@ -30,6 +39,7 @@ const (
 
 // MemTable is the run ladder for all column families.
 type MemTable struct {
+	mu       sync.Mutex
 	numCf    int
 	gen      uint64
 	runs     [][]*Run
@@ -55,8 +65,21 @@ func New(numCf int) *MemTable {
 // NumCf returns the column-family count.
 func (mt *MemTable) NumCf() int { return mt.numCf }
 
+// Gen returns the generation counter (bumped on any ladder transition).
+func (mt *MemTable) Gen() uint64 {
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
+	return mt.gen
+}
+
 // Size returns the active key bytes.
 func (mt *MemTable) Size() uint64 {
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
+	return mt.sizeLocked()
+}
+
+func (mt *MemTable) sizeLocked() uint64 {
 	sz := 0
 	for _, s := range mt.cfSize {
 		sz += s
@@ -71,8 +94,6 @@ func recKlen(p []byte) int {
 }
 
 func recDeleted(p []byte) bool { return p[0]&1 != 0 }
-
-func recIsKV(p []byte) bool { return p[0]&2 != 0 }
 
 func recKey(p []byte) []byte {
 	klen := recKlen(p)
@@ -92,9 +113,7 @@ func recValue(p []byte) []byte {
 }
 
 // CmpRec compares two records byte-lexicographically by key.
-func CmpRec(a, b []byte) int {
-	return CmpKeys(recKey(a), recKey(b))
-}
+func CmpRec(a, b []byte) int { return CmpKeys(recKey(a), recKey(b)) }
 
 // CmpKeys compares two byte keys.
 func CmpKeys(a, b []byte) int {
@@ -121,7 +140,7 @@ func CmpKeys(a, b []byte) int {
 
 // ── write path ───────────────────────────────────────────────────────────
 
-func (mt *MemTable) appendRec(cf, klen int, deleted bool, key, value []byte) uint64 {
+func (mt *MemTable) appendRecLocked(cf, klen int, deleted bool, key, value []byte) {
 	kv := cf >= 10
 	vlen := 0
 	if kv {
@@ -154,46 +173,46 @@ func (mt *MemTable) appendRec(cf, klen int, deleted bool, key, value []byte) uin
 	mt.buf[cf] = append(mt.buf[cf], p)
 	mt.cfSize[cf] += klen
 	if len(mt.buf[cf]) >= MaxBufEntries {
-		mt.Materialize(cf)
-		mt.MaybeMerge(cf)
+		mt.materializeLocked(cf)
+		mt.maybeMergeLocked(cf)
 	}
-	return mt.Size()
 }
 
 // Put appends a key-only record.
 func (mt *MemTable) Put(cf int, key []byte) uint64 {
-	if cf < 0 || cf >= mt.numCf {
-		panic("memtable: invalid cf")
-	}
-	return mt.appendRec(cf, len(key), false, key, nil)
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
+	mt.appendRecLocked(cf, len(key), false, key, nil)
+	return mt.sizeLocked()
 }
 
 // PutKv appends a key-value record to a KV cf.
 func (mt *MemTable) PutKv(cf int, key, value []byte) uint64 {
-	if cf < 0 || cf >= mt.numCf {
-		panic("memtable: invalid cf")
-	}
-	return mt.appendRec(cf, len(key), false, key, value)
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
+	mt.appendRecLocked(cf, len(key), false, key, value)
+	return mt.sizeLocked()
 }
 
 // DeleteKv appends a tombstone.
 func (mt *MemTable) DeleteKv(cf int, key []byte) {
-	if cf < 0 || cf >= mt.numCf {
-		panic("memtable: invalid cf")
-	}
-	mt.appendRec(cf, len(key), true, key, nil)
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
+	mt.appendRecLocked(cf, len(key), true, key, nil)
 }
 
 // Batch appends many key-only records.
 func (mt *MemTable) Batch(entries []CfKey) uint64 {
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
 	for _, e := range entries {
 		cf := int(e.Cf)
 		if cf < 0 || cf >= mt.numCf {
 			continue
 		}
-		mt.Put(cf, e.Key)
+		mt.appendRecLocked(cf, len(e.Key), false, e.Key, nil)
 	}
-	return mt.Size()
+	return mt.sizeLocked()
 }
 
 // CfKey is a column family + key.
@@ -204,7 +223,7 @@ type CfKey struct {
 
 // ── materialize / merge ──────────────────────────────────────────────────
 
-func (mt *MemTable) Materialize(cf int) {
+func (mt *MemTable) materializeLocked(cf int) {
 	if len(mt.buf[cf]) == 0 {
 		return
 	}
@@ -243,7 +262,7 @@ func (mt *MemTable) Materialize(cf int) {
 	mt.gen++
 }
 
-func (mt *MemTable) MaybeMerge(cf int) {
+func (mt *MemTable) maybeMergeLocked(cf int) {
 	if len(mt.runs[cf]) <= MaxActiveRuns {
 		return
 	}
@@ -282,42 +301,72 @@ func (mt *MemTable) MaybeMerge(cf int) {
 
 // EnsureMaterialized materializes the delta before scans.
 func (mt *MemTable) EnsureMaterialized(cf int) {
-	mt.Materialize(cf)
-	mt.MaybeMerge(cf)
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
+	mt.materializeLocked(cf)
+	mt.maybeMergeLocked(cf)
 }
 
 // MaybeCapBuf materializes incrementally past the delta cap.
 func (mt *MemTable) MaybeCapBuf(cf int) {
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
 	if len(mt.buf[cf]) >= MaxBufEntries {
-		mt.Materialize(cf)
-		mt.MaybeMerge(cf)
+		mt.materializeLocked(cf)
+		mt.maybeMergeLocked(cf)
 	}
 }
 
 // MaterializeAll materializes every CF.
 func (mt *MemTable) MaterializeAll() {
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
 	for cf := 0; cf < mt.numCf; cf++ {
-		mt.Materialize(cf)
-		mt.MaybeMerge(cf)
+		mt.materializeLocked(cf)
+		mt.maybeMergeLocked(cf)
 	}
 }
 
-// ── capture / publish ────────────────────────────────────────────────────
+// SnapshotRuns materializes the delta and returns the immutable run set for a
+// CF (draining first, then active).  The returned *Run values are immutable;
+// the caller iterates them without holding the lock.
+func (mt *MemTable) SnapshotRuns(cf int) []*Run {
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
+	mt.materializeLocked(cf)
+	mt.maybeMergeLocked(cf)
+	out := make([]*Run, 0, len(mt.draining[cf])+len(mt.runs[cf]))
+	out = append(out, mt.draining[cf]...)
+	out = append(out, mt.runs[cf]...)
+	return out
+}
 
-// FreezeAll captures: delta -> run, active -> draining, new generation.
-func (mt *MemTable) FreezeAll() {
-	mt.MaterializeAll()
+// FreezeAllCapture captures the live ladder: delta → run, active → draining,
+// fresh generation, and returns the captured draining runs per CF (immutable)
+// so a flush can drain them off the lock.
+func (mt *MemTable) FreezeAllCapture() [][]*Run {
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
+	for cf := 0; cf < mt.numCf; cf++ {
+		mt.materializeLocked(cf)
+		mt.maybeMergeLocked(cf)
+	}
+	captured := make([][]*Run, mt.numCf)
 	for cf := 0; cf < mt.numCf; cf++ {
 		mt.draining[cf] = mt.runs[cf]
 		mt.runs[cf] = nil
 		mt.buf[cf] = nil
 		mt.cfSize[cf] = 0
+		captured[cf] = append([]*Run(nil), mt.draining[cf]...)
 	}
 	mt.gen++
+	return captured
 }
 
 // Publish discards draining runs after a flush.
 func (mt *MemTable) Publish() {
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
 	for cf := 0; cf < mt.numCf; cf++ {
 		mt.draining[cf] = nil
 	}
@@ -326,6 +375,8 @@ func (mt *MemTable) Publish() {
 
 // Clear drops everything.
 func (mt *MemTable) Clear() {
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
 	for cf := 0; cf < mt.numCf; cf++ {
 		mt.runs[cf] = nil
 		mt.draining[cf] = nil
@@ -337,7 +388,7 @@ func (mt *MemTable) Clear() {
 
 // ── point lookups ────────────────────────────────────────────────────────
 
-func (mt *MemTable) findBuf(cf int, key []byte) []byte {
+func (mt *MemTable) findBufLocked(cf int, key []byte) []byte {
 	for i := len(mt.buf[cf]) - 1; i >= 0; i-- {
 		p := mt.buf[cf][i]
 		if CmpKeys(recKey(p), key) == 0 {
@@ -365,7 +416,13 @@ func findRun(r *Run, key []byte) []byte {
 
 // LookupKv resolves a key across buf -> runs -> draining (newest first).
 func (mt *MemTable) LookupKv(cf int, key []byte) KvLookup {
-	if b := mt.findBuf(cf, key); b != nil {
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
+	return mt.lookupKvLocked(cf, key)
+}
+
+func (mt *MemTable) lookupKvLocked(cf int, key []byte) KvLookup {
+	if b := mt.findBufLocked(cf, key); b != nil {
 		if recDeleted(b) {
 			return KvDeleted
 		}
@@ -392,10 +449,12 @@ func (mt *MemTable) LookupKv(cf int, key []byte) KvLookup {
 
 // GetValue returns the active value for a KV key.
 func (mt *MemTable) GetValue(cf int, key []byte) ([]byte, bool) {
-	if mt.LookupKv(cf, key) != KvValue {
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
+	if mt.lookupKvLocked(cf, key) != KvValue {
 		return nil, false
 	}
-	if b := mt.findBuf(cf, key); b != nil && !recDeleted(b) {
+	if b := mt.findBufLocked(cf, key); b != nil && !recDeleted(b) {
 		return copyBytes(recValue(b)), true
 	}
 	for i := len(mt.runs[cf]) - 1; i >= 0; i-- {
@@ -422,7 +481,7 @@ func copyBytes(b []byte) []byte {
 	return out
 }
 
-// ── drain ────────────────────────────────────────────────────────────────
+// ── drain (flush) — k-way sobre runs congelados, newest-wins ─────────────
 
 // DrainSorted merges runs (old -> new) into ascending deduped keys.
 func DrainSorted(runs []*Run) [][]byte {
@@ -509,12 +568,3 @@ func DrainKvSorted(runs []*Run) (pairs [][2][]byte, deleted [][]byte) {
 	}
 	return pairs, deleted
 }
-
-// Runs exposes the active runs for a CF (read-only; for the cursor).
-func (mt *MemTable) Runs(cf int) []*Run { return mt.runs[cf] }
-
-// Draining exposes the draining runs for a CF.
-func (mt *MemTable) Draining(cf int) []*Run { return mt.draining[cf] }
-
-// Gen returns the generation counter.
-func (mt *MemTable) Gen() uint64 { return mt.gen }

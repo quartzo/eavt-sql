@@ -52,7 +52,13 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   auto-GC pós-flush.
 - **`explain`** — renderer portado (`internal/datalog/explain.go`), golden
   25/25.
-- **Concorrência do query server** — mutex global no `Gateway`.
+- **Concorrência do query server** — o mutex global foi removido. Agora vale
+  a **lógica de snapshot real**: a MemTable tem mutex interno e expõe
+  `SnapshotRuns`/`FreezeAllCapture` (runs imutáveis), o PageStore tem
+  `treeMu` + cache com mutex, o Resolver tem RWMutex, e o KVStore usa um
+  `snapshotMu` para tornar atômico "capturar runs + root" vs. o publish
+  (troca do root + limpa draining). Cada query pina seu snapshot no open e
+  conclui sem lock; WAL apply e outras queries rodam em paralelo.
 - **Flush stop-the-world no transactor** — o flush passou a ser
   capture/prepare/publish; só o capture e o publish (curtos) seguram o lock.
   O `PrepareFlush` (I/O de blobs) roda **fora** do lock.
@@ -119,8 +125,9 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   curta (o Nim, single-loop, também serializa). O I/O de blobs do flush roda
   fora do lock. Ainda há concorrência entre o ciclo do WAL, os drains de
   replicação (mutex próprio) e os handlers.
-- **Query server**: goroutine por conexão + mutex global, reproduzindo o event
-  loop único do Nim; execução do VM libera o lock **entre batches**.
+- **Query server**: goroutine por conexão, **sem lock global**. A consistência
+  vem da snapshot isolation (ver §"Snapshot" abaixo): o cursor pina runs +
+  root no open e itera lock-free. WAL apply e queries não se bloqueiam.
 - **`EncodeCompileStats`**: usa encoding de int mínimo em vez do `uint64`
   explícito do Nim — compatível com os decoders (Nim/OCaml/Go), bytes
   diferentes.
@@ -131,7 +138,38 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
 
 ---
 
-## 4. Lacunas de verificação (o que não foi testado)
+## 4. Snapshot (implementação correta)
+
+A concorrência segue a semântica do Nim (runs congelados + COW root),
+**sem lock global**:
+
+- **MemTable** (`internal/memtable/memtable.go`): mutex interno para a
+  escada; `SnapshotRuns(cf)` materializa o delta e devolve os `*Run`
+  **imutáveis** (draining + ativos); `FreezeAllCapture()` congela e devolve
+  as runs capturadas. Runs nunca são mutadas depois de criadas.
+- **PageStore** (`internal/pagestore/store.go`, `cache.go`): `treeMu`
+  (RWMutex) guarda `trees`/`currentRoot`; a cache de páginas tem mutex
+  próprio. `Tree(cf)`/`BaseTrees()` dão o snapshot do root; `PublishTrees`/
+  `LoadRoot` trocam sob write lock.
+- **KVStore** (`internal/kvstore/kvstore.go`): `snapshotMu` (RWMutex) torna
+  **atômico** `OpenScanCursor` (capturar runs + root) contra
+  `PublishFlush`/`PublishRoot` (trocar root + limpar draining). Sem isso, um
+  cursor aberto no meio do publish veria o root novo **e** as runs draining
+  antigas, contando o dado duas vezes.
+- **Resolver** (`internal/eavt/resolver.go`): RWMutex; leituras concorrentes
+  (queries) sob RLock, escrita (WAL/schema) sob Lock.
+- **Query server** (`internal/querysrv/server.go`): sem lock de engine; só o
+  cache de `CompileStats` tem mutex. Cada query pina o snapshot no open do
+  cursor e conclui; WAL apply roda em paralelo.
+
+Validado com `-race`: query server (e transactor) com `-race`, 4 clientes
+lendo (8 queries cada) enquanto um writer faz `tx` (WAL → réplica) →
+**sem data races**; e `TestSnapshotIsolation` prova que um cursor aberto antes
+de um flush continua vendo o snapshot antigo.
+
+---
+
+## 5. Lacunas de verificação (o que não foi testado)
 
 - **Sem paridade A/B da stack completa** (transactor Go × Nim) além do REPL
   (51 linhas). A stack Go foi validada funcionalmente (tx/kv/dump/query/float),
@@ -151,15 +189,16 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
 
 ---
 
-## 5. Mapa rápido por arquivo
+## 6. Mapa rápido por arquivo
 
 | Item | Onde |
 |---|---|
-| Flush síncrono (pause) | `internal/kvstore/kvstore.go`, `internal/transactor/server.go` |
+| Flush faseado (sem pause) | `internal/kvstore/kvstore.go`, `internal/pagestore/store.go`, `internal/transactor/server.go` |
 | KV não durável | `internal/kvstore/kvstore.go` (`PutKv`/`DeleteKv`/`journalDeliver`) |
 | hydrated/anchor ausentes | `internal/eavt/*`, `internal/engine/write.go` |
 | Planner blind-first | `internal/datalog/planner.go` |
-| Replica snapshot síncrono | `internal/querysrv/server.go`, `internal/replica/replica.go` |
+| Snapshot (memtable/kvstore) | `internal/memtable/memtable.go`, `internal/kvstore/kvstore.go`, `internal/pagestore/{store,cache}.go`, `internal/eavt/resolver.go` |
+| Snapshot da réplica é síncrono no reader (latência) | `internal/querysrv/server.go`, `internal/replica/replica.go` |
 | Snapshot WAL do segmento corrente | `internal/wal/wal.go` (`Segments`), `internal/transactor/server.go` |
 | Re-encodação de frames | `internal/downstream/downstream.go` |
 | Só backend file | `internal/blobstore` |

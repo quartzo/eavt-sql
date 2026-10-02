@@ -1,5 +1,7 @@
 package pagestore
 
+import "sync"
+
 type cacheKind int
 
 const (
@@ -20,6 +22,7 @@ type cacheEntry struct {
 }
 
 type pageCache struct {
+	mu        sync.Mutex
 	m         map[UUID]*cacheEntry
 	maxBytes  int
 	curBytes  int
@@ -62,6 +65,9 @@ func (c *pageCache) touch(e *cacheEntry) {
 }
 
 func (c *pageCache) getBytes(u UUID) ([]byte, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if e, ok := c.m[u]; ok && e.kind == ckBytes {
 		c.touch(e)
 		return e.data, true
@@ -70,6 +76,9 @@ func (c *pageCache) getBytes(u UUID) ([]byte, bool) {
 }
 
 func (c *pageCache) putBytes(u UUID, data []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if !c.slotFor(u, len(data)) {
 		return
 	}
@@ -79,6 +88,9 @@ func (c *pageCache) putBytes(u UUID, data []byte) {
 }
 
 func (c *pageCache) getIndex(u UUID) ([]IndexEntry, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if e, ok := c.m[u]; ok && e.kind == ckIndex {
 		c.touch(e)
 		return e.entries, true
@@ -87,6 +99,9 @@ func (c *pageCache) getIndex(u UUID) ([]IndexEntry, bool) {
 }
 
 func (c *pageCache) putIndex(u UUID, entries []IndexEntry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	sz := 0
 	for _, e := range entries {
 		sz += len(e.Key) + 16 + 32
@@ -100,6 +115,9 @@ func (c *pageCache) putIndex(u UUID, entries []IndexEntry) {
 }
 
 func (c *pageCache) getLeafKeys(u UUID) ([][]byte, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if e, ok := c.m[u]; ok && e.kind == ckLeafKeys {
 		c.touch(e)
 		return e.keys, true
@@ -108,6 +126,9 @@ func (c *pageCache) getLeafKeys(u UUID) ([][]byte, bool) {
 }
 
 func (c *pageCache) putLeafKeys(u UUID, keys [][]byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	sz := 48
 	for _, k := range keys {
 		sz += len(k) + 4
@@ -121,6 +142,9 @@ func (c *pageCache) putLeafKeys(u UUID, keys [][]byte) {
 }
 
 func (c *pageCache) getLeafKV(u UUID) ([][2][]byte, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if e, ok := c.m[u]; ok && e.kind == ckLeafKV {
 		c.touch(e)
 		return e.pairs, true
@@ -129,6 +153,9 @@ func (c *pageCache) getLeafKV(u UUID) ([][2][]byte, bool) {
 }
 
 func (c *pageCache) putLeafKV(u UUID, pairs [][2][]byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	sz := 64
 	for _, p := range pairs {
 		sz += len(p[0]) + len(p[1]) + 8

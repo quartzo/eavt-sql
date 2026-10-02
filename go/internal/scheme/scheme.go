@@ -1217,7 +1217,9 @@ func NewVmSession(program Program) *VmSession {
 	return &VmSession{Program: program, Env: NewEnvironment()}
 }
 
-// NextBatch returns up to maxRows rows and whether more remain.
+// NextBatch returns up to maxRows rows and whether more remain.  It runs the
+// program until it has maxRows rows or finishes (like the Nim VM) — the
+// caller serializes it with other engine work, so no soft-yield is needed.
 func (s *VmSession) NextBatch(host HostFns, maxRows int) ([][]sexpr.Expr, bool, error) {
 	if s.Done || maxRows == 0 {
 		return nil, false, nil

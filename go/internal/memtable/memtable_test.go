@@ -6,7 +6,7 @@ import (
 )
 
 func (mt *MemTable) runsOf(cf int) []*Run {
-	return mt.Runs(cf)
+	return mt.SnapshotRuns(cf)
 }
 
 func TestPutAndSize(t *testing.T) {
@@ -142,8 +142,8 @@ func TestRecency(t *testing.T) {
 func TestFreezePublish(t *testing.T) {
 	mt := New(12)
 	mt.PutKv(10, []byte{1}, []byte{100})
-	mt.FreezeAll()
-	if len(mt.Runs(10)) != 0 || len(mt.Draining(10)) != 1 {
+	mt.FreezeAllCapture()
+	if len(mt.SnapshotRuns(10)) != 1 {
 		t.Fatal("freeze should move runs to draining")
 	}
 	if v, ok := mt.GetValue(10, []byte{1}); !ok || !bytes.Equal(v, []byte{100}) {
@@ -163,7 +163,7 @@ func TestDrainSorted(t *testing.T) {
 	mt.Put(0, []byte{2})
 	mt.Put(0, []byte{9})
 	mt.MaterializeAll()
-	got := DrainSorted(mt.Runs(0))
+	got := DrainSorted(mt.SnapshotRuns(0))
 	want := [][]byte{{1}, {2}, {5}, {9}}
 	if len(got) != len(want) {
 		t.Fatalf("drain = %v", got)
@@ -181,7 +181,7 @@ func TestDrainKvSorted(t *testing.T) {
 	mt.PutKv(10, []byte{2}, []byte{20})
 	mt.DeleteKv(10, []byte{2})
 	mt.MaterializeAll()
-	pairs, deleted := DrainKvSorted(mt.Runs(10))
+	pairs, deleted := DrainKvSorted(mt.SnapshotRuns(10))
 	if len(pairs) != 1 || !bytes.Equal(pairs[0][0], []byte{1}) || !bytes.Equal(pairs[0][1], []byte{10}) {
 		t.Fatalf("pairs = %v", pairs)
 	}

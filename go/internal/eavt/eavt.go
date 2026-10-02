@@ -6,6 +6,7 @@ package eavt
 import (
 	"bytes"
 	"strings"
+	"sync"
 	"time"
 
 	"eavt-go/internal/datalog"
@@ -61,6 +62,7 @@ type Engine struct {
 	KV       *kvstore.KVStore
 	Resolver *Resolver
 
+	statsMu         sync.Mutex
 	cachedStats     *datalog.CompileStats
 	cachedStatsTime time.Time
 }
@@ -281,13 +283,15 @@ func (e *Engine) SeedPartitionCounters() {
 
 // BuildCompileStats precomputes the schema snapshot (30s TTL cache).
 func (e *Engine) BuildCompileStats() *datalog.CompileStats {
+	e.statsMu.Lock()
+	defer e.statsMu.Unlock()
 	now := time.Now()
 	if e.cachedStats != nil && now.Sub(e.cachedStatsTime) < 30*time.Second &&
 		len(e.cachedStats.AttrIDs) > 0 {
 		return e.cachedStats
 	}
 	s := datalog.NewCompileStats()
-	for name, aid := range e.Resolver.attrs {
+	for name, aid := range e.Resolver.AttrsSnapshot() {
 		s.AttrIDs[name] = int32(aid)
 		if vt, ok := e.Resolver.ValueTypeFor(aid); ok && vt == DbTypeRef {
 			s.RefAttrs[name] = true
@@ -334,4 +338,8 @@ func DeriveIndexKeys(k []byte, indexed, isRef bool) []EavtEntry {
 }
 
 // InvalidateStats forces the next BuildCompileStats to rebuild.
-func (e *Engine) InvalidateStats() { e.cachedStatsTime = time.Time{} }
+func (e *Engine) InvalidateStats() {
+	e.statsMu.Lock()
+	e.cachedStatsTime = time.Time{}
+	e.statsMu.Unlock()
+}

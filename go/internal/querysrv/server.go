@@ -23,18 +23,15 @@ import (
 const schemaTTL = 30 * time.Second
 const batchSize = 100
 
-// Gateway is the shared query-server state.
-//
-// The KVStore/MemTable/engine are NOT internally synchronized (the Nim query
-// server runs a single event loop).  Go serves a goroutine per connection, so
-// a single mutex serializes every replica/engine access — query execution,
-// WAL/snapshot apply and stats rebuild — reproducing the single-loop
-// semantics.
+// Gateway is the shared query-server state.  There is no global engine lock:
+// the replica is safe for concurrent readers because cursors snapshot the
+// immutable memtable runs + the COW page-store root at open, and the resolver
+// uses its own RWMutex.  Only the CompileStats cache is guarded.
 type Gateway struct {
 	Replica *replica.ReplicaEngine
 	Conn    *downstream.Conn
 
-	mu        sync.Mutex
+	statsMu   sync.Mutex
 	stats     *datalog.CompileStats
 	fetchedAt time.Time
 }
@@ -53,15 +50,15 @@ func NewGateway(downstreamPath, dataPath string) *Gateway {
 
 // GetSnapshot returns the (cached) CompileStats for query compilation.
 func (g *Gateway) GetSnapshot() *datalog.CompileStats {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.stats != nil && g.Replica != nil && !g.Replica.SchemaDirty &&
+	g.statsMu.Lock()
+	defer g.statsMu.Unlock()
+	if g.stats != nil && g.Replica != nil && !g.Replica.SchemaDirty() &&
 		time.Since(g.fetchedAt) < schemaTTL && len(g.stats.AttrIDs) > 0 {
 		return g.stats
 	}
 	if g.Replica != nil {
 		g.stats = g.Replica.GetStats()
-		g.Replica.SchemaDirty = false
+		g.Replica.ClearSchemaDirty()
 		g.fetchedAt = time.Now()
 	}
 	return g.stats
@@ -69,16 +66,14 @@ func (g *Gateway) GetSnapshot() *datalog.CompileStats {
 
 // InvalidateSnapshot forces a stats rebuild on the next compile.
 func (g *Gateway) InvalidateSnapshot() {
-	g.mu.Lock()
+	g.statsMu.Lock()
 	g.fetchedAt = time.Time{}
-	g.mu.Unlock()
+	g.statsMu.Unlock()
 }
 
 // ── replication events ───────────────────────────────────────────────────
 
 func (g *Gateway) onReplicationEvent(frame []byte) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
 	v, err := msgpack.Unmarshal(frame)
 	if err != nil {
 		return
@@ -251,11 +246,9 @@ func (g *Gateway) compile(query string) (scheme.Program, []string, error) {
 }
 
 func (g *Gateway) refreshResolver() {
-	g.mu.Lock()
 	if g.Replica != nil {
 		g.Replica.RefreshResolverOnSchemaWal()
 	}
-	g.mu.Unlock()
 }
 
 func (g *Gateway) handleExplain(conn net.Conn, query string) {
@@ -348,12 +341,9 @@ func (g *Gateway) streamProgram(conn net.Conn, prog scheme.Program, params []sex
 	stream := engine.NewStreamingSession(sess)
 	first := true
 	for {
-		// Only the VM step touches the replica; serialize it, then release the
-		// lock before the (blocking) network write so WAL apply and other
-		// queries can interleave between batches.
-		g.mu.Lock()
+		// The cursors are pinned to the snapshot captured at session open, so
+		// execution is lock-free; WAL apply and other queries run concurrently.
 		rows, more, err := stream.NextBatch(batchSize)
-		g.mu.Unlock()
 		if err != nil {
 			downstream.RelayError(conn, err.Error())
 			return

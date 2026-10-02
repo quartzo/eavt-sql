@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 )
 
 func errf(format string, a ...any) error { return fmt.Errorf(format, a...) }
@@ -90,8 +91,12 @@ func NormalizeAttr(name string) (string, error) {
 
 type partitionCounter struct{ nextSeq int64 }
 
-// Resolver holds the schema cache and id allocation.
+// Resolver holds the schema cache and id allocation.  An RWMutex makes reads
+// (attribute lookup, value types) safe against concurrent WAL/snapshot apply:
+// queries hold RLock only for the duration of each accessor call, never for a
+// whole query.
 type Resolver struct {
+	mu                  sync.RWMutex
 	attrs               map[string]uint32
 	attrsRev            map[uint32]string
 	nextAid             uint32
@@ -166,8 +171,7 @@ func NewResolver() *Resolver {
 	return r
 }
 
-// AllocateInPartition reserves an entity id in a partition.
-func (r *Resolver) AllocateInPartition(partitionID uint64) (int64, error) {
+func (r *Resolver) allocateInPartitionLocked(partitionID uint64) (int64, error) {
 	pc, ok := r.partitions[partitionID]
 	if !ok {
 		return 0, errf("unknown partition: %d", partitionID)
@@ -177,20 +181,39 @@ func (r *Resolver) AllocateInPartition(partitionID uint64) (int64, error) {
 	return MakeEntityID(partitionID, seq), nil
 }
 
+// AllocateInPartition reserves an entity id in a partition.
+func (r *Resolver) AllocateInPartition(partitionID uint64) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.allocateInPartitionLocked(partitionID)
+}
+
 // AllocateEntityID reserves an id in the user partition.
-func (r *Resolver) AllocateEntityID() (int64, error) { return r.AllocateInPartition(PartUser) }
+func (r *Resolver) AllocateEntityID() (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.allocateInPartitionLocked(PartUser)
+}
 
 // AllocateSchemaID reserves an id in the db partition.
-func (r *Resolver) AllocateSchemaID() (int64, error) { return r.AllocateInPartition(PartDb) }
+func (r *Resolver) AllocateSchemaID() (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.allocateInPartitionLocked(PartDb)
+}
 
 // PartitionIDFor returns the id for a partition name.
 func (r *Resolver) PartitionIDFor(name string) (uint64, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	p, ok := r.partitionNames[name]
 	return p, ok
 }
 
 // DeclarePartition registers a custom partition.
 func (r *Resolver) DeclarePartition(name string) uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if p, ok := r.partitionNames[name]; ok {
 		return p
 	}
@@ -204,6 +227,8 @@ func (r *Resolver) DeclarePartition(name string) uint64 {
 
 // RegisterPartition registers a partition with a known id.
 func (r *Resolver) RegisterPartition(name string, partitionID uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if _, ok := r.partitionNames[name]; ok {
 		return
 	}
@@ -221,6 +246,8 @@ func (r *Resolver) DefaultUserPartition() uint64 { return PartUser }
 
 // KnownPartitions returns all known partition ids.
 func (r *Resolver) KnownPartitions() []uint64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	out := make([]uint64, 0, len(r.partitions))
 	for k := range r.partitions {
 		out = append(out, k)
@@ -235,12 +262,18 @@ func (r *Resolver) LookupAttr(name string) (uint32, bool) {
 	if err != nil {
 		return 0, false
 	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	a, ok := r.attrs[n]
 	return a, ok
 }
 
 // IsDeclared reports whether an aid is declared.
-func (r *Resolver) IsDeclared(aid uint32) bool { return r.declared[aid] }
+func (r *Resolver) IsDeclared(aid uint32) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.declared[aid]
+}
 
 // InternAttr resolves or allocates an attribute id.
 func (r *Resolver) InternAttr(name string) (uint32, error) {
@@ -248,10 +281,12 @@ func (r *Resolver) InternAttr(name string) (uint32, error) {
 	if err != nil {
 		return 0, err
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if a, ok := r.attrs[n]; ok {
 		return a, nil
 	}
-	eid, err := r.AllocateInPartition(PartDb)
+	eid, err := r.allocateInPartitionLocked(PartDb)
 	if err != nil {
 		return 0, err
 	}
@@ -268,10 +303,12 @@ func (r *Resolver) DeclareAttr(name string, valueType uint32, many bool) (uint32
 	if err != nil {
 		return 0, false, err
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if a, ok := r.attrs[n]; ok && r.declared[a] {
 		return a, false, nil
 	}
-	seq, err := r.AllocateInPartition(PartDb)
+	seq, err := r.allocateInPartitionLocked(PartDb)
 	if err != nil {
 		return 0, false, err
 	}
@@ -290,12 +327,16 @@ func (r *Resolver) DeclareAttr(name string, valueType uint32, many bool) (uint32
 
 // ValueTypeFor returns the value type for an aid.
 func (r *Resolver) ValueTypeFor(aid uint32) (uint32, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	vt, ok := r.valueTypes[aid]
 	return vt, ok
 }
 
 // AttrName returns the name for an aid (id as string fallback).
 func (r *Resolver) AttrName(aid uint32) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	if n, ok := r.attrsRev[aid]; ok {
 		return n
 	}
@@ -304,15 +345,23 @@ func (r *Resolver) AttrName(aid uint32) string {
 
 // AttrNameOpt returns the name for an aid, if known.
 func (r *Resolver) AttrNameOpt(aid uint32) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	n, ok := r.attrsRev[aid]
 	return n, ok
 }
 
 // IsMany reports cardinality-many.
-func (r *Resolver) IsMany(aid uint32) bool { return r.cardinality[aid] }
+func (r *Resolver) IsMany(aid uint32) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.cardinality[aid]
+}
 
 // SetCardinality sets cardinality-many.
 func (r *Resolver) SetCardinality(aid uint32, many bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if many {
 		r.cardinality[aid] = true
 	} else {
@@ -321,10 +370,16 @@ func (r *Resolver) SetCardinality(aid uint32, many bool) {
 }
 
 // IsUnique reports whether an aid is unique.
-func (r *Resolver) IsUnique(aid uint32) bool { return r.uniqueAttrs[aid] }
+func (r *Resolver) IsUnique(aid uint32) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.uniqueAttrs[aid]
+}
 
 // SetUnique sets the unique flag.
 func (r *Resolver) SetUnique(aid uint32, unique bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if unique {
 		r.uniqueAttrs[aid] = true
 	} else {
@@ -334,11 +389,15 @@ func (r *Resolver) SetUnique(aid uint32, unique bool) {
 
 // IsIndexed reports whether an aid is indexed (or unique).
 func (r *Resolver) IsIndexed(aid uint32) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.uniqueAttrs[aid] || r.indexedAttrs[aid]
 }
 
 // SetIndexed sets the indexed flag.
 func (r *Resolver) SetIndexed(aid uint32, indexed bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if indexed {
 		r.indexedAttrs[aid] = true
 	} else {
@@ -350,6 +409,8 @@ func (r *Resolver) SetIndexed(aid uint32, indexed bool) {
 func (r *Resolver) AdvancePast(eid int64) {
 	p := PartitionOf(eid)
 	s := SeqOf(eid)
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if pc, ok := r.partitions[p]; ok {
 		if s >= pc.nextSeq {
 			pc.nextSeq = s + 1
@@ -359,6 +420,8 @@ func (r *Resolver) AdvancePast(eid int64) {
 
 // SetPartitionSeq raises a partition sequence.
 func (r *Resolver) SetPartitionSeq(partitionID uint64, seq int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if pc, ok := r.partitions[partitionID]; ok {
 		if seq > pc.nextSeq {
 			pc.nextSeq = seq
@@ -368,14 +431,29 @@ func (r *Resolver) SetPartitionSeq(partitionID uint64, seq int64) {
 
 // NextEntID returns the db partition's next sequence.
 func (r *Resolver) NextEntID() int64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	if pc, ok := r.partitions[PartDb]; ok {
 		return pc.nextSeq
 	}
 	return BootstrapFirstUserID
 }
 
+// AttrsSnapshot returns a copy of the name→aid table.
+func (r *Resolver) AttrsSnapshot() map[string]uint32 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]uint32, len(r.attrs))
+	for k, v := range r.attrs {
+		out[k] = v
+	}
+	return out
+}
+
 // LoadAttrs bulk-loads (name, aid-bytes) pairs.
 func (r *Resolver) LoadAttrs(items [][2][]byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	for _, kv := range items {
 		name := string(kv[0])
 		v := kv[1]
@@ -394,6 +472,8 @@ func (r *Resolver) LoadAttrs(items [][2][]byte) {
 // LoadUserAttr registers a user attribute discovered during bootstrap.
 func (r *Resolver) LoadUserAttr(name string, eid int64, valueType uint32, many, unique, indexed bool) {
 	aid := uint32(eid)
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	isNew := !r.declared[aid]
 	r.attrs[name] = aid
 	r.attrsRev[aid] = name

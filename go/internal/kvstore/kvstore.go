@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"eavt-go/internal/cursor"
@@ -85,9 +86,14 @@ type KVStore struct {
 	FlushThreshold uint64
 	GcMaxAgeSecs   uint64
 	GcMaxRootCount int
-	flushActive    bool
-	path           string
-	ownsPath       bool
+	// snapshotMu makes "capture the run set + page-store root" atomic with
+	// respect to publish (which swaps the root and clears draining).  Without
+	// it a cursor opening mid-publish could see the new root AND the old
+	// draining runs, double-counting the flushed data.
+	snapshotMu  sync.RWMutex
+	flushActive bool
+	path        string
+	ownsPath    bool
 
 	// JournalSink, when set, receives journal entries instead of the file
 	// fallback (the transactor wires it to the WAL).
@@ -361,7 +367,7 @@ func (kv *KVStore) ApplyJournalRecordsExpanded(entries []memtable.CfKey) {
 
 // SealLiveToFlush freezes the live memtable into draining runs.
 func (kv *KVStore) SealLiveToFlush() {
-	kv.MT.FreezeAll()
+	kv.MT.FreezeAllCapture()
 	kv.flushActive = true
 	kv.memSize = 0
 }
@@ -383,12 +389,14 @@ func (kv *KVStore) RootHasData() bool {
 
 // PublishRoot loads a root and discards the pending draining runs.
 func (kv *KVStore) PublishRoot(rootName string) {
+	kv.snapshotMu.Lock()
 	loaded, err := kv.PS.LoadRoot(rootName)
 	if err == nil && loaded {
 		kv.MT.Publish()
 		kv.flushActive = false
 		kv.memSize = 0
 	}
+	kv.snapshotMu.Unlock()
 }
 
 // ── point operations ─────────────────────────────────────────────────────
@@ -489,7 +497,7 @@ func (kv *KVStore) CaptureFlush() (*FlushBatch, bool) {
 	if kv.ReadOnly || kv.flushActive {
 		return nil, false
 	}
-	kv.MT.FreezeAll()
+	captured := kv.MT.FreezeAllCapture()
 	kv.flushActive = true
 	kv.memSize = 0
 	b := &FlushBatch{
@@ -500,7 +508,7 @@ func (kv *KVStore) CaptureFlush() (*FlushBatch, bool) {
 		b.SealBoundary = kv.JournalSeal()
 	}
 	for cf := 0; cf < kv.NumCf; cf++ {
-		runs := kv.MT.Draining(cf)
+		runs := captured[cf]
 		if len(runs) == 0 {
 			continue
 		}
@@ -557,10 +565,12 @@ func (kv *KVStore) PrepareFlush(b *FlushBatch) ([]pagestore.CfTree, string, erro
 
 // PublishFlush swaps in the prepared trees.  Call under the engine lock.
 func (kv *KVStore) PublishFlush(b *FlushBatch, trees []pagestore.CfTree, root string) {
+	kv.snapshotMu.Lock()
 	kv.PS.PublishTrees(trees, root)
 	kv.MT.Publish()
 	kv.flushActive = false
 	kv.memSize = 0
+	kv.snapshotMu.Unlock()
 	if b.SealBoundary >= 0 && kv.WalDurableUpTo != nil {
 		kv.WalDurableUpTo.Store(b.SealBoundary)
 	}
@@ -587,15 +597,14 @@ func (kv *KVStore) Flush() error {
 
 // OpenScanCursor opens a key-only scan cursor over cf.
 func (kv *KVStore) OpenScanCursor(cf int) *cursor.MergedCursor {
-	kv.MT.EnsureMaterialized(cf)
-	tree := kv.PS.Trees()[cf]
+	kv.snapshotMu.RLock()
+	runs := kv.MT.SnapshotRuns(cf)
+	tree := kv.PS.Tree(cf)
+	kv.snapshotMu.RUnlock()
 	psc := pagestore.NewCursor(kv.PS, cf, tree.RootUUID, tree.Height, false)
 	var sources []cursor.Cursor
 	sources = append(sources, cursor.NewPageStoreCursor(psc))
-	for _, r := range kv.MT.Draining(cf) {
-		sources = append(sources, cursor.NewRunCursor(memtable.NewRunCursor(r)))
-	}
-	for _, r := range kv.MT.Runs(cf) {
+	for _, r := range runs {
 		sources = append(sources, cursor.NewRunCursor(memtable.NewRunCursor(r)))
 	}
 	mc := cursor.NewMergedCursor(sources)
@@ -608,17 +617,16 @@ func (kv *KVStore) OpenScanCursor(cf int) *cursor.MergedCursor {
 
 // OpenScanCursorKv opens a key-value scan cursor over cf (>= 10).
 func (kv *KVStore) OpenScanCursorKv(cf int) *cursor.MergedCursor {
-	kv.MT.EnsureMaterialized(cf)
-	tree := kv.PS.Trees()[cf]
+	kv.snapshotMu.RLock()
+	runs := kv.MT.SnapshotRuns(cf)
+	tree := kv.PS.Tree(cf)
+	kv.snapshotMu.RUnlock()
 	var sources []cursor.Cursor
 	if tree.RootUUID != (pagestore.UUID{}) {
 		psc := pagestore.NewCursor(kv.PS, cf, tree.RootUUID, tree.Height, true)
 		sources = append(sources, cursor.NewPageStoreCursor(psc))
 	}
-	for _, r := range kv.MT.Draining(cf) {
-		sources = append(sources, cursor.NewRunKvCursor(memtable.NewRunCursor(r)))
-	}
-	for _, r := range kv.MT.Runs(cf) {
+	for _, r := range runs {
 		sources = append(sources, cursor.NewRunKvCursor(memtable.NewRunCursor(r)))
 	}
 	mc := cursor.NewMergedCursor(sources)

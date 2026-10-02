@@ -55,6 +55,7 @@ type Config struct {
 // Store is a page store instance.
 type Store struct {
 	blobs       *blobstore.FileBlobStore
+	treeMu      sync.RWMutex // guards trees/currentRoot (published roots)
 	trees       []CfTree
 	numCf       int
 	readOnly    bool
@@ -130,14 +131,34 @@ func (s *Store) Close() error {
 	return nil
 }
 
-// Trees returns the current CF trees.
-func (s *Store) Trees() []CfTree { return s.trees }
+// Trees returns a copy of the current CF trees.
+func (s *Store) Trees() []CfTree {
+	s.treeMu.RLock()
+	defer s.treeMu.RUnlock()
+	out := make([]CfTree, len(s.trees))
+	copy(out, s.trees)
+	return out
+}
+
+// Tree returns the current tree of one CF.
+func (s *Store) Tree(cf int) CfTree {
+	s.treeMu.RLock()
+	defer s.treeMu.RUnlock()
+	if cf < 0 || cf >= len(s.trees) {
+		return CfTree{}
+	}
+	return s.trees[cf]
+}
 
 // NumCf returns the configured CF count.
 func (s *Store) NumCf() int { return s.numCf }
 
 // CurrentRoot returns the current root name.
-func (s *Store) CurrentRoot() string { return s.currentRoot }
+func (s *Store) CurrentRoot() string {
+	s.treeMu.RLock()
+	defer s.treeMu.RUnlock()
+	return s.currentRoot
+}
 
 // SetReadOnly flips the read-only flag (not used by the replica read path).
 func (s *Store) ReadOnly() bool { return s.readOnly }
@@ -297,7 +318,7 @@ func (s *Store) GetKeysInPrefix(cf int, prefix []byte) ([][]byte, error) {
 	if cf >= s.numCf {
 		return nil, nil
 	}
-	tree := s.trees[cf]
+	tree := s.Tree(cf)
 	if tree.RootUUID == (UUID{}) {
 		return nil, nil
 	}
@@ -336,7 +357,7 @@ func (s *Store) GetPairsInPrefix(cf int, prefix []byte) ([][2][]byte, error) {
 	if cf >= s.numCf {
 		return nil, nil
 	}
-	tree := s.trees[cf]
+	tree := s.Tree(cf)
 	if tree.RootUUID == (UUID{}) {
 		return nil, nil
 	}
@@ -445,11 +466,13 @@ func (s *Store) LoadRoot(rootName string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	s.treeMu.Lock()
 	s.trees = trees
 	for len(s.trees) < s.numCf {
 		s.trees = append(s.trees, EmptyTree())
 	}
 	s.currentRoot = rootName
+	s.treeMu.Unlock()
 	return true, nil
 }
 
@@ -661,6 +684,8 @@ type cfKeys struct {
 // CommitMerge merges sorted keys into the key-only CFs and publishes a root.
 // BaseTrees returns a copy of the current CF trees.
 func (s *Store) BaseTrees() []CfTree {
+	s.treeMu.RLock()
+	defer s.treeMu.RUnlock()
 	out := make([]CfTree, len(s.trees))
 	copy(out, s.trees)
 	return out
@@ -668,8 +693,10 @@ func (s *Store) BaseTrees() []CfTree {
 
 // PublishTrees swaps in prepared trees and the new root (call under the lock).
 func (s *Store) PublishTrees(trees []CfTree, root string) {
+	s.treeMu.Lock()
 	s.trees = trees
 	s.currentRoot = root
+	s.treeMu.Unlock()
 }
 
 // PrepareMerge computes merged key-only trees and writes the new root WITHOUT
