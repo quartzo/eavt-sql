@@ -659,15 +659,32 @@ type cfKeys struct {
 }
 
 // CommitMerge merges sorted keys into the key-only CFs and publishes a root.
-func (s *Store) CommitMerge(keysByCf []cfKeys) (string, error) {
+// BaseTrees returns a copy of the current CF trees.
+func (s *Store) BaseTrees() []CfTree {
+	out := make([]CfTree, len(s.trees))
+	copy(out, s.trees)
+	return out
+}
+
+// PublishTrees swaps in prepared trees and the new root (call under the lock).
+func (s *Store) PublishTrees(trees []CfTree, root string) {
+	s.trees = trees
+	s.currentRoot = root
+}
+
+// PrepareMerge computes merged key-only trees and writes the new root WITHOUT
+// mutating the store, so the blob I/O can run off the engine lock.
+func (s *Store) PrepareMerge(baseTrees []CfTree, keysByCf []cfKeys) ([]CfTree, string, error) {
 	if s.readOnly {
-		return "", errf("read-only")
+		return nil, "", errf("read-only")
 	}
+	newTrees := make([]CfTree, len(baseTrees))
+	copy(newTrees, baseTrees)
 	for _, ck := range keysByCf {
-		if ck.cf >= len(s.trees) || len(ck.keys) == 0 {
+		if ck.cf >= len(newTrees) || len(ck.keys) == 0 {
 			continue
 		}
-		tree := s.trees[ck.cf]
+		tree := newTrees[ck.cf]
 		idx := 0
 		var newTree CfTree
 		if tree.RootUUID == (UUID{}) {
@@ -675,18 +692,18 @@ func (s *Store) CommitMerge(keysByCf []cfKeys) (string, error) {
 			var entries []IndexEntry
 			for _, pl := range pageList {
 				if _, err := DeserializePage(pl[1]); err != nil {
-					return "", err
+					return nil, "", err
 				}
 				uuid, err := s.blobPut(pl[1])
 				if err != nil {
-					return "", err
+					return nil, "", err
 				}
 				entries = append(entries, IndexEntry{Key: pl[0], UUID: uuid})
 			}
 			numLeaves := uint32(len(entries))
 			root, height, err := s.buildIndexTree(entries, 0)
 			if err != nil {
-				return "", err
+				return nil, "", err
 			}
 			if height == 0 {
 				newTree = CfTree{RootUUID: root}
@@ -696,7 +713,7 @@ func (s *Store) CommitMerge(keysByCf []cfKeys) (string, error) {
 		} else {
 			res, err := s.mergeSubtree(tree.RootUUID, tree.Height, false, nil, ck.keys, &idx)
 			if err != nil {
-				return "", err
+				return nil, "", err
 			}
 			switch {
 			case res == nil:
@@ -706,22 +723,39 @@ func (s *Store) CommitMerge(keysByCf []cfKeys) (string, error) {
 			default:
 				root, height, err := s.buildIndexTree(res, tree.Height)
 				if err != nil {
-					return "", err
+					return nil, "", err
 				}
 				newTree = CfTree{RootUUID: root, Height: height, NumLeaves: tree.NumLeaves}
 			}
 		}
-		s.trees[ck.cf] = newTree
+		newTrees[ck.cf] = newTree
 	}
 	newRoot := MakeRootName()
-	if !s.blobPutRoot(newRoot, SerializeRoot(s.trees)) {
-		return "", errf("commitMerge: cannot write root")
+	if !s.blobPutRoot(newRoot, SerializeRoot(newTrees)) {
+		return nil, "", errf("commitMerge: cannot write root")
 	}
-	s.currentRoot = newRoot
-	return newRoot, nil
+	return newTrees, newRoot, nil
 }
 
-// CommitMerge is a convenience wrapper taking a map.
+// PrepareMergeMap is the map-based entry to PrepareMerge.
+func (s *Store) PrepareMergeMap(baseTrees []CfTree, keysByCf map[int][][]byte) ([]CfTree, string, error) {
+	var list []cfKeys
+	for cf, keys := range keysByCf {
+		list = append(list, cfKeys{cf: cf, keys: keys})
+	}
+	return s.PrepareMerge(baseTrees, list)
+}
+
+// CommitMerge is the synchronous (prepare + publish) convenience wrapper.
+func (s *Store) CommitMerge(keysByCf []cfKeys) (string, error) {
+	trees, root, err := s.PrepareMerge(s.BaseTrees(), keysByCf)
+	if err != nil {
+		return "", err
+	}
+	s.PublishTrees(trees, root)
+	return root, nil
+}
+
 func (s *Store) CommitMergeMap(keysByCf map[int][][]byte) (string, error) {
 	var list []cfKeys
 	for cf, keys := range keysByCf {
@@ -731,10 +765,12 @@ func (s *Store) CommitMergeMap(keysByCf map[int][][]byte) (string, error) {
 }
 
 // CommitMergeKv merges (and deletes) key-value pairs in CFs >= 10.
-func (s *Store) CommitMergeKv(pairsByCf map[int][][2][]byte, deletedByCf map[int][][]byte) (string, error) {
+func (s *Store) PrepareMergeKv(baseTrees []CfTree, pairsByCf map[int][][2][]byte, deletedByCf map[int][][]byte) ([]CfTree, string, error) {
 	if s.readOnly {
-		return "", errf("read-only")
+		return nil, "", errf("read-only")
 	}
+	newTrees := make([]CfTree, len(baseTrees))
+	copy(newTrees, baseTrees)
 	deleted := map[int]map[string]bool{}
 	for cf, keys := range deletedByCf {
 		set := map[string]bool{}
@@ -749,7 +785,7 @@ func (s *Store) CommitMergeKv(pairsByCf map[int][][2][]byte, deletedByCf map[int
 	}
 	rebuild := func(cf int, pairs [][2][]byte) error {
 		if len(pairs) == 0 {
-			s.trees[cf] = EmptyTree()
+			newTrees[cf] = EmptyTree()
 			return nil
 		}
 		pageList := BuildPagesKv(pairs)
@@ -770,9 +806,9 @@ func (s *Store) CommitMergeKv(pairsByCf map[int][][2][]byte, deletedByCf map[int
 			return err
 		}
 		if height == 0 {
-			s.trees[cf] = CfTree{RootUUID: root}
+			newTrees[cf] = CfTree{RootUUID: root}
 		} else {
-			s.trees[cf] = CfTree{RootUUID: root, Height: height, NumLeaves: numLeaves}
+			newTrees[cf] = CfTree{RootUUID: root, Height: height, NumLeaves: numLeaves}
 		}
 		return nil
 	}
@@ -781,12 +817,12 @@ func (s *Store) CommitMergeKv(pairsByCf map[int][][2][]byte, deletedByCf map[int
 		if inPairs[cf] || cf >= s.numCf {
 			continue
 		}
-		if s.trees[cf].RootUUID == (UUID{}) {
+		if newTrees[cf].RootUUID == (UUID{}) {
 			continue
 		}
 		all, err := s.GetPairsInPrefix(cf, nil)
 		if err != nil {
-			return "", err
+			return nil, "", err
 		}
 		delSet := deleted[cf]
 		var live [][2][]byte
@@ -796,14 +832,14 @@ func (s *Store) CommitMergeKv(pairsByCf map[int][][2][]byte, deletedByCf map[int
 			}
 		}
 		if err := rebuild(cf, live); err != nil {
-			return "", err
+			return nil, "", err
 		}
 	}
 	for cf, sortedPairs := range pairsByCf {
 		if cf >= s.numCf || len(sortedPairs) == 0 {
 			continue
 		}
-		tree := s.trees[cf]
+		tree := newTrees[cf]
 		delSet := deleted[cf]
 		if tree.RootUUID == (UUID{}) {
 			var filtered [][2][]byte
@@ -813,13 +849,13 @@ func (s *Store) CommitMergeKv(pairsByCf map[int][][2][]byte, deletedByCf map[int
 				}
 			}
 			if err := rebuild(cf, filtered); err != nil {
-				return "", err
+				return nil, "", err
 			}
 			continue
 		}
 		all, err := s.GetPairsInPrefix(cf, nil)
 		if err != nil {
-			return "", err
+			return nil, "", err
 		}
 		var live [][2][]byte
 		for _, p := range all {
@@ -861,13 +897,22 @@ func (s *Store) CommitMergeKv(pairsByCf map[int][][2][]byte, deletedByCf map[int
 			}
 		}
 		if err := rebuild(cf, merged); err != nil {
-			return "", err
+			return nil, "", err
 		}
 	}
 	newRoot := MakeRootName()
-	if !s.blobPutRoot(newRoot, SerializeRoot(s.trees)) {
-		return "", errf("commitMergeKv: cannot write root")
+	if !s.blobPutRoot(newRoot, SerializeRoot(newTrees)) {
+		return nil, "", errf("commitMergeKv: cannot write root")
 	}
-	s.currentRoot = newRoot
-	return newRoot, nil
+	return newTrees, newRoot, nil
+}
+
+// CommitMergeKv is the synchronous (prepare + publish) convenience wrapper.
+func (s *Store) CommitMergeKv(pairsByCf map[int][][2][]byte, deletedByCf map[int][][]byte) (string, error) {
+	trees, root, err := s.PrepareMergeKv(s.BaseTrees(), pairsByCf, deletedByCf)
+	if err != nil {
+		return "", err
+	}
+	s.PublishTrees(trees, root)
+	return root, nil
 }

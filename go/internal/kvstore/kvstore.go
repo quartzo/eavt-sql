@@ -470,23 +470,35 @@ func (kv *KVStore) maybeArmFlush() {
 
 // ── flush ────────────────────────────────────────────────────────────────
 
-// Flush captures the memtable, commits it to the page store and publishes.
-func (kv *KVStore) Flush() error {
+// FlushBatch is the captured state of one flush.
+type FlushBatch struct {
+	KeysByCf     map[int][][]byte
+	PairsByCf    map[int][][2][]byte
+	DeletedByCf  map[int][][]byte
+	BaseTrees    []pagestore.CfTree
+	SealBoundary int64
+	MaxT         int64
+}
+
+// FlushActive reports whether a capture is in flight.
+func (kv *KVStore) FlushActive() bool { return kv.flushActive }
+
+// CaptureFlush freezes the memtable and collects the draining data.  Call
+// under the engine lock; returns false when read-only or a flush is in flight.
+func (kv *KVStore) CaptureFlush() (*FlushBatch, bool) {
 	if kv.ReadOnly || kv.flushActive {
-		return nil
+		return nil, false
 	}
 	kv.MT.FreezeAll()
 	kv.flushActive = true
 	kv.memSize = 0
-	sealBoundary := int64(-1)
-	if kv.JournalSeal != nil {
-		sealBoundary = kv.JournalSeal()
+	b := &FlushBatch{
+		KeysByCf: map[int][][]byte{}, PairsByCf: map[int][][2][]byte{},
+		DeletedByCf: map[int][][]byte{}, SealBoundary: -1, MaxT: -1,
 	}
-
-	keysByCf := map[int][][]byte{}
-	pairsByCf := map[int][][2][]byte{}
-	deletedByCf := map[int][][]byte{}
-	var collectedMaxT int64 = -1
+	if kv.JournalSeal != nil {
+		b.SealBoundary = kv.JournalSeal()
+	}
 	for cf := 0; cf < kv.NumCf; cf++ {
 		runs := kv.MT.Draining(cf)
 		if len(runs) == 0 {
@@ -495,19 +507,19 @@ func (kv *KVStore) Flush() error {
 		if cf >= 10 {
 			pairs, deleted := memtable.DrainKvSorted(runs)
 			if len(pairs) > 0 {
-				pairsByCf[cf] = pairs
+				b.PairsByCf[cf] = pairs
 			}
 			if len(deleted) > 0 {
-				deletedByCf[cf] = deleted
+				b.DeletedByCf[cf] = deleted
 			}
 		} else {
 			keys := memtable.DrainSorted(runs)
 			if len(keys) > 0 {
-				keysByCf[cf] = keys
+				b.KeysByCf[cf] = keys
 			}
 		}
 	}
-	for cf, keys := range keysByCf {
+	for cf, keys := range b.KeysByCf {
 		if cf >= 10 {
 			continue
 		}
@@ -516,34 +528,58 @@ func (kv *KVStore) Flush() error {
 				continue
 			}
 			var sf uint64
-			for _, b := range k[len(k)-8:] {
-				sf = (sf << 8) | uint64(b)
+			for _, x := range k[len(k)-8:] {
+				sf = (sf << 8) | uint64(x)
 			}
-			kt := int64(sf >> 1)
-			if kt > collectedMaxT {
-				collectedMaxT = kt
+			if kt := int64(sf >> 1); kt > b.MaxT {
+				b.MaxT = kt
 			}
 		}
 	}
-	if len(keysByCf) > 0 {
-		if _, err := kv.PS.CommitMergeMap(keysByCf); err != nil {
-			return err
+	b.BaseTrees = kv.PS.BaseTrees()
+	return b, true
+}
+
+// PrepareFlush does the heavy blob I/O off the engine lock.
+func (kv *KVStore) PrepareFlush(b *FlushBatch) ([]pagestore.CfTree, string, error) {
+	trees, root, err := kv.PS.PrepareMergeMap(b.BaseTrees, b.KeysByCf)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(b.PairsByCf) > 0 || len(b.DeletedByCf) > 0 {
+		trees, root, err = kv.PS.PrepareMergeKv(trees, b.PairsByCf, b.DeletedByCf)
+		if err != nil {
+			return nil, "", err
 		}
 	}
-	if len(pairsByCf) > 0 || len(deletedByCf) > 0 {
-		if _, err := kv.PS.CommitMergeKv(pairsByCf, deletedByCf); err != nil {
-			return err
-		}
-	}
+	return trees, root, nil
+}
+
+// PublishFlush swaps in the prepared trees.  Call under the engine lock.
+func (kv *KVStore) PublishFlush(b *FlushBatch, trees []pagestore.CfTree, root string) {
+	kv.PS.PublishTrees(trees, root)
 	kv.MT.Publish()
 	kv.flushActive = false
 	kv.memSize = 0
-	if sealBoundary >= 0 && kv.WalDurableUpTo != nil {
-		kv.WalDurableUpTo.Store(sealBoundary)
+	if b.SealBoundary >= 0 && kv.WalDurableUpTo != nil {
+		kv.WalDurableUpTo.Store(b.SealBoundary)
 	}
 	if kv.OnFlushPublish != nil {
-		kv.OnFlushPublish(kv.PS.CurrentRoot(), collectedMaxT)
+		kv.OnFlushPublish(root, b.MaxT)
 	}
+}
+
+// Flush is the synchronous capture+prepare+publish (tests, sync callers).
+func (kv *KVStore) Flush() error {
+	b, ok := kv.CaptureFlush()
+	if !ok {
+		return nil
+	}
+	trees, root, err := kv.PrepareFlush(b)
+	if err != nil {
+		return err
+	}
+	kv.PublishFlush(b, trees, root)
 	return nil
 }
 

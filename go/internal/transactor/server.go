@@ -69,6 +69,25 @@ func NewEngine(dbPath, blobDir string) (*Engine, error) {
 	return e, nil
 }
 
+// runFlush does capture (under the lock) + prepare (off-lock, heavy blob I/O)
+// + publish (under the lock), so a flush does not block the engine for its
+// whole duration.
+func (e *Engine) runFlush() {
+	e.mu.Lock()
+	b, ok := e.KV.CaptureFlush()
+	e.mu.Unlock()
+	if !ok {
+		return
+	}
+	trees, root, err := e.KV.PrepareFlush(b)
+	if err != nil {
+		return
+	}
+	e.mu.Lock()
+	e.KV.PublishFlush(b, trees, root)
+	e.mu.Unlock()
+}
+
 // Close stops the WAL and closes the store.
 func (e *Engine) Close() {
 	if e.Wal != nil {
@@ -317,20 +336,14 @@ func (e *Engine) handleAdmin(conn net.Conn, command, id string) {
 		if e.KV.ReadOnly {
 			output = "error: read-only"
 		} else {
-			go func() {
-				e.mu.Lock()
-				defer e.mu.Unlock()
-				_ = e.KV.Flush()
-			}()
+			go e.runFlush()
 			output = "ok: flush requested"
 		}
 	case "flush-sync":
 		if e.KV.ReadOnly {
 			output = "error: read-only"
 		} else {
-			e.mu.Lock()
-			_ = e.KV.Flush()
-			e.mu.Unlock()
+			e.runFlush()
 			output = "ok: flushed"
 		}
 	case "gc", "gc-dry":
@@ -338,6 +351,11 @@ func (e *Engine) handleAdmin(conn net.Conn, command, id string) {
 			output = "error: read-only"
 		} else {
 			e.mu.Lock()
+			if e.KV.FlushActive() {
+				e.mu.Unlock()
+				output = "error: flush in progress"
+				break
+			}
 			rep, err := e.KV.PS.GcFull(e.KV.GcMaxAgeSecs, e.KV.GcMaxRootCount, command == "gc-dry")
 			e.mu.Unlock()
 			if err != nil {

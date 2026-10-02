@@ -136,3 +136,33 @@ func TestJournalParseRoundTrip(t *testing.T) {
 		t.Fatalf("parse = %#v", entries)
 	}
 }
+
+// TestPhasedFlushMatchesSync exercises capture/prepare/publish directly and
+// verifies the in-flight flag and that data is readable after.
+func TestPhasedFlushMatchesSync(t *testing.T) {
+	kv := newStore(t)
+	for i := 0; i < 100; i++ {
+		kv.Put(0, []byte{byte(i)})
+	}
+	b, ok := kv.CaptureFlush()
+	if !ok {
+		t.Fatal("capture failed")
+	}
+	if !kv.FlushActive() {
+		t.Fatal("flushActive not set during prepare")
+	}
+	trees, root, err := kv.PrepareFlush(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kv.PublishFlush(b, trees, root)
+	if kv.FlushActive() {
+		t.Fatal("flushActive not cleared after publish")
+	}
+	if got, _ := kv.Get(0, []byte{50}); !got {
+		t.Fatal("data missing after phased flush")
+	}
+	if n := len(scanKeys(t, kv, 0)); n != 100 {
+		t.Fatalf("scan = %d, want 100", n)
+	}
+}

@@ -15,13 +15,16 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
 
 ## 1. Adiado (não implementado)
 
-- **Flush assíncrono chunked + pool de blobs.** O `KVStore.Flush` Go é
-  síncrono e roda inteiro sob o mutex do engine — um flush de dataset grande
-  **pausa todas as requests** durante o drain/commit. O Nim fatia o drain em
-  ~256 KiB, faz `await sleepAsync(0)` entre fatias (serve queries) e usa o
-  blob pool (zstd + I/O em workers). Arquivo: `internal/kvstore/kvstore.go`
-  (`Flush`), `internal/transactor/server.go` (flush async é uma goroutine que
-  pega o mesmo lock, não fatia).
+- **Flush chunked + pool de blobs.** O flush Go agora é **faseado**
+  (`CaptureFlush` sob o lock → `PrepareFlush` **fora** do lock → `PublishFlush`
+  sob o lock), então o I/O de blobs **não segura o engine**. O que ainda falta
+  em relação ao Nim: o Nim **fatia** o drain em ~256 KiB com
+  `await sleepAsync(0)` entre fatias (serve queries durante o próprio drain) e
+  usa o blob pool (zstd + I/O em workers). No Go o `PrepareFlush` é uma única
+  passada bloqueante numa goroutine (não fatia) e o zstd roda nessa mesma
+  goroutine, sem pool. Arquivos: `internal/kvstore/kvstore.go`,
+  `internal/pagestore/store.go` (`PrepareMerge`/`PrepareMergeKv`),
+  `internal/transactor/server.go` (`runFlush`).
 - **`hydrated` (cache de leitura por eid, M6).** Não portado; `hydrateEid`
   é no-op. Como consequência, os *fast paths* de escrita que dependem de
   `probeComplete` (`skip provado` do retract scan e do `hasDatom`) **nunca
@@ -50,6 +53,9 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
 - **`explain`** — renderer portado (`internal/datalog/explain.go`), golden
   25/25.
 - **Concorrência do query server** — mutex global no `Gateway`.
+- **Flush stop-the-world no transactor** — o flush passou a ser
+  capture/prepare/publish; só o capture e o publish (curtos) seguram o lock.
+  O `PrepareFlush` (I/O de blobs) roda **fora** do lock.
 
 ---
 
@@ -108,10 +114,11 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
 - **WAL**: goroutine + `os.WriteAt` + ticker de 100 ms em vez do chronos-file
   thread-pool. Mesma semântica de durabilidade (fsync por intervalo ~100 ms;
   crash de processo sempre seguro, crash de máquina perde ≤ ~100 ms).
-- **Transactor**: um único `e.mu` serializa engine + WAL + GC. O flush async é
-  uma goroutine que pega o mesmo lock (`internal/transactor/server.go`).
-  Ainda há concorrência entre o ciclo do WAL, os drains de replicação (por
-  mutex próprio) e os handlers.
+- **Transactor**: um único `e.mu` serializa a aplicação de tx e as janelas
+  curtas de capture/publish do flush e do GC. A aplicação de tx é CPU-bound
+  curta (o Nim, single-loop, também serializa). O I/O de blobs do flush roda
+  fora do lock. Ainda há concorrência entre o ciclo do WAL, os drains de
+  replicação (mutex próprio) e os handlers.
 - **Query server**: goroutine por conexão + mutex global, reproduzindo o event
   loop único do Nim; execução do VM libera o lock **entre batches**.
 - **`EncodeCompileStats`**: usa encoding de int mínimo em vez do `uint64`
