@@ -1,0 +1,161 @@
+# Port Nim → Go: adiado, divergências e atalhos
+
+Este documento lista, de forma explícita, **tudo o que foi adiado, ficou
+diferente do Nim ou foi feito por atalho** no port Go (`go/`). O objetivo é
+não deixar dívida escondida.
+
+Estado geral: a stack Go está **funcional de ponta a ponta** — REPL,
+compilador datalog (25/25 wire byte-idêntico + explain 25/25), query server
+(réplica + execução local) e transactor (write path + tx + WAL + replicação +
+GC). O que segue são os buracos conhecidos.
+
+Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,transactor-go}`.
+
+---
+
+## 1. Adiado (não implementado)
+
+- **Flush assíncrono chunked + pool de blobs.** O `KVStore.Flush` Go é
+  síncrono e roda inteiro sob o mutex do engine — um flush de dataset grande
+  **pausa todas as requests** durante o drain/commit. O Nim fatia o drain em
+  ~256 KiB, faz `await sleepAsync(0)` entre fatias (serve queries) e usa o
+  blob pool (zstd + I/O em workers). Arquivo: `internal/kvstore/kvstore.go`
+  (`Flush`), `internal/transactor/server.go` (flush async é uma goroutine que
+  pega o mesmo lock, não fatia).
+- **`hydrated` (cache de leitura por eid, M6).** Não portado; `hydrateEid`
+  é no-op. Como consequência, os *fast paths* de escrita que dependem de
+  `probeComplete` (`skip provado` do retract scan e do `hasDatom`) **nunca
+  são tomados** — sempre faz scan. Correto, mais lento. (`internal/eavt/*`.)
+- **`anchor_index` (hash AV→eid, M7).** Não portado. `LookupEntity`,
+  `LookupEntityW` e `BatchLookupAvet` caem sempre no scan CF-2. Correto,
+  mais lento. (`internal/eavt/write.go`, `internal/engine/write.go`.)
+- **Backends de blobstore S3 e journal.** Só o backend `file` foi portado
+  (`internal/blobstore`). O facade async/pool de blobstore não é usado pelo
+  transactor Go.
+- **Arena plana do PageStore** (`FlatLeafKeys`/`FlatLeafKV`). O cursor Go usa
+  `[][]byte`/`[][2][]byte`; é mais alocação por troca de folha.
+- **Contadores/diagnóstico de performance** (`memledger`, `printSavePerf`,
+  `printSpPerf`, `printBwPerf`, `eavtScanDiag`, `spCounters`): não portados.
+- **Loader de receita** (`load_receita`): existe em OCaml/Python, **não foi
+  portado para Go**.
+- **`scheme` VM**: portado o suficiente para queries (e os special forms de
+  exec). `scanner-iterate` (special form legado) foi portado mas é código
+  morto — o compilador emite keyword opcodes.
+- **`edn` maps/sets**: rejeitados por design (o surface tx-data não os usa).
+
+### Resolvidos depois de terem sido adiados
+- **GC do pagestore** — implementado em `internal/pagestore/gc.go`
+  (`GcFull`/`HasOldRoots`/`ClassifyRoots`), wire em `.gc`/`.gc-dry` e
+  auto-GC pós-flush.
+- **`explain`** — renderer portado (`internal/datalog/explain.go`), golden
+  25/25.
+- **Concorrência do query server** — mutex global no `Gateway`.
+
+---
+
+## 2. Deixado errado / divergências conhecidas
+
+- **KV CFs (>= 10) NÃO são duráveis nem replicam (bug real).**
+  - `PutKv` (`internal/kvstore/kvstore.go`) chama `journalDeliver` com um
+    `CfKey` **só-chave** — o **valor é descartado**. No replay,
+    `ParseJournalRecords` só processa `cf <= 3`, então o registro KV nem é
+    lido. Resultado: `.kv-put`/`PutKv` não sobrevivem a restart.
+  - `DeleteKv` grava direto no arquivo legacy `journal/journal`, **ignorando o
+    sink WAL** (divergente do Nim, que não grava nada quando o sink existe).
+  - Impacto: superfície KV (`.kv-*`, qualquer uso de CF >= 10) não é durável
+    nem replicada. **O caminho de datoms (CF 0-3) está correto** (WAL CF-0),
+    então datalog/tx estão íntegros.
+- **`slotToPackedValue` de keyword** (`internal/query/edn_tx.go`): para
+  `TskKw` retorna `v.S`, que é vazio (o slot guarda só `Sym`). Espelha o
+  comportamento do Nim, mas keyword usada **como valor de datom** codifica
+  vazio — bug latente compartilhado.
+- **Planner com cardinalidade minúscula** (`internal/datalog/planner.go`):
+  quando `total_eavt` é pequeno, a busca de custo pode escolher uma ordem
+  "blind-first" que gera programa inválido (var sem scanner no depth). É a
+  **mesma aritmética de custo do Nim** (não é bug do port), mas é uma
+  fragilidade: com store de 1 datom só, a query pode vir vazia. Dados
+  realistas escolhem a ordem correta.
+- **Sessão de paridade anterior estava furada.** `go/testdata/parity_session.txt`
+  usava `:db.type/double`, que **o próprio Nim rejeita** (o tipo é
+  `:db.type/float`). A paridade "OK" de 44 linhas passava com **ambos errando**
+  e nunca exercitava float de verdade. Corrigido para `float` (agora 51 linhas).
+- **Replica lê segmentos do snapshot de forma síncrona** na goroutine do
+  reader do downstream (`internal/querysrv/server.go` → `replica.ApplySnapshot`).
+  Um snapshot grande bloqueia a entrega de respostas/eventos durante a
+  leitura. O Nim usa leitura async (chronos-file).
+- **Corrida no snapshot do WAL**: `wal.Segments` lista inclusive o segmento
+  **corrente**, que pode estar sendo appendado durante a montagem do
+  snapshot. O parser tem resync de tail torn e duplicatas são puts
+  idempotentes, mas existe uma janela (a mesma do Nim).
+- **`admin tree` não existe** (retorna `unknown admin command: tree`) e
+  `status` só reporta `memtable: N bytes` — igual ao Nim, porém pobre.
+- **`deleteKv`/`putKv` com sink**: ver o primeiro item. `journalDeliver` do Go
+  usa o sink para puts (mas perde o valor) e o `DeleteKv` nem usa o sink.
+
+---
+
+## 3. Atalhos
+
+- **Framing/forward**: para despachar e para injetar o `id` de correlação eu
+  **decodifico o frame inteiro** com msgpack e re-encodo
+  (`internal/downstream/downstream.go` `injectID`, `internal/querysrv`,
+  `internal/transactor`). O Nim usa `injectTopPair` (append cru no mapa),
+  preservando os bytes originais. Semanticamente igual; a re-encodação pode
+  mudar bytes (ordem de chaves, largura de int) e custa O(payload).
+- **PageStore cache**: guarda formas decodificadas (`[][]byte`), sem arena
+  plana; um único orçamento de bytes (o `index_cache_bytes` do Nim era só
+  log).
+- **WAL**: goroutine + `os.WriteAt` + ticker de 100 ms em vez do chronos-file
+  thread-pool. Mesma semântica de durabilidade (fsync por intervalo ~100 ms;
+  crash de processo sempre seguro, crash de máquina perde ≤ ~100 ms).
+- **Transactor**: um único `e.mu` serializa engine + WAL + GC. O flush async é
+  uma goroutine que pega o mesmo lock (`internal/transactor/server.go`).
+  Ainda há concorrência entre o ciclo do WAL, os drains de replicação (por
+  mutex próprio) e os handlers.
+- **Query server**: goroutine por conexão + mutex global, reproduzindo o event
+  loop único do Nim; execução do VM libera o lock **entre batches**.
+- **`EncodeCompileStats`**: usa encoding de int mínimo em vez do `uint64`
+  explícito do Nim — compatível com os decoders (Nim/OCaml/Go), bytes
+  diferentes.
+- **Testes de paridade**: o harness compara REPL e front, não a stack
+  transactor-vs-transactor byte a byte.
+- **`scheme.String` de float**: portado do `$float` do Nim (dragonbox) e
+  golden 45 vetores; usado também pelo pretty-printer do explain.
+
+---
+
+## 4. Lacunas de verificação (o que não foi testado)
+
+- **Sem paridade A/B da stack completa** (transactor Go × Nim) além do REPL
+  (51 linhas). A stack Go foi validada funcionalmente (tx/kv/dump/query/float),
+  não byte-a-byte em todas as combinações.
+- **Sem teste E2E de replicação** (transactor Go → réplica Go) além do teste
+  de ordem do hub (`internal/replication/replication_test.go`); a réplica foi
+  exercitada indiretamente pelo query server Go no E2E.
+- **Sem teste E2E de restart/recovery** (replay do WAL + `recoverWriteState`)
+  na stack Go.
+- **Sem teste de concorrência do transactor** (o `-race` cobre o query server,
+  não vários clientes concorrentes no transactor).
+- **Sem teste E2E do auto-GC pós-flush** (só unitário do `gcFull`).
+- **WAL delete-durável** coberto só em unitário, não em E2E.
+- **`ocaml/` permanece no repo** e o `nimble dist` ainda tenta compilar o front
+  OCaml (abandonado) — dívida a remover; hoje isso pode quebrar `dist` se o
+  `dune` não estiver no PATH.
+
+---
+
+## 5. Mapa rápido por arquivo
+
+| Item | Onde |
+|---|---|
+| Flush síncrono (pause) | `internal/kvstore/kvstore.go`, `internal/transactor/server.go` |
+| KV não durável | `internal/kvstore/kvstore.go` (`PutKv`/`DeleteKv`/`journalDeliver`) |
+| hydrated/anchor ausentes | `internal/eavt/*`, `internal/engine/write.go` |
+| Planner blind-first | `internal/datalog/planner.go` |
+| Replica snapshot síncrono | `internal/querysrv/server.go`, `internal/replica/replica.go` |
+| Snapshot WAL do segmento corrente | `internal/wal/wal.go` (`Segments`), `internal/transactor/server.go` |
+| Re-encodação de frames | `internal/downstream/downstream.go` |
+| Só backend file | `internal/blobstore` |
+| `gcFull` / GC | `internal/pagestore/gc.go` |
+| `explain` | `internal/datalog/explain.go` |
+| Float `$float` | `internal/numfmt/numfmt.go` |
