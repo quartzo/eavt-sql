@@ -366,13 +366,18 @@ func (e *Engine) Serve(conn net.Conn) {
 		}
 		if !isReplication && memberStr(m, "type") == "replicate" {
 			isReplication = true
-			sub := e.Hub.Register(conn)
-			sealed := wal.Segments(e.Path)
-			var tail []byte
+			// Capture the snapshot and register+enqueue it under the WAL
+			// lock so a concurrent write can neither tear the live segment
+			// nor broadcast a record before the snapshot on the queue.
 			if e.Wal != nil {
-				tail = e.Wal.OpenTail()
+				e.Wal.SnapshotLocked(func(sealed []string, live []byte) {
+					sub := e.Hub.Register(conn)
+					e.Hub.SendSnapshot(sub, sealed, live, e.KV.PS.CurrentRoot())
+				})
+			} else {
+				sub := e.Hub.Register(conn)
+				e.Hub.SendSnapshot(sub, nil, nil, e.KV.PS.CurrentRoot())
 			}
-			e.Hub.SendSnapshot(sub, sealed, tail, e.KV.PS.CurrentRoot())
 			continue
 		}
 		e.processFrame(conn, m, v, memberStr(m, "id"))

@@ -180,10 +180,15 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   (`internal/downstream` `evCh` + goroutine `eventLoop`) e o reader do socket
   **não bloqueia** no I/O de arquivos do `ApplySnapshot`; os eventos aplicam
   em ordem. A fila é limpa no disconnect (o reconnect re-snapshota).
-- **Corrida no snapshot do WAL**: `wal.Segments` lista inclusive o segmento
-  **corrente**, que pode estar sendo appendado durante a montagem do
-  snapshot. O parser tem resync de tail torn e duplicatas são puts
-  idempotentes, mas existe uma janela (a mesma do Nim).
+- ~~**Corrida no snapshot do WAL.**~~ **Resolvido:** o snapshot agora é
+  capturado por `wal.SnapshotLocked` sob o lock do writer — drena o buffer,
+  inclui todos os segmentos do disco **exceto** o corrente e lê os bytes do
+  corrente sob o lock (sem leitura torn). E o transactor faz
+  `Register`+`SendSnapshot` **dentro** do mesmo lock, então nenhum `OnWal`
+  pode escapar um registro antes do snapshot na fila do subscriber. (Era
+  preciso incluir os segmentos de sessões anteriores: num restart o `Attach`
+  abre um segmento novo, e os datoms replayed de um crash só vivem no
+  segmento antigo.)
 - ~~**`admin tree` não existe.**~~ **Implementado no Go (extensão):** o REPL
   já anunciava `.tree` mas o handler respondia `unknown`; agora `tree`
   reporta por CF (`cf= height= leaves= root=`). `status` segue igual ao Nim

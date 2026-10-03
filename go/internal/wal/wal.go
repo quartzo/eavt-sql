@@ -261,9 +261,38 @@ func (w *Writer) OpenTail() []byte {
 	return append([]byte(nil), w.buf...)
 }
 
-// Segments lists all segment file paths (numerically sorted).
+// SnapshotLocked captures a consistent replication snapshot — the sealed
+// segment paths plus the live segment's bytes — and runs fn while still
+// holding the writer lock.  Draining first puts every record in the live
+// segment file, so the captured bytes are complete; holding the lock until fn
+// returns means OnWal (also called under this lock) cannot broadcast a record
+// between the capture and fn (subscriber registration + snapshot enqueue).
+func (w *Writer) SnapshotLocked(fn func(sealed []string, live []byte)) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	_ = w.drainLocked()
+	// Include every segment on disk EXCEPT the current live one (which may be
+	// appended concurrently): segments from earlier sessions hold replayed
+	// records that only live there, so they must travel in the snapshot too.
+	cur := segPath(w.dir, w.segIdx)
+	var sealed []string
+	for _, p := range listSegments(w.dir) {
+		if p != cur {
+			sealed = append(sealed, p)
+		}
+	}
+	live, _ := os.ReadFile(cur)
+	fn(sealed, live)
+}
+
+// Segments lists all segment file paths under <dir>/journal (numerically
+// sorted).  dir is the DB path.
 func Segments(dir string) []string {
-	jdir := filepath.Join(dir, "journal")
+	return listSegments(filepath.Join(dir, "journal"))
+}
+
+// listSegments lists the segment files directly inside jdir.
+func listSegments(jdir string) []string {
 	entries, err := os.ReadDir(jdir)
 	if err != nil {
 		return nil
