@@ -1,3 +1,0 @@
-(executable
- (name load_receita)
- (libraries eavt_lib))

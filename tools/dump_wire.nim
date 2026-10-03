@@ -2,7 +2,7 @@
 ## program on stdout (msgpack, writeSExprWire); :find vars on stderr.
 ## Fetches the CompileStats snapshot from the query server's internal
 ## socket ({"type":"schema"}) — the same snapshot the front will cache.
-## Fase-1 smoke tool and Fase-2 golden-test seed (Nim vs OCaml compiler).
+## Fase-1 smoke tool and Fase-2 golden-test seed (Nim compiler).
 import std/[os, strutils, streams, posix]
 import scheme, wire, msgpack_scan
 import stats

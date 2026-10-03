@@ -47,11 +47,8 @@ unnecessary recompilation.
 ```
 eavt_transactor_nim/        # Transactor: tx (EDN)/scheme/schema/admin/kv over UDS (chronos loop + blob pool)
 eavt_query_nim/             # Query back: replica + local execution + transactor forwarding (chronos);
-                            #   internal executor socket for the OCaml front (see "Two-layer split")
+                            #   internal executor socket for the query front (see "Two-layer split")
 eavt-repl-nim/              # REPL client (linenoise, tab-separated output; orc, no threads)
-ocaml/                      # OCaml track: lib (msgpack/edn/client/csv/sha256/zipsrc + datalog
-                            #   compiler byte-identical to Nim), repl, load (load_receita — 1.8x
-                            #   the Python loader), query (front server — owns eavt-query.sock)
 py_eavt_client/             # Python UDS client (msgpack; datalog/scheme/schema/admin/tx)
 vendor/chronos_file_pkg/    # Vendored chronos-file (async file I/O; WAL + async blobstore bridge) — see VENDORED.md
 nim_blobstore/async/      # Async blobstore facade (pool bridge over sync trait; file/s3 via same bridge)
@@ -118,14 +115,14 @@ BlobStore (Memory / File / S3)
   overrides) serving `datalog` (Nim-compile fallback), `scheme-local`
   (pre-compiled wire program + `columns` (:find vars) → local execute;
   `mode: "exec"` refused), `schema`, and forwarded `tx`/`admin`/`kv`/`scheme`
-  (via its downstream). The **OCaml front** (`ocaml/query/front.ml`, shipped
-  as `build/eavt-query-front-ocaml`) compiles Datalog EDN **byte-identically**
-  to the Nim compiler (25/25 golden vectors in `ocaml/test/golden/`) and
-  drives the internal socket — reads still execute on the Nim back's replica.
-  A/B mode: front on `eavt-query-ocaml.sock` while Nim owns `eavt-query.sock`;
-  swapped mode: Nim gets `--socket-path .../eavt-query-back.sock` and the
-  front takes `eavt-query.sock` (parity validated: 1918-line client session
-  + probes byte-equal). Rollback = repoint the client socket.
+  (via its downstream). The **Go query front** (`go/cmd/eavt-query-front`,
+  shipped as `build/eavt-sql-query-front-go`) compiles Datalog EDN
+  **byte-identically** to the Nim compiler (25/25 golden vectors in
+  `go/testdata/golden/`) and drives the internal socket — reads still execute
+  on the back's replica. It can run A/B (front on a separate socket while the
+  Nim back owns `eavt-query.sock`) or own the client socket (Nim gets
+  `--socket-path .../eavt-query-back.sock`); `scripts/parity_front.sh` diffs
+  the two fronts. Rollback = repoint the client socket.
 - **Attribute name canonical form:** `ns/name` (slash, no leading colon) in
   storage and on the wire.
 - **Position-independence rule:** compiled programs never embed attribute ids;

@@ -1,6 +1,6 @@
 // Package datalog ports the Nim Datalog query pipeline: EDN reader → IR →
-// resolve → cost-based planner → Scheme compiler.  It mirrors the OCaml port
-// (itself byte-identical to the Nim compiler over 25 golden vectors).
+// resolve → cost-based planner → Scheme compiler, byte-identical to the Nim
+// compiler over 25 golden vectors.
 package datalog
 
 import "strings"

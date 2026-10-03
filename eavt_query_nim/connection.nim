@@ -172,7 +172,7 @@ proc executeLocalStream(gw: GatewayState; program: SchemeProgram;
                         transp: StreamTransport) {.async.} =
   ## Compile-agnostic streaming execution of a wire program on the local
   ## replica — the shared body of handleDatalog and the internal
-  ## scheme-local endpoint (the Fase-1 contract with the OCaml front).
+  ## scheme-local endpoint (the Fase-1 contract with the query front).
   if gw.replica == nil:
     await transp.writeErrorAsync("replica unavailable")
     return
@@ -203,11 +203,11 @@ proc executeLocalStream(gw: GatewayState; program: SchemeProgram;
 
 proc handleSchemeLocal(gw: GatewayState; raw: string;
                        transp: StreamTransport) {.async.} =
-  ## Internal endpoint (Fase 1 of the OCaml front split): execute an
+  ## Internal endpoint (Fase 1 of the query front split): execute an
   ## already-compiled wire program on the local replica.
   ##   {"type": "scheme-local", "program": <wire AST>,
   ##    "params": [wire ASTs], "mode": "query", "columns": ["?a", ...]}
-  ## The caller (OCaml front) owns compilation and supplies the :find
+  ## The caller (query front) owns compilation and supplies the :find
   ## vars as columns.  mode "exec" is refused — writes belong to the
   ## transactor.
   let mode = getTopStr(raw, "mode")
@@ -358,8 +358,8 @@ proc serveGatewayConnection*(gw: GatewayState; transp: StreamTransport) {.
 
 proc serveInternalConnection*(gw: GatewayState; transp: StreamTransport) {.
     async: (raises: []).} =
-  ## Internal executor socket (Fase 1/3 of the OCaml front split): the
-  ## OCaml front compiles datalog and drives this socket.  Locally-served
+  ## Internal executor socket (Fase 1/3 of the query front split): the
+  ## query front compiles datalog and drives this socket.  Locally-served
   ## types: datalog (Nim-compile fallback), scheme-local (wire exec),
   ## schema.  Forwarded types (tx/admin/kv/scheme) pass through to the
   ## transactor via the back's downstream — the front is a pure

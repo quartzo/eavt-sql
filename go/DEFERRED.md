@@ -65,7 +65,7 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   capture/prepare/publish; só o capture e o publish (curtos) seguram o lock.
   O `PrepareFlush` (I/O de blobs) roda **fora** do lock.
 - **Loader de receita em Go** — `internal/loader` + `cmd/eavt-load` (build:
-  `eavt-sql-load-go`), porta de `ocaml/load/load_receita.ml`: schema como
+  `eavt-sql-load-go`), porta do loader de referência `load_receita`: schema como
   tx-data (eids 1000+i), depois lookups/empresas/simples/estabelecimentos/
   sócios em lotes de `tx` pelo socket do query server, usando tempids
   negativos + upsert de attr único para get-or-create. Lê os zips
@@ -201,7 +201,7 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   vem da snapshot isolation (ver §"Snapshot" abaixo): o cursor pina runs +
   root no open e itera lock-free. WAL apply e queries não se bloqueiam.
 - **`EncodeCompileStats`**: usa encoding de int mínimo em vez do `uint64`
-  explícito do Nim — compatível com os decoders (Nim/OCaml/Go), bytes
+  explícito do Nim — compatível com os decoders (Nim/Go), bytes
   diferentes.
 - **Testes de paridade**: o harness compara REPL e front, não a stack
   transactor-vs-transactor byte a byte.
@@ -259,9 +259,11 @@ de um flush continua vendo o snapshot antigo.
   não vários clientes concorrentes no transactor).
 - **Sem teste E2E do auto-GC pós-flush** (só unitário do `gcFull`).
 - **WAL delete-durável** coberto só em unitário, não em E2E.
-- **`ocaml/` permanece no repo** e o `nimble dist` ainda tenta compilar o front
-  OCaml (abandonado) — dívida a remover; hoje isso pode quebrar `dist` se o
-  `dune` não estiver no PATH.
+- ~~**`ocaml/` no repo / `dune` no `dist`.**~~ **Resolvido**: a trilha OCaml
+  (abandonada) foi removida — `ocaml/` apagado, o passo `dune` saiu do
+  `nimble dist`, o `dev.sh` não sobe mais o front OCaml e os binários stale
+  (`eavt-query-front-ocaml`, `test_frontend`) foram removidos. O front Go
+  (`eavt-sql-query-front-go`) é o sucessor.
 
 ---
 

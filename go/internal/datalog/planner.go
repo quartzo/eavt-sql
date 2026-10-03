@@ -718,7 +718,8 @@ func buildIterPlan(p Pattern, patternIdx int, idxName string, boundInts []BoundI
 	}
 }
 
-// setSameVarConstraint mirrors OCaml's (depth, positions) :: remove_assoc depth.
+// setSameVarConstraint mirrors the reference planner's (depth, positions) ::
+// remove_assoc depth.
 func setSameVarConstraint(l []SameVarConstraint, depth int, pos string) []SameVarConstraint {
 	var existing []string
 	var rest []SameVarConstraint

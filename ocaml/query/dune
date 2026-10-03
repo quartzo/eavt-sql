@@ -1,3 +1,0 @@
-(executable
- (name front)
- (libraries eavt_lib threads.posix))

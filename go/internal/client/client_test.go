@@ -94,7 +94,7 @@ func TestDatalogStreaming(t *testing.T) {
 }
 
 // A single error frame must be consumed exactly once so the next request on
-// the same connection stays in sync (the OCaml front got this wrong).
+// the same connection stays in sync (an earlier front got this wrong).
 func TestErrorThenSuccess(t *testing.T) {
 	n := 0
 	client, cleanup := fakeServer(t, func(req msgpack.Map, send func(msgpack.Value)) {

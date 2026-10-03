@@ -1,4 +1,4 @@
-// Package front implements the OCaml-style two-layer query front: it owns the
+// Package front implements the two-layer query front: it owns the
 // client socket, compiles Datalog EDN locally (byte-identical to the Nim
 // compiler) and drives the back's internal executor socket.  tx/admin/kv/
 // scheme are forwarded verbatim; responses stream through untouched.

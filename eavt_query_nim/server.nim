@@ -9,7 +9,7 @@ proc gatewayCallback(server: StreamServer, transp: StreamTransport) {.
 
 proc internalCallback(server: StreamServer, transp: StreamTransport) {.
     async: (raises: []).} =
-  ## Internal executor socket — consumed by the OCaml front (Fase 1 of
+  ## Internal executor socket — consumed by the query front (Fase 1 of
   ## the two-layer split: compile in the front, execute on the replica).
   var gw = cast[GatewayState](server.udata)
   await serveInternalConnection(gw, transp)
@@ -100,7 +100,7 @@ proc main() {.async.} =
   let server = createStreamServer(address, gatewayCallback, udata = cast[pointer](gw))
   server.start()
 
-  # Internal executor socket (Fase 1): always-on, consumed by the OCaml
+  # Internal executor socket (Fase 1): always-on, consumed by the query
   # front.  Stale socket from a crash is removed unconditionally — the
   # client-socket probe above already guards against a second instance.
   block internal:

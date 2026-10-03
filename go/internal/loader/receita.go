@@ -1,6 +1,6 @@
 // Package loader bulk-loads the Receita Federal CNPJ open data into the EAVT
-// stack over the wire tx protocol.  Port of ocaml/load/load_receita.ml (itself
-// a port of py_eavt/examples/load_receita_edn.py): schema as tx-data, then
+// stack over the wire tx protocol.  Port of the reference `load_receita` loader
+// (py_eavt/examples/load_receita_edn.py): schema as tx-data, then
 // lookups / empresas / simples / estabelecimentos / socios, batched into `tx`
 // requests.  Refs and get-or-create use negative tempids plus the unique-attr
 // upsert (so re-adding a known key merges into the existing entity).
@@ -708,7 +708,7 @@ func Load(c Txer, o Opts) error {
 	return nil
 }
 
-// Demo prints a first-empresa probe (datalog) like the OCaml loader.
+// Demo prints a first-empresa probe (datalog) like the reference loader.
 func Demo(c *client.Client) error {
 	chunks, err := c.DatalogAll("[:find ?cnpj ?rs :where [?e :empresa/cnpj_base ?cnpj] [?e :empresa/razao_social ?rs]]")
 	if err != nil {

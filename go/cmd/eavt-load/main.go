@@ -1,5 +1,5 @@
 // eavt-load loads the Receita Federal CNPJ open data into the EAVT stack over
-// the query server's tx protocol.  Port of ocaml/load/load_receita.ml.
+// the query server's tx protocol.  Port of the reference `load_receita` loader.
 //
 // Usage:
 //
