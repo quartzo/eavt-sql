@@ -17,10 +17,16 @@ import (
 
 const maxFrame = 100_000_000
 
+// eventQueueSize bounds the replication-event backlog.  The reader enqueues
+// events and a dedicated applier drains them in order, so a slow snapshot
+// apply (sealed-segment file reads) never blocks the socket reader.
+const eventQueueSize = 256
+
 // Conn is the multiplexed downstream connection.
 type Conn struct {
 	path    string
 	onEvent func(frame []byte)
+	evCh    chan []byte
 
 	mu        sync.Mutex
 	conn      net.Conn
@@ -33,9 +39,31 @@ type Conn struct {
 
 // Open creates and starts the connection (reconnect loop in the background).
 func Open(path string, onEvent func(frame []byte)) *Conn {
-	c := &Conn{path: path, onEvent: onEvent, pending: map[string]chan []byte{}}
+	c := &Conn{path: path, onEvent: onEvent, evCh: make(chan []byte, eventQueueSize), pending: map[string]chan []byte{}}
+	go c.eventLoop()
 	go c.connectLoop()
 	return c
+}
+
+// eventLoop applies replication events in arrival order.
+func (c *Conn) eventLoop() {
+	for frame := range c.evCh {
+		if c.onEvent != nil {
+			c.onEvent(frame)
+		}
+	}
+}
+
+// dropEvents clears queued events (called on disconnect: the reconnect
+// re-snapshots, so stale frames must not be applied).
+func (c *Conn) dropEvents() {
+	for {
+		select {
+		case <-c.evCh:
+		default:
+			return
+		}
+	}
 }
 
 // Connected reports whether the downstream link is currently up.
@@ -66,6 +94,7 @@ func (c *Conn) connectLoop() {
 			delete(c.pending, id)
 		}
 		c.mu.Unlock()
+		c.dropEvents()
 		_ = conn.Close()
 		time.Sleep(time.Second)
 	}
@@ -87,7 +116,7 @@ func (c *Conn) readerLoop(conn net.Conn) {
 		}
 		if _, isEv := msgpack.Member(m, msgpack.Str("ev")); isEv {
 			if c.onEvent != nil {
-				c.onEvent(frame)
+				c.evCh <- frame
 			}
 			continue
 		}

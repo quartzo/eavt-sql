@@ -175,10 +175,11 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   usava `:db.type/double`, que **o próprio Nim rejeita** (o tipo é
   `:db.type/float`). A paridade "OK" de 44 linhas passava com **ambos errando**
   e nunca exercitava float de verdade. Corrigido para `float` (agora 51 linhas).
-- **Replica lê segmentos do snapshot de forma síncrona** na goroutine do
-  reader do downstream (`internal/querysrv/server.go` → `replica.ApplySnapshot`).
-  Um snapshot grande bloqueia a entrega de respostas/eventos durante a
-  leitura. O Nim usa leitura async (chronos-file).
+- ~~**Replica lê segmentos do snapshot de forma síncrona no reader.**~~
+  **Resolvido:** o downstream agora enfileira os eventos de replicação
+  (`internal/downstream` `evCh` + goroutine `eventLoop`) e o reader do socket
+  **não bloqueia** no I/O de arquivos do `ApplySnapshot`; os eventos aplicam
+  em ordem. A fila é limpa no disconnect (o reconnect re-snapshota).
 - **Corrida no snapshot do WAL**: `wal.Segments` lista inclusive o segmento
   **corrente**, que pode estar sendo appendado durante a montagem do
   snapshot. O parser tem resync de tail torn e duplicatas são puts
