@@ -53,7 +53,13 @@ type Engine struct {
 
 // NewEngine opens the data dir, bootstraps the schema and attaches the WAL.
 func NewEngine(dbPath, blobDir string) (*Engine, error) {
-	kv, err := kvstore.New(kvstore.Config{Path: dbPath, NumCf: 64, PageCacheSize: 536870912})
+	kvCfg := kvstore.Config{Path: dbPath, NumCf: 64, PageCacheSize: 536870912}
+	if v := os.Getenv("EAVT_FLUSH_THRESHOLD"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
+			kvCfg.FlushThreshold = n
+		}
+	}
+	kv, err := kvstore.New(kvCfg)
 	if err != nil {
 		return nil, err
 	}
