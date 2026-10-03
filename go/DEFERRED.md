@@ -41,8 +41,8 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   `execWallNs`, …), que no Nim é `when perfCounters* = false` (compile-time,
   desligado por padrão) e o `-d:eavtScanDiag`. Portá-los exigiria instrumentar
   ~10 call-sites com `clock_gettime`; os *counts* já dão a visão de volume.
-- **Loader de receita** (`load_receita`): existe em OCaml/Python, **não foi
-  portado para Go**.
+- ~~**Loader de receita** (`load_receita`)~~ — portado (ver a entrada
+  resolvida `Loader de receita em Go`).
 - **`scheme` VM**: portado o suficiente para queries (e os special forms de
   exec). `scanner-iterate` (special form legado) foi portado mas é código
   morto — o compilador emite keyword opcodes.
@@ -64,6 +64,17 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
 - **Flush stop-the-world no transactor** — o flush passou a ser
   capture/prepare/publish; só o capture e o publish (curtos) seguram o lock.
   O `PrepareFlush` (I/O de blobs) roda **fora** do lock.
+- **Loader de receita em Go** — `internal/loader` + `cmd/eavt-load` (build:
+  `eavt-sql-load-go`), porta de `ocaml/load/load_receita.ml`: schema como
+  tx-data (eids 1000+i), depois lookups/empresas/simples/estabelecimentos/
+  sócios em lotes de `tx` pelo socket do query server, usando tempids
+  negativos + upsert de attr único para get-or-create. Lê os zips
+  (`archive/zip` + `encoding/csv` com `;`), converte latin-1→UTF-8, e
+  reproduz a chave de sócio (cpf visível + 6 chars base64url de sha256 do
+  nome normalizado). Opções `--n/--data-dir/--sock/--batch/--demo-only/
+  --skip-*/--max-estabs/--max-socios`. Testes com zips sintéticos e um
+  `Txer` fake (`TestLoadLookupsSynthetic`, `TestLoadEmpresasSynthetic`,
+  `TestSocioChaveStable`, `TestLatin1ToUTF8`); E2E contra a stack Go OK.
 - **`logutil` + `memledger` + `stats`** — `internal/logutil` porta o logger do
   Nim (níveis DEBUG<INFO<WARN<ERROR, threshold `EAVT_LOG`, uma linha
   timestamped no stderr, concorrência-safe). O transactor ganhou o

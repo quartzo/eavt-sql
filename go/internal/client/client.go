@@ -367,6 +367,22 @@ func (c *Client) Tx(ops []edn.Value) (string, error) {
 	return "tx-report: " + joinComma(parts), nil
 }
 
+// TxData sends tx-data ops and returns any server/transport error (unlike Tx,
+// which folds a server error into the summary string).  Used by the bulk
+// loader, which must abort on failure.
+func (c *Client) TxData(ops []edn.Value) error {
+	wire := make(msgpack.Array, len(ops))
+	for i, op := range ops {
+		wire[i] = ednToWire(op)
+	}
+	if err := c.sendFrame(msgpack.Marshal(req("tx",
+		msgpack.Pair{Key: msgpack.Str("txdata"), Value: wire}))); err != nil {
+		return err
+	}
+	_, err := c.recvMap()
+	return err
+}
+
 func ednToWire(v edn.Value) msgpack.Value {
 	switch x := v.(type) {
 	case edn.Int:
