@@ -437,9 +437,13 @@ func (e *Engine) processFrame(conn net.Conn, m msgpack.Map, v msgpack.Value, id 
 
 func (e *Engine) execTx(conn net.Conn, v msgpack.Value, id string) {
 	e.mu.Lock()
-	tDec := time.Now()
+	perfOn := perf.Enabled()
+	var tDec time.Time
+	if perfOn {
+		tDec = time.Now()
+	}
 	txops, err := scheme.TxOpsFromValue(v, e.Store.Symtab())
-	if perf.Enabled() {
+	if perfOn {
 		e.Store.AddDecode(int64(time.Since(tDec)))
 	}
 	if err != nil {
@@ -479,9 +483,13 @@ func (e *Engine) execScheme(conn net.Conn, m msgpack.Map, id string) {
 		e.writeResponse(conn, id, nil, nil, false, "scheme request is missing program")
 		return
 	}
-	tDec := time.Now()
+	perfOn := perf.Enabled()
+	var tDec time.Time
+	if perfOn {
+		tDec = time.Now()
+	}
 	body, err := sexpr.UnmarshalWire(msgpack.Marshal(progVal))
-	if perf.Enabled() {
+	if perfOn {
 		e.Store.AddDecode(int64(time.Since(tDec)))
 	}
 	if err != nil {
