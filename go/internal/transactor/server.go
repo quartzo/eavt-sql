@@ -48,11 +48,10 @@ func NewEngine(dbPath, blobDir string) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	e := &Engine{KV: kv, Store: engine.New(kv), Path: dbPath, Hub: replication.NewHub(blobDir)}
-	e.Store.Eavt.BootstrapSystemAttrs()
-	e.Store.Eavt.BootstrapResolver()
-	e.Store.Eavt.RecoverWriteState()
+	e := &Engine{KV: kv, Path: dbPath, Hub: replication.NewHub(blobDir)}
 
+	// Attach the WAL and install the sink BEFORE bootstrap so the system-attr
+	// datoms go through the WAL (durable + replicated), not the legacy journal.
 	durable := &atomic.Int64{}
 	durable.Store(-1)
 	w, err := wal.Attach(dbPath, durable)
@@ -72,6 +71,11 @@ func NewEngine(dbPath, blobDir string) (*Engine, error) {
 			_, _ = e.KV.PS.GcFull(e.KV.GcMaxAgeSecs, e.KV.GcMaxRootCount, false)
 		}
 	}
+
+	e.Store = engine.New(kv)
+	e.Store.Eavt.BootstrapSystemAttrs()
+	e.Store.Eavt.BootstrapResolver()
+	e.Store.Eavt.RecoverWriteState()
 	return e, nil
 }
 

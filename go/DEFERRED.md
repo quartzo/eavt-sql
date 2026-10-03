@@ -118,8 +118,9 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   plana; um único orçamento de bytes (o `index_cache_bytes` do Nim era só
   log).
 - **WAL**: goroutine + `os.WriteAt` + ticker de 100 ms em vez do chronos-file
-  thread-pool. Mesma semântica de durabilidade (fsync por intervalo ~100 ms;
-  crash de processo sempre seguro, crash de máquina perde ≤ ~100 ms).
+  thread-pool. O `Sink` escreve para o arquivo (page cache do OS) **na hora**;
+  o fsync fica no tick de ~100 ms → crash de processo não perde nada, crash de
+  máquina perde ≤ ~100 ms.
 - **Transactor**: `e.mu` serializa apenas a aplicação de tx/exec (como o
   single-loop do Nim) e as janelas curtas de capture/publish do flush e do GC.
   Leituras (scheme query, kv get/scan, dump, schema) e o I/O de blobs do flush
@@ -183,8 +184,8 @@ de um flush continua vendo o snapshot antigo.
 - **Sem teste E2E de replicação** (transactor Go → réplica Go) além do teste
   de ordem do hub (`internal/replication/replication_test.go`); a réplica foi
   exercitada indiretamente pelo query server Go no E2E.
-- **Sem teste E2E de restart/recovery** (replay do WAL + `recoverWriteState`)
-  na stack Go.
+- **Restart/recovery** agora coberto por `scripts/restart_recovery.sh`
+  (Alice flushed + Bob via WAL replay + bootstrap no WAL, sem legacy journal).
 - **Sem teste de concorrência do transactor** (o `-race` cobre o query server,
   não vários clientes concorrentes no transactor).
 - **Sem teste E2E do auto-GC pós-flush** (só unitário do `gcFull`).

@@ -132,6 +132,12 @@ func (w *Writer) Sink(entries []memtable.CfKey) {
 	if w.OnWal != nil && pos > base {
 		w.OnWal(w.buf[base:pos])
 	}
+	// Process-crash safety: write the bytes to the file (OS page cache)
+	// immediately, not only on the 100 ms fsync tick.  A machine crash still
+	// loses at most ~100 ms (un-fsynced), but a killed process loses nothing.
+	if err := w.drainLocked(); err != nil {
+		fmt.Fprintf(os.Stderr, "wal: drain failed: %v\n", err)
+	}
 }
 
 // Seal marks the current logical end as a segment boundary.
