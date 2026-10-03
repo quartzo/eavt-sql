@@ -30,9 +30,12 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   No Nim o cursor hidratado também só tem chaves ativas, então um as-of que
   ancore num eid hidratado lá perderia versões antigas — no Go isso não
   acontece. Regressão: `TestOpenCursorHydGuard`.
-- **Backends de blobstore S3 e journal.** Só o backend `file` foi portado
-  (`internal/blobstore`). O facade async/pool de blobstore não é usado pelo
-  transactor Go.
+- ~~**Backends de blobstore S3 e journal.**~~ **S3 portado** (ver a entrada
+  resolvida). O `Journal` (marcador sequencial do page store) também foi
+  portado como primitiva testada, mas **não é fiado** ao commit do page store
+  (o WAL + journal legacy do kvstore já cobrem durabilidade; fiá-lo apagaria
+  o journal legacy no modo sem sink). O facade async/pool do blobstore
+  continua sem uso — o transactor Go usa o worker pool do flush.
 - **Arena plana do PageStore** (`FlatLeafKeys`/`FlatLeafKV`). O cursor Go usa
   `[][]byte`/`[][2][]byte`; é mais alocação por troca de folha.
 - **Buckets de nanossegundos e `eavtScanDiag`.** Os *counts* e o `memledger`
@@ -75,6 +78,16 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   --skip-*/--max-estabs/--max-socios`. Testes com zips sintéticos e um
   `Txer` fake (`TestLoadLookupsSynthetic`, `TestLoadEmpresasSynthetic`,
   `TestSocioChaveStable`, `TestLatin1ToUTF8`); E2E contra a stack Go OK.
+- **Backend S3 do blobstore** — `internal/blobstore` ganhou a interface
+  `BlobStore`, o `S3BlobStore` + SigV4 (`sigv4.go`, HMAC/SHA-256 da stdlib) e
+  a factory `Open` (file|s3). Wire: `pagestore.Store.blobs` passou a
+  `blobstore.BlobStore`, `pagestore.Open` seleciona pelo `Backend`,
+  `kvstore`/`replica`/transactor e query server carregam as chaves S3
+  (`EAVT_BACKEND` + `EAVT_S3_{ENDPOINT,BUCKET,ACCESS_KEY,SECRET_KEY,REGION,
+  PREFIX,PATH_STYLE}` / flags `--backend --s3-*`). O WAL continua local; os
+  blobs vão para o bucket. Testes: vetor de signing key da AWS, HMAC/SHA,
+  round-trip S3 contra um S3 in-process (blobstore e pagestore), read-only e
+  config faltando; E2E transactor+query ambos em S3 OK (write→flush→query).
 - **`logutil` + `memledger` + `stats`** — `internal/logutil` porta o logger do
   Nim (níveis DEBUG<INFO<WARN<ERROR, threshold `EAVT_LOG`, uma linha
   timestamped no stderr, concorrência-safe). O transactor ganhou o

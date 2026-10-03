@@ -70,11 +70,12 @@ type Config struct {
 	PageCacheSize int
 	NumCf         int
 	OwnsPath      bool
+	S3            blobstore.S3Config
 }
 
 // Store is a page store instance.
 type Store struct {
-	blobs       *blobstore.FileBlobStore
+	blobs       blobstore.BlobStore
 	treeMu      sync.RWMutex // guards trees/currentRoot (published roots)
 	trees       []CfTree
 	numCf       int
@@ -90,9 +91,6 @@ func Open(cfg Config) (*Store, error) {
 	if cfg.Backend == "" {
 		cfg.Backend = "file"
 	}
-	if cfg.Backend != "file" {
-		return nil, errf("unsupported backend %q", cfg.Backend)
-	}
 	if cfg.Path == "" {
 		return nil, errf("pagestore: path is required")
 	}
@@ -102,7 +100,9 @@ func Open(cfg Config) (*Store, error) {
 	if cfg.PageCacheSize == 0 {
 		cfg.PageCacheSize = 536870912
 	}
-	blobs, err := blobstore.New(cfg.Path, cfg.ReadOnly)
+	blobs, err := blobstore.Open(blobstore.Config{
+		Backend: cfg.Backend, Path: cfg.Path, ReadOnly: cfg.ReadOnly, S3: cfg.S3,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -145,6 +145,9 @@ func Open(cfg Config) (*Store, error) {
 
 // Close releases the store (and removes the dir when OwnsPath).
 func (s *Store) Close() error {
+	if s.blobs != nil {
+		_ = s.blobs.Close()
+	}
 	if s.ownsPath && s.dbPath != "" {
 		_ = os.RemoveAll(s.dbPath)
 	}

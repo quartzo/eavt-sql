@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"eavt-go/internal/blobstore"
 	"eavt-go/internal/cursor"
 	"eavt-go/internal/memtable"
 	"eavt-go/internal/pagestore"
@@ -37,6 +38,7 @@ type Config struct {
 	OwnsPath       bool
 	GcMaxAgeSecs   uint64
 	GcMaxRootCount int
+	S3             blobstore.S3Config
 }
 
 // FromMap builds a Config from a string map (server config shape).
@@ -72,6 +74,15 @@ func FromMap(m map[string]string) Config {
 	}
 	if v, err := strconv.Atoi(get("gc_root_count", "10")); err == nil {
 		cfg.GcMaxRootCount = v
+	}
+	cfg.S3 = blobstore.S3Config{
+		Endpoint:  get("endpoint", ""),
+		Bucket:    get("bucket_name", ""),
+		Region:    get("region", ""),
+		AccessKey: get("access_key", ""),
+		SecretKey: get("secret_key", ""),
+		Prefix:    get("prefix", ""),
+		PathStyle: get("path_style", "true") == "true",
 	}
 	return cfg
 }
@@ -146,6 +157,7 @@ func New(cfg Config) (*KVStore, error) {
 		NumCf:         cfg.NumCf,
 		PageCacheSize: cfg.PageCacheSize,
 		OwnsPath:      false,
+		S3:            cfg.S3,
 	})
 	if err != nil {
 		return nil, err

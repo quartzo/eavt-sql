@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"eavt-go/internal/blobstore"
 	"eavt-go/internal/datalog"
 	"eavt-go/internal/downstream"
 	"eavt-go/internal/engine"
@@ -58,9 +59,30 @@ type Engine struct {
 	stopOnce sync.Once
 }
 
-// NewEngine opens the data dir, bootstraps the schema and attaches the WAL.
+// EngineConfig configures NewEngineConfig.
+type EngineConfig struct {
+	DBPath  string
+	BlobDir string
+	// Backend selects the blob backend ("file" default, "s3").  For s3 the
+	// local DBPath still hosts the WAL — blobs live in the bucket.
+	Backend string
+	S3      blobstore.S3Config
+}
+
+// NewEngine opens the data dir with the file backend.
 func NewEngine(dbPath, blobDir string) (*Engine, error) {
-	kvCfg := kvstore.Config{Path: dbPath, NumCf: 64, PageCacheSize: 536870912}
+	return NewEngineConfig(EngineConfig{DBPath: dbPath, BlobDir: blobDir})
+}
+
+// NewEngineConfig opens the data dir, bootstraps the schema and attaches the WAL.
+func NewEngineConfig(ecfg EngineConfig) (*Engine, error) {
+	dbPath := ecfg.DBPath
+	blobDir := ecfg.BlobDir
+	backend := ecfg.Backend
+	if backend == "" {
+		backend = "file"
+	}
+	kvCfg := kvstore.Config{Path: dbPath, NumCf: 64, PageCacheSize: 536870912, Backend: backend, S3: ecfg.S3}
 	if v := os.Getenv("EAVT_FLUSH_THRESHOLD"); v != "" {
 		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
 			kvCfg.FlushThreshold = n

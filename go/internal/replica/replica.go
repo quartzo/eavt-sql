@@ -8,6 +8,7 @@ import (
 	"os"
 	"sync/atomic"
 
+	"eavt-go/internal/blobstore"
 	"eavt-go/internal/datalog"
 	"eavt-go/internal/eavt"
 	"eavt-go/internal/engine"
@@ -32,20 +33,35 @@ type ReplicaEngine struct {
 	EvRootCount int64
 }
 
-// Open opens a read-only replica on dir (journal replay off — the stream
-// delivers everything).
+// Config configures a read-only replica.
+type Config struct {
+	Dir     string
+	Backend string // "file" (default) | "s3"
+	S3      blobstore.S3Config
+}
+
+// Open opens a read-only replica on dir with the file backend.
 func Open(dir string) *ReplicaEngine {
+	return OpenConfig(Config{Dir: dir})
+}
+
+// OpenConfig opens a read-only replica (journal replay off — the stream
+// delivers everything).  The backend must match the transactor's so adopted
+// roots and page blobs resolve.
+func OpenConfig(cfg Config) *ReplicaEngine {
 	kv, err := kvstore.New(kvstore.Config{
-		Path:      dir,
+		Path:      cfg.Dir,
 		ReadOnly:  true,
 		ReplayOff: true,
 		NumCf:     64,
+		Backend:   cfg.Backend,
+		S3:        cfg.S3,
 	})
 	if err != nil {
 		return nil
 	}
 	store := engine.New(kv)
-	return &ReplicaEngine{KV: kv, Store: store, Path: dir}
+	return &ReplicaEngine{KV: kv, Store: store, Path: cfg.Dir}
 }
 
 // Close releases the replica.

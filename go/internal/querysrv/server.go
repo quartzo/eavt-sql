@@ -36,10 +36,15 @@ type Gateway struct {
 	fetchedAt time.Time
 }
 
-// NewGateway creates the gateway state.
+// NewGateway creates the gateway state (file backend).
 func NewGateway(downstreamPath, dataPath string) *Gateway {
+	return NewGatewayConfig(downstreamPath, replica.Config{Dir: dataPath})
+}
+
+// NewGatewayConfig creates the gateway state with an explicit replica backend.
+func NewGatewayConfig(downstreamPath string, rcfg replica.Config) *Gateway {
 	g := &Gateway{}
-	g.Replica = replica.Open(dataPath)
+	g.Replica = replica.OpenConfig(rcfg)
 	if g.Replica != nil {
 		g.Conn = downstream.Open(downstreamPath, func(frame []byte) {
 			g.onReplicationEvent(frame)

@@ -2,8 +2,70 @@ package pagestore
 
 import (
 	"bytes"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"sort"
+	"strings"
+	"sync"
 	"testing"
+
+	"eavt-go/internal/blobstore"
 )
+
+// newFakeS3 is a minimal S3 endpoint for the backend tests.
+func newFakeS3(t *testing.T) (*httptest.Server, map[string][]byte) {
+	t.Helper()
+	var mu sync.Mutex
+	objects := map[string][]byte{}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("list-type") == "2" {
+			prefix := r.URL.Query().Get("prefix")
+			mu.Lock()
+			var keys []string
+			for k := range objects {
+				if strings.HasPrefix(k, prefix) {
+					keys = append(keys, k)
+				}
+			}
+			mu.Unlock()
+			sort.Strings(keys)
+			var b strings.Builder
+			b.WriteString(`<?xml version="1.0"?><ListBucketResult><IsTruncated>false</IsTruncated>`)
+			for _, k := range keys {
+				b.WriteString("<Contents><Key>" + k + "</Key></Contents>")
+			}
+			b.WriteString("</ListBucketResult>")
+			_, _ = w.Write([]byte(b.String()))
+			return
+		}
+		key := strings.TrimPrefix(r.URL.Path, "/test/")
+		switch r.Method {
+		case http.MethodPut:
+			body, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			objects[key] = body
+			mu.Unlock()
+			w.WriteHeader(200)
+		case http.MethodGet:
+			mu.Lock()
+			v, ok := objects[key]
+			mu.Unlock()
+			if !ok {
+				w.WriteHeader(404)
+				return
+			}
+			_, _ = w.Write(v)
+		case http.MethodDelete:
+			mu.Lock()
+			delete(objects, key)
+			mu.Unlock()
+			w.WriteHeader(204)
+		default:
+			w.WriteHeader(405)
+		}
+	})), objects
+}
 
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
@@ -229,5 +291,40 @@ func TestPooledMergeIntoExistingTree(t *testing.T) {
 	}
 	if len(got) != 12000 {
 		t.Fatalf("scan = %d, want 12000", len(got))
+	}
+}
+
+// TestPageStoreS3Backend exercises the pagestore over the S3 backend against a
+// minimal in-process S3 (writes pages/roots, reopens and reads back).
+func TestPageStoreS3Backend(t *testing.T) {
+	srv, _ := newFakeS3(t)
+	defer srv.Close()
+	cfg := Config{
+		Backend: "s3", Path: t.TempDir(), NumCf: 8, PageCacheSize: 1 << 20,
+		S3: blobstore.S3Config{Endpoint: srv.URL, Bucket: "test", AccessKey: "a", SecretKey: "s", PathStyle: true},
+	}
+	s, err := Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := wideKeys(4000)
+	if _, err := s.CommitMergeMap(map[int][][]byte{0: keys}); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+
+	s2, err := Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	tree := s2.Trees()[0]
+	cur := NewCursor(s2, 0, tree.RootUUID, tree.Height, false)
+	got, err := collect(cur)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 4000 {
+		t.Fatalf("scan = %d, want 4000", len(got))
 	}
 }

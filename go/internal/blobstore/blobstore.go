@@ -15,6 +15,21 @@ import (
 // ID is a 16-byte blob identifier.
 type ID [16]byte
 
+// BlobStore is the backend interface shared by the file and S3 backends
+// (nim_blobstore/blobstore.nim).  The page store dispatches through it.
+type BlobStore interface {
+	Put(data []byte) (ID, error)
+	PutAt(id ID, data []byte) error
+	Get(id ID) ([]byte, bool, error)
+	Delete(id ID) error
+	List() ([]ID, error)
+	PutRoot(name string, data []byte) error
+	GetRoot(name string) ([]byte, bool, error)
+	ListRoots() ([]string, error)
+	DeleteRoot(name string) error
+	Close() error
+}
+
 const hexChars = "0123456789abcdef"
 
 // FileBlobStore is a file-backed blob store.
@@ -36,6 +51,9 @@ func New(path string, readOnly bool) (*FileBlobStore, error) {
 
 // Base returns the blobs directory.
 func (s *FileBlobStore) Base() string { return s.base }
+
+// Close is a no-op for the file backend (BlobStore interface).
+func (s *FileBlobStore) Close() error { return nil }
 
 func (s *FileBlobStore) failReadOnly() error {
 	if s.readOnly {
