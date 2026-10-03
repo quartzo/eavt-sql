@@ -293,9 +293,12 @@ de um flush continua vendo o snapshot antigo.
 
 ## 5. Lacunas de verificação (o que não foi testado)
 
-- **Sem paridade A/B da stack completa** (transactor Go × Nim) além do REPL
-  (51 linhas). A stack Go foi validada funcionalmente (tx/kv/dump/query/float),
-  não byte-a-byte em todas as combinações.
+- ~~**Sem paridade A/B da stack completa**~~ — `scripts/parity_stack.sh` roda
+  a sessão espelhada contra uma stack **Go** fresca e uma stack **Nim**
+  fresca (mesmo cliente REPL nas duas) e diffeira o output (tx id
+  normalizado): **STACK PARITY OK (52 linhas)**, byte-a-byte no
+  tx/kv/dump/query/float/erros. (`parity_repl.sh` = os dois REPLs sobre a
+  stack Nim; `parity_front.sh` = a front Nim × a front Go sobre o back Nim.)
 - ~~**Sem teste E2E de replicação**~~ — `internal/e2e.TestReplicationE2E`:
   transactor real num socket + `Gateway`/réplica, tx volátil (flush do WAL na
   resposta encaminhada) e pós-flush (adoção de root).
