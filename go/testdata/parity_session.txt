@@ -7,7 +7,7 @@
 [:find ?n ?a :where [?e :person/name ?n] [?e :person/age ?a]]
 [:find ?n ?p :where [?e :person/name ?n] [?e :fin/price ?p]]
 [:find ?p :where [?e :fin/price ?p]]
-[:find ?n :where [?e :person/name ?n] [(> ?a 20)] [?e :person/age ?a]]
+[:find ?a :where [?e :person/age ?a] [(> ?a 20)]]
 [:find ?n :where [?e :person/name ?n] [(> ?unbound 1)]]
 [:find ?n :where [?e :person/name ?n]]
 [:find ?n :where [?e :person/name ?n]];

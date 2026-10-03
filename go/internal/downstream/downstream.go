@@ -211,16 +211,9 @@ func (c *Conn) register(raw []byte) (string, chan []byte, error) {
 }
 
 func injectID(raw []byte, id string) ([]byte, error) {
-	v, err := msgpack.Unmarshal(raw)
-	if err != nil {
-		return nil, err
-	}
-	m, ok := v.(msgpack.Map)
-	if !ok {
-		return nil, errors.New("request must be a map")
-	}
-	m = append(m, msgpack.Pair{Key: msgpack.Str("id"), Value: msgpack.Str(id)})
-	return msgpack.Marshal(m), nil
+	// Append ("id", id) to the top-level map without decoding: the payload
+	// keeps its original bytes (Nim injectTopPair).
+	return msgpack.InjectTopPair(raw, "id", id)
 }
 
 // Request forwards a raw request and relays response frames to relay.

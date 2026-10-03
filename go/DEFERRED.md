@@ -175,8 +175,17 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   e explain, 25/25) e só cai num fallback que prefere passos não-blind quando
   o plano escolhido é **insoundável** — alguma var de `OrderedVars` sem
   scanner no seu depth (`internal/datalog/planner.go`). Corrige a query vazia
-  com store de 1 datom. Regressão: `TestBlindFirstTinyCardinality` (planner) e
+  com store de 1 datom. Regressão: `TestBlindFirstTinyCardinality` (planner,
+  inclui a forma `predicado em padrão posterior`) e
   `TestDatalogQueryTinyStore` (E2E no engine).
+  **Divergência conhecida com a front Nim:** na sessão de paridade a query
+  `[:find ?n :where [?e :person/name ?n] [(> ?a 20)] [?e :person/age ?a]]`
+  com stats minúsculos fazia as duas fronts concordarem num plano *quebrado*
+  (o back respondia `unbound: n`). Como o Go agora corrige, as fronts
+  divergiram; a linha da sessão trocou a forma patológica por
+  `[:find ?a :where [?e :person/age ?a] [(> ?a 20)]]` e o caso original
+  ficou coberto pelos testes de regressão acima + os goldens de predicado
+  (q06/q10/q15).
 - **Sessão de paridade anterior estava furada.** `go/testdata/parity_session.txt`
   usava `:db.type/double`, que **o próprio Nim rejeita** (o tipo é
   `:db.type/float`). A paridade "OK" de 44 linhas passava com **ambos errando**
@@ -207,12 +216,13 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
 
 ## 3. Atalhos
 
-- **Framing/forward**: para despachar e para injetar o `id` de correlação eu
-  **decodifico o frame inteiro** com msgpack e re-encodo
-  (`internal/downstream/downstream.go` `injectID`, `internal/querysrv`,
-  `internal/transactor`). O Nim usa `injectTopPair` (append cru no mapa),
-  preservando os bytes originais. Semanticamente igual; a re-encodação pode
-  mudar bytes (ordem de chaves, largura de int) e custa O(payload).
+- ~~**Framing/forward: re-encodagem do frame inteiro.**~~ **Resolvido:** o
+  injetor de `id` agora usa `msgpack.InjectTopPair` (`internal/msgpack/
+  scan.go`), que anexa o par ao mapa **sem decodificar** (patch só do header
+  de contagem, fixmap→map16→map32), preservando os bytes do payload
+  verbatim e custando O(id). O decodificar/re-encodificar (ordem de chaves,
+  largura de int) sai do caminho de forward. Testes:
+  `TestInjectTopPair*`.
 - **PageStore cache**: guarda formas decodificadas (`[][]byte`), sem arena
   plana; um único orçamento de bytes (o `index_cache_bytes` do Nim era só
   log).
@@ -307,14 +317,14 @@ de um flush continua vendo o snapshot antigo.
 | Flush faseado (sem pause) | `internal/kvstore/kvstore.go`, `internal/pagestore/store.go`, `internal/transactor/server.go` |
 | KV não WAL'd (só flush) | `internal/kvstore/kvstore.go` (`PutKv`/`DeleteKv`/`journalRecord`) |
 | hydrated (M6) / anchor (M7) | `internal/hydrated/*`, `internal/anchor/*`, `internal/eavt/*`, `internal/engine/{engine,write}.go`, `internal/cursor/cursor.go` |
-| Cursor hid + history (latente) | `internal/cursor/cursor.go`, `internal/engine/engine.go` (`OpenCursor`) |
+| Cursor hid vs history (resolvido, mais estrito) | `internal/cursor/cursor.go`, `internal/engine/engine.go` (`OpenCursor`) |
 | CF-2 unique derivado na réplica | `internal/replica/replica.go` (`applyRecords`) |
-| Planner blind-first | `internal/datalog/planner.go` |
+| Planner blind-first (resolvido) | `internal/datalog/planner.go` |
 | Snapshot (memtable/kvstore) | `internal/memtable/memtable.go`, `internal/kvstore/kvstore.go`, `internal/pagestore/{store,cache}.go`, `internal/eavt/resolver.go` |
-| Snapshot da réplica é síncrono no reader (latência) | `internal/querysrv/server.go`, `internal/replica/replica.go` |
-| Snapshot WAL do segmento corrente | `internal/wal/wal.go` (`Segments`), `internal/transactor/server.go` |
-| Re-encodação de frames | `internal/downstream/downstream.go` |
-| Só backend file | `internal/blobstore` |
+| Snapshot da réplica síncrono (resolvido) | `internal/querysrv/server.go`, `internal/replica/replica.go` |
+| Snapshot WAL consistente (resolvido) | `internal/wal/wal.go` (`SnapshotLocked`), `internal/transactor/server.go` |
+| InjectTopPair sem decodificar (resolvido) | `internal/msgpack/scan.go`, `internal/downstream/downstream.go` |
+| Backends blobstore (file+s3) | `internal/blobstore/` |
 | `gcFull` / GC | `internal/pagestore/gc.go` |
 | `explain` | `internal/datalog/explain.go` |
 | Float `$float` | `internal/numfmt/numfmt.go` |

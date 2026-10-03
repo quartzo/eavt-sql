@@ -3,6 +3,7 @@ package msgpack
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"testing"
@@ -105,5 +106,107 @@ func TestMember(t *testing.T) {
 	}
 	if _, ok := Member(m, Str("missing")); ok {
 		t.Errorf("member missing should be false")
+	}
+}
+
+func TestInjectTopPairRoundTrip(t *testing.T) {
+	orig := Map{
+		{Key: Str("type"), Value: Str("scheme")},
+		{Key: Str("mode"), Value: Str("exec")},
+		{Key: Str("program"), Value: Array{Int(7), Array{Str("begin")}}},
+	}
+	raw := Marshal(orig)
+	framed, err := InjectTopPair(raw, "id", "41")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The original bytes after the header must be preserved verbatim.
+	_, hdr, ok := mapCountAndHeaderLen(raw)
+	if !ok {
+		t.Fatal("raw is not a map")
+	}
+	nHdr, nHdrLen, ok := mapCountAndHeaderLen(framed)
+	if !ok {
+		t.Fatal("framed is not a map")
+	}
+	if nHdr != 4 || nHdrLen < hdr {
+		t.Fatalf("framed count=%d hdr=%d", nHdr, nHdrLen)
+	}
+	if !bytes.Equal(framed[nHdrLen:nHdrLen+len(raw)-hdr], raw[hdr:]) {
+		t.Fatal("injectTopPair did not preserve the original body bytes")
+	}
+	v, err := Unmarshal(framed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := v.(Map)
+	if !ok {
+		t.Fatal("not a map")
+	}
+	if s, _ := m[0].Value.(Str); s != "scheme" {
+		t.Fatalf("type = %q", s)
+	}
+	if s, _ := m[3].Value.(Str); s != "41" {
+		t.Fatalf("id = %q", s)
+	}
+}
+
+func TestInjectTopPairTwiceAndPromotion(t *testing.T) {
+	raw := Marshal(Map{{Key: Str("type"), Value: Str("kv")}})
+	once, err := InjectTopPair(raw, "id", "7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	twice, err := InjectTopPair(once, "seq", "9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := Unmarshal(twice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := v.(Map)
+	if len(m) != 3 {
+		t.Fatalf("len = %d", len(m))
+	}
+	if s, _ := m[1].Value.(Str); s != "7" {
+		t.Fatalf("id = %q", s)
+	}
+	if s, _ := m[2].Value.(Str); s != "9" {
+		t.Fatalf("seq = %q", s)
+	}
+
+	// fixmap(15) must promote to map16.
+	big := make(Map, 0, 15)
+	for i := 0; i < 15; i++ {
+		big = append(big, Pair{Key: Str(fmt.Sprintf("k%02d", i)), Value: Int(int64(i))})
+	}
+	raw15 := Marshal(big)
+	promoted, err := InjectTopPair(raw15, "id", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if promoted[0] != 0xde {
+		t.Fatalf("header = %#x, want map16", promoted[0])
+	}
+	vv, err := Unmarshal(promoted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mm, ok := vv.(Map)
+	if !ok || len(mm) != 16 {
+		t.Fatalf("promoted map len = %d", len(mm))
+	}
+	if s, _ := mm[15].Value.(Str); s != "1" {
+		t.Fatalf("id = %q", s)
+	}
+}
+
+func TestInjectTopPairRejectsNonMap(t *testing.T) {
+	if _, err := InjectTopPair(Marshal(Array{Int(1)}), "id", "1"); err == nil {
+		t.Fatal("array must be rejected")
+	}
+	if _, err := InjectTopPair([]byte{}, "id", "1"); err == nil {
+		t.Fatal("empty must be rejected")
 	}
 }
