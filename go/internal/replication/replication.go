@@ -143,6 +143,11 @@ func (s *Subscriber) pump() {
 	go s.drain()
 }
 
+// drain writes the whole pending queue as ONE writev.  The WAL frame and the
+// response frame are queued back-to-back (EnqueueResponse flushes the WAL buf
+// first); sending them as separate writes makes the reader wake once per
+// frame, and the second wakeup sits on the critical path of every forwarded
+// request (measured: the Go query hop cost ~2x the Nim's with them split).
 func (s *Subscriber) drain() {
 	for {
 		s.mu.Lock()
@@ -151,38 +156,36 @@ func (s *Subscriber) drain() {
 			s.mu.Unlock()
 			return
 		}
-		body := s.queue[0]
-		s.queue = s.queue[1:]
+		frames := s.queue
+		s.queue = nil
 		s.mu.Unlock()
-		if err := writeFrame(s.conn, body); err != nil {
+
+		hdrs := make([][4]byte, len(frames))
+		var bufs net.Buffers
+		total := 0
+		for i, body := range frames {
+			binary.BigEndian.PutUint32(hdrs[i][:], uint32(len(body)))
+			bufs = append(bufs, hdrs[i][:])
+			if len(body) > 0 {
+				bufs = append(bufs, body)
+			}
+			total += 4 + len(body)
+		}
+		if _, err := bufs.WriteTo(s.conn); err != nil {
 			s.markClosed()
 			return
 		}
-		// Credit the frame that just left the queue (4-byte header + body),
-		// so backlog tracks PENDING bytes — not the cumulative total.  The
-		// Nim subscriber does the same in sendFrame; without it a fast
-		// writer trips BacklogMaxBytes after 64 MiB of total traffic and the
-		// subscriber is closed for no reason.
+		// Credit what just left the queue so backlog tracks PENDING bytes —
+		// not the cumulative total (the Nim subscriber does the same in
+		// sendFrame; without it a fast writer trips BacklogMaxBytes after
+		// 64 MiB of traffic and the subscriber is closed for no reason).
 		s.mu.Lock()
-		s.backlog -= int64(4 + len(body))
+		s.backlog -= int64(total)
 		if s.backlog < 0 {
 			s.backlog = 0
 		}
 		s.mu.Unlock()
 	}
-}
-
-func writeFrame(conn net.Conn, body []byte) error {
-	hdr := make([]byte, 4)
-	binary.BigEndian.PutUint32(hdr, uint32(len(body)))
-	if _, err := conn.Write(hdr); err != nil {
-		return err
-	}
-	if len(body) > 0 {
-		_, err := conn.Write(body)
-		return err
-	}
-	return nil
 }
 
 // Hub fans out events to all subscribers.

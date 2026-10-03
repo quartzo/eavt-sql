@@ -7,6 +7,8 @@ package main
 import (
 	"fmt"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"path/filepath"
 	"strings"
@@ -159,6 +161,14 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("Internal executor socket on %s\n", internalPath)
+	// Optional profiling for perf work: EAVT_PPROF_QUERY=host:port
+	if pp := os.Getenv("EAVT_PPROF_QUERY"); pp != "" {
+		go func() {
+			if err := http.ListenAndServe(pp, nil); err != nil {
+				fmt.Fprintln(os.Stderr, "pprof:", err)
+			}
+		}()
+	}
 	acceptLoop(internalLn, gw.ServeInternal)
 }
 

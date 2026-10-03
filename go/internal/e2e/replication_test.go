@@ -20,7 +20,7 @@ import (
 	"eavt-go/internal/transactor"
 )
 
-func startTransactor(t *testing.T, dir string) (*transactor.Engine, string) {
+func startTransactor(t testing.TB, dir string) (*transactor.Engine, string) {
 	t.Helper()
 	e, err := transactor.NewEngineConfig(transactor.EngineConfig{DBPath: dir, BlobDir: dir})
 	if err != nil {
@@ -58,7 +58,7 @@ func txRequest(ops ...msgpack.Value) []byte {
 	})
 }
 
-func schemaAndAlice(t *testing.T, gw *querysrv.Gateway) {
+func schemaAndAlice(t testing.TB, gw *querysrv.Gateway) {
 	t.Helper()
 	schema := txRequest(
 		addOp(0, "db/ident", kw("person/name")),
@@ -83,7 +83,7 @@ func replicaHasAlice(r *replica.ReplicaEngine) bool {
 	return false
 }
 
-func waitFor(t *testing.T, what string, cond func() bool) {
+func waitFor(t testing.TB, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {

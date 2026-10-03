@@ -120,6 +120,21 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   blobs vão para o bucket. Testes: vetor de signing key da AWS, HMAC/SHA,
   round-trip S3 contra um S3 in-process (blobstore e pagestore), read-only e
   config faltando; E2E transactor+query ambos em S3 OK (write→flush→query).
+- **Latência do upsert (tx) vs Nim — otimizado, gap residual.** A sonda
+  `upsert(tx)` era 1,55× mais lenta que o Nim (80,6 → 72,6 µs @25k após as
+  correções). Diagnóstico: o custo **não é compute** (`execTx` ≈ 4,5 µs) — é
+  a latência de round-trip (espera em syscall ~50%); num 1-hop o Go já
+  emparelha com o Nim (22,3 vs 20,5 µs) e o gap está no hop do query server
+  (57,1 vs 40,3 µs). Correções aplicadas: `WriteFrame`/`client.sendFrame` em
+  **um writev** e `Subscriber.drain` escrevendo **a fila inteira num writev**
+  (WAL+resposta na mesma escrita → um wakeup por leitura) — 2-hop de
+  82,6 → 57,1 µs. O que **não** se pode fazer (testado): resposta numa
+  conexão dedicada e "flush do WAL imediato na fila" — ambos quebram a ordem
+  `[WAL][resposta]` e o read-your-writes. Gap restante (+15 µs) = custo de
+  handoff do runtime Go (goroutine wake/futex vs o loop único do chronos);
+  não há compute a eliminar. Medições em
+  `docs/perf-receita-carga.md` (benchmarks `BenchmarkTxUpsert*`,
+  `EAVT_PROBE_SOCK`).
 - **Backlog da replicação só crescia (bug, achado na carga real).** O `Subscriber`
   incrementava `backlog` por cada byte enfileirado e **nunca decrementava** ao
   escrever — era um acumulado total, não o pendente. Com isso qualquer carga que

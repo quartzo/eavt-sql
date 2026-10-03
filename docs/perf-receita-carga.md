@@ -67,43 +67,68 @@ do `start.sh` vale só para o Nim (o Go fica abaixo dela naturalmente).
 
 | estágio | Go @10k | Go @25k | Go @50k | Nim ref @25k (M8) |
 |---|---|---|---|---|
-| empresas | 26.223 | 27.102 | 25.738 | 28.298 |
-| estabs   | **6.978** | **7.450** | 7.774 | 6.181 |
-| simples  | 32.856 | 29.070 | 30.848 | 30.064 |
-| sócios   | **12.671** | **14.232** | 13.333 | 11.691 |
-| load total | 3,1 s | 7,2 s | 14,1 s | — |
+| empresas | 26.774 | 27.518 | 26.378 | 28.298 |
+| estabs   | **7.275** | **7.746** | 7.937 | 6.181 |
+| simples  | 34.206 | 29.450 | 31.527 | 30.064 |
+| sócios   | **13.044** | **14.114** | 13.859 | 11.691 |
+| load total | 3,0 s | 7,0 s | 13,7 s | — |
 
 ### Probes (p50, 500 ops)
 
 | probe | Go @10k | Go @25k | Go @50k | Nim ref @25k |
 |---|---|---|---|---|
-| eid_lookup (AVET) | 40,9 µs | **36,7 µs** | 38,7 µs | 78,5 µs |
-| attr_by_eid (EAVT) | 41,4 µs | **41,3 µs** | 40,5 µs | 107 µs |
-| attrs_x3 | 82,2 µs | **85,8 µs** | 79,9 µs | 220 µs |
-| upsert (retract-scan) | 71,3 µs | 80,6 µs | 72,6 µs | **52 µs** |
+| eid_lookup (AVET) | 39,8 µs | **39,9 µs** | 41,5 µs | 78,5 µs |
+| attr_by_eid (EAVT) | 40,3 µs | **42,8 µs** | 46,3 µs | 107 µs |
+| attrs_x3 | 79,9 µs | **82,8 µs** | 92,4 µs | 220 µs |
+| upsert (retract-scan) | 75,3 µs | 72,6 µs | 71,6 µs | **52 µs** |
 
 ### Extrapolação da carga completa (@ taxas de 50k, Go)
 
 ```
-empresas   46M / 25.738/s → 0,50 h
-estabs     73M /  7.774/s → 2,61 h   ← continua dominando
-simples    50M / 30.848/s → 0,45 h
-sócios     28M / 13.333/s → 0,58 h
-TOTAL ≈ 4,1 h   (Nim @25k: 4,9 h)
+empresas   46M / 26.378/s → 0,48 h
+estabs     73M /  7.937/s → 2,55 h   ← continua dominando
+simples    50M / 31.527/s → 0,44 h
+sócios     28M / 13.859/s → 0,56 h
+TOTAL ≈ 4,0 h   (Nim @25k: 4,9 h)
 ```
 
 **Leitura**: a stack Go fica **dentro de ±5%** das taxas de escrita do Nim
-(empresas −4%, simples −3%) e é **20–22% mais rápida** em estabs/sócios; os
-probes pontuais ficam **2,1–2,6× mais rápidos** (eid_lookup/attr_by_eid/
-attrs_x3). O único regresso é o **upsert (tx)**, ~1,55× mais lento — o
-caminho de tx Go passa por `TransactTx` (decode + lookup único + retract
-scan) sem o atalho do `hasDatom` do editor. A extrapolação total cai de
-4,9 h → 4,1 h.
+(empresas −3%, simples −2%) e é **20–28% mais rápida** em estabs/sócios; os
+probes pontuais ficam **1,9–2,6× mais rápidos** (eid_lookup/attr_by_eid/
+attrs_x3). A extrapolação total cai de 4,9 h → 4,0 h.
+
+### Onde o tempo do `upsert` (tx) vai — medição de hop a hop
+
+Sonda sintética com o **mesmo cliente Go** em dois caminhos (benchmarks
+`BenchmarkTxUpsert{,Remote}` em `internal/eavt...`/`internal/e2e`,
+`EAVT_PROBE_SOCK` aponta para o transactor [1 hop] ou o query server
+[2 hops]; `EAVT_FLUSH_THRESHOLD` alto para não interferir o auto-flush):
+
+| caminho | Nim | Go |
+|---|---|---|
+| transactor (1 hop) | 20,5 µs | 22,3 µs (≈ a par) |
+| query server (2 hops) | 40,3 µs | **57,1 µs** (+41%) |
+
+Conclusões e correções aplicadas nesta rodada:
+
+- **O custo não é compute** (o `execTx` puro é ~4,5 µs): é a **latência de
+  round-trip** (espera em syscall ~50%, futex ~12%). Num 1-hop o Go emparelha
+  com o Nim.
+- Correções: `WriteFrame`/`client.sendFrame` passam a **um writev** (antes 2
+  syscalls/handoff por frame — divisor de wakeup por leitura); o
+  `Subscriber.drain` escreve **toda a fila num writev** (o WAL e a resposta
+  ficam na mesma escrita → o leitor acorda uma vez, não duas). Isso levou o
+  2-hop de 82,6 µs → 57,1 µs.
+- O que **não** se pode fazer: mandar a resposta numa conexão dedicada (já
+  testado — remove um handoff, mas perde a ordem `[WAL][resposta]` e o read-
+  your-writes quebra; idem para "flush do WAL imediato na fila"). O gap
+  restante (+15 µs no hop do query server) é overhead de handoff do Go
+  runtime (goroutine wake/futex vs o loop único do chronos) — não é compute.
 
 Rodada nesta data com o código do port já incluindo as correções de perf
 (`hydrated` M6, `anchor` M7, blob pool do flush, arena plana do page store,
-drain fora do lock, credit do backlog de replicação). Contagem fixa
-(declare+lookups) ≈ 0,1 s.
+drain fora do lock, credit do backlog de replicação, writev + drain
+coalesced). Contagem fixa (declare+lookups) ≈ 0,1 s.
 
 ## Referência @50k (todas as taxas em linhas/s)
 

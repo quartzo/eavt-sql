@@ -5,6 +5,8 @@ package main
 import (
 	"fmt"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"path/filepath"
 	"strings"
@@ -139,6 +141,15 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
+	}
+	// Optional CPU/heap profiling for perf work: EAVT_PPROF=127.0.0.1:6060
+	if pp := os.Getenv("EAVT_PPROF"); pp != "" {
+		go func() {
+			fmt.Fprintln(os.Stderr, "pprof on http://"+pp+"/debug/pprof/profile")
+			if err := http.ListenAndServe(pp, nil); err != nil {
+				fmt.Fprintln(os.Stderr, "pprof:", err)
+			}
+		}()
 	}
 	fmt.Println("Listening...")
 	for {

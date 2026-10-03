@@ -75,15 +75,18 @@ func (c *Client) sendFrame(body []byte) error {
 	if c.conn == nil {
 		return &DisconnectedError{Msg: "server disconnected (closed)"}
 	}
-	hdr := make([]byte, 4)
-	binary.BigEndian.PutUint32(hdr, uint32(len(body)))
-	if _, err := c.conn.Write(hdr); err != nil {
-		return &DisconnectedError{Msg: "server disconnected (send)"}
+	// One writev per frame (single syscall, no copy) — splitting the header
+	// out forces the server to block twice per request.
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], uint32(len(body)))
+	var bufs net.Buffers
+	if len(body) == 0 {
+		bufs = net.Buffers{hdr[:]}
+	} else {
+		bufs = net.Buffers{hdr[:], body}
 	}
-	if len(body) > 0 {
-		if _, err := c.conn.Write(body); err != nil {
-			return &DisconnectedError{Msg: "server disconnected (send body)"}
-		}
+	if _, err := bufs.WriteTo(c.conn); err != nil {
+		return &DisconnectedError{Msg: "server disconnected (send)"}
 	}
 	return nil
 }

@@ -324,18 +324,21 @@ func readFrame(conn net.Conn) ([]byte, error) {
 	return body, nil
 }
 
-// WriteFrame writes a framed msgpack body to a transport.
+// WriteFrame writes a framed msgpack body to a transport in ONE writev:
+// splitting the 4-byte header from the body costs the reader a wakeup per
+// frame, and round-trip latency dominates the request path.
 func WriteFrame(conn net.Conn, body []byte) error {
-	hdr := make([]byte, 4)
-	binary.BigEndian.PutUint32(hdr, uint32(len(body)))
-	if _, err := conn.Write(hdr); err != nil {
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], uint32(len(body)))
+	if len(body) == 0 {
+		_, err := conn.Write(hdr[:])
 		return err
 	}
-	if len(body) > 0 {
-		_, err := conn.Write(body)
-		return err
-	}
-	return nil
+	// net.Buffers issues a single writev: one syscall and no per-frame copy
+	// (the header is a stack array, the body is the caller's slice).
+	var bufs net.Buffers = [][]byte{hdr[:], body}
+	_, err := bufs.WriteTo(conn)
+	return err
 }
 
 // ReadFrame reads one framed msgpack body.
