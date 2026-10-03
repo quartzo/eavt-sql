@@ -43,11 +43,13 @@ func New(kv *kvstore.KVStore) *QueryStore {
 	return &QueryStore{Eavt: eavt.NewEngine(kv), KV: kv, symtab: scheme.NewSymTab()}
 }
 
-// OpenCursor opens a merged scan cursor over a CF.  CF-0 cursors are wired
-// to the hydrated set (M6) for eid-anchored fast-path seeks.
-func (q *QueryStore) OpenCursor(cfID uint32, prefix []byte) cursor.Cursor {
+// OpenCursor opens a merged scan cursor over a CF.  CF-0 cursors are wired to
+// the hydrated set (M6) for eid-anchored fast-path seeks, EXCEPT for history
+// (as-of) scans: a hydrated entry holds only ACTIVE keys, so using it would
+// hide older versions needed to reconstruct the value as of a past tx.
+func (q *QueryStore) OpenCursor(cfID uint32, prefix []byte, history bool) cursor.Cursor {
 	mc := q.KV.OpenScanCursor(int(cfID))
-	if cfID == 0 && q.Eavt.HydEnabled {
+	if cfID == 0 && q.Eavt.HydEnabled && !history {
 		mc.Hyd = q.Eavt.Hyd
 	}
 	return mc

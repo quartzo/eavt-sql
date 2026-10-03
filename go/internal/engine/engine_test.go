@@ -3,6 +3,7 @@ package engine
 import (
 	"testing"
 
+	"eavt-go/internal/cursor"
 	"eavt-go/internal/datalog"
 	"eavt-go/internal/eavt"
 	"eavt-go/internal/kvstore"
@@ -53,7 +54,7 @@ func TestBootstrapResolver(t *testing.T) {
 func TestScannerExtracts(t *testing.T) {
 	q := setup(t)
 	sc := query.NewV2Scanner("EAVT", []string{"e", "a", "v", "t", "added"}, 0, false)
-	sc.SetCursor(q.OpenCursor(0, nil))
+	sc.SetCursor(q.OpenCursor(0, nil, false))
 	sc.SaveValue(sexpr.Int(200))
 	sc.AdvanceToActiveAt()
 	got, ok := sc.ExtractCurrent()
@@ -115,7 +116,7 @@ func TestScannerExtractsHydrated(t *testing.T) {
 		t.Fatal("eid 200 not hydrated")
 	}
 	sc := query.NewV2Scanner("EAVT", []string{"e", "a", "v", "t", "added"}, 0, false)
-	sc.SetCursor(q.OpenCursor(0, nil))
+	sc.SetCursor(q.OpenCursor(0, nil, false))
 	sc.SaveValue(sexpr.Int(200))
 	sc.AdvanceToActiveAt()
 	got, ok := sc.ExtractCurrent()
@@ -134,10 +135,25 @@ func TestScannerExtractsHydrated(t *testing.T) {
 	// A non-hydrated eid falls back to the merged cursor transparently.
 	q.Eavt.Hyd.Evict(200)
 	sc2 := query.NewV2Scanner("EAVT", []string{"e", "a", "v", "t", "added"}, 0, false)
-	sc2.SetCursor(q.OpenCursor(0, nil))
+	sc2.SetCursor(q.OpenCursor(0, nil, false))
 	sc2.SaveValue(sexpr.Int(200))
 	sc2.AdvanceToActiveAt()
 	if got, ok := sc2.ExtractCurrent(); !ok || got != sexpr.Int(100) {
 		t.Fatalf("fallback attr = %#v %v", got, ok)
+	}
+}
+
+// TestOpenCursorHydGuard verifies the hydrated fast path is wired only for
+// non-history CF-0 scans (as-of/history would otherwise hide old versions).
+func TestOpenCursorHydGuard(t *testing.T) {
+	q := setup(t)
+	if mc := q.OpenCursor(0, nil, false).(*cursor.MergedCursor); mc.Hyd == nil {
+		t.Fatal("hyd not wired for normal CF-0")
+	}
+	if mc := q.OpenCursor(0, nil, true).(*cursor.MergedCursor); mc.Hyd != nil {
+		t.Fatal("hyd must be disabled for history/as-of")
+	}
+	if mc := q.OpenCursor(2, nil, false).(*cursor.MergedCursor); mc.Hyd != nil {
+		t.Fatal("hyd wired for a non-CF-0 cursor")
 	}
 }

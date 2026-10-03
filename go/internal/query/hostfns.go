@@ -13,7 +13,9 @@ import (
 // EngineOps is the engine surface the host functions and the tx interpreter
 // need (read + write).
 type EngineOps interface {
-	OpenCursor(cfID uint32, prefix []byte) cursor.Cursor
+	// OpenCursor opens a scan cursor over a CF; history disables the
+	// hydrated (active-only) fast path so older versions stay visible.
+	OpenCursor(cfID uint32, prefix []byte, history bool) cursor.Cursor
 	LookupAttr(name string) (uint32, bool)
 	AttrName(aid uint32) string
 	ValueTypeFor(aid uint32) (uint32, bool)
@@ -369,7 +371,7 @@ func (h *SchemeHostFns) scannerOpen(args []sexpr.Expr) (scheme.EvalStep, error) 
 	case "VAET":
 		cfID = 3
 	}
-	sc.SetCursor(h.Engine.OpenCursor(cfID, nil))
+	sc.SetCursor(h.Engine.OpenCursor(cfID, nil, history || h.HasAsOfTx))
 	sc.AdvanceToActiveAt()
 	rid := h.pushScanner(sc)
 	return scheme.Done(sexpr.Resource(rid)), nil

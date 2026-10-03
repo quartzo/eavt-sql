@@ -22,16 +22,14 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   entrada resolvida `Flush + blob pool` abaixo. O que fica de fora é
   fatiar um único CF gigante em merges intermediários (o Go faz um passe
   ordenado por CF); o worker pool já paraleliza a compressão/escrita.
-- **Cursor hidratado do scanner — variante `/as-of`/history.** O pacote
-  `internal/hydrated` (M6) e o modo hid do `MergedCursor` foram portados:
-  um seek CF-0 ancorado num eid hidratado é servido da entrada (snapshot
-  de chaves copiado no seek, seguro sob concorrência). Como as entradas
-  guardam **apenas chaves ativas**, uma query `as-of`/history que ancore
-  num eid hidratado perderia as versões antigas — mesma interação latente
-  do Nim (lá o cursor também só tem chaves ativas). Na prática entidades
-  hidratadas são as recém-escritas/consultadas; para blindar o Go, dá para
-  restringir o modo hid a scanners não-history (`internal/cursor`,
-  `internal/engine/engine.go` `OpenCursor`).
+- ~~**Cursor hidratado do scanner — variante `/as-of`/history.**~~ **Resolvido
+  no Go (mais estrito que o Nim).** O modo hid do `MergedCursor` só é ligado
+  para CF-0 em scanners **não** history/as-of: `EngineOps.OpenCursor(cfID,
+  prefix, history)` recebe a flag e `QueryStore.OpenCursor` só seta
+  `mc.Hyd` quando `!history`; o `scannerOpen` passa `history || HasAsOfTx`.
+  No Nim o cursor hidratado também só tem chaves ativas, então um as-of que
+  ancore num eid hidratado lá perderia versões antigas — no Go isso não
+  acontece. Regressão: `TestOpenCursorHydGuard`.
 - **Backends de blobstore S3 e journal.** Só o backend `file` foi portado
   (`internal/blobstore`). O facade async/pool de blobstore não é usado pelo
   transactor Go.
