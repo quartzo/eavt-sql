@@ -130,3 +130,24 @@ func TestEngineCounters(t *testing.T) {
 		t.Fatalf("reset left saves=%d lookups=%d execs=%d", s, l, e)
 	}
 }
+
+// TestKeywordValueEncodesName verifies a keyword used as a datom value encodes
+// its name (not ""): the flat slot stores only the interned symbol, so the
+// conversion must resolve it via the symtab.
+func TestKeywordValueEncodesName(t *testing.T) {
+	q := newWriteStore(t)
+	transact(t, q, txFrame(
+		op(kw("db/add"), msgpack.Int(0), kw("db/ident"), kw("person/status")),
+		op(kw("db/add"), msgpack.Int(0), kw("db/valueType"), kw("db.type/keyword")),
+		op(kw("db/add"), msgpack.Int(0), kw("db/cardinality"), kw("db.cardinality/one")),
+	))
+	r := transact(t, q, txFrame(op(kw("db/add"), msgpack.Int(-1), kw("person/status"), kw("active"))))
+	eid := r.Tempids[-1]
+	v, ok := q.LookupValue(eid, "person/status")
+	if !ok {
+		t.Fatal("no value")
+	}
+	if s, ok := v.(sexpr.Str); !ok || s != "active" {
+		t.Fatalf("keyword value = %#v, want Str(active)", v)
+	}
+}

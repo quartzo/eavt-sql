@@ -48,4 +48,7 @@ func TestAutoFlushOnThreshold(t *testing.T) {
 			t.Fatalf("stats text missing %q: %s", want, st)
 		}
 	}
+	if got := e.treeText(); !strings.Contains(got, "cf=0") {
+		t.Fatalf("tree text = %q", got)
+	}
 }

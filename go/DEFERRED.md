@@ -129,10 +129,13 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   fidelidade: o Go escrevia um record WAL só-chave para `PutKv` (valor
   descartado, e o Nim não escreve nada com sink) e `DeleteKv` ignorava o sink
   — agora ambos seguem a regra do Nim (`JournalSink == nil`).
-- **`slotToPackedValue` de keyword** (`internal/query/edn_tx.go`): para
-  `TskKw` retorna `v.S`, que é vazio (o slot guarda só `Sym`). Espelha o
-  comportamento do Nim, mas keyword usada **como valor de datom** codifica
-  vazio — bug latente compartilhado.
+- ~~**`slotToPackedValue` de keyword.**~~ **Corrigido no Go (divergência
+  deliberada).** O slot `TskKw` guarda só o símbolo internado (como no Nim), e
+  o `slotToPackedValue` do Nim retornava `v.s` (vazio) — keyword usada como
+  valor de datom codificava `""`. Agora `SlotToValueForType`/
+  `slotToPackedValue` recebem o symtab e resolvem o nome para `TskKw`.
+  Regressão: `TestKeywordValueEncodesName` + E2E (`:person/status :active`
+  volta `active`).
 - **Planner com cardinalidade minúscula** (`internal/datalog/planner.go`):
   quando `total_eavt` é pequeno, a busca de custo pode escolher uma ordem
   "blind-first" que gera programa inválido (var sem scanner no depth). É a
@@ -151,8 +154,10 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   **corrente**, que pode estar sendo appendado durante a montagem do
   snapshot. O parser tem resync de tail torn e duplicatas são puts
   idempotentes, mas existe uma janela (a mesma do Nim).
-- **`admin tree` não existe** (retorna `unknown admin command: tree`) e
-  `status` só reporta `memtable: N bytes` — igual ao Nim, porém pobre.
+- ~~**`admin tree` não existe.**~~ **Implementado no Go (extensão):** o REPL
+  já anunciava `.tree` mas o handler respondia `unknown`; agora `tree`
+  reporta por CF (`cf= height= leaves= root=`). `status` segue igual ao Nim
+  (`memtable: N bytes`); o detalhe fica em `.stats`.
 - **`deleteKv`/`putKv` com sink**: resolvido — ambos não journalam com sink
   (`JournalSink == nil`); sem sink, gravam o valor/tombstone no legacy com o
   formato correto. Ver o primeiro item.

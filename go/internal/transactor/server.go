@@ -155,6 +155,23 @@ func (e *Engine) memLedgerLine() string {
 		int64(e.KV.MemtableSize())/1048576, active, draining, e.KV.MT.Gen(), e.KV.FlushActive())
 }
 
+// treeText reports per-column-family page-store trees (the REPL `.tree`).
+func (e *Engine) treeText() string {
+	trees := e.KV.PS.Trees()
+	var zero [16]byte
+	var sb strings.Builder
+	for cf, t := range trees {
+		if t.NumLeaves == 0 && t.Height == 0 && t.RootUUID == zero {
+			continue
+		}
+		fmt.Fprintf(&sb, "cf=%d height=%d leaves=%d root=%x\n", cf, t.Height, t.NumLeaves, t.RootUUID)
+	}
+	if sb.Len() == 0 {
+		return "no committed trees"
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
 // statsText returns the observability snapshot for the admin `stats` command.
 func (e *Engine) statsText() string {
 	saves, lookups, execs := e.Store.Counters()
@@ -509,6 +526,8 @@ func (e *Engine) handleAdmin(conn net.Conn, command, id string) {
 		output = "memtable: " + strconv.FormatUint(e.KV.MemtableSize(), 10) + " bytes"
 	case "memtable":
 		output = strconv.FormatUint(e.KV.MemtableSize(), 10)
+	case "tree":
+		output = e.treeText()
 	case "stats":
 		output = e.statsText()
 	case "stats-reset":

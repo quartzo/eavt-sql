@@ -158,7 +158,7 @@ func applySchemaGroupTx(ops EngineOps, tab *scheme.SymTab, txops []scheme.TxWOp,
 	return ops.DeclareAttrFromSQL(ident, vtName, many, unique, t)
 }
 
-func SlotToValueForType(v scheme.TxWSlot, vt uint32) string {
+func SlotToValueForType(v scheme.TxWSlot, vt uint32, tab *scheme.SymTab) string {
 	switch vt {
 	case eavt.DbTypeBoolean:
 		if v.Kind == scheme.TskBool {
@@ -174,16 +174,26 @@ func SlotToValueForType(v scheme.TxWSlot, vt uint32) string {
 		}
 		return "0"
 	}
-	return slotToPackedValue(v)
+	return slotToPackedValue(v, tab)
 }
 
-func slotToPackedValue(v scheme.TxWSlot) string {
+func slotToPackedValue(v scheme.TxWSlot, tab *scheme.SymTab) string {
 	switch v.Kind {
 	case scheme.TskInt:
 		return strconv.FormatInt(v.I, 10)
 	case scheme.TskFloat:
 		return numfmt.FloatString(v.F)
-	case scheme.TskStr, scheme.TskKw:
+	case scheme.TskStr:
+		return v.S
+	case scheme.TskKw:
+		// A keyword slot stores only its interned symbol (like the Nim
+		// TxWSlot); resolve the name through the symtab.  The Nim
+		// slotToPackedValue returns v.s (always empty for keywords) — a
+		// shared latent bug: keyword-as-value encoded as "".  This port
+		// fixes it deliberately (diverges from Nim for keyword values).
+		if tab != nil {
+			return tab.SymName(scheme.SymId(v.Sym))
+		}
 		return v.S
 	case scheme.TskBool:
 		if v.B {
@@ -283,7 +293,7 @@ func TransactTx(ops EngineOps, txops []scheme.TxWOp) (TxReport, error) {
 	}
 	keyFor := func(aid, vt uint32, mode eavt.EncodeMode, v scheme.TxWSlot) []byte {
 		key := []byte{byte(aid >> 24), byte(aid >> 16), byte(aid >> 8), byte(aid)}
-		enc, _ := eavt.EncodeValue(SlotToValueForType(v, vt), mode, 0)
+		enc, _ := eavt.EncodeValue(SlotToValueForType(v, vt, tab), mode, 0)
 		return append(key, enc...)
 	}
 	slotOf := func(sym uint32, name string) int32 {

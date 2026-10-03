@@ -55,8 +55,8 @@ func encodeSaveValue(val sexpr.Expr, vt uint32, mode eavt.EncodeMode, eid int64)
 	return eavt.EncodeValue(packed, mode, eid)
 }
 
-func encodeSaveValueSlot(val scheme.TxWSlot, vt uint32, mode eavt.EncodeMode, eid int64) ([]byte, error) {
-	packed := query.SlotToValueForType(val, vt)
+func encodeSaveValueSlot(val scheme.TxWSlot, vt uint32, mode eavt.EncodeMode, eid int64, tab *scheme.SymTab) ([]byte, error) {
+	packed := query.SlotToValueForType(val, vt, tab)
 	if mode == eavt.EmRef {
 		n, err := strconv.ParseInt(packed, 10, 64)
 		if err != nil {
@@ -216,7 +216,7 @@ func (q *QueryStore) SaveBatchEdn(txops []scheme.TxWOp, t int64) {
 			continue
 		}
 		m := metaFor(op.AttrId)
-		encoded, err := encodeSaveValueSlot(effVal(op), m.vt, m.mode, op.E.I)
+		encoded, err := encodeSaveValueSlot(effVal(op), m.vt, m.mode, op.E.I, q.symtab)
 		if err != nil {
 			continue
 		}
@@ -236,7 +236,7 @@ func (q *QueryStore) RetractBatch(txops []scheme.TxWOp, t int64) {
 		}
 		vt, _ := q.Eavt.ValueTypeFor(op.AttrId)
 		mode := eavt.ValueTypeToEncodeMode(vt)
-		encoded, err := encodeSaveValueSlot(op.V, vt, mode, op.E.I)
+		encoded, err := encodeSaveValueSlot(op.V, vt, mode, op.E.I, q.symtab)
 		if err != nil {
 			continue
 		}
@@ -251,7 +251,7 @@ func (q *QueryStore) RetractBatch(txops []scheme.TxWOp, t int64) {
 func (q *QueryStore) HasDatomW(eid int64, attrID uint32, val scheme.TxWSlot) bool {
 	vt, _ := q.Eavt.ValueTypeFor(attrID)
 	mode := eavt.ValueTypeToEncodeMode(vt)
-	encoded, err := encodeSaveValueSlot(val, vt, mode, eid)
+	encoded, err := encodeSaveValueSlot(val, vt, mode, eid, q.symtab)
 	if err != nil {
 		return false
 	}
@@ -287,7 +287,7 @@ func (q *QueryStore) LookupEntityW(attrName string, value scheme.TxWSlot) (int64
 	}
 	vt, _ := q.Eavt.ValueTypeFor(aid)
 	mode := eavt.ValueTypeToEncodeMode(vt)
-	encoded, err := eavt.EncodeValue(query.SlotToValueForType(value, vt), mode, 0)
+	encoded, err := eavt.EncodeValue(query.SlotToValueForType(value, vt, q.symtab), mode, 0)
 	if err != nil {
 		return 0, false
 	}
