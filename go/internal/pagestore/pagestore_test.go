@@ -202,3 +202,32 @@ func TestKvCommitAndScan(t *testing.T) {
 		t.Fatalf("KeyExistsKv = %q %v", v, ok)
 	}
 }
+
+// TestPooledMergeIntoExistingTree exercises the blob pool on the merge path:
+// a second merge into a populated tree must write leaf/index pages through the
+// worker pool and yield the full union.
+func TestPooledMergeIntoExistingTree(t *testing.T) {
+	s := newTestStore(t)
+	keys := wideKeys(8000)
+	if _, err := s.CommitMergeMap(map[int][][]byte{0: keys}); err != nil {
+		t.Fatal(err)
+	}
+	extra := make([][]byte, 4000)
+	for i := range extra {
+		k := append([]byte(nil), keys[i*2]...)
+		k[3] = 1 // interleave within the same 3-byte prefix group
+		extra[i] = k
+	}
+	if _, err := s.CommitMergeMap(map[int][][]byte{0: extra}); err != nil {
+		t.Fatal(err)
+	}
+	tree := s.Trees()[0]
+	cur := NewCursor(s, 0, tree.RootUUID, tree.Height, false)
+	got, err := collect(cur)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 12000 {
+		t.Fatalf("scan = %d, want 12000", len(got))
+	}
+}

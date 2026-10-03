@@ -15,16 +15,13 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
 
 ## 1. Adiado (não implementado)
 
-- **Flush chunked + pool de blobs.** O flush Go agora é **faseado**
-  (`CaptureFlush` sob o lock → `PrepareFlush` **fora** do lock → `PublishFlush`
-  sob o lock), então o I/O de blobs **não segura o engine**. O que ainda falta
-  em relação ao Nim: o Nim **fatia** o drain em ~256 KiB com
-  `await sleepAsync(0)` entre fatias (serve queries durante o próprio drain) e
-  usa o blob pool (zstd + I/O em workers). No Go o `PrepareFlush` é uma única
-  passada bloqueante numa goroutine (não fatia) e o zstd roda nessa mesma
-  goroutine, sem pool. Arquivos: `internal/kvstore/kvstore.go`,
-  `internal/pagestore/store.go` (`PrepareMerge`/`PrepareMergeKv`),
-  `internal/transactor/server.go` (`runFlush`).
+- **Fatiamento do drain em ~256 KiB.** O Nim fatia o drain em fatias de
+  ~256 KiB com `await sleepAsync(0)` (serve queries no próprio loop do drain).
+  No Go isso não é necessário para a *latência*: o `PrepareFlush` roda numa
+  goroutine **fora** do `e.mu`, e queries rodam em outras goroutines — ver a
+  entrada resolvida `Flush + blob pool` abaixo. O que fica de fora é
+  fatiar um único CF gigante em merges intermediários (o Go faz um passe
+  ordenado por CF); o worker pool já paraleliza a compressão/escrita.
 - **Cursor hidratado do scanner — variante `/as-of`/history.** O pacote
   `internal/hydrated` (M6) e o modo hid do `MergedCursor` foram portados:
   um seek CF-0 ancorado num eid hidratado é servido da entrada (snapshot
@@ -65,6 +62,18 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
 - **Flush stop-the-world no transactor** — o flush passou a ser
   capture/prepare/publish; só o capture e o publish (curtos) seguram o lock.
   O `PrepareFlush` (I/O de blobs) roda **fora** do lock.
+- **Flush + blob pool + auto-flush** — `internal/pagestore` ganhou o blob pool
+  (`blobPutPages`): compressão zstd + escrita de blobs em paralelo num pool
+  limitado a 2–4 workers, com `putPageList`/`putIndexPages` usados por
+  `PrepareMerge`/`PrepareMergeKv`/`buildIndexTree`/`writeIndexLevel`; há um
+  `yieldPageWork` (Gosched) nas fronteiras de CF (o análogo Go do
+  `sleepAsync(0)`). No transactor, o auto-flush por threshold agora está
+  **armado** (`OnFlushRequest = requestFlush`) com um driver single-flight que
+  coalesce pedidos (o Nim `AsyncFlusher`); `.flush` enfileira e `.flush-sync`
+  espera (`flushSync`). Falha de prepare agora libera a captura
+  (`AbortFlush`) em vez de travar o store com `flushActive` preso.
+  Testes: `TestPooledMergeIntoExistingTree`, `TestAbortFlushReleasesCapture`,
+  `TestAutoFlushOnThreshold`.
 - **`hydrated` (cache de leitura por eid, M6)** — portado em
   `internal/hydrated`: buffer plano por entrada + array de offsets, LRU com
   orçamento, `applyKey` (write-through), `hydrate`/`hydrateEmpty`,

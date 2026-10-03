@@ -342,3 +342,24 @@ func TestConcurrentWriteAndFlush(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+// TestAbortFlushReleasesCapture verifies a failed capture can be released so
+// later flushes proceed.
+func TestAbortFlushReleasesCapture(t *testing.T) {
+	kv := newStore(t)
+	kv.Put(0, []byte{1})
+	if _, ok := kv.CaptureFlush(); !ok {
+		t.Fatal("capture failed")
+	}
+	if !kv.FlushActive() {
+		t.Fatal("flushActive not set")
+	}
+	kv.AbortFlush()
+	if kv.FlushActive() {
+		t.Fatal("flushActive not cleared after abort")
+	}
+	if _, ok := kv.CaptureFlush(); !ok {
+		t.Fatal("capture after abort failed")
+	}
+	kv.AbortFlush()
+}

@@ -5,6 +5,7 @@ package transactor
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -40,6 +41,14 @@ type Engine struct {
 	// and the memtable keeps the active ladder while the frozen (draining)
 	// one is drained, released only at publish.
 	mu sync.Mutex
+
+	// Flush driver (the Nim AsyncFlusher's single-flight + coalescing): a
+	// background worker drains one capture at a time; requests arriving during
+	// a drain collapse into one follow-up pass.
+	flushMu    sync.Mutex
+	flushCond  *sync.Cond
+	flushing   bool
+	flushAgain bool
 }
 
 // NewEngine opens the data dir, bootstraps the schema and attaches the WAL.
@@ -49,6 +58,7 @@ func NewEngine(dbPath, blobDir string) (*Engine, error) {
 		return nil, err
 	}
 	e := &Engine{KV: kv, Path: dbPath, Hub: replication.NewHub(blobDir)}
+	e.flushCond = sync.NewCond(&e.flushMu)
 
 	// Attach the WAL and install the sink BEFORE bootstrap so the system-attr
 	// datoms go through the WAL (durable + replicated), not the legacy journal.
@@ -76,12 +86,56 @@ func NewEngine(dbPath, blobDir string) (*Engine, error) {
 	e.Store.Eavt.BootstrapSystemAttrs()
 	e.Store.Eavt.BootstrapResolver()
 	e.Store.Eavt.RecoverWriteState()
+
+	// Auto-flush on threshold crossing (armed by batchWrite/putKv), driven by
+	// the single-flight background flusher.
+	kv.OnFlushRequest = e.requestFlush
 	return e, nil
 }
 
-// runFlush does capture (under the lock) + prepare (off-lock, heavy blob I/O)
-// + publish (under the lock), so a flush does not block the engine for its
-// whole duration.
+// requestFlush arms the single-flight background flusher.  Requests arriving
+// while a drain is in progress are coalesced into one follow-up pass.
+func (e *Engine) requestFlush() {
+	e.flushMu.Lock()
+	if e.flushing {
+		e.flushAgain = true
+		e.flushMu.Unlock()
+		return
+	}
+	e.flushing = true
+	e.flushMu.Unlock()
+	go e.flushLoop()
+}
+
+func (e *Engine) flushLoop() {
+	for {
+		e.runFlush()
+		e.flushMu.Lock()
+		if !e.flushAgain {
+			e.flushing = false
+			e.flushCond.Broadcast()
+			e.flushMu.Unlock()
+			return
+		}
+		e.flushAgain = false
+		e.flushMu.Unlock()
+	}
+}
+
+// flushSync waits for every pending/queued flush to complete.
+func (e *Engine) flushSync() {
+	e.requestFlush()
+	e.flushMu.Lock()
+	for e.flushing {
+		e.flushCond.Wait()
+	}
+	e.flushMu.Unlock()
+}
+
+// runFlush does capture (under the lock) + prepare (off-lock, heavy blob I/O
+// + blob pool) + publish (under the lock), so a flush does not block the
+// engine for its whole duration.  On a prepare failure the frozen capture is
+// discarded and the WAL residue is re-applied at the next bootstrap.
 func (e *Engine) runFlush() {
 	e.mu.Lock()
 	b, ok := e.KV.CaptureFlush()
@@ -91,6 +145,10 @@ func (e *Engine) runFlush() {
 	}
 	trees, root, err := e.KV.PrepareFlush(b)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "transactor: flush prepare failed: %v; capture discarded\n", err)
+		e.mu.Lock()
+		e.KV.AbortFlush()
+		e.mu.Unlock()
 		return
 	}
 	e.mu.Lock()
@@ -341,14 +399,14 @@ func (e *Engine) handleAdmin(conn net.Conn, command, id string) {
 		if e.KV.ReadOnly {
 			output = "error: read-only"
 		} else {
-			go e.runFlush()
+			e.requestFlush()
 			output = "ok: flush requested"
 		}
 	case "flush-sync":
 		if e.KV.ReadOnly {
 			output = "error: read-only"
 		} else {
-			e.runFlush()
+			e.flushSync()
 			output = "ok: flushed"
 		}
 	case "gc", "gc-dry":

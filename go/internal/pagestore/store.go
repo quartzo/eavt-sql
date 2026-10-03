@@ -2,12 +2,32 @@ package pagestore
 
 import (
 	"os"
+	"runtime"
 	"sync"
+	"sync/atomic"
 
 	"github.com/klauspost/compress/zstd"
 
 	"eavt-go/internal/blobstore"
 )
+
+// pagePoolWorkers bounds concurrent page compression + blob writes during a
+// flush (the blob pool of the Nim AsyncFlusher).  Note: PageCacheSize is
+// unrelated; this is a CPU/IO worker count.
+var pagePoolWorkers = func() int {
+	n := runtime.NumCPU()
+	if n > 4 {
+		n = 4
+	}
+	if n < 2 {
+		n = 2
+	}
+	return n
+}()
+
+// yieldPageWork gives other goroutines a chance between drain chunks (the Go
+// analog of the Nim event-loop `await sleepAsync(0)`).  Overridable in tests.
+var yieldPageWork = runtime.Gosched
 
 var (
 	zstdEncOnce sync.Once
@@ -173,6 +193,106 @@ func (s *Store) blobPut(data []byte) (UUID, error) {
 	var u UUID
 	copy(u[:], id[:])
 	return u, nil
+}
+
+// blobPutPages compresses + writes a batch of pages on a bounded worker pool,
+// preserving the input order in the returned UUIDs.  Each page write is
+// independent (random blob ids), so this is embarrassingly parallel; the
+// worker count caps CPU/IO concurrency.  This is the flush's blob pool.
+func (s *Store) blobPutPages(pages [][]byte) ([]UUID, error) {
+	n := len(pages)
+	if n == 0 {
+		return nil, nil
+	}
+	if n == 1 {
+		u, err := s.blobPut(pages[0])
+		if err != nil {
+			return nil, err
+		}
+		return []UUID{u}, nil
+	}
+	uuids := make([]UUID, n)
+	errs := make([]error, n)
+	var next int64 = -1
+	w := pagePoolWorkers
+	if n < w {
+		w = n
+	}
+	var wg sync.WaitGroup
+	for k := 0; k < w; k++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(atomic.AddInt64(&next, 1))
+				if i >= n {
+					return
+				}
+				uuids[i], errs[i] = s.blobPut(pages[i])
+			}
+		}()
+	}
+	wg.Wait()
+	for _, e := range errs {
+		if e != nil {
+			return nil, e
+		}
+	}
+	return uuids, nil
+}
+
+// putPageList validates a [key,pageData] list, parallel-writes the pages and
+// returns the index entries (kv selects the KV page decoder).
+func (s *Store) putPageList(pageList [][2][]byte, kv bool) ([]IndexEntry, error) {
+	pages := make([][]byte, len(pageList))
+	for i, pl := range pageList {
+		var err error
+		if kv {
+			_, err = DeserializePageKv(pl[1])
+		} else {
+			_, err = DeserializePage(pl[1])
+		}
+		if err != nil {
+			return nil, err
+		}
+		pages[i] = pl[1]
+	}
+	uuids, err := s.blobPutPages(pages)
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]IndexEntry, len(pageList))
+	for i, pl := range pageList {
+		entries[i] = IndexEntry{Key: pl[0], UUID: uuids[i]}
+	}
+	return entries, nil
+}
+
+// putIndexPages parallel-writes a level's serialized index pages and returns
+// the level entries (first key + uuid).
+func (s *Store) putIndexPages(pages [][]byte) ([]IndexEntry, error) {
+	var data [][]byte
+	var keys [][]byte
+	for _, pageData := range pages {
+		pe, err := DeserializeIndexPage(pageData)
+		if err != nil {
+			return nil, err
+		}
+		if len(pe) == 0 {
+			continue
+		}
+		keys = append(keys, pe[0].Key)
+		data = append(data, pageData)
+	}
+	uuids, err := s.blobPutPages(data)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]IndexEntry, len(keys))
+	for i := range keys {
+		out[i] = IndexEntry{Key: keys[i], UUID: uuids[i]}
+	}
+	return out, nil
 }
 
 func (s *Store) blobGet(u UUID) ([]byte, bool, error) {
@@ -492,21 +612,7 @@ func (s *Store) writeIndexLevel(entries []IndexEntry) ([]IndexEntry, error) {
 		return []IndexEntry{{Key: entries[0].Key, UUID: uuid}}, nil
 	}
 	pages := s.splitIndexEntries(entries)
-	var out []IndexEntry
-	for _, pageData := range pages {
-		pageEntries, err := DeserializeIndexPage(pageData)
-		if err != nil {
-			return nil, err
-		}
-		if len(pageEntries) > 0 {
-			uuid, err := s.blobPut(pageData)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, IndexEntry{Key: pageEntries[0].Key, UUID: uuid})
-		}
-	}
-	return out, nil
+	return s.putIndexPages(pages)
 }
 
 func (s *Store) buildIndexTree(entries []IndexEntry, childHeight uint8) (UUID, uint8, error) {
@@ -523,19 +629,9 @@ func (s *Store) buildIndexTree(entries []IndexEntry, childHeight uint8) (UUID, u
 		uuid, err := s.blobPut(pages[0])
 		return uuid, childHeight + 1, err
 	}
-	var levelEntries []IndexEntry
-	for _, pageData := range pages {
-		pageEntries, err := DeserializeIndexPage(pageData)
-		if err != nil {
-			return UUID{}, 0, err
-		}
-		if len(pageEntries) > 0 {
-			uuid, err := s.blobPut(pageData)
-			if err != nil {
-				return UUID{}, 0, err
-			}
-			levelEntries = append(levelEntries, IndexEntry{Key: pageEntries[0].Key, UUID: uuid})
-		}
+	levelEntries, err := s.putIndexPages(pages)
+	if err != nil {
+		return UUID{}, 0, err
 	}
 	height := childHeight + 2
 	for {
@@ -549,19 +645,9 @@ func (s *Store) buildIndexTree(entries []IndexEntry, childHeight uint8) (UUID, u
 			uuid, err := s.blobPut(ser2)
 			return uuid, height, err
 		}
-		var nextLevel []IndexEntry
-		for _, pageData := range pages2 {
-			pageEntries, err := DeserializeIndexPage(pageData)
-			if err != nil {
-				return UUID{}, 0, err
-			}
-			if len(pageEntries) > 0 {
-				uuid, err := s.blobPut(pageData)
-				if err != nil {
-					return UUID{}, 0, err
-				}
-				nextLevel = append(nextLevel, IndexEntry{Key: pageEntries[0].Key, UUID: uuid})
-			}
+		nextLevel, err := s.putIndexPages(pages2)
+		if err != nil {
+			return UUID{}, 0, err
 		}
 		levelEntries = nextLevel
 		height++
@@ -615,18 +701,7 @@ func (s *Store) mergeLeaf(leafUUID UUID, hasRangeEnd bool, rangeEnd []byte,
 		}
 	}
 	pageList := BuildPages(merged)
-	var entries []IndexEntry
-	for _, pl := range pageList {
-		if _, err := DeserializePage(pl[1]); err != nil {
-			return nil, err
-		}
-		uuid, err := s.blobPut(pl[1])
-		if err != nil {
-			return nil, err
-		}
-		entries = append(entries, IndexEntry{Key: pl[0], UUID: uuid})
-	}
-	return entries, nil
+	return s.putPageList(pageList, false)
 }
 
 func (s *Store) mergeSubtree(nodeUUID UUID, height uint8, hasRangeEnd bool, rangeEnd []byte,
@@ -716,16 +791,9 @@ func (s *Store) PrepareMerge(baseTrees []CfTree, keysByCf []cfKeys) ([]CfTree, s
 		var newTree CfTree
 		if tree.RootUUID == (UUID{}) {
 			pageList := BuildPages(ck.keys)
-			var entries []IndexEntry
-			for _, pl := range pageList {
-				if _, err := DeserializePage(pl[1]); err != nil {
-					return nil, "", err
-				}
-				uuid, err := s.blobPut(pl[1])
-				if err != nil {
-					return nil, "", err
-				}
-				entries = append(entries, IndexEntry{Key: pl[0], UUID: uuid})
+			entries, err := s.putPageList(pageList, false)
+			if err != nil {
+				return nil, "", err
 			}
 			numLeaves := uint32(len(entries))
 			root, height, err := s.buildIndexTree(entries, 0)
@@ -756,6 +824,7 @@ func (s *Store) PrepareMerge(baseTrees []CfTree, keysByCf []cfKeys) ([]CfTree, s
 			}
 		}
 		newTrees[ck.cf] = newTree
+		yieldPageWork() // chunk boundary: let the event loop breathe
 	}
 	newRoot := MakeRootName()
 	if !s.blobPutRoot(newRoot, SerializeRoot(newTrees)) {
@@ -816,16 +885,9 @@ func (s *Store) PrepareMergeKv(baseTrees []CfTree, pairsByCf map[int][][2][]byte
 			return nil
 		}
 		pageList := BuildPagesKv(pairs)
-		var entries []IndexEntry
-		for _, pl := range pageList {
-			if _, err := DeserializePageKv(pl[1]); err != nil {
-				return err
-			}
-			uuid, err := s.blobPut(pl[1])
-			if err != nil {
-				return err
-			}
-			entries = append(entries, IndexEntry{Key: pl[0], UUID: uuid})
+		entries, err := s.putPageList(pageList, true)
+		if err != nil {
+			return err
 		}
 		numLeaves := uint32(len(entries))
 		root, height, err := s.buildIndexTree(entries, 0)
@@ -861,6 +923,7 @@ func (s *Store) PrepareMergeKv(baseTrees []CfTree, pairsByCf map[int][][2][]byte
 		if err := rebuild(cf, live); err != nil {
 			return nil, "", err
 		}
+		yieldPageWork()
 	}
 	for cf, sortedPairs := range pairsByCf {
 		if cf >= s.numCf || len(sortedPairs) == 0 {

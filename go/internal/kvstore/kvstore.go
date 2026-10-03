@@ -600,6 +600,18 @@ func (kv *KVStore) PublishFlush(b *FlushBatch, trees []pagestore.CfTree, root st
 	}
 }
 
+// AbortFlush releases a failed capture: the frozen (draining) runs are
+// discarded and the in-flight flag cleared so later flushes can proceed.  The
+// datoms remain durable in the WAL (recovered at the next bootstrap), so only
+// the volatile read window is lost until then.
+func (kv *KVStore) AbortFlush() {
+	kv.snapshotMu.Lock()
+	kv.MT.Publish()
+	kv.flushActive.Store(false)
+	kv.memSize.Store(0)
+	kv.snapshotMu.Unlock()
+}
+
 // Flush is the synchronous capture+prepare+publish (tests, sync callers).
 func (kv *KVStore) Flush() error {
 	b, ok := kv.CaptureFlush()
