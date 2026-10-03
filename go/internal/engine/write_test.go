@@ -93,6 +93,12 @@ func TestTxUniqueUpsert(t *testing.T) {
 		op(kw("db/add"), msgpack.Int(-1), kw("person/email"), msgpack.Str("a@b.c")),
 	))
 	e1 := r1.Tempids[-1]
+	if v, ok := q.LookupValue(e1, "person/email"); !ok || v != sexpr.Str("a@b.c") {
+		t.Fatalf("email CF-0 lookup = %#v %v", v, ok)
+	}
+	if got, ok := q.LookupEntity("person/email", sexpr.Str("a@b.c")); !ok || got != e1 {
+		t.Fatalf("email unique lookup = %d %v, want %d", got, ok, e1)
+	}
 	// Same unique value with a different tempid → upsert to the same eid.
 	r2 := transact(t, q, txFrame(
 		op(kw("db/add"), msgpack.Int(-2), kw("person/email"), msgpack.Str("a@b.c")),

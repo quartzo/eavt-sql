@@ -102,6 +102,16 @@ func (r *ReplicaEngine) ApplyWal(data []byte) {
 	if len(recs) == 0 {
 		return
 	}
+	r.applyRecords(recs)
+}
+
+// applyRecords routes one WAL/snapshot chunk through the unified write path.
+// When the chunk carries schema datoms, the CF-0 keys are written FIRST and
+// the resolver is refreshed BEFORE deriving the CF-1/2/3 indexes — otherwise
+// a `:db/unique` datom in the same chunk is not yet visible to IsIndexed and
+// the CF-2 (AVET) keys are never derived until a flush/root adoption brings
+// them from the primary.
+func (r *ReplicaEngine) applyRecords(recs []memtable.CfKey) {
 	hasSchema := false
 	for _, rec := range recs {
 		if rec.Cf == 0 && len(rec.Key) >= 12 {
@@ -114,12 +124,29 @@ func (r *ReplicaEngine) ApplyWal(data []byte) {
 		}
 	}
 	if hasSchema {
+		var cf0 []eavt.EavtEntry
+		for _, rec := range recs {
+			if rec.Cf == 0 && len(rec.Key) >= 20 {
+				cf0 = append(cf0, eavt.EavtEntry{CF: 0, Key: rec.Key})
+			}
+		}
+		if len(cf0) > 0 {
+			r.Store.Eavt.BatchWriteForeign(cf0)
+		}
 		r.RefreshResolverOnSchemaWal()
 	}
 	expanded := r.expand(recs)
 	if len(expanded) > 0 {
-		r.KV.BatchWrite(expanded, false)
+		r.Store.Eavt.BatchWriteForeign(toEntries(expanded))
 	}
+}
+
+func toEntries(keys []memtable.CfKey) []eavt.EavtEntry {
+	out := make([]eavt.EavtEntry, len(keys))
+	for i, k := range keys {
+		out[i] = eavt.EavtEntry{CF: k.Cf, Key: k.Key}
+	}
+	return out
 }
 
 // ApplySnapshot applies the initial snapshot (sealed segment paths + open tail).
@@ -146,10 +173,7 @@ func (r *ReplicaEngine) applyChunk(data []byte) {
 	if len(recs) == 0 {
 		return
 	}
-	expanded := r.expand(recs)
-	if len(expanded) > 0 {
-		r.KV.BatchWrite(expanded, false)
-	}
+	r.applyRecords(recs)
 }
 
 // ApplySeal promotes the live memtable to the pending set.

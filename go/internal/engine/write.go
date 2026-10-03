@@ -250,6 +250,21 @@ func (q *QueryStore) HasDatomW(eid int64, attrID uint32, val scheme.TxWSlot) boo
 	if err != nil {
 		return false
 	}
+	// Hydrated fast path: a hydrated eid is authoritative for its CF-0 set —
+	// no key for (eid, attrID) means the datom cannot exist (bulk-load hot
+	// path); with keys present, membership is checked in memory.
+	if q.Eavt.HydEnabled && q.Eavt.Hyd.ProbeComplete(eid) {
+		if !q.Eavt.Hyd.HasAttrKey(eid, attrID) {
+			return false
+		}
+		prefix := append(eidAttrPrefix(eid, attrID), encoded...)
+		for _, k := range q.Eavt.Hyd.LookupRange(eid, prefix) {
+			if len(k) >= 20 && bytes.Equal(k[12:len(k)-8], encoded) {
+				return true
+			}
+		}
+		return false
+	}
 	for _, k := range q.Eavt.ScanPrefixActive(0, eidAttrPrefix(eid, attrID)) {
 		if len(k) >= 20 && bytes.Equal(k[12:len(k)-8], encoded) {
 			return true
@@ -270,10 +285,17 @@ func (q *QueryStore) LookupEntityW(attrName string, value scheme.TxWSlot) (int64
 	if err != nil {
 		return 0, false
 	}
+	// M7: anchor probe first (unflushed), CF-2 scan fallback (committed).
+	if eid, ok := q.Eavt.Anchors.Probe(aid, encoded); ok {
+		q.Eavt.HydrateEID(eid)
+		return eid, true
+	}
 	prefix := append([]byte{byte(aid >> 24), byte(aid >> 16), byte(aid >> 8), byte(aid)}, encoded...)
 	for _, k := range q.Eavt.ScanPrefixActive(2, prefix) {
 		if len(k) >= 20 {
-			return eavt.DecodeEid(eavt.BeUint64(k, len(k)-16)), true
+			eid := eavt.DecodeEid(eavt.BeUint64(k, len(k)-16))
+			q.Eavt.HydrateEID(eid)
+			return eid, true
 		}
 	}
 	return 0, false

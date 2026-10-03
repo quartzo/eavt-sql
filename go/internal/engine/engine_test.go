@@ -104,3 +104,40 @@ func TestCompileAndExecuteQuery(t *testing.T) {
 		t.Fatalf("row value = %#v", rows[0][0])
 	}
 }
+
+// TestScannerExtractsHydrated verifies the M6 cursor fast path: a CF-0 scan
+// anchored at a hydrated eid is served from the entry and yields the same
+// results as the merged cursor.
+func TestScannerExtractsHydrated(t *testing.T) {
+	q := setup(t)
+	q.Eavt.HydrateEID(200)
+	if !q.Eavt.Hyd.Contains(200) {
+		t.Fatal("eid 200 not hydrated")
+	}
+	sc := query.NewV2Scanner("EAVT", []string{"e", "a", "v", "t", "added"}, 0, false)
+	sc.SetCursor(q.OpenCursor(0, nil))
+	sc.SaveValue(sexpr.Int(200))
+	sc.AdvanceToActiveAt()
+	got, ok := sc.ExtractCurrent()
+	if !ok || got != sexpr.Int(100) {
+		t.Fatalf("attr = %#v %v", got, ok)
+	}
+	sc.SaveValue(sexpr.Int(100))
+	sc.AdvanceToActiveAtPreserving()
+	got, ok = sc.ExtractCurrent()
+	if !ok {
+		t.Fatal("value missing")
+	}
+	if s, ok := got.(sexpr.Str); !ok || s != "Alice" {
+		t.Fatalf("value = %#v", got)
+	}
+	// A non-hydrated eid falls back to the merged cursor transparently.
+	q.Eavt.Hyd.Evict(200)
+	sc2 := query.NewV2Scanner("EAVT", []string{"e", "a", "v", "t", "added"}, 0, false)
+	sc2.SetCursor(q.OpenCursor(0, nil))
+	sc2.SaveValue(sexpr.Int(200))
+	sc2.AdvanceToActiveAt()
+	if got, ok := sc2.ExtractCurrent(); !ok || got != sexpr.Int(100) {
+		t.Fatalf("fallback attr = %#v %v", got, ok)
+	}
+}

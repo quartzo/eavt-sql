@@ -14,6 +14,8 @@ import (
 )
 
 // BatchWrite journals the CF-0 datoms and writes every CF to the memtable.
+// CF-2 keys are additionally mirrored into the anchor hash (M7 O(1) unique
+// lookup) and CF-0 keys into the hydrated cache (M6 read-your-writes).
 func (e *Engine) BatchWrite(entries []EavtEntry) {
 	if len(entries) == 0 {
 		return
@@ -21,6 +23,16 @@ func (e *Engine) BatchWrite(entries []EavtEntry) {
 	cfs := make([]memtable.CfKey, 0, len(entries))
 	var durable []memtable.CfKey
 	for _, en := range entries {
+		if en.CF == 2 && len(en.Key) >= 20 {
+			k := en.Key
+			sf := BeUint64(k, len(k)-8)
+			aid := BeUint32(k, 0)
+			if sf&1 == 0 {
+				e.Anchors.Put(aid, k[4:len(k)-16], DecodeEid(BeUint64(k, len(k)-16)))
+			} else {
+				e.Anchors.Del(aid, k[4:len(k)-16])
+			}
+		}
 		cfs = append(cfs, memtable.CfKey{Cf: en.CF, Key: en.Key})
 		if en.CF == 0 {
 			durable = append(durable, memtable.CfKey{Cf: 0, Key: en.Key})
@@ -28,6 +40,11 @@ func (e *Engine) BatchWrite(entries []EavtEntry) {
 	}
 	if len(durable) > 0 {
 		e.KV.JournalOnly(durable)
+	}
+	if e.HydEnabled {
+		for _, d := range durable {
+			e.Hyd.ApplyKey(d.Key)
+		}
 	}
 	e.KV.BatchWrite(cfs, false)
 }
@@ -228,14 +245,47 @@ func (e *Engine) BootstrapSystemAttrs() {
 	}
 }
 
-// AllocateInPartition reserves a user/partition entity id.
+// AllocateInPartition reserves a user/partition entity id.  New entities
+// start hydrated (empty): their first saves mirror into the fast path.
 func (e *Engine) AllocateInPartition(pid uint64) int64 {
 	eid, _ := e.Resolver.AllocateInPartition(pid)
+	if e.HydEnabled {
+		e.Hyd.HydrateEmpty(eid)
+	}
 	return eid
 }
 
 // AllocateEntityId reserves a user entity id.
 func (e *Engine) AllocateEntityId() int64 { return e.AllocateInPartition(PartUser) }
+
+// HydrateEID installs the full active CF-0 key set for eid (read-time
+// hydration).  No-op when disabled or already hydrated; phantom (no datom)
+// entities are left unhydrated.
+func (e *Engine) HydrateEID(eid int64) {
+	if !e.HydEnabled || e.Hyd.Contains(eid) {
+		return
+	}
+	ks := e.ScanPrefixActive(0, EncodeEid(eid))
+	if len(ks) > 0 {
+		e.Hyd.Hydrate(eid, ks)
+	}
+}
+
+// BatchWriteForeign routes datom/index keys that are NOT arena-owned (replica
+// WAL frames, tests) through the write path so the anchor/hydrated mirrors
+// stay current.  No journaling happens on a read-only replica.
+func (e *Engine) BatchWriteForeign(entries []EavtEntry) {
+	if len(entries) == 0 {
+		return
+	}
+	owned := make([]EavtEntry, 0, len(entries))
+	for _, en := range entries {
+		k := make([]byte, len(en.Key))
+		copy(k, en.Key)
+		owned = append(owned, EavtEntry{CF: en.CF, Key: k})
+	}
+	e.BatchWrite(owned)
+}
 
 // DeclarePartition registers a custom partition.
 func (e *Engine) DeclarePartition(name string) uint64 { return e.Resolver.DeclarePartition(name) }
@@ -250,21 +300,37 @@ func (e *Engine) BatchLookupAvet(keys [][]byte) []int64 {
 	if len(keys) == 0 {
 		return out
 	}
-	order := make([]int, len(keys))
+	// M7: hash probe first (unflushed anchors); misses fall to the CF-2 scan.
+	var missIdx []int
+	var missKeys [][]byte
+	for i, k := range keys {
+		if len(k) > 4 {
+			if eid, ok := e.Anchors.Probe(BeUint32(k, 0), k[4:]); ok {
+				out[i] = eid
+				continue
+			}
+		}
+		missIdx = append(missIdx, i)
+		missKeys = append(missKeys, k)
+	}
+	if len(missIdx) == 0 {
+		return out
+	}
+	order := make([]int, len(missKeys))
 	for i := range order {
 		order[i] = i
 	}
-	sort.SliceStable(order, func(a, b int) bool { return CmpBytes(keys[order[a]], keys[order[b]]) < 0 })
+	sort.SliceStable(order, func(a, b int) bool { return CmpBytes(missKeys[order[a]], missKeys[order[b]]) < 0 })
 	lastIdx := -1
 	for oi := range order {
-		i := order[oi]
-		if lastIdx >= 0 && CmpBytes(keys[order[lastIdx]], keys[i]) == 0 {
-			out[i] = out[order[lastIdx]]
+		mi := order[oi]
+		if lastIdx >= 0 && CmpBytes(missKeys[order[lastIdx]], missKeys[mi]) == 0 {
+			out[missIdx[mi]] = out[missIdx[order[lastIdx]]]
 			continue
 		}
-		res := e.ScanPrefixActive(2, keys[i])
+		res := e.ScanPrefixActive(2, missKeys[mi])
 		if len(res) > 0 && len(res[0]) >= 20 {
-			out[i] = DecodeEid(BeUint64(res[0], len(res[0])-16))
+			out[missIdx[mi]] = DecodeEid(BeUint64(res[0], len(res[0])-16))
 		}
 		lastIdx = oi
 	}
@@ -283,10 +349,17 @@ func (e *Engine) LookupEntityByValue(attrName, value string) (int64, bool) {
 	if err != nil {
 		return 0, false
 	}
+	// M7: anchor probe first (O(1)); CF-2 scan fallback.
+	if eid, ok := e.Anchors.Probe(aid, encoded); ok {
+		e.HydrateEID(eid)
+		return eid, true
+	}
 	prefix := append([]byte{byte(aid >> 24), byte(aid >> 16), byte(aid >> 8), byte(aid)}, encoded...)
 	for _, k := range e.ScanPrefixActive(2, prefix) {
 		if len(k) >= 20 {
-			return DecodeEid(BeUint64(k, len(k)-16)), true
+			eid := DecodeEid(BeUint64(k, len(k)-16))
+			e.HydrateEID(eid)
+			return eid, true
 		}
 	}
 	return 0, false
@@ -337,6 +410,10 @@ func (e *Engine) RecoverWriteState() {
 		}
 		for _, d := range DeriveIndexKeys(k, indexed, isRef) {
 			derived = append(derived, memtable.CfKey{Cf: d.CF, Key: d.Key})
+		}
+		if !retracted && indexed {
+			// M7 anchor rebuild: [aid][val] -> eid for the O(1) probe.
+			e.Anchors.Put(aid, k[12:len(k)-8], DecodeEid(BeUint64(k, 0)))
 		}
 	}
 	e.KV.ApplyJournalRecordsExpanded(derived)

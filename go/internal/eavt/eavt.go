@@ -5,11 +5,15 @@ package eavt
 
 import (
 	"bytes"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"eavt-go/internal/anchor"
 	"eavt-go/internal/datalog"
+	"eavt-go/internal/hydrated"
 	"eavt-go/internal/kvstore"
 )
 
@@ -61,15 +65,42 @@ func ValueTypeFromName(name string) uint32 {
 type Engine struct {
 	KV       *kvstore.KVStore
 	Resolver *Resolver
+	// M6: RAM read cache of complete CF-0 key sets per eid.
+	Hyd *hydrated.Set
+	// M7: packed [aid+val] -> eid mirror for UNIQUE attrs.
+	Anchors    *anchor.Index
+	HydEnabled bool
 
 	statsMu         sync.Mutex
 	cachedStats     *datalog.CompileStats
 	cachedStatsTime time.Time
 }
 
+// hydratedDefaults mirrors nim_eavt/eavt.nim's default budgets.
+const defaultMaxBytes = 256 * 1024 * 1024
+
 // NewEngine creates an engine and bootstraps its resolver.
 func NewEngine(kv *kvstore.KVStore) *Engine {
-	e := &Engine{KV: kv, Resolver: NewResolver()}
+	hydMax := defaultMaxBytes
+	if v := os.Getenv("EAVT_HYDRATED_MAX_BYTES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			hydMax = n
+		}
+	}
+	anchorMax := defaultMaxBytes
+	if v := os.Getenv("EAVT_ANCHOR_INDEX_MAX_BYTES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			anchorMax = n
+		}
+	}
+	enabled := os.Getenv("EAVT_HYDRATED_ENABLED") != "false"
+	e := &Engine{
+		KV:         kv,
+		Resolver:   NewResolver(),
+		Hyd:        hydrated.New(hydMax),
+		Anchors:    anchor.New(anchorMax),
+		HydEnabled: enabled,
+	}
 	e.BootstrapResolver()
 	return e
 }
@@ -97,6 +128,14 @@ func (e *Engine) ScanPrefix(cf int, prefix []byte) [][]byte {
 
 // ScanPrefixActive returns only active datoms (newest version per logical key).
 func (e *Engine) ScanPrefixActive(cf int, prefix []byte) [][]byte {
+	// M6 hydrated fast path: a CF-0 scan anchored at a hydrated eid is
+	// answered entirely from the in-memory key set (complete + current).
+	if e.HydEnabled && cf == 0 && len(prefix) >= 8 {
+		eid := DecodeEid(BeUint64(prefix, 0))
+		if e.Hyd.ProbeComplete(eid) {
+			return e.Hyd.LookupRange(eid, prefix)
+		}
+	}
 	collected := e.ScanPrefix(cf, prefix)
 	var kept [][]byte
 	var lastPrefix []byte

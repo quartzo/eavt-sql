@@ -25,13 +25,16 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   goroutine, sem pool. Arquivos: `internal/kvstore/kvstore.go`,
   `internal/pagestore/store.go` (`PrepareMerge`/`PrepareMergeKv`),
   `internal/transactor/server.go` (`runFlush`).
-- **`hydrated` (cache de leitura por eid, M6).** Não portado; `hydrateEid`
-  é no-op. Como consequência, os *fast paths* de escrita que dependem de
-  `probeComplete` (`skip provado` do retract scan e do `hasDatom`) **nunca
-  são tomados** — sempre faz scan. Correto, mais lento. (`internal/eavt/*`.)
-- **`anchor_index` (hash AV→eid, M7).** Não portado. `LookupEntity`,
-  `LookupEntityW` e `BatchLookupAvet` caem sempre no scan CF-2. Correto,
-  mais lento. (`internal/eavt/write.go`, `internal/engine/write.go`.)
+- **Cursor hidratado do scanner — variante `/as-of`/history.** O pacote
+  `internal/hydrated` (M6) e o modo hid do `MergedCursor` foram portados:
+  um seek CF-0 ancorado num eid hidratado é servido da entrada (snapshot
+  de chaves copiado no seek, seguro sob concorrência). Como as entradas
+  guardam **apenas chaves ativas**, uma query `as-of`/history que ancore
+  num eid hidratado perderia as versões antigas — mesma interação latente
+  do Nim (lá o cursor também só tem chaves ativas). Na prática entidades
+  hidratadas são as recém-escritas/consultadas; para blindar o Go, dá para
+  restringir o modo hid a scanners não-history (`internal/cursor`,
+  `internal/engine/engine.go` `OpenCursor`).
 - **Backends de blobstore S3 e journal.** Só o backend `file` foi portado
   (`internal/blobstore`). O facade async/pool de blobstore não é usado pelo
   transactor Go.
@@ -62,6 +65,30 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
 - **Flush stop-the-world no transactor** — o flush passou a ser
   capture/prepare/publish; só o capture e o publish (curtos) seguram o lock.
   O `PrepareFlush` (I/O de blobs) roda **fora** do lock.
+- **`hydrated` (cache de leitura por eid, M6)** — portado em
+  `internal/hydrated`: buffer plano por entrada + array de offsets, LRU com
+  orçamento, `applyKey` (write-through), `hydrate`/`hydrateEmpty`,
+  `hasAttrKey`/`lookupRange`/`keysFrom`. Cada método pega o mutex interno e
+  devolve cópias (o Nim é single-threaded e empresta a entrada ao cursor).
+  Wire: `eavt.BatchWrite` espelha CF-0, `ScanPrefixActive` serve seeks CF-0
+  ancorados num eid hidratado, `HydrateEID` no read-time, `Allocate*` marca
+  entidades novas; no engine, `HasDatomW` ("skip provado") e os lookups
+  hidratam; o `MergedCursor` tem modo hid (snapshot de chaves no seek).
+  Config: `EAVT_HYDRATED_ENABLED`/`EAVT_HYDRATED_MAX_BYTES` (default 256 MiB).
+- **`anchor_index` (hash AV→eid, M7)** — portado em `internal/anchor`: hash
+  empacotado com arena + recs de índice estável, FNV-1a sem concatenação,
+  LRU/eviction, rehash com compactação, mutex interno. Wire:
+  `eavt.BatchWrite` espelha CF-2 (put/del), `RecoverWriteState` reconstrói do
+  resíduo CF-0, `BatchLookupAvet`/`LookupEntityByValue` e os lookups do engine
+  fazem probe antes do scan CF-2. Config: `EAVT_ANCHOR_INDEX_MAX_BYTES`.
+- **CF-2 de atributo `:db/unique` não era derivado na réplica (bug real,
+  pré-M6).** A réplica atualizava o resolver **antes** de gravar o chunk de
+  schema, então o `:db/unique` do próprio chunk não era visível a `IsIndexed`
+  e as chaves CF-2 (AVET) nunca eram derivadas — queries em attr unique
+  voltavam vazias até um flush/adoção de root trazer o CF-2 do transactor
+  (o Nim não exibe isso). Corrigido em `internal/replica` `applyRecords`:
+  grava primeiro os CF-0 do chunk, atualiza o resolver, depois deriva os
+  índices. Regressão: `TestWalSchemaRefreshBeforeDerive`.
 
 ---
 
@@ -206,7 +233,9 @@ de um flush continua vendo o snapshot antigo.
 |---|---|
 | Flush faseado (sem pause) | `internal/kvstore/kvstore.go`, `internal/pagestore/store.go`, `internal/transactor/server.go` |
 | KV não WAL'd (só flush) | `internal/kvstore/kvstore.go` (`PutKv`/`DeleteKv`/`journalRecord`) |
-| hydrated/anchor ausentes | `internal/eavt/*`, `internal/engine/write.go` |
+| hydrated (M6) / anchor (M7) | `internal/hydrated/*`, `internal/anchor/*`, `internal/eavt/*`, `internal/engine/{engine,write}.go`, `internal/cursor/cursor.go` |
+| Cursor hid + history (latente) | `internal/cursor/cursor.go`, `internal/engine/engine.go` (`OpenCursor`) |
+| CF-2 unique derivado na réplica | `internal/replica/replica.go` (`applyRecords`) |
 | Planner blind-first | `internal/datalog/planner.go` |
 | Snapshot (memtable/kvstore) | `internal/memtable/memtable.go`, `internal/kvstore/kvstore.go`, `internal/pagestore/{store,cache}.go`, `internal/eavt/resolver.go` |
 | Snapshot da réplica é síncrono no reader (latência) | `internal/querysrv/server.go`, `internal/replica/replica.go` |

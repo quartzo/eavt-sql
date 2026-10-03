@@ -26,9 +26,14 @@ func New(kv *kvstore.KVStore) *QueryStore {
 	return &QueryStore{Eavt: eavt.NewEngine(kv), KV: kv, symtab: scheme.NewSymTab()}
 }
 
-// OpenCursor opens a merged scan cursor over a CF.
+// OpenCursor opens a merged scan cursor over a CF.  CF-0 cursors are wired
+// to the hydrated set (M6) for eid-anchored fast-path seeks.
 func (q *QueryStore) OpenCursor(cfID uint32, prefix []byte) cursor.Cursor {
-	return q.KV.OpenScanCursor(int(cfID))
+	mc := q.KV.OpenScanCursor(int(cfID))
+	if cfID == 0 && q.Eavt.HydEnabled {
+		mc.Hyd = q.Eavt.Hyd
+	}
+	return mc
 }
 
 // LookupAttr resolves an attribute name.
@@ -62,10 +67,12 @@ func (q *QueryStore) LookupValue(eid int64, attrName string) (sexpr.Expr, bool) 
 		return nil, false
 	}
 	vt, _ := q.Eavt.ValueTypeFor(aid)
+	q.Eavt.HydrateEID(eid)
 	return eavt.DecodeStoredValue(k[12:len(k)-8], vt), true
 }
 
-// LookupEntity resolves an entity by a unique attribute value (CF-2 scan).
+// LookupEntity resolves an entity by a unique attribute value.  M7: anchor
+// probe first (O(1)); CF-2 scan fallback.
 func (q *QueryStore) LookupEntity(attrName string, value sexpr.Expr) (int64, bool) {
 	aid, ok := q.Eavt.LookupAttr(attrName)
 	if !ok {
@@ -78,11 +85,17 @@ func (q *QueryStore) LookupEntity(attrName string, value sexpr.Expr) (int64, boo
 	if err != nil {
 		return 0, false
 	}
+	if eid, ok := q.Eavt.Anchors.Probe(aid, encoded); ok {
+		q.Eavt.HydrateEID(eid)
+		return eid, true
+	}
 	prefix := []byte{byte(aid >> 24), byte(aid >> 16), byte(aid >> 8), byte(aid)}
 	prefix = append(prefix, encoded...)
 	keys := q.Eavt.ScanPrefixActive(2, prefix)
 	if len(keys) > 0 && len(keys[0]) >= 20 {
-		return eavt.DecodeEid(eavt.BeUint64(keys[0], len(keys[0])-16)), true
+		eid := eavt.DecodeEid(eavt.BeUint64(keys[0], len(keys[0])-16))
+		q.Eavt.HydrateEID(eid)
+		return eid, true
 	}
 	return 0, false
 }
