@@ -164,12 +164,13 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   `slotToPackedValue` recebem o symtab e resolvem o nome para `TskKw`.
   Regressão: `TestKeywordValueEncodesName` + E2E (`:person/status :active`
   volta `active`).
-- **Planner com cardinalidade minúscula** (`internal/datalog/planner.go`):
-  quando `total_eavt` é pequeno, a busca de custo pode escolher uma ordem
-  "blind-first" que gera programa inválido (var sem scanner no depth). É a
-  **mesma aritmética de custo do Nim** (não é bug do port), mas é uma
-  fragilidade: com store de 1 datom só, a query pode vir vazia. Dados
-  realistas escolhem a ordem correta.
+- ~~**Planner blind-first com cardinalidade minúscula.**~~ **Blindado no Go.**
+  A busca roda primeiro **idêntica à referência** (preserva os golden de wire
+  e explain, 25/25) e só cai num fallback que prefere passos não-blind quando
+  o plano escolhido é **insoundável** — alguma var de `OrderedVars` sem
+  scanner no seu depth (`internal/datalog/planner.go`). Corrige a query vazia
+  com store de 1 datom. Regressão: `TestBlindFirstTinyCardinality` (planner) e
+  `TestDatalogQueryTinyStore` (E2E no engine).
 - **Sessão de paridade anterior estava furada.** `go/testdata/parity_session.txt`
   usava `:db.type/double`, que **o próprio Nim rejeita** (o tipo é
   `:db.type/float`). A paridade "OK" de 44 linhas passava com **ambos errando**

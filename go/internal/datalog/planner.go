@@ -377,7 +377,7 @@ func candidateCmp(a, b string, findSet map[string]bool) int {
 	return 0
 }
 
-func exploreOrderingDepth(env *searchEnv, remaining []string, bound []string,
+func exploreOrderingDepth(env *searchEnv, preferNonBlind bool, remaining []string, bound []string,
 	clauseIndexMap []string, accumulated, topElements float64,
 	state *searchState, path []string, depthTraces []DepthTrace) {
 
@@ -411,34 +411,63 @@ func exploreOrderingDepth(env *searchEnv, remaining []string, bound []string,
 		return candidateCmp(candidates[i], candidates[j], env.findSet) < 0
 	})
 
+	// Precompute each candidate's active clauses so blind steps can be
+	// deferred to last resort (see the filter below).
+	type candPlan struct {
+		varName string
+		active  []ActiveClause
+		sizes   []float64
+		newIdx  []string
+		gaps    int
+		blind   bool
+	}
+	plans := make([]candPlan, 0, len(candidates))
+	anyNonBlind := false
 	for _, currentVar := range candidates {
 		if synth, ok := env.synthByName[currentVar]; ok && !boundSet[synth.SourceVar] {
 			continue
 		}
-		var activeClauses []ActiveClause
-		var clauseSizes []float64
-		newClauseIndexes := copySlice(clauseIndexMap)
-		totalGaps := 0
+		cp := candPlan{varName: currentVar, newIdx: copySlice(clauseIndexMap)}
 		for ci, clause := range env.clauses {
 			if !ContainsVarInEAV(clause, currentVar) {
 				continue
 			}
 			if assigned := clauseIndexMap[ci]; assigned != "" {
 				if isVarReachableInIndex(clause, currentVar, assigned, boundSet) {
-					activeClauses = append(activeClauses, ActiveClause{Ci: ci, Index: assigned})
-					clauseSizes = append(clauseSizes, env.stats.estimate(env.joinIndices[ci], assigned, currentVar))
+					cp.active = append(cp.active, ActiveClause{Ci: ci, Index: assigned})
+					cp.sizes = append(cp.sizes, env.stats.estimate(env.joinIndices[ci], assigned, currentVar))
 				}
 			} else {
 				bestName, _, bestGap := findBestIndex(clause, currentVar, boundSet, env.refAttrs)
 				if bestName != "" {
-					activeClauses = append(activeClauses, ActiveClause{Ci: ci, Index: bestName})
-					newClauseIndexes[ci] = bestName
-					clauseSizes = append(clauseSizes, env.stats.estimate(env.joinIndices[ci], bestName, currentVar))
-					totalGaps += bestGap
+					cp.active = append(cp.active, ActiveClause{Ci: ci, Index: bestName})
+					cp.newIdx[ci] = bestName
+					cp.sizes = append(cp.sizes, env.stats.estimate(env.joinIndices[ci], bestName, currentVar))
+					cp.gaps += bestGap
 				}
 			}
 		}
-		isBlind := len(activeClauses) == 0
+		cp.blind = len(cp.active) == 0
+		if !cp.blind {
+			anyNonBlind = true
+		}
+		plans = append(plans, cp)
+	}
+
+	for _, cp := range plans {
+		currentVar := cp.varName
+		// Hardening over the reference planner: only take a blind step when no
+		// non-blind candidate remains.  With tiny cardinalities a blind step
+		// is cost-cheap and could be ordered first, producing scanners whose
+		// vars are never bound (empty results).
+		if preferNonBlind && anyNonBlind && cp.blind {
+			continue
+		}
+		activeClauses := cp.active
+		clauseSizes := cp.sizes
+		newClauseIndexes := cp.newIdx
+		totalGaps := cp.gaps
+		isBlind := cp.blind
 		rangeSel := 1.0
 		if env.rangeVars[currentVar] {
 			rangeSel = 0.1
@@ -497,7 +526,7 @@ func exploreOrderingDepth(env *searchEnv, remaining []string, bound []string,
 				newRemaining = append(newRemaining, v)
 			}
 		}
-		exploreOrderingDepth(env, newRemaining, newBound, newClauseIndexes,
+		exploreOrderingDepth(env, preferNonBlind, newRemaining, newBound, newClauseIndexes,
 			accumulated+stepCost, levelElements, state, newPath, newDepths)
 	}
 }
@@ -865,183 +894,214 @@ func BuildQueryPlan(wherePatterns []Pattern, findVars []string,
 		totalRecords: stats.TotalEAVT, stats: stats, joinIndices: joinIndices,
 		refAttrs: refSet, syntheticVars: syntheticVars, synthByName: synthByName,
 	}
-	clauseIndexMap := make([]string, len(joinPatterns))
-	state := &searchState{bestCost: math.Inf(1)}
-	exploreOrderingDepth(env, allVars, nil, clauseIndexMap, 0.0, 1.0, state, nil, nil)
-
-	bestOrderingOrig := state.bestOrdering
-	orderedVars := bestOrderingOrig
-	if len(orderedVars) == 0 {
-		orderedVars = allVars
+	runSearch := func(preferNonBlind bool) *searchState {
+		clauseIndexMap := make([]string, len(joinPatterns))
+		state := &searchState{bestCost: math.Inf(1)}
+		exploreOrderingDepth(env, preferNonBlind, allVars, nil, clauseIndexMap, 0.0, 1.0, state, nil, nil)
+		return state
 	}
-	clauseIndexes := clauseIndexMap
-	if len(state.bestClauseIndexes) > 0 {
-		clauseIndexes = state.bestClauseIndexes
-	}
+	finalize := func(state *searchState) (*QueryPlanResult, bool) {
+		clauseIndexMap := make([]string, len(joinPatterns))
+		bestOrderingOrig := state.bestOrdering
+		orderedVars := bestOrderingOrig
+		if len(orderedVars) == 0 {
+			orderedVars = allVars
+		}
+		clauseIndexes := clauseIndexMap
+		if len(state.bestClauseIndexes) > 0 {
+			clauseIndexes = state.bestClauseIndexes
+		}
 
-	// validation-only patterns
-	for patIdx, p := range joinPatterns {
-		if clauseIndexes[patIdx] != "" {
-			continue
-		}
-		hasVar := false
-		for _, s := range []Slot{p.E, p.A, p.V, p.T, p.Added} {
-			if _, ok := s.(DsVar); ok {
-				hasVar = true
-				break
-			}
-		}
-		if !hasVar && !IsLookup(p) {
-			bestIdx := ""
-			bestScore := 0
-			for _, idx := range IndexOrders {
-				score := 0
-				for _, pos := range idx.Order {
-					if _, ok := p.SlotAt(pos).(DsConst); ok {
-						score++
-					} else {
-						break
-					}
-				}
-				if score > bestScore {
-					bestScore = score
-					bestIdx = idx.Name
-				}
-			}
-			if bestScore > 0 {
-				clauseIndexes[patIdx] = bestIdx
-			}
-		}
-	}
-
-	// pre-compute skip vars for missing gaps
-	for patIdx, p := range joinPatterns {
-		idxName := clauseIndexes[patIdx]
-		if idxName == "" {
-			continue
-		}
-		idxEntry := IndexEntry(idxName)
-		firstVarPos := -1
-		for i, pos := range idxEntry {
-			if _, ok := p.SlotAt(pos).(DsVar); ok {
-				firstVarPos = i
-				break
-			}
-		}
-		if firstVarPos < 0 {
-			continue
-		}
-		targetVar := string(p.SlotAt(idxEntry[firstVarPos]).(DsVar))
-		for posIdx := 0; posIdx < firstVarPos; posIdx++ {
-			pos := idxEntry[posIdx]
-			if _, ok := p.SlotAt(pos).(DsMissing); !ok {
+		// validation-only patterns
+		for patIdx, p := range joinPatterns {
+			if clauseIndexes[patIdx] != "" {
 				continue
 			}
-			synthName := "?skip_" + pos + "_" + strings.ToLower(idxName)
-			if contains(orderedVars, synthName) {
-				continue
-			}
-			found := false
-			for vi := 0; vi < len(orderedVars); vi++ {
-				if orderedVars[vi] == targetVar {
-					orderedVars = listInsert(orderedVars, vi, synthName)
-					found = true
+			hasVar := false
+			for _, s := range []Slot{p.E, p.A, p.V, p.T, p.Added} {
+				if _, ok := s.(DsVar); ok {
+					hasVar = true
 					break
 				}
 			}
-			if !found {
-				orderedVars = append(orderedVars, synthName)
-			}
-		}
-	}
-
-	var iterPlans []IterPlanData
-	for patIdx, p := range joinPatterns {
-		idxName := clauseIndexes[patIdx]
-		if idxName == "" {
-			continue
-		}
-		var boundInts []BoundInt
-		if c, ok := p.E.(DsConst); ok {
-			switch v := c.V.(type) {
-			case BvInt:
-				boundInts = append(boundInts, BoundInt{"e", pvInt(int64(v))})
-			case BvStr:
-				boundInts = append(boundInts, BoundInt{"e", pvStr(string(v))})
-			case BvAttr:
-				boundInts = append(boundInts, BoundInt{"e", pvStr(string(v))})
-			case BvParam:
-				boundInts = append(boundInts, BoundInt{"e", PvParam(v)})
-			}
-		}
-		if c, ok := p.A.(DsConst); ok {
-			switch v := c.V.(type) {
-			case BvResolvedAttr:
-				boundInts = append(boundInts, BoundInt{"a", pvStr(v.Name)})
-			case BvStr:
-				boundInts = append(boundInts, BoundInt{"a", pvStr(string(v))})
-			case BvAttr:
-				boundInts = append(boundInts, BoundInt{"a", pvStr(string(v))})
-			case BvParam:
-				boundInts = append(boundInts, BoundInt{"a", PvParam(v)})
-			}
-		}
-		if c, ok := p.V.(DsConst); ok {
-			switch v := c.V.(type) {
-			case BvInt:
-				boundInts = append(boundInts, BoundInt{"v", pvInt(int64(v))})
-			case BvFloat:
-				boundInts = append(boundInts, BoundInt{"v", pvFloat(float64(v))})
-			case BvStr:
-				boundInts = append(boundInts, BoundInt{"v", pvStr(string(v))})
-			case BvAttr:
-				boundInts = append(boundInts, BoundInt{"v", pvStr(string(v))})
-			case BvParam:
-				boundInts = append(boundInts, BoundInt{"v", PvParam(v)})
-			}
-		}
-		iterPlans = append(iterPlans, buildIterPlan(p, patIdx, idxName, boundInts, orderedVars, syntheticVars))
-	}
-
-	var tLookupVars []string
-	for _, p := range lookups {
-		if n, ok := p.T.(DsVar); ok && !contains(tLookupVars, string(n)) {
-			tLookupVars = append(tLookupVars, string(n))
-		}
-	}
-
-	var planTraces []*PlanTrace
-	for _, trace := range state.traces {
-		if trace.Pruned {
-			planTraces = append(planTraces, trace)
-			continue
-		}
-		if slicesEqual(bestOrderingOrig, trace.Ordering) {
-			trace.Chosen = true
-			oldDepths := map[string]DepthTrace{}
-			for _, d := range trace.Depths {
-				oldDepths[d.VarName] = d
-			}
-			newDepths := make([]DepthTrace, 0, len(orderedVars))
-			for _, vn := range orderedVars {
-				if d, ok := oldDepths[vn]; ok {
-					newDepths = append(newDepths, d)
-				} else {
-					newDepths = append(newDepths, DepthTrace{VarName: vn})
+			if !hasVar && !IsLookup(p) {
+				bestIdx := ""
+				bestScore := 0
+				for _, idx := range IndexOrders {
+					score := 0
+					for _, pos := range idx.Order {
+						if _, ok := p.SlotAt(pos).(DsConst); ok {
+							score++
+						} else {
+							break
+						}
+					}
+					if score > bestScore {
+						bestScore = score
+						bestIdx = idx.Name
+					}
+				}
+				if bestScore > 0 {
+					clauseIndexes[patIdx] = bestIdx
 				}
 			}
-			trace.Depths = newDepths
-			trace.Ordering = copySlice(orderedVars)
 		}
-		planTraces = append(planTraces, trace)
+
+		// pre-compute skip vars for missing gaps
+		for patIdx, p := range joinPatterns {
+			idxName := clauseIndexes[patIdx]
+			if idxName == "" {
+				continue
+			}
+			idxEntry := IndexEntry(idxName)
+			firstVarPos := -1
+			for i, pos := range idxEntry {
+				if _, ok := p.SlotAt(pos).(DsVar); ok {
+					firstVarPos = i
+					break
+				}
+			}
+			if firstVarPos < 0 {
+				continue
+			}
+			targetVar := string(p.SlotAt(idxEntry[firstVarPos]).(DsVar))
+			for posIdx := 0; posIdx < firstVarPos; posIdx++ {
+				pos := idxEntry[posIdx]
+				if _, ok := p.SlotAt(pos).(DsMissing); !ok {
+					continue
+				}
+				synthName := "?skip_" + pos + "_" + strings.ToLower(idxName)
+				if contains(orderedVars, synthName) {
+					continue
+				}
+				found := false
+				for vi := 0; vi < len(orderedVars); vi++ {
+					if orderedVars[vi] == targetVar {
+						orderedVars = listInsert(orderedVars, vi, synthName)
+						found = true
+						break
+					}
+				}
+				if !found {
+					orderedVars = append(orderedVars, synthName)
+				}
+			}
+		}
+
+		var iterPlans []IterPlanData
+		for patIdx, p := range joinPatterns {
+			idxName := clauseIndexes[patIdx]
+			if idxName == "" {
+				continue
+			}
+			var boundInts []BoundInt
+			if c, ok := p.E.(DsConst); ok {
+				switch v := c.V.(type) {
+				case BvInt:
+					boundInts = append(boundInts, BoundInt{"e", pvInt(int64(v))})
+				case BvStr:
+					boundInts = append(boundInts, BoundInt{"e", pvStr(string(v))})
+				case BvAttr:
+					boundInts = append(boundInts, BoundInt{"e", pvStr(string(v))})
+				case BvParam:
+					boundInts = append(boundInts, BoundInt{"e", PvParam(v)})
+				}
+			}
+			if c, ok := p.A.(DsConst); ok {
+				switch v := c.V.(type) {
+				case BvResolvedAttr:
+					boundInts = append(boundInts, BoundInt{"a", pvStr(v.Name)})
+				case BvStr:
+					boundInts = append(boundInts, BoundInt{"a", pvStr(string(v))})
+				case BvAttr:
+					boundInts = append(boundInts, BoundInt{"a", pvStr(string(v))})
+				case BvParam:
+					boundInts = append(boundInts, BoundInt{"a", PvParam(v)})
+				}
+			}
+			if c, ok := p.V.(DsConst); ok {
+				switch v := c.V.(type) {
+				case BvInt:
+					boundInts = append(boundInts, BoundInt{"v", pvInt(int64(v))})
+				case BvFloat:
+					boundInts = append(boundInts, BoundInt{"v", pvFloat(float64(v))})
+				case BvStr:
+					boundInts = append(boundInts, BoundInt{"v", pvStr(string(v))})
+				case BvAttr:
+					boundInts = append(boundInts, BoundInt{"v", pvStr(string(v))})
+				case BvParam:
+					boundInts = append(boundInts, BoundInt{"v", PvParam(v)})
+				}
+			}
+			iterPlans = append(iterPlans, buildIterPlan(p, patIdx, idxName, boundInts, orderedVars, syntheticVars))
+		}
+
+		var tLookupVars []string
+		for _, p := range lookups {
+			if n, ok := p.T.(DsVar); ok && !contains(tLookupVars, string(n)) {
+				tLookupVars = append(tLookupVars, string(n))
+			}
+		}
+
+		var planTraces []*PlanTrace
+		for _, trace := range state.traces {
+			if trace.Pruned {
+				planTraces = append(planTraces, trace)
+				continue
+			}
+			if slicesEqual(bestOrderingOrig, trace.Ordering) {
+				trace.Chosen = true
+				oldDepths := map[string]DepthTrace{}
+				for _, d := range trace.Depths {
+					oldDepths[d.VarName] = d
+				}
+				newDepths := make([]DepthTrace, 0, len(orderedVars))
+				for _, vn := range orderedVars {
+					if d, ok := oldDepths[vn]; ok {
+						newDepths = append(newDepths, d)
+					} else {
+						newDepths = append(newDepths, DepthTrace{VarName: vn})
+					}
+				}
+				trace.Depths = newDepths
+				trace.Ordering = copySlice(orderedVars)
+			}
+			planTraces = append(planTraces, trace)
+		}
+
+		res := &QueryPlanResult{
+			IterPlans: iterPlans, Lookups: lookups, JoinPatterns: joinPatterns,
+			OrderedVars: orderedVars, EVars: eVars, AttrVars: attrVars,
+			TLookupVars: tLookupVars, VarOrder: varOrder, PlanTraces: planTraces,
+			SyntheticVars: syntheticVars,
+		}
+		// Soundness: every var in orderedVars must be bound at its depth by at
+		// least one scanner.  A blind-first ordering (tiny cardinality) can leave
+		// a var with no scanner, so the query silently returns nothing.
+		boundDepths := map[int]bool{}
+		for _, ip := range iterPlans {
+			for _, dp := range ip.VarDepths {
+				boundDepths[dp.Depth] = true
+			}
+		}
+		sound := true
+		for _, v := range allVars {
+			if d := indexOf(orderedVars, v); d >= 0 && !boundDepths[d] {
+				sound = false
+			}
+		}
+		return res, sound
 	}
 
-	return &QueryPlanResult{
-		IterPlans: iterPlans, Lookups: lookups, JoinPatterns: joinPatterns,
-		OrderedVars: orderedVars, EVars: eVars, AttrVars: attrVars,
-		TLookupVars: tLookupVars, VarOrder: varOrder, PlanTraces: planTraces,
-		SyntheticVars: syntheticVars,
-	}, nil
+	state := runSearch(false)
+	if res, sound := finalize(state); sound {
+		return res, nil
+	}
+	// Fallback (hardening over the reference planner): the cost-chosen
+	// ordering is unsound; re-search preferring non-blind steps.
+	state = runSearch(true)
+	res, _ := finalize(state)
+	return res, nil
 }
 
 // ── small helpers ────────────────────────────────────────────────────────

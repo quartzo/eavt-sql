@@ -157,3 +157,48 @@ func TestOpenCursorHydGuard(t *testing.T) {
 		t.Fatal("hyd wired for a non-CF-0 cursor")
 	}
 }
+
+// TestDatalogQueryTinyStore is a regression test for the blind-first planner
+// bug: a store with only one datom per attribute (total EAVT estimate ~2)
+// must still return the joined row.
+func TestDatalogQueryTinyStore(t *testing.T) {
+	kv, err := kvstore.New(kvstore.Config{Path: t.TempDir(), NumCf: 16, PageCacheSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { kv.Close() })
+
+	attrs := []struct {
+		eid  int64
+		name string
+	}{{100, "person/name"}, {101, "person/email"}}
+	for _, a := range attrs {
+		kv.Put(1, eavt.BuildAevtKey(eavt.DbIdentAid, a.eid, eavt.EncodeVariable(a.name), 1, false))
+		kv.Put(1, eavt.BuildAevtKey(eavt.DbValueTypeAid, a.eid, eavt.EncodeInt(int64(eavt.DbTypeString)), 1, false))
+	}
+	kv.Put(0, eavt.BuildEavtKey(200, 100, eavt.EncodeVariable("Alice"), 1, false))
+	kv.Put(1, eavt.BuildAevtKey(100, 200, eavt.EncodeVariable("Alice"), 1, false))
+	kv.Put(2, eavt.BuildAvetKey(100, eavt.EncodeVariable("Alice"), 200, 1, false))
+	kv.Put(0, eavt.BuildEavtKey(200, 101, eavt.EncodeVariable("a@b.c"), 1, false))
+	kv.Put(1, eavt.BuildAevtKey(101, 200, eavt.EncodeVariable("a@b.c"), 1, false))
+	kv.Put(2, eavt.BuildAvetKey(101, eavt.EncodeVariable("a@b.c"), 200, 1, false))
+
+	q := New(kv)
+	if stats := q.Eavt.BuildCompileStats(); stats.IndexEstimates["EAVT:"] > 5 {
+		t.Fatalf("tiny store estimate unexpectedly large: %v", stats.IndexEstimates["EAVT:"])
+	}
+	query := "[:find ?n ?m :where [?e :person/name ?n] [?e :person/email ?m]]"
+	prog, _, err := datalog.CompileDatalogQuery(query, q.Eavt.BuildCompileStats())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := NewQuerySession(q, scheme.Program{Body: prog}, nil, 1, 0, false)
+	stream := NewStreamingSession(sess)
+	rows, _, err := stream.NextBatch(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("tiny-store join returned no row (blind-first planner bug)")
+	}
+}
