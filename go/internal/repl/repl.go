@@ -321,6 +321,10 @@ func handleDot(c *client.Client, line string) (bool, error) {
 		return false, adminCmd(c, "tree")
 	case ".memtable":
 		return false, adminCmd(c, "memtable")
+	case ".stats":
+		return false, adminCmd(c, "stats")
+	case ".stats-reset":
+		return false, adminCmd(c, "stats-reset")
 	case ".dump":
 		a := arg(0, "EAVT")
 		if n, err := strconv.Atoi(a); err == nil && n >= 10 {

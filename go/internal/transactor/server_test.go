@@ -2,6 +2,7 @@ package transactor
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,5 +41,11 @@ func TestAutoFlushOnThreshold(t *testing.T) {
 	e.flushSync()
 	if v, ok := e.Store.Eavt.LookupValueStr(eid, "person/name"); !ok || v != "Alice" {
 		t.Fatalf("lookup after flush = %q %v", v, ok)
+	}
+	st := e.statsText()
+	for _, want := range []string{"rss=", "hyd=", "anchor=", "counters:", "saves="} {
+		if !strings.Contains(st, want) {
+			t.Fatalf("stats text missing %q: %s", want, st)
+		}
 	}
 }

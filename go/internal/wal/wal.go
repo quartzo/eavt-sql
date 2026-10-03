@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"eavt-go/internal/logutil"
 	"eavt-go/internal/memtable"
 )
 
@@ -136,7 +137,7 @@ func (w *Writer) Sink(entries []memtable.CfKey) {
 	// immediately, not only on the 100 ms fsync tick.  A machine crash still
 	// loses at most ~100 ms (un-fsynced), but a killed process loses nothing.
 	if err := w.drainLocked(); err != nil {
-		fmt.Fprintf(os.Stderr, "wal: drain failed: %v\n", err)
+		logutil.Error("wal", fmt.Sprintf("drain failed: %v", err))
 	}
 }
 

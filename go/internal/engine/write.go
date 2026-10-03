@@ -86,6 +86,7 @@ func (q *QueryStore) saveResolvedEncodedInto(eid int64, attrID, vt uint32, many,
 
 // SaveWithT saves one datom for an SExpr value.
 func (q *QueryStore) SaveWithT(eid int64, attr string, val sexpr.Expr, t, asOf int64) error {
+	q.saveCount.Add(1)
 	aid, ok := q.Eavt.LookupAttr(attr)
 	if !ok {
 		return scheme.EvalError("save to undeclared attr: " + attr)
@@ -106,6 +107,7 @@ func (q *QueryStore) SaveWithT(eid int64, attr string, val sexpr.Expr, t, asOf i
 
 // SaveManyWithT saves many (eid, value) pairs for one attribute.
 func (q *QueryStore) SaveManyWithT(attr string, pairs []query.Pair, t, asOf int64) error {
+	q.saveCount.Add(int64(len(pairs)))
 	aid, ok := q.Eavt.LookupAttr(attr)
 	if !ok {
 		return scheme.EvalError("save-many to undeclared attr: " + attr)
@@ -152,6 +154,7 @@ func (q *QueryStore) SaveManyWithT(attr string, pairs []query.Pair, t, asOf int6
 
 // Retract retracts one datom for an SExpr value.
 func (q *QueryStore) Retract(eid int64, attr string, val sexpr.Expr, t, asOf int64) error {
+	q.saveCount.Add(1)
 	aid, ok := q.Eavt.LookupAttr(attr)
 	if !ok {
 		return nil
@@ -194,6 +197,7 @@ type opMeta struct {
 // SaveBatchEdn applies all data ops of a flat tx in one batch (plus the
 // deferred db.txInstant datom).
 func (q *QueryStore) SaveBatchEdn(txops []scheme.TxWOp, t int64) {
+	q.saveCount.Add(int64(len(txops)))
 	metaCache := map[uint32]opMeta{}
 	metaFor := func(aid uint32) opMeta {
 		if m, ok := metaCache[aid]; ok {
@@ -223,6 +227,7 @@ func (q *QueryStore) SaveBatchEdn(txops []scheme.TxWOp, t int64) {
 
 // RetractBatch applies all retract ops of a flat tx in one batch.
 func (q *QueryStore) RetractBatch(txops []scheme.TxWOp, t int64) {
+	q.saveCount.Add(int64(len(txops)))
 	var entries []eavt.EavtEntry
 	for i := range txops {
 		op := &txops[i]
@@ -275,6 +280,7 @@ func (q *QueryStore) HasDatomW(eid int64, attrID uint32, val scheme.TxWSlot) boo
 
 // LookupEntityW resolves an entity by a unique attribute value (flat slot).
 func (q *QueryStore) LookupEntityW(attrName string, value scheme.TxWSlot) (int64, bool) {
+	q.lookupCount.Add(1)
 	aid, ok := q.Eavt.LookupAttr(attrName)
 	if !ok {
 		return 0, false

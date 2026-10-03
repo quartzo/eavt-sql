@@ -363,3 +363,17 @@ func TestAbortFlushReleasesCapture(t *testing.T) {
 	}
 	kv.AbortFlush()
 }
+
+// TestWriteCounters verifies the batch-write counters advance and reset.
+func TestWriteCounters(t *testing.T) {
+	kv := newStore(t)
+	kv.BatchWrite([]memtable.CfKey{{Cf: 0, Key: []byte{1}}, {Cf: 0, Key: []byte{2}}}, false)
+	batches, keys := kv.WriteStats()
+	if batches != 1 || keys != 2 {
+		t.Fatalf("write stats = %d/%d", batches, keys)
+	}
+	kv.ResetWriteCounters()
+	if b, k := kv.WriteStats(); b != 0 || k != 0 {
+		t.Fatalf("reset left %d/%d", b, k)
+	}
+}

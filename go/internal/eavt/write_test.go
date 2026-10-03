@@ -174,3 +174,17 @@ func TestConcurrentMirrorReadWrite(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// TestScanStats verifies the scan counters advance.
+func TestScanStats(t *testing.T) {
+	kv := newKV(t)
+	e := NewEngine(kv)
+	_ = e.ScanPrefixActive(0, nil)
+	if calls, _ := e.ScanStats(); calls == 0 {
+		t.Fatal("scan calls not counted")
+	}
+	e.ResetScanCounters()
+	if calls, keys := e.ScanStats(); calls != 0 || keys != 0 {
+		t.Fatalf("reset left %d/%d", calls, keys)
+	}
+}

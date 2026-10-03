@@ -5,6 +5,7 @@ package engine
 
 import (
 	"strconv"
+	"sync/atomic"
 
 	"eavt-go/internal/cursor"
 	"eavt-go/internal/eavt"
@@ -19,6 +20,22 @@ type QueryStore struct {
 	Eavt   *eavt.Engine
 	KV     *kvstore.KVStore
 	symtab *scheme.SymTab
+
+	saveCount   atomic.Int64
+	lookupCount atomic.Int64
+	execCount   atomic.Int64
+}
+
+// Counters returns cumulative (saves, lookups, execs).
+func (q *QueryStore) Counters() (saves, lookups, execs int64) {
+	return q.saveCount.Load(), q.lookupCount.Load(), q.execCount.Load()
+}
+
+// ResetCounters zeroes the engine request counters.
+func (q *QueryStore) ResetCounters() {
+	q.saveCount.Store(0)
+	q.lookupCount.Store(0)
+	q.execCount.Store(0)
 }
 
 // New creates a QueryStore and bootstraps its resolver.
@@ -74,6 +91,7 @@ func (q *QueryStore) LookupValue(eid int64, attrName string) (sexpr.Expr, bool) 
 // LookupEntity resolves an entity by a unique attribute value.  M7: anchor
 // probe first (O(1)); CF-2 scan fallback.
 func (q *QueryStore) LookupEntity(attrName string, value sexpr.Expr) (int64, bool) {
+	q.lookupCount.Add(1)
 	aid, ok := q.Eavt.LookupAttr(attrName)
 	if !ok {
 		return 0, false
@@ -159,6 +177,7 @@ func NewQuerySession(store *QueryStore, program scheme.Program, params []sexpr.E
 
 // ExecuteProgram runs the program to completion (non-streaming).
 func (s *QuerySession) ExecuteProgram() (sexpr.Expr, error) {
+	s.Store.execCount.Add(1)
 	return scheme.Eval(s.Program, scheme.NewEnvironment(), s.Host)
 }
 

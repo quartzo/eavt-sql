@@ -72,6 +72,17 @@ func (mt *MemTable) Gen() uint64 {
 	return mt.gen
 }
 
+// RunCounts returns the total active and draining run counts across all CFs.
+func (mt *MemTable) RunCounts() (active, draining int) {
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
+	for cf := 0; cf < mt.numCf; cf++ {
+		active += len(mt.runs[cf])
+		draining += len(mt.draining[cf])
+	}
+	return
+}
+
 // Size returns the active key bytes.
 func (mt *MemTable) Size() uint64 {
 	mt.mu.Lock()

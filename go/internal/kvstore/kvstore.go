@@ -108,6 +108,21 @@ type KVStore struct {
 	OnFlushRequest func()
 	// OnFlushPublish is called after a flush publishes a new root.
 	OnFlushPublish func(rootName string, maxT int64)
+
+	// write diagnostics (atomic; the Nim bwCounters).
+	bwCount atomic.Int64
+	bwKeys  atomic.Int64
+}
+
+// WriteStats returns cumulative (batchWrites, keysWritten).
+func (kv *KVStore) WriteStats() (batches, keys int64) {
+	return kv.bwCount.Load(), kv.bwKeys.Load()
+}
+
+// ResetWriteCounters zeroes the write counters.
+func (kv *KVStore) ResetWriteCounters() {
+	kv.bwCount.Store(0)
+	kv.bwKeys.Store(0)
 }
 
 // New opens a KVStore.
@@ -481,6 +496,8 @@ func (kv *KVStore) BatchWrite(entries []memtable.CfKey, journal bool) {
 	if journal && kv.journaling() && len(entries) > 0 {
 		kv.journalDeliver(entries)
 	}
+	kv.bwCount.Add(1)
+	kv.bwKeys.Add(int64(len(entries)))
 	kv.memSize.Store(kv.MT.Batch(entries))
 	kv.maybeArmFlush()
 }

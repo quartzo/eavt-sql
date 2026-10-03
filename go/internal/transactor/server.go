@@ -13,11 +13,13 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"eavt-go/internal/datalog"
 	"eavt-go/internal/downstream"
 	"eavt-go/internal/engine"
 	"eavt-go/internal/kvstore"
+	"eavt-go/internal/logutil"
 	"eavt-go/internal/msgpack"
 	"eavt-go/internal/query"
 	"eavt-go/internal/replication"
@@ -49,6 +51,11 @@ type Engine struct {
 	flushCond  *sync.Cond
 	flushing   bool
 	flushAgain bool
+
+	// stopCh stops the periodic memledger (nil when disabled); stopOnce
+	// makes Close idempotent without racing the reader.
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 // NewEngine opens the data dir, bootstraps the schema and attaches the WAL.
@@ -96,7 +103,69 @@ func NewEngine(dbPath, blobDir string) (*Engine, error) {
 	// Auto-flush on threshold crossing (armed by batchWrite/putKv), driven by
 	// the single-flight background flusher.
 	kv.OnFlushRequest = e.requestFlush
+
+	// Permanent memory instrument (M9): RSS + per-component bytes every 10s.
+	if os.Getenv("EAVT_MEM_LEDGER") != "0" {
+		e.stopCh = make(chan struct{})
+		go e.memLedgerLoop()
+	}
 	return e, nil
+}
+
+// memLedgerLoop logs the memory ledger until Close.
+func (e *Engine) memLedgerLoop() {
+	t := time.NewTicker(10 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-e.stopCh:
+			return
+		case <-t.C:
+			logutil.Info("memledger", e.memLedgerLine())
+		}
+	}
+}
+
+// rssKB reads the resident set size from /proc/self/statm (Linux).
+func rssKB() int64 {
+	data, err := os.ReadFile("/proc/self/statm")
+	if err != nil {
+		return 0
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) < 2 {
+		return 0
+	}
+	pages, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return pages * int64(os.Getpagesize()) / 1024
+}
+
+// memLedgerLine is the one-line memory snapshot (memledger + admin stats).
+func (e *Engine) memLedgerLine() string {
+	mib := func(b int) int64 { return int64(b) / 1048576 }
+	hs := e.Store.Eavt.Hyd.Stats()
+	as := e.Store.Eavt.Anchors.Stats()
+	active, draining := e.KV.MT.RunCounts()
+	return fmt.Sprintf(
+		"rss=%dMB hyd=%dMB/%deids anchor=%dMB/%dentries mt=%dMB runs=%d+%d gen=%d flushActive=%v",
+		rssKB()/1024, mib(hs.Bytes), hs.Len, mib(as.Bytes), as.Len,
+		int64(e.KV.MemtableSize())/1048576, active, draining, e.KV.MT.Gen(), e.KV.FlushActive())
+}
+
+// statsText returns the observability snapshot for the admin `stats` command.
+func (e *Engine) statsText() string {
+	saves, lookups, execs := e.Store.Counters()
+	scans, scanKeys := e.Store.Eavt.ScanStats()
+	batches, written := e.KV.WriteStats()
+	hs := e.Store.Eavt.Hyd.Stats()
+	as := e.Store.Eavt.Anchors.Stats()
+	return fmt.Sprintf("%s\ncounters: saves=%d lookups=%d execs=%d scans=%d scanKeys=%d batchWrites=%d writtenKeys=%d\nhyd: bytes=%d eids=%d hits=%d misses=%d hydrations=%d rejected=%d evictions=%d\nanchor: bytes=%d entries=%d hits=%d misses=%d rehashes=%d rejected=%d evictions=%d",
+		e.memLedgerLine(), saves, lookups, execs, scans, scanKeys, batches, written,
+		hs.Bytes, hs.Len, hs.Hits, hs.Misses, hs.Hydrations, hs.Rejected, hs.Evictions,
+		as.Bytes, as.Len, as.Hits, as.Misses, as.Rehashes, as.Rejected, as.Evictions)
 }
 
 // requestFlush arms the single-flight background flusher.  Requests arriving
@@ -151,7 +220,7 @@ func (e *Engine) runFlush() {
 	}
 	trees, root, err := e.KV.PrepareFlush(b)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "transactor: flush prepare failed: %v; capture discarded\n", err)
+		logutil.Error("transactor", fmt.Sprintf("flush prepare failed: %v; capture discarded", err))
 		e.mu.Lock()
 		e.KV.AbortFlush()
 		e.mu.Unlock()
@@ -162,8 +231,11 @@ func (e *Engine) runFlush() {
 	e.mu.Unlock()
 }
 
-// Close stops the WAL and closes the store.
+// Close stops the WAL, the memledger and closes the store.
 func (e *Engine) Close() {
+	if e.stopCh != nil {
+		e.stopOnce.Do(func() { close(e.stopCh) })
+	}
 	if e.Wal != nil {
 		e.Wal.Stop()
 	}
@@ -437,6 +509,13 @@ func (e *Engine) handleAdmin(conn net.Conn, command, id string) {
 		output = "memtable: " + strconv.FormatUint(e.KV.MemtableSize(), 10) + " bytes"
 	case "memtable":
 		output = strconv.FormatUint(e.KV.MemtableSize(), 10)
+	case "stats":
+		output = e.statsText()
+	case "stats-reset":
+		e.Store.ResetCounters()
+		e.Store.Eavt.ResetScanCounters()
+		e.KV.ResetWriteCounters()
+		output = "ok: counters reset"
 	default:
 		output = "unknown admin command: " + command
 	}

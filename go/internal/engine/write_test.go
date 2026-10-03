@@ -107,3 +107,26 @@ func TestTxUniqueUpsert(t *testing.T) {
 		t.Fatalf("upsert eid = %d, want %d", r2.Tempids[-2], e1)
 	}
 }
+
+// TestEngineCounters verifies the observability counters advance.
+func TestEngineCounters(t *testing.T) {
+	q := newWriteStore(t)
+	transact(t, q, txFrame(
+		op(kw("db/add"), msgpack.Int(0), kw("db/ident"), kw("person/email")),
+		op(kw("db/add"), msgpack.Int(0), kw("db/valueType"), kw("db.type/string")),
+		op(kw("db/add"), msgpack.Int(0), kw("db/cardinality"), kw("db.cardinality/one")),
+		op(kw("db/add"), msgpack.Int(0), kw("db/unique"), kw("db.unique/identity")),
+	))
+	transact(t, q, txFrame(op(kw("db/add"), msgpack.Int(-1), kw("person/email"), msgpack.Str("a@b.c"))))
+	if _, ok := q.LookupEntity("person/email", sexpr.Str("a@b.c")); !ok {
+		t.Fatal("lookup failed")
+	}
+	saves, lookups, _ := q.Counters()
+	if saves == 0 || lookups == 0 {
+		t.Fatalf("counters saves=%d lookups=%d", saves, lookups)
+	}
+	q.ResetCounters()
+	if s, l, e := q.Counters(); s != 0 || l != 0 || e != 0 {
+		t.Fatalf("reset left saves=%d lookups=%d execs=%d", s, l, e)
+	}
+}

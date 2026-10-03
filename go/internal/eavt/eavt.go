@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"eavt-go/internal/anchor"
@@ -74,6 +75,21 @@ type Engine struct {
 	statsMu         sync.Mutex
 	cachedStats     *datalog.CompileStats
 	cachedStatsTime time.Time
+
+	// scan diagnostics (atomic; the Nim spCounters).
+	spCount  int64
+	spKeysIn int64
+}
+
+// ScanStats returns the cumulative scan counter snapshot.
+func (e *Engine) ScanStats() (calls, keys int64) {
+	return atomic.LoadInt64(&e.spCount), atomic.LoadInt64(&e.spKeysIn)
+}
+
+// ResetScanCounters zeroes the scan counters.
+func (e *Engine) ResetScanCounters() {
+	atomic.StoreInt64(&e.spCount, 0)
+	atomic.StoreInt64(&e.spKeysIn, 0)
 }
 
 // hydratedDefaults mirrors nim_eavt/eavt.nim's default budgets.
@@ -110,6 +126,7 @@ func NewEngine(kv *kvstore.KVStore) *Engine {
 // ScanPrefix returns all keys in cf matching prefix (including retracted and
 // historical versions), ascending.
 func (e *Engine) ScanPrefix(cf int, prefix []byte) [][]byte {
+	atomic.AddInt64(&e.spCount, 1)
 	mc := e.KV.OpenScanCursor(cf)
 	mc.Seek(prefix)
 	var out [][]byte
@@ -123,6 +140,7 @@ func (e *Engine) ScanPrefix(cf int, prefix []byte) [][]byte {
 		}
 		out = append(out, k)
 	}
+	atomic.AddInt64(&e.spKeysIn, int64(len(out)))
 	return out
 }
 

@@ -37,8 +37,12 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   transactor Go.
 - **Arena plana do PageStore** (`FlatLeafKeys`/`FlatLeafKV`). O cursor Go usa
   `[][]byte`/`[][2][]byte`; é mais alocação por troca de folha.
-- **Contadores/diagnóstico de performance** (`memledger`, `printSavePerf`,
-  `printSpPerf`, `printBwPerf`, `eavtScanDiag`, `spCounters`): não portados.
+- **Buckets de nanossegundos e `eavtScanDiag`.** Os *counts* e o `memledger`
+  foram portados (ver a entrada resolvida). Fica de fora o detalhamento de
+  tempo (`saveLookupAttrNs`, `saveRetractSeekNs`, `spOpenCursorNs`, `bwNs`,
+  `execWallNs`, …), que no Nim é `when perfCounters* = false` (compile-time,
+  desligado por padrão) e o `-d:eavtScanDiag`. Portá-los exigiria instrumentar
+  ~10 call-sites com `clock_gettime`; os *counts* já dão a visão de volume.
 - **Loader de receita** (`load_receita`): existe em OCaml/Python, **não foi
   portado para Go**.
 - **`scheme` VM**: portado o suficiente para queries (e os special forms de
@@ -62,6 +66,17 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
 - **Flush stop-the-world no transactor** — o flush passou a ser
   capture/prepare/publish; só o capture e o publish (curtos) seguram o lock.
   O `PrepareFlush` (I/O de blobs) roda **fora** do lock.
+- **`logutil` + `memledger` + `stats`** — `internal/logutil` porta o logger do
+  Nim (níveis DEBUG<INFO<WARN<ERROR, threshold `EAVT_LOG`, uma linha
+  timestamped no stderr, concorrência-safe). O transactor ganhou o
+  **memledger** periódico (10s, `EAVT_MEM_LEDGER` != "0"): RSS
+  (`/proc/self/statm`) + `hyd` bytes/eids + `anchor` bytes/eids + memtable
+  bytes + runs ativos/draining + `gen` + `flushActive` — o mesmo instrumento
+  do M9, agora no Go. Contadores de volume (`internal/eavt` scans/scanKeys,
+  `internal/engine` saves/lookups/execs, `internal/kvstore` batchWrites/
+  writtenKeys) são expostos por `.stats` e zerados por `.stats-reset`
+  (comandos admin; o `.help` fica idêntico ao Nim para não quebrar a parity).
+  Erros do WAL e do flush passam por `logutil`.
 - **Flush + blob pool + auto-flush** — `internal/pagestore` ganhou o blob pool
   (`blobPutPages`): compressão zstd + escrita de blobs em paralelo num pool
   limitado a 2–4 workers, com `putPageList`/`putIndexPages` usados por
