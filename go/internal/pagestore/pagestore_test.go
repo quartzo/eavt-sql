@@ -328,3 +328,49 @@ func TestPageStoreS3Backend(t *testing.T) {
 		t.Fatalf("scan = %d, want 4000", len(got))
 	}
 }
+
+// TestFlatLeafRoundTrip checks the arena form decodes back to the same keys
+// (one allocation per leaf instead of one per key).
+func TestFlatLeafRoundTrip(t *testing.T) {
+	keys := wideKeys(500)
+	raw := SerializePage(keys)
+	flat, err := DecodePageFlat(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flat.Count() != len(keys) {
+		t.Fatalf("count = %d, want %d", flat.Count(), len(keys))
+	}
+	for i, k := range keys {
+		got := flat.Key(i)
+		if !bytes.Equal(got, k) {
+			t.Fatalf("key %d = %q, want %q", i, got, k)
+		}
+	}
+	if flat.Bytes() <= len(raw) {
+		t.Fatalf("flat bytes = %d should exceed raw %d", flat.Bytes(), len(raw))
+	}
+}
+
+// TestFlatLeafKvRoundTrip is the key-value flavour.
+func TestFlatLeafKvRoundTrip(t *testing.T) {
+	pairs := [][2][]byte{
+		{[]byte("aaa"), []byte("v1")},
+		{[]byte("aab"), []byte("v2")},
+		{[]byte("aabc"), []byte("")},
+	}
+	raw := SerializePageKv(pairs)
+	flat, err := DecodePageKvFlat(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flat.Count() != len(pairs) {
+		t.Fatalf("count = %d, want %d", flat.Count(), len(pairs))
+	}
+	for i, p := range pairs {
+		got, ok := flat.Pair(i)
+		if !ok || !bytes.Equal(got[0], p[0]) || !bytes.Equal(got[1], p[1]) {
+			t.Fatalf("pair %d = %q/%q, want %q/%q", i, got[0], got[1], p[0], p[1])
+		}
+	}
+}

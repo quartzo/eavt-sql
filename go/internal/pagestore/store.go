@@ -342,7 +342,7 @@ func (s *Store) loadLeafRaw(u UUID) ([]byte, error) {
 	return data, nil
 }
 
-func (s *Store) loadLeafKeys(u UUID) ([][]byte, error) {
+func (s *Store) loadLeafKeys(u UUID) (*FlatLeaf, error) {
 	if cached, ok := s.cache.getLeafKeys(u); ok {
 		return cached, nil
 	}
@@ -350,15 +350,15 @@ func (s *Store) loadLeafKeys(u UUID) ([][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	keys, err := DeserializePage(raw)
+	leaf, err := DecodePageFlat(raw)
 	if err != nil {
 		return nil, err
 	}
-	s.cache.putLeafKeys(u, keys)
-	return keys, nil
+	s.cache.putLeafKeys(u, leaf)
+	return leaf, nil
 }
 
-func (s *Store) loadLeafPairs(u UUID) ([][2][]byte, error) {
+func (s *Store) loadLeafPairs(u UUID) (*FlatLeafKV, error) {
 	if cached, ok := s.cache.getLeafKV(u); ok {
 		return cached, nil
 	}
@@ -366,12 +366,12 @@ func (s *Store) loadLeafPairs(u UUID) ([][2][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	pairs, err := DeserializePageKv(raw)
+	leaf, err := DecodePageKvFlat(raw)
 	if err != nil {
 		return nil, err
 	}
-	s.cache.putLeafKV(u, pairs)
-	return pairs, nil
+	s.cache.putLeafKV(u, leaf)
+	return leaf, nil
 }
 
 func (s *Store) loadIndexPage(u UUID) ([]IndexEntry, error) {
@@ -423,7 +423,8 @@ func (s *Store) collectKeysFromIndex(pageUUID UUID, height uint8, prefix []byte)
 			if err != nil {
 				return nil, err
 			}
-			for _, k := range keys {
+			for i := 0; i < keys.Count(); i++ {
+				k := keys.Key(i)
 				if hasPrefix(k, prefix) {
 					out = append(out, k)
 				}
@@ -454,7 +455,8 @@ func (s *Store) GetKeysInPrefix(cf int, prefix []byte) ([][]byte, error) {
 			return nil, err
 		}
 		var out [][]byte
-		for _, k := range keys {
+		for i := 0; i < keys.Count(); i++ {
+			k := keys.Key(i)
 			if hasPrefix(k, prefix) {
 				out = append(out, k)
 			}
@@ -493,8 +495,9 @@ func (s *Store) GetPairsInPrefix(cf int, prefix []byte) ([][2][]byte, error) {
 			return nil, err
 		}
 		var out [][2][]byte
-		for _, p := range pairs {
-			if hasPrefix(p[0], prefix) {
+		for i := 0; i < pairs.Count(); i++ {
+			p, ok := pairs.Pair(i)
+			if ok && hasPrefix(p[0], prefix) {
 				out = append(out, p)
 			}
 		}
@@ -520,8 +523,9 @@ func (s *Store) GetPairsInPrefix(cf int, prefix []byte) ([][2][]byte, error) {
 			if err != nil {
 				return nil, err
 			}
-			for _, p := range pairs {
-				if hasPrefix(p[0], prefix) {
+			for i := 0; i < pairs.Count(); i++ {
+				p, ok := pairs.Pair(i)
+				if ok && hasPrefix(p[0], prefix) {
 					out = append(out, p)
 				}
 			}
@@ -554,8 +558,9 @@ func (s *Store) GetPairsInPrefix(cf int, prefix []byte) ([][2][]byte, error) {
 					if err != nil {
 						return nil, err
 					}
-					for _, p := range pairs {
-						if hasPrefix(p[0], prefix) {
+					for i := 0; i < pairs.Count(); i++ {
+						p, ok := pairs.Pair(i)
+						if ok && hasPrefix(p[0], prefix) {
 							out = append(out, p)
 						}
 					}

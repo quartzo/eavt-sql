@@ -15,8 +15,8 @@ type cacheEntry struct {
 	kind    cacheKind
 	data    []byte
 	entries []IndexEntry
-	keys    [][]byte
-	pairs   [][2][]byte
+	leaf    *FlatLeaf
+	leafKV  *FlatLeafKV
 	size    int
 	order   int64
 }
@@ -114,56 +114,50 @@ func (c *pageCache) putIndex(u UUID, entries []IndexEntry) {
 	c.nextOrder++
 }
 
-func (c *pageCache) getLeafKeys(u UUID) ([][]byte, bool) {
+func (c *pageCache) getLeafKeys(u UUID) (*FlatLeaf, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if e, ok := c.m[u]; ok && e.kind == ckLeafKeys {
 		c.touch(e)
-		return e.keys, true
+		return e.leaf, true
 	}
 	return nil, false
 }
 
-func (c *pageCache) putLeafKeys(u UUID, keys [][]byte) {
+func (c *pageCache) putLeafKeys(u UUID, leaf *FlatLeaf) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	sz := 48
-	for _, k := range keys {
-		sz += len(k) + 4
-	}
+	sz := leaf.Bytes()
 	if !c.slotFor(u, sz) {
 		return
 	}
 	c.curBytes += sz
-	c.m[u] = &cacheEntry{kind: ckLeafKeys, keys: keys, size: sz, order: c.nextOrder}
+	c.m[u] = &cacheEntry{kind: ckLeafKeys, leaf: leaf, size: sz, order: c.nextOrder}
 	c.nextOrder++
 }
 
-func (c *pageCache) getLeafKV(u UUID) ([][2][]byte, bool) {
+func (c *pageCache) getLeafKV(u UUID) (*FlatLeafKV, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if e, ok := c.m[u]; ok && e.kind == ckLeafKV {
 		c.touch(e)
-		return e.pairs, true
+		return e.leafKV, true
 	}
 	return nil, false
 }
 
-func (c *pageCache) putLeafKV(u UUID, pairs [][2][]byte) {
+func (c *pageCache) putLeafKV(u UUID, leaf *FlatLeafKV) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	sz := 64
-	for _, p := range pairs {
-		sz += len(p[0]) + len(p[1]) + 8
-	}
+	sz := leaf.Bytes()
 	if !c.slotFor(u, sz) {
 		return
 	}
 	c.curBytes += sz
-	c.m[u] = &cacheEntry{kind: ckLeafKV, pairs: pairs, size: sz, order: c.nextOrder}
+	c.m[u] = &cacheEntry{kind: ckLeafKV, leafKV: leaf, size: sz, order: c.nextOrder}
 	c.nextOrder++
 }

@@ -8,8 +8,8 @@ type Cursor struct {
 	cf         int
 	AtEnd      bool
 	indexStack []indexPos
-	keys       [][]byte
-	pairs      [][2][]byte
+	leaf       *FlatLeaf
+	leafKV     *FlatLeafKV
 	leafIdx    int
 	hasKey     bool
 	curKey     []byte
@@ -38,13 +38,13 @@ func (c *Cursor) loadLeaf(u UUID) error {
 		if err != nil {
 			return err
 		}
-		c.pairs = pairs
+		c.leafKV = pairs
 	} else {
 		keys, err := c.s.loadLeafKeys(u)
 		if err != nil {
 			return err
 		}
-		c.keys = keys
+		c.leaf = keys
 	}
 	c.leafIdx = -1
 	return nil
@@ -52,23 +52,23 @@ func (c *Cursor) loadLeaf(u UUID) error {
 
 func (c *Cursor) keyCount() int {
 	if c.isKv {
-		return len(c.pairs)
+		return c.leafKV.Count()
 	}
-	return len(c.keys)
+	return c.leaf.Count()
 }
 
 func (c *Cursor) cmpKeyAt(i int, target []byte) int {
 	if c.isKv {
-		return CmpSeq(c.pairs[i][0], target)
+		return CmpSeq(c.leafKV.Key(i), target)
 	}
-	return CmpSeq(c.keys[i], target)
+	return CmpSeq(c.leaf.Key(i), target)
 }
 
 func (c *Cursor) firstKeyAt(i int) []byte {
 	if c.isKv {
-		return c.pairs[i][0]
+		return c.leafKV.Key(i)
 	}
-	return c.keys[i]
+	return c.leaf.Key(i)
 }
 
 func (c *Cursor) descendToFirstLeaf(u UUID, h uint8) error {
@@ -152,16 +152,16 @@ func (c *Cursor) advance() error {
 	for {
 		c.leafIdx++
 		if c.isKv {
-			if c.leafIdx < len(c.pairs) {
-				c.curPair = c.pairs[c.leafIdx]
+			if c.leafIdx < c.leafKV.Count() {
+				c.curPair, _ = c.leafKV.Pair(c.leafIdx)
 				c.hasPair = true
-				c.curKey = c.pairs[c.leafIdx][0]
+				c.curKey = c.leafKV.Key(c.leafIdx)
 				c.hasKey = true
 				return nil
 			}
 		} else {
-			if c.leafIdx < len(c.keys) {
-				c.curKey = c.keys[c.leafIdx]
+			if c.leafIdx < c.leaf.Count() {
+				c.curKey = c.leaf.Key(c.leafIdx)
 				c.hasKey = true
 				return nil
 			}
@@ -311,8 +311,8 @@ func (c *Cursor) Update(root UUID, height uint8) {
 	c.rootUUID = root
 	c.height = height
 	c.indexStack = nil
-	c.keys = nil
-	c.pairs = nil
+	c.leaf = nil
+	c.leafKV = nil
 	c.leafIdx = 0
 	c.hasKey = false
 	c.hasPair = false

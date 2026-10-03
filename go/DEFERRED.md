@@ -36,8 +36,14 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   (o WAL + journal legacy do kvstore já cobrem durabilidade; fiá-lo apagaria
   o journal legacy no modo sem sink). O facade async/pool do blobstore
   continua sem uso — o transactor Go usa o worker pool do flush.
-- **Arena plana do PageStore** (`FlatLeafKeys`/`FlatLeafKV`). O cursor Go usa
-  `[][]byte`/`[][2][]byte`; é mais alocação por troca de folha.
+- ~~**Arena plana do PageStore** (`FlatLeafKeys`/`FlatLeafKV`).~~ **Portado em**
+  `internal/pagestore/flat.go`: cada folha vira um `FlatLeaf` (arena + offsets
+  n+1) em vez de `[][]byte` — uma alocação por troca de folha em vez de uma
+  por chave, e `Key(i)` devolve vista zero-copy (páginas são imutáveis sob
+  COW; o GC mantém a arena viva). Cache (`leaf`/`leafKV`), `loadLeafKeys`/
+  `loadLeafPairs`, cursor e scans de prefixo migram. `DeserializePage`/`Kv`
+  seguem para o caminho de escrita (`mergeLeaf`). Testes:
+  `TestFlatLeafRoundTrip`, `TestFlatLeafKvRoundTrip`.
 - ~~**Buckets de nanossegundos e `eavtScanDiag`.**~~ **Portados** (gate
   `EAVT_PERF_COUNTERS=true`, default off como `perfCounters=false`):
   instrumentação em `internal/engine` (lookupAttr/typeCheck/encode/retractScan
