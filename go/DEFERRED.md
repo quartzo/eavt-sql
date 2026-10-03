@@ -72,9 +72,16 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   `TestScannerIterateSpecialForm` cobre o caminho simples, o `:ranges` e o
   iterador esgotado. (O compilador emite opcodes keyword, então o form só é
   alcançável de scheme escrito à mão via `scheme-local`.)
+### Por design (sem ação)
+
 - **`edn` maps/sets**: rejeitados por design — o surface tx-data não os usa.
   **Igual ao Nim** (`nim_edn/edn.nim` também levanta `edn: maps not
-  supported` no reader), e coberto por `TestRejectMapsAndSets`. Sem ação.
+  supported` no reader), coberto por `TestRejectMapsAndSets`.
+- **WAL com goroutine + ticker** vs o thread-pool do chronos-file: semântica
+  de durabilidade equivalente (o Sink grava na hora — crash de processo não
+  perde nada; fsync no tick de 100 ms — crash de máquina perde ≤ ~100 ms),
+  verificado em `internal/wal/wal.go` (ticker em `fsyncIntervalMs`).
+  Ver "3. Atalhos".
 
 ### Resolvidos depois de terem sido adiados
 - **GC do pagestore** — implementado em `internal/pagestore/gc.go`
