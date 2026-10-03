@@ -245,9 +245,8 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   verbatim e custando O(id). O decodificar/re-encodificar (ordem de chaves,
   largura de int) sai do caminho de forward. Testes:
   `TestInjectTopPair*`.
-- **PageStore cache**: guarda formas decodificadas (`[][]byte`), sem arena
-  plana; um único orçamento de bytes (o `index_cache_bytes` do Nim era só
-  log).
+- **PageStore cache**: guarda a arena plana (`*FlatLeaf`/`*FlatLeafKV`) com um
+  único orçamento de bytes (o `index_cache_bytes` do Nim era só log).
 - **WAL**: goroutine + `os.WriteAt` + ticker de 100 ms em vez do chronos-file
   thread-pool. O `Sink` escreve para o arquivo (page cache do OS) **na hora**;
   o fsync fica no tick de ~100 ms → crash de processo não perde nada, crash de

@@ -67,16 +67,30 @@ func latin1ToUTF8(s string) string {
 
 // ── zip / csv row streaming ──────────────────────────────────────────────
 
+// findZip locates a table's zip.  Three conventions are tried in order, so
+// both the `Name__TIMESTAMP.zip` layout of the reference loaders and a plain
+// `Name.zip` layout work:
+//
+//  1. exact        Name.zip
+//  2. underscore   Name__*.zip (the reference loaders' pattern)
+//  3. prefix       Name*.zip   (first sorted match)
 func findZip(dir, prefix string) (string, error) {
-	matches, err := filepath.Glob(filepath.Join(dir, prefix+"__*.zip"))
-	if err != nil {
-		return "", err
+	patterns := []string{
+		filepath.Join(dir, prefix+".zip"),
+		filepath.Join(dir, prefix+"__*.zip"),
+		filepath.Join(dir, prefix+"*.zip"),
 	}
-	sort.Strings(matches)
-	if len(matches) == 0 {
-		return "", fmt.Errorf("no zip matching %s__* in %s", prefix, dir)
+	for _, pat := range patterns {
+		matches, err := filepath.Glob(pat)
+		if err != nil {
+			return "", err
+		}
+		sort.Strings(matches)
+		if len(matches) > 0 {
+			return matches[0], nil
+		}
 	}
-	return matches[0], nil
+	return "", fmt.Errorf("no zip matching %s.zip / %s__*.zip in %s", prefix, prefix, dir)
 }
 
 type rowReader struct {
