@@ -201,3 +201,55 @@ func TestRangesCreate(t *testing.T) {
 		t.Errorf("empty ranges = %q", got)
 	}
 }
+
+// iterHost serves scanner-iterate-init/next over a fixed row list, ending with
+// Void (the real host does the same when the leap scan is exhausted).
+type iterHost struct {
+	vals []sexpr.Expr
+	idx  int
+}
+
+func (h *iterHost) Call(name string, args []sexpr.Expr) (EvalStep, error) {
+	switch name {
+	case "scanner-iterate-init":
+		h.idx = 0
+		return Done(sexpr.Resource(0)), nil
+	case "scanner-iterate-next":
+		if h.idx >= len(h.vals) {
+			return Done(sexpr.Void{}), nil
+		}
+		v := h.vals[h.idx]
+		h.idx++
+		return Done(v), nil
+	}
+	return EvalStep{}, EvalError("unknown host function: " + name)
+}
+
+// TestScannerIterateSpecialForm covers the (scanner-iterate ...) special form:
+// the compiler emits scanner-iterate-init/next opcodes directly, so this
+// input form is only reachable from hand-written scheme (scheme-local), but it
+// was ported and must work.
+func TestScannerIterateSpecialForm(t *testing.T) {
+	h := &iterHost{vals: []sexpr.Expr{sexpr.Int(10), sexpr.Int(20)}}
+	if _, err := evalSrc(t, `[:scanner-iterate 0 (v) [:+ v 0]]`, h); err != nil {
+		t.Fatalf("eval: %v", err)
+	}
+	if h.idx != 2 {
+		t.Fatalf("iterated %d rows, want 2", h.idx)
+	}
+
+	// :ranges branch (evaluated and forwarded to the iterator).
+	h2 := &iterHost{vals: []sexpr.Expr{sexpr.Int(1)}}
+	if _, err := evalSrc(t, `[:scanner-iterate 0 (v) :ranges [:ranges-create []] [:+ v 0]]`, h2); err != nil {
+		t.Fatalf("eval with :ranges: %v", err)
+	}
+	if h2.idx != 1 {
+		t.Fatalf("iterated %d rows with :ranges, want 1", h2.idx)
+	}
+
+	// Exhausted iterator: no rows, no error.
+	h3 := &iterHost{}
+	if _, err := evalSrc(t, `[:scanner-iterate 0 (v) [:+ v 0]]`, h3); err != nil {
+		t.Fatalf("eval on empty iterator: %v", err)
+	}
+}

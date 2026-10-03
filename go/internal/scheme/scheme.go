@@ -938,6 +938,19 @@ func absF(f float64) float64 {
 	return f
 }
 
+// isRangesMarker reports whether e is the `:ranges` marker of a
+// (scanner-iterate ...) form (EDN decodes it as a Keyword; legacy input may
+// carry it as a Symbol).
+func isRangesMarker(e sexpr.Expr) bool {
+	switch t := e.(type) {
+	case sexpr.Keyword:
+		return string(t) == "ranges"
+	case sexpr.Symbol:
+		return string(t) == ":ranges"
+	}
+	return false
+}
+
 func evalScannerIterate(items []sexpr.Expr, env *Environment, host HostFns, state *YieldState) (EvalStep, error) {
 	if len(items) < 4 {
 		return EvalStep{}, EvalError("scanner-iterate: expected (scanner-iterate scanners (param) [:ranges r] body...+)")
@@ -962,7 +975,9 @@ func evalScannerIterate(items []sexpr.Expr, env *Environment, host HostFns, stat
 	i := 3
 	for i < len(items) {
 		it := items[i]
-		if s, ok := it.(sexpr.Symbol); ok && string(s) == ":ranges" {
+		// EDN reads `:ranges` as a Keyword (no colon); a Symbol is accepted
+		// too for compatibility with hand-written legacy input.
+		if isRangesMarker(it) {
 			if rangesExpr != nil {
 				return EvalStep{}, EvalError("scanner-iterate: :ranges specified more than once")
 			}
@@ -1013,8 +1028,10 @@ func evalScannerIterate(items []sexpr.Expr, env *Environment, host HostFns, stat
 		return done(sexpr.Void{}), nil
 	}
 	iterRes := iterStep.Result
-	condExpr := sexpr.List{sexpr.Symbol("set!"), sexpr.Symbol(string(paramName)),
-		sexpr.List{sexpr.Symbol("scanner-iterate-next"), iterRes}}
+	// Keyword heads: the Go VM dispatches special forms on keyword heads and
+	// rejects symbol-headed forms as legacy (the Nim accepts both).
+	condExpr := sexpr.List{sexpr.Keyword("set!"), sexpr.Symbol(string(paramName)),
+		sexpr.List{sexpr.Keyword("scanner-iterate-next"), iterRes}}
 	state.stack = append(state.stack, frame{kind: fkWhile, wCond: condExpr, wBody: body, wPhase: 0})
 	state.stack = append(state.stack, frame{kind: fkEval, expr: condExpr})
 	return done(sexpr.Void{}), nil

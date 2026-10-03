@@ -62,10 +62,19 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   globais do `page_cursor.nim`.
 - ~~**Loader de receita** (`load_receita`)~~ — portado (ver a entrada
   resolvida `Loader de receita em Go`).
-- **`scheme` VM**: portado o suficiente para queries (e os special forms de
-  exec). `scanner-iterate` (special form legado) foi portado mas é código
-  morto — o compilador emite keyword opcodes.
-- **`edn` maps/sets**: rejeitados por design (o surface tx-data não os usa).
+- ~~**`scheme` VM / `scanner-iterate`.**~~ **Corrigido e coberto:** o special
+  form `[:scanner-iterate ...]` estava portado mas **quebrado** — ele montava
+  as formas `set!`/`scanner-iterate-next` com *cabeças de símbolo*, e o VM Go
+  rejeita formas simbólicas como legacy (`legacy scheme form rejected`); além
+  disso a detecção do marcador `:ranges` só checava `sexpr.Symbol`, enquanto a
+  EDN Go decodifica `:ranges` como `Keyword`. Corrigido para cabeças keyword +
+  `isRangesMarker` (Keyword ou Symbol `:ranges`); teste
+  `TestScannerIterateSpecialForm` cobre o caminho simples, o `:ranges` e o
+  iterador esgotado. (O compilador emite opcodes keyword, então o form só é
+  alcançável de scheme escrito à mão via `scheme-local`.)
+- **`edn` maps/sets**: rejeitados por design — o surface tx-data não os usa.
+  **Igual ao Nim** (`nim_edn/edn.nim` também levanta `edn: maps not
+  supported` no reader), e coberto por `TestRejectMapsAndSets`. Sem ação.
 
 ### Resolvidos depois de terem sido adiados
 - **GC do pagestore** — implementado em `internal/pagestore/gc.go`
