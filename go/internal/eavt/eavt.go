@@ -5,6 +5,7 @@ package eavt
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -16,6 +17,8 @@ import (
 	"eavt-go/internal/datalog"
 	"eavt-go/internal/hydrated"
 	"eavt-go/internal/kvstore"
+	"eavt-go/internal/logutil"
+	"eavt-go/internal/perf"
 )
 
 // ValueTypeToEncodeMode maps a db valueType to its encode mode.
@@ -76,20 +79,59 @@ type Engine struct {
 	cachedStats     *datalog.CompileStats
 	cachedStatsTime time.Time
 
-	// scan diagnostics (atomic; the Nim spCounters).
+	// scan counters/diagnostics (atomic; the Nim spCounters + eavtScanDiag).
 	spCount  int64
 	spKeysIn int64
+	spOpenNS int64
+	spSeekNS int64
+	spIterNS int64
+
+	diagEnabled bool
+	diagCalls   int64
+	diagSeekNS  int64
+	diagIterNS  int64
 }
 
-// ScanStats returns the cumulative scan counter snapshot.
+// ScanPerf is the cumulative scan counter snapshot (spCounters).
+type ScanPerf struct {
+	Calls  int64
+	Keys   int64
+	OpenNS int64
+	SeekNS int64
+	IterNS int64
+}
+
+// ScanStats returns (calls, key count) — kept for the stats command.
 func (e *Engine) ScanStats() (calls, keys int64) {
 	return atomic.LoadInt64(&e.spCount), atomic.LoadInt64(&e.spKeysIn)
+}
+
+// ScanPerf returns the full scan counter snapshot.
+func (e *Engine) ScanPerf() ScanPerf {
+	return ScanPerf{
+		Calls:  atomic.LoadInt64(&e.spCount),
+		Keys:   atomic.LoadInt64(&e.spKeysIn),
+		OpenNS: atomic.LoadInt64(&e.spOpenNS),
+		SeekNS: atomic.LoadInt64(&e.spSeekNS),
+		IterNS: atomic.LoadInt64(&e.spIterNS),
+	}
 }
 
 // ResetScanCounters zeroes the scan counters.
 func (e *Engine) ResetScanCounters() {
 	atomic.StoreInt64(&e.spCount, 0)
 	atomic.StoreInt64(&e.spKeysIn, 0)
+	atomic.StoreInt64(&e.spOpenNS, 0)
+	atomic.StoreInt64(&e.spSeekNS, 0)
+	atomic.StoreInt64(&e.spIterNS, 0)
+}
+
+// SetScanDiag toggles the eavtScanDiag diagnostics.
+func (e *Engine) SetScanDiag(v bool) { e.diagEnabled = v }
+
+// ScanDiag returns the eavtScanDiag counters (cf != 0 scans).
+func (e *Engine) ScanDiag() (calls, seekNS, iterNS int64) {
+	return atomic.LoadInt64(&e.diagCalls), atomic.LoadInt64(&e.diagSeekNS), atomic.LoadInt64(&e.diagIterNS)
 }
 
 // hydratedDefaults mirrors nim_eavt/eavt.nim's default budgets.
@@ -111,11 +153,12 @@ func NewEngine(kv *kvstore.KVStore) *Engine {
 	}
 	enabled := os.Getenv("EAVT_HYDRATED_ENABLED") != "false"
 	e := &Engine{
-		KV:         kv,
-		Resolver:   NewResolver(),
-		Hyd:        hydrated.New(hydMax),
-		Anchors:    anchor.New(anchorMax),
-		HydEnabled: enabled,
+		KV:          kv,
+		Resolver:    NewResolver(),
+		Hyd:         hydrated.New(hydMax),
+		Anchors:     anchor.New(anchorMax),
+		HydEnabled:  enabled,
+		diagEnabled: os.Getenv("EAVT_SCAN_DIAG") == "true",
 	}
 	e.BootstrapResolver()
 	return e
@@ -127,8 +170,21 @@ func NewEngine(kv *kvstore.KVStore) *Engine {
 // historical versions), ascending.
 func (e *Engine) ScanPrefix(cf int, prefix []byte) [][]byte {
 	atomic.AddInt64(&e.spCount, 1)
+	perfOn := perf.Enabled()
+	var t time.Time
+	if perfOn {
+		t = time.Now()
+	}
 	mc := e.KV.OpenScanCursor(cf)
+	if perfOn {
+		atomic.AddInt64(&e.spOpenNS, int64(time.Since(t)))
+		t = time.Now()
+	}
 	mc.Seek(prefix)
+	if perfOn {
+		atomic.AddInt64(&e.spSeekNS, int64(time.Since(t)))
+		t = time.Now()
+	}
 	var out [][]byte
 	for {
 		k, ok := mc.Next()
@@ -139,6 +195,9 @@ func (e *Engine) ScanPrefix(cf int, prefix []byte) [][]byte {
 			break
 		}
 		out = append(out, k)
+	}
+	if perfOn {
+		atomic.AddInt64(&e.spIterNS, int64(time.Since(t)))
 	}
 	atomic.AddInt64(&e.spKeysIn, int64(len(out)))
 	return out
@@ -154,7 +213,16 @@ func (e *Engine) ScanPrefixActive(cf int, prefix []byte) [][]byte {
 			return e.Hyd.LookupRange(eid, prefix)
 		}
 	}
+	diag := e.diagEnabled && cf != 0
+	var tSeek time.Time
+	if diag {
+		tSeek = time.Now()
+	}
 	collected := e.ScanPrefix(cf, prefix)
+	var tIter time.Time
+	if diag {
+		tIter = time.Now()
+	}
 	var kept [][]byte
 	var lastPrefix []byte
 	hasLast := false
@@ -177,6 +245,15 @@ func (e *Engine) ScanPrefixActive(cf int, prefix []byte) [][]byte {
 	out := make([][]byte, 0, len(kept))
 	for j := len(kept) - 1; j >= 0; j-- {
 		out = append(out, kept[j])
+	}
+	if diag {
+		atomic.AddInt64(&e.diagSeekNS, int64(tIter.Sub(tSeek)))
+		atomic.AddInt64(&e.diagIterNS, int64(time.Since(tIter)))
+		n := atomic.AddInt64(&e.diagCalls, 1)
+		if n%2000 == 0 {
+			logutil.Info("scandiag", fmt.Sprintf("cf=%d calls=%d seekUs=%d iterUs=%d keys=%d",
+				cf, n, atomic.LoadInt64(&e.diagSeekNS)/n/1000, atomic.LoadInt64(&e.diagIterNS)/n/1000, len(out)))
+		}
 	}
 	return out
 }

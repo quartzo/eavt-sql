@@ -22,6 +22,7 @@ import (
 	"eavt-go/internal/kvstore"
 	"eavt-go/internal/logutil"
 	"eavt-go/internal/msgpack"
+	"eavt-go/internal/perf"
 	"eavt-go/internal/query"
 	"eavt-go/internal/replication"
 	"eavt-go/internal/scheme"
@@ -190,6 +191,69 @@ func (e *Engine) treeText() string {
 	}
 	if sb.Len() == 0 {
 		return "no committed trees"
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+func msOf(ns int64) string { return strconv.FormatFloat(float64(ns)/1e6, 'f', 1, 64) }
+
+func pctOf(ns, total int64) string {
+	if total == 0 {
+		return "0.0"
+	}
+	return strconv.FormatFloat(float64(ns)/float64(total)*100, 'f', 1, 64)
+}
+
+// perfText renders the nanosecond buckets (Nim printSavePerf/printSpPerf/
+// printBwPerf).  Empty unless EAVT_PERF_COUNTERS is set.
+func (e *Engine) perfText() string {
+	sv := e.Store.SavePerf()
+	sp := e.Store.Eavt.ScanPerf()
+	bw := e.KV.WritePerf()
+	var sb strings.Builder
+	if sv.Saves > 0 {
+		total := sv.LookupAttrNS + sv.TypeCheckNS + sv.EncodeNS + sv.RetractScanNS + sv.BuildEntriesNS + sv.BatchWriteNS
+		fmt.Fprintf(&sb, "=== saveWithT perf (%d calls) ===\n", sv.Saves)
+		fmt.Fprintf(&sb, "  lookupAttr:     %s ms  (%s%%)\n", msOf(sv.LookupAttrNS), pctOf(sv.LookupAttrNS, total))
+		fmt.Fprintf(&sb, "  typeCheck:      %s ms  (%s%%)\n", msOf(sv.TypeCheckNS), pctOf(sv.TypeCheckNS, total))
+		fmt.Fprintf(&sb, "  encode:         %s ms  (%s%%)\n", msOf(sv.EncodeNS), pctOf(sv.EncodeNS, total))
+		fmt.Fprintf(&sb, "  retractScan:    %s ms  (%s%%)\n", msOf(sv.RetractScanNS), pctOf(sv.RetractScanNS, total))
+		fmt.Fprintf(&sb, "    prefix:       %s ms\n", msOf(sv.RetractPrefixNS))
+		fmt.Fprintf(&sb, "    seek:         %s ms\n", msOf(sv.RetractSeekNS))
+		fmt.Fprintf(&sb, "    apply:        %s ms\n", msOf(sv.RetractApplyNS))
+		fmt.Fprintf(&sb, "    retracted:    %d datoms in %d scans\n", sv.RetractCount, sv.RetractScans)
+		fmt.Fprintf(&sb, "  buildEntries:   %s ms  (%s%%)\n", msOf(sv.BuildEntriesNS), pctOf(sv.BuildEntriesNS, total))
+		fmt.Fprintf(&sb, "  batchWrite:     %s ms  (%s%%)\n", msOf(sv.BatchWriteNS), pctOf(sv.BatchWriteNS, total))
+		fmt.Fprintf(&sb, "  total:          %s ms\n", msOf(total))
+	}
+	if sv.Execs > 0 {
+		fmt.Fprintf(&sb, "=== exec perf (%d requests) ===\n", sv.Execs)
+		fmt.Fprintf(&sb, "  exec wall:      %s ms (avg %s ms/request)\n",
+			msOf(sv.ExecWallNS), strconv.FormatFloat(float64(sv.ExecWallNS)/float64(sv.Execs)/1e6, 'f', 3, 64))
+		fmt.Fprintf(&sb, "  entity lookups: %s ms (%s%% of wall; %d lookups)\n",
+			msOf(sv.LookupNS), pctOf(sv.LookupNS, sv.ExecWallNS), sv.Lookups)
+		fmt.Fprintf(&sb, "    scan portion: %s ms\n", msOf(sv.LookupScanNS))
+		fmt.Fprintf(&sb, "  wire decode:    %s ms (%s%% of wall; %d decodes)\n",
+			msOf(sv.DecodeNS), pctOf(sv.DecodeNS, sv.ExecWallNS), sv.DecodeCount)
+	}
+	if sp.Calls > 0 {
+		total := sp.OpenNS + sp.SeekNS + sp.IterNS
+		fmt.Fprintf(&sb, "=== scanPrefix perf (%d calls) ===\n", sp.Calls)
+		fmt.Fprintf(&sb, "  openCursor:     %s ms  (%s%%)\n", msOf(sp.OpenNS), pctOf(sp.OpenNS, total))
+		fmt.Fprintf(&sb, "  seek:           %s ms  (%s%%)\n", msOf(sp.SeekNS), pctOf(sp.SeekNS, total))
+		fmt.Fprintf(&sb, "  iterate:        %s ms  (%s%%)\n", msOf(sp.IterNS), pctOf(sp.IterNS, total))
+		fmt.Fprintf(&sb, "  total:          %s ms\n", msOf(total))
+		fmt.Fprintf(&sb, "  keys returned:  %d\n", sp.Keys)
+		fmt.Fprintf(&sb, "  empty scans:    %d\n", sp.Calls-sp.Keys)
+	}
+	if bw.Batches > 0 {
+		fmt.Fprintf(&sb, "=== batchWrite perf (%d calls) ===\n", bw.Batches)
+		fmt.Fprintf(&sb, "  journal:        %s ms  (%s%%)\n", msOf(bw.JournalNS), pctOf(bw.JournalNS, bw.TotalNS))
+		fmt.Fprintf(&sb, "  memtable:       %s ms  (%s%%)\n", msOf(bw.MemtableNS), pctOf(bw.MemtableNS, bw.TotalNS))
+		fmt.Fprintf(&sb, "  total:          %s ms\n", msOf(bw.TotalNS))
+	}
+	if sb.Len() == 0 {
+		return "no perf samples (set EAVT_PERF_COUNTERS=true)"
 	}
 	return strings.TrimRight(sb.String(), "\n")
 }
@@ -373,7 +437,11 @@ func (e *Engine) processFrame(conn net.Conn, m msgpack.Map, v msgpack.Value, id 
 
 func (e *Engine) execTx(conn net.Conn, v msgpack.Value, id string) {
 	e.mu.Lock()
+	tDec := time.Now()
 	txops, err := scheme.TxOpsFromValue(v, e.Store.Symtab())
+	if perf.Enabled() {
+		e.Store.AddDecode(int64(time.Since(tDec)))
+	}
 	if err != nil {
 		e.mu.Unlock()
 		e.writeResponse(conn, id, nil, nil, false, err.Error())
@@ -411,7 +479,11 @@ func (e *Engine) execScheme(conn net.Conn, m msgpack.Map, id string) {
 		e.writeResponse(conn, id, nil, nil, false, "scheme request is missing program")
 		return
 	}
+	tDec := time.Now()
 	body, err := sexpr.UnmarshalWire(msgpack.Marshal(progVal))
+	if perf.Enabled() {
+		e.Store.AddDecode(int64(time.Since(tDec)))
+	}
 	if err != nil {
 		e.writeResponse(conn, id, nil, nil, false, "bad program wire ("+err.Error()+")")
 		return
@@ -557,6 +629,13 @@ func (e *Engine) handleAdmin(conn net.Conn, command, id string) {
 		e.Store.Eavt.ResetScanCounters()
 		e.KV.ResetWriteCounters()
 		output = "ok: counters reset"
+	case "perf":
+		output = e.perfText()
+	case "perf-reset":
+		e.Store.ResetCounters()
+		e.Store.Eavt.ResetScanCounters()
+		e.KV.ResetWriteCounters()
+		output = "ok: perf counters reset"
 	default:
 		output = "unknown admin command: " + command
 	}

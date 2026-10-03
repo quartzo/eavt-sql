@@ -13,11 +13,13 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"eavt-go/internal/blobstore"
 	"eavt-go/internal/cursor"
 	"eavt-go/internal/memtable"
 	"eavt-go/internal/pagestore"
+	"eavt-go/internal/perf"
 )
 
 const (
@@ -121,8 +123,20 @@ type KVStore struct {
 	OnFlushPublish func(rootName string, maxT int64)
 
 	// write diagnostics (atomic; the Nim bwCounters).
-	bwCount atomic.Int64
-	bwKeys  atomic.Int64
+	bwCount     atomic.Int64
+	bwKeys      atomic.Int64
+	bwJournalNS atomic.Int64
+	bwTreapNS   atomic.Int64
+	bwTotalNS   atomic.Int64
+}
+
+// WritePerf is the batchWrite timing snapshot.
+type WritePerf struct {
+	Batches    int64
+	Keys       int64
+	JournalNS  int64
+	MemtableNS int64
+	TotalNS    int64
 }
 
 // WriteStats returns cumulative (batchWrites, keysWritten).
@@ -130,10 +144,24 @@ func (kv *KVStore) WriteStats() (batches, keys int64) {
 	return kv.bwCount.Load(), kv.bwKeys.Load()
 }
 
+// WritePerf returns the batchWrite timing snapshot.
+func (kv *KVStore) WritePerf() WritePerf {
+	return WritePerf{
+		Batches:    kv.bwCount.Load(),
+		Keys:       kv.bwKeys.Load(),
+		JournalNS:  kv.bwJournalNS.Load(),
+		MemtableNS: kv.bwTreapNS.Load(),
+		TotalNS:    kv.bwTotalNS.Load(),
+	}
+}
+
 // ResetWriteCounters zeroes the write counters.
 func (kv *KVStore) ResetWriteCounters() {
 	kv.bwCount.Store(0)
 	kv.bwKeys.Store(0)
+	kv.bwJournalNS.Store(0)
+	kv.bwTreapNS.Store(0)
+	kv.bwTotalNS.Store(0)
 }
 
 // New opens a KVStore.
@@ -510,7 +538,24 @@ func (kv *KVStore) BatchWrite(entries []memtable.CfKey, journal bool) {
 	}
 	kv.bwCount.Add(1)
 	kv.bwKeys.Add(int64(len(entries)))
+	perfOn := perf.Enabled()
+	var t0, t1 time.Time
+	if perfOn {
+		t0 = time.Now()
+	}
+	if journal && kv.journaling() && len(entries) > 0 {
+		kv.journalDeliver(entries)
+	}
+	if perfOn {
+		t1 = time.Now()
+		kv.bwJournalNS.Add(int64(t1.Sub(t0)))
+	}
 	kv.memSize.Store(kv.MT.Batch(entries))
+	if perfOn {
+		t := time.Now()
+		kv.bwTreapNS.Add(int64(t.Sub(t1)))
+		kv.bwTotalNS.Add(int64(t.Sub(t0)))
+	}
 	kv.maybeArmFlush()
 }
 

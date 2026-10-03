@@ -6,8 +6,10 @@ package engine
 import (
 	"bytes"
 	"strconv"
+	"time"
 
 	"eavt-go/internal/eavt"
+	"eavt-go/internal/perf"
 	"eavt-go/internal/query"
 	"eavt-go/internal/scheme"
 	"eavt-go/internal/sexpr"
@@ -73,35 +75,89 @@ func eidAttrPrefix(eid int64, aid uint32) []byte {
 
 func (q *QueryStore) saveResolvedEncodedInto(eid int64, attrID, vt uint32, many, indexed bool,
 	mode eavt.EncodeMode, encoded []byte, t int64, entries *[]eavt.EavtEntry) {
+	perfOn := perf.Enabled()
+	var t0 time.Time
+	if perfOn {
+		t0 = time.Now()
+	}
 	if !many {
-		for _, ek := range q.Eavt.ScanPrefixActive(0, eidAttrPrefix(eid, attrID)) {
+		prefix := eidAttrPrefix(eid, attrID)
+		var t1 time.Time
+		if perfOn {
+			t1 = time.Now()
+			q.perf.saveRetractPrefix.Add(int64(t1.Sub(t0)))
+			q.perf.saveRetractScans.Add(1)
+		}
+		keys := q.Eavt.ScanPrefixActive(0, prefix)
+		var t2 time.Time
+		if perfOn {
+			t2 = time.Now()
+			q.perf.saveRetractSeek.Add(int64(t2.Sub(t1)))
+		}
+		for _, ek := range keys {
 			if len(ek) < 20 {
 				continue
 			}
 			*entries = append(*entries, eavt.BuildEavtEntries(eid, attrID, ek[12:len(ek)-8], t, true, mode, indexed)...)
+			if perfOn {
+				q.perf.saveRetractCount.Add(1)
+			}
+		}
+		if perfOn {
+			q.perf.saveRetractApply.Add(int64(time.Since(t2)))
 		}
 	}
+	if perfOn {
+		q.perf.saveRetractScanNS.Add(int64(time.Since(t0)))
+		t0 = time.Now()
+	}
 	*entries = append(*entries, eavt.BuildEavtEntries(eid, attrID, encoded, t, false, mode, indexed)...)
+	if perfOn {
+		q.perf.saveBuildEntries.Add(int64(time.Since(t0)))
+	}
 }
 
 // SaveWithT saves one datom for an SExpr value.
 func (q *QueryStore) SaveWithT(eid int64, attr string, val sexpr.Expr, t, asOf int64) error {
 	q.saveCount.Add(1)
+	perfOn := perf.Enabled()
+	var t0, t1 time.Time
+	if perfOn {
+		t0 = time.Now()
+	}
 	aid, ok := q.Eavt.LookupAttr(attr)
 	if !ok {
 		return scheme.EvalError("save to undeclared attr: " + attr)
+	}
+	if perfOn {
+		t1 = time.Now()
+		q.perf.saveLookupAttrNS.Add(int64(t1.Sub(t0)))
 	}
 	vt, _ := q.Eavt.ValueTypeFor(aid)
 	many := q.Eavt.Resolver.IsMany(aid)
 	mode := eavt.ValueTypeToEncodeMode(vt)
 	indexed := q.Eavt.Resolver.IsIndexed(aid)
+	if perfOn {
+		t0 = time.Now()
+		q.perf.saveTypeCheckNS.Add(int64(t0.Sub(t1)))
+	}
 	encoded, err := encodeSaveValue(val, vt, mode, eid)
 	if err != nil {
 		return err
 	}
+	if perfOn {
+		t1 = time.Now()
+		q.perf.saveEncodeNS.Add(int64(t1.Sub(t0)))
+	}
 	var entries []eavt.EavtEntry
 	q.saveResolvedEncodedInto(eid, aid, vt, many, indexed, mode, encoded, t, &entries)
+	if perfOn {
+		t0 = time.Now()
+	}
 	q.Eavt.BatchWrite(entries)
+	if perfOn {
+		q.perf.saveBatchWriteNS.Add(int64(time.Since(t0)))
+	}
 	return nil
 }
 
@@ -222,7 +278,15 @@ func (q *QueryStore) SaveBatchEdn(txops []scheme.TxWOp, t int64) {
 		}
 		q.saveResolvedEncodedInto(op.E.I, m.attrID, m.vt, m.many, m.indexed, m.mode, encoded, t, &entries)
 	}
+	perfOn := perf.Enabled()
+	var t0 time.Time
+	if perfOn {
+		t0 = time.Now()
+	}
 	q.Eavt.BatchWrite(entries)
+	if perfOn {
+		q.perf.saveBatchWriteNS.Add(int64(time.Since(t0)))
+	}
 }
 
 // RetractBatch applies all retract ops of a flat tx in one batch.
@@ -243,7 +307,15 @@ func (q *QueryStore) RetractBatch(txops []scheme.TxWOp, t int64) {
 		entries = append(entries, eavt.BuildEavtEntries(op.E.I, op.AttrId, encoded, t, true, mode, q.Eavt.Resolver.IsIndexed(op.AttrId))...)
 	}
 	if len(entries) > 0 {
+		perfOn := perf.Enabled()
+		var t0 time.Time
+		if perfOn {
+			t0 = time.Now()
+		}
 		q.Eavt.BatchWrite(entries)
+		if perfOn {
+			q.perf.saveBatchWriteNS.Add(int64(time.Since(t0)))
+		}
 	}
 }
 
@@ -281,6 +353,11 @@ func (q *QueryStore) HasDatomW(eid int64, attrID uint32, val scheme.TxWSlot) boo
 // LookupEntityW resolves an entity by a unique attribute value (flat slot).
 func (q *QueryStore) LookupEntityW(attrName string, value scheme.TxWSlot) (int64, bool) {
 	q.lookupCount.Add(1)
+	perfOn := perf.Enabled()
+	var t0 time.Time
+	if perfOn {
+		t0 = time.Now()
+	}
 	aid, ok := q.Eavt.LookupAttr(attrName)
 	if !ok {
 		return 0, false
@@ -294,15 +371,30 @@ func (q *QueryStore) LookupEntityW(attrName string, value scheme.TxWSlot) (int64
 	// M7: anchor probe first (unflushed), CF-2 scan fallback (committed).
 	if eid, ok := q.Eavt.Anchors.Probe(aid, encoded); ok {
 		q.Eavt.HydrateEID(eid)
+		if perfOn {
+			q.perf.lookupNS.Add(int64(time.Since(t0)))
+		}
 		return eid, true
 	}
 	prefix := append([]byte{byte(aid >> 24), byte(aid >> 16), byte(aid >> 8), byte(aid)}, encoded...)
+	tScan := t0
+	if perfOn {
+		tScan = time.Now()
+	}
 	for _, k := range q.Eavt.ScanPrefixActive(2, prefix) {
 		if len(k) >= 20 {
 			eid := eavt.DecodeEid(eavt.BeUint64(k, len(k)-16))
 			q.Eavt.HydrateEID(eid)
+			if perfOn {
+				q.perf.lookupScanNS.Add(int64(time.Since(tScan)))
+				q.perf.lookupNS.Add(int64(time.Since(t0)))
+			}
 			return eid, true
 		}
+	}
+	if perfOn {
+		q.perf.lookupScanNS.Add(int64(time.Since(tScan)))
+		q.perf.lookupNS.Add(int64(time.Since(t0)))
 	}
 	return 0, false
 }

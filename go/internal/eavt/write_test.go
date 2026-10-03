@@ -188,3 +188,17 @@ func TestScanStats(t *testing.T) {
 		t.Fatalf("reset left %d/%d", calls, keys)
 	}
 }
+
+// TestScanDiagCounts verifies the eavtScanDiag counter accrues for cf != 0.
+func TestScanDiagCounts(t *testing.T) {
+	kv := newKV(t)
+	e := NewEngine(kv)
+	e.BootstrapSystemAttrs()
+	e.SetScanDiag(true)
+	for i := 0; i < 2000; i++ {
+		_ = e.ScanPrefixActive(1, []byte{0, 0, 0, byte(DbIdentAid)})
+	}
+	if calls, _, _ := e.ScanDiag(); calls != 2000 {
+		t.Fatalf("diag calls = %d, want 2000", calls)
+	}
+}

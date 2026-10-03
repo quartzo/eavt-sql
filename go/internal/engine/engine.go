@@ -6,14 +6,36 @@ package engine
 import (
 	"strconv"
 	"sync/atomic"
+	"time"
 
 	"eavt-go/internal/cursor"
 	"eavt-go/internal/eavt"
 	"eavt-go/internal/kvstore"
+	"eavt-go/internal/perf"
 	"eavt-go/internal/query"
 	"eavt-go/internal/scheme"
 	"eavt-go/internal/sexpr"
 )
+
+// perfStats holds the optional nanosecond buckets (Nim perfCounters).
+type perfStats struct {
+	saveLookupAttrNS  atomic.Int64
+	saveTypeCheckNS   atomic.Int64
+	saveEncodeNS      atomic.Int64
+	saveRetractScanNS atomic.Int64
+	saveRetractPrefix atomic.Int64
+	saveRetractSeek   atomic.Int64
+	saveRetractApply  atomic.Int64
+	saveRetractCount  atomic.Int64
+	saveRetractScans  atomic.Int64
+	saveBuildEntries  atomic.Int64
+	saveBatchWriteNS  atomic.Int64
+	lookupNS          atomic.Int64
+	lookupScanNS      atomic.Int64
+	execWallNS        atomic.Int64
+	decodeNS          atomic.Int64
+	decodeCount       atomic.Int64
+}
 
 // QueryStore implements query.EngineOps over a KVStore + EAVT engine.
 type QueryStore struct {
@@ -24,6 +46,31 @@ type QueryStore struct {
 	saveCount   atomic.Int64
 	lookupCount atomic.Int64
 	execCount   atomic.Int64
+
+	perf perfStats
+}
+
+// SavePerf is the QueryStore timing snapshot.
+type SavePerf struct {
+	Saves           int64
+	LookupAttrNS    int64
+	TypeCheckNS     int64
+	EncodeNS        int64
+	RetractScanNS   int64
+	RetractPrefixNS int64
+	RetractSeekNS   int64
+	RetractApplyNS  int64
+	RetractCount    int64
+	RetractScans    int64
+	BuildEntriesNS  int64
+	BatchWriteNS    int64
+	Lookups         int64
+	LookupNS        int64
+	LookupScanNS    int64
+	Execs           int64
+	ExecWallNS      int64
+	DecodeNS        int64
+	DecodeCount     int64
 }
 
 // Counters returns cumulative (saves, lookups, execs).
@@ -31,11 +78,51 @@ func (q *QueryStore) Counters() (saves, lookups, execs int64) {
 	return q.saveCount.Load(), q.lookupCount.Load(), q.execCount.Load()
 }
 
-// ResetCounters zeroes the engine request counters.
+// SavePerf returns the timing snapshot.
+func (q *QueryStore) SavePerf() SavePerf {
+	return SavePerf{
+		Saves:           q.saveCount.Load(),
+		LookupAttrNS:    q.perf.saveLookupAttrNS.Load(),
+		TypeCheckNS:     q.perf.saveTypeCheckNS.Load(),
+		EncodeNS:        q.perf.saveEncodeNS.Load(),
+		RetractScanNS:   q.perf.saveRetractScanNS.Load(),
+		RetractPrefixNS: q.perf.saveRetractPrefix.Load(),
+		RetractSeekNS:   q.perf.saveRetractSeek.Load(),
+		RetractApplyNS:  q.perf.saveRetractApply.Load(),
+		RetractCount:    q.perf.saveRetractCount.Load(),
+		RetractScans:    q.perf.saveRetractScans.Load(),
+		BuildEntriesNS:  q.perf.saveBuildEntries.Load(),
+		BatchWriteNS:    q.perf.saveBatchWriteNS.Load(),
+		Lookups:         q.lookupCount.Load(),
+		LookupNS:        q.perf.lookupNS.Load(),
+		LookupScanNS:    q.perf.lookupScanNS.Load(),
+		Execs:           q.execCount.Load(),
+		ExecWallNS:      q.perf.execWallNS.Load(),
+		DecodeNS:        q.perf.decodeNS.Load(),
+		DecodeCount:     q.perf.decodeCount.Load(),
+	}
+}
+
+// AddDecode records msgpack→SExpr decode time (set by the transactor loop).
+func (q *QueryStore) AddDecode(ns int64) {
+	q.perf.decodeNS.Add(ns)
+	q.perf.decodeCount.Add(1)
+}
+
+// ResetCounters zeroes the engine request counters and timing buckets.
 func (q *QueryStore) ResetCounters() {
 	q.saveCount.Store(0)
 	q.lookupCount.Store(0)
 	q.execCount.Store(0)
+	for _, c := range []*atomic.Int64{
+		&q.perf.saveLookupAttrNS, &q.perf.saveTypeCheckNS, &q.perf.saveEncodeNS,
+		&q.perf.saveRetractScanNS, &q.perf.saveRetractPrefix, &q.perf.saveRetractSeek,
+		&q.perf.saveRetractApply, &q.perf.saveRetractCount, &q.perf.saveRetractScans,
+		&q.perf.saveBuildEntries, &q.perf.saveBatchWriteNS, &q.perf.lookupNS,
+		&q.perf.lookupScanNS, &q.perf.execWallNS, &q.perf.decodeNS, &q.perf.decodeCount,
+	} {
+		c.Store(0)
+	}
 }
 
 // New creates a QueryStore and bootstraps its resolver.
@@ -94,6 +181,11 @@ func (q *QueryStore) LookupValue(eid int64, attrName string) (sexpr.Expr, bool) 
 // probe first (O(1)); CF-2 scan fallback.
 func (q *QueryStore) LookupEntity(attrName string, value sexpr.Expr) (int64, bool) {
 	q.lookupCount.Add(1)
+	perfOn := perf.Enabled()
+	var t0 time.Time
+	if perfOn {
+		t0 = time.Now()
+	}
 	aid, ok := q.Eavt.LookupAttr(attrName)
 	if !ok {
 		return 0, false
@@ -107,15 +199,30 @@ func (q *QueryStore) LookupEntity(attrName string, value sexpr.Expr) (int64, boo
 	}
 	if eid, ok := q.Eavt.Anchors.Probe(aid, encoded); ok {
 		q.Eavt.HydrateEID(eid)
+		if perfOn {
+			q.perf.lookupNS.Add(int64(time.Since(t0)))
+		}
 		return eid, true
 	}
 	prefix := []byte{byte(aid >> 24), byte(aid >> 16), byte(aid >> 8), byte(aid)}
 	prefix = append(prefix, encoded...)
+	tScan := t0
+	if perfOn {
+		tScan = time.Now()
+	}
 	keys := q.Eavt.ScanPrefixActive(2, prefix)
 	if len(keys) > 0 && len(keys[0]) >= 20 {
 		eid := eavt.DecodeEid(eavt.BeUint64(keys[0], len(keys[0])-16))
 		q.Eavt.HydrateEID(eid)
+		if perfOn {
+			q.perf.lookupScanNS.Add(int64(time.Since(tScan)))
+			q.perf.lookupNS.Add(int64(time.Since(t0)))
+		}
 		return eid, true
+	}
+	if perfOn {
+		q.perf.lookupScanNS.Add(int64(time.Since(tScan)))
+		q.perf.lookupNS.Add(int64(time.Since(t0)))
 	}
 	return 0, false
 }
@@ -180,7 +287,16 @@ func NewQuerySession(store *QueryStore, program scheme.Program, params []sexpr.E
 // ExecuteProgram runs the program to completion (non-streaming).
 func (s *QuerySession) ExecuteProgram() (sexpr.Expr, error) {
 	s.Store.execCount.Add(1)
-	return scheme.Eval(s.Program, scheme.NewEnvironment(), s.Host)
+	perfOn := perf.Enabled()
+	var t0 time.Time
+	if perfOn {
+		t0 = time.Now()
+	}
+	r, err := scheme.Eval(s.Program, scheme.NewEnvironment(), s.Host)
+	if perfOn {
+		s.Store.perf.execWallNS.Add(int64(time.Since(t0)))
+	}
+	return r, err
 }
 
 // StreamingSession is a yield/resume VM session.

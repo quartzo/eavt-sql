@@ -38,12 +38,16 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   continua sem uso — o transactor Go usa o worker pool do flush.
 - **Arena plana do PageStore** (`FlatLeafKeys`/`FlatLeafKV`). O cursor Go usa
   `[][]byte`/`[][2][]byte`; é mais alocação por troca de folha.
-- **Buckets de nanossegundos e `eavtScanDiag`.** Os *counts* e o `memledger`
-  foram portados (ver a entrada resolvida). Fica de fora o detalhamento de
-  tempo (`saveLookupAttrNs`, `saveRetractSeekNs`, `spOpenCursorNs`, `bwNs`,
-  `execWallNs`, …), que no Nim é `when perfCounters* = false` (compile-time,
-  desligado por padrão) e o `-d:eavtScanDiag`. Portá-los exigiria instrumentar
-  ~10 call-sites com `clock_gettime`; os *counts* já dão a visão de volume.
+- ~~**Buckets de nanossegundos e `eavtScanDiag`.**~~ **Portados** (gate
+  `EAVT_PERF_COUNTERS=true`, default off como `perfCounters=false`):
+  instrumentação em `internal/engine` (lookupAttr/typeCheck/encode/retractScan
+  + prefix/seek/apply, buildEntries, batchWrite, lookup/lookupScan, execWall,
+  decode), `internal/eavt` (scan open/seek/iterate) e `internal/kvstore`
+  (batchWrite journal/memtable/total); admin `.perf`/`.perf-reset`. O
+  `eavtScanDiag` (`EAVT_SCAN_DIAG=true`) loga a cada 2000 scans cf != 0
+  (calls/seekUs/iterUs/keys). Fica de fora só o sub-breakdown do page_cursor
+  (`gDiagIdxNs`/`bin`/`leaf`) — o cursor Go é `[][]byte`, sem os contadores
+  globais do `page_cursor.nim`.
 - ~~**Loader de receita** (`load_receita`)~~ — portado (ver a entrada
   resolvida `Loader de receita em Go`).
 - **`scheme` VM**: portado o suficiente para queries (e os special forms de
