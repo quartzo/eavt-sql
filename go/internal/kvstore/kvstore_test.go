@@ -257,3 +257,60 @@ func TestConcurrentWriteAndScan(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+// TestConcurrentWriteAndFlush runs writers, a flusher and scanners together:
+// writes keep landing on the active ladder while the frozen one is drained
+// and published.
+func TestConcurrentWriteAndFlush(t *testing.T) {
+	kv := newStore(t)
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		i := 0
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			kv.Put(0, []byte{byte(i), byte(i >> 8), byte(i >> 16)})
+			i++
+		}
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = kv.Flush()
+		}
+	}()
+	for r := 0; r < 3; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				mc := kv.OpenScanCursor(0)
+				for {
+					if _, ok := mc.Next(); !ok {
+						break
+					}
+				}
+			}
+		}()
+	}
+	time.Sleep(150 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+}

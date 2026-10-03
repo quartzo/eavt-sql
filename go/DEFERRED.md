@@ -120,11 +120,13 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
 - **WAL**: goroutine + `os.WriteAt` + ticker de 100 ms em vez do chronos-file
   thread-pool. Mesma semântica de durabilidade (fsync por intervalo ~100 ms;
   crash de processo sempre seguro, crash de máquina perde ≤ ~100 ms).
-- **Transactor**: um único `e.mu` serializa a aplicação de tx e as janelas
-  curtas de capture/publish do flush e do GC. A aplicação de tx é CPU-bound
-  curta (o Nim, single-loop, também serializa). O I/O de blobs do flush roda
-  fora do lock. Ainda há concorrência entre o ciclo do WAL, os drains de
-  replicação (mutex próprio) e os handlers.
+- **Transactor**: `e.mu` serializa apenas a aplicação de tx/exec (como o
+  single-loop do Nim) e as janelas curtas de capture/publish do flush e do GC.
+  Leituras (scheme query, kv get/scan, dump, schema) e o I/O de blobs do flush
+  (`PrepareFlush`) rodam **sem** esse lock. Writes continuam na memtable
+  **ativa** enquanto o flush drena a **congelada** (draining), liberada só no
+  publish. Estado compartilhado restante é atômico/lockado internamente
+  (`memSize`/`flushActive` atômicos, WAL com mutex próprio, hub com mutex).
 - **Query server**: goroutine por conexão, **sem lock global**. A consistência
   vem da snapshot isolation (ver §"Snapshot" abaixo): o cursor pina runs +
   root no open e itera lock-free. WAL apply e queries não se bloqueiam.
@@ -161,6 +163,10 @@ A concorrência segue a semântica do Nim (runs congelados + COW root),
 - **Query server** (`internal/querysrv/server.go`): sem lock de engine; só o
   cache de `CompileStats` tem mutex. Cada query pina o snapshot no open do
   cursor e conclui; WAL apply roda em paralelo.
+- **Transactor** (`internal/transactor/server.go`): mesma dualidade
+  ativa/congelada — tx escrevem na ativa (min/max do ladder), o flush congela
+  via `FreezeAllCapture` e drena a congelada, que segue legível pelos cursores
+  até o `PublishFlush` (limpa draining + troca o root sob `snapshotMu`).
 
 Validado com `-race`: query server (e transactor) com `-race`, 4 clientes
 lendo (8 queries cada) enquanto um writer faz `tx` (WAL → réplica) →

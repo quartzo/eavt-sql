@@ -33,7 +33,13 @@ type Engine struct {
 	Hub   *replication.Hub
 	Path  string
 
-	mu sync.Mutex // serializes every engine/WAL access
+	// mu serializes transaction application (tx / scheme exec), the short
+	// capture and publish windows of a flush, and GC — mirroring the Nim
+	// single-loop for writes.  Reads (scheme query, kv get/scan, dump,
+	// schema) and the flush's blob I/O run without it: cursors pin a snapshot
+	// and the memtable keeps the active ladder while the frozen (draining)
+	// one is drained, released only at publish.
+	mu sync.Mutex
 }
 
 // NewEngine opens the data dir, bootstraps the schema and attaches the WAL.
@@ -243,12 +249,12 @@ func (e *Engine) execScheme(conn net.Conn, m msgpack.Map, id string) {
 	}
 	prog := scheme.Program{Body: body}
 	if mode == "query" {
-		e.mu.Lock()
+		// Queries run against the snapshot pinned by their cursors; no engine
+		// lock is needed (WAL apply and flush prepare run concurrently).
 		sess := engine.NewQuerySession(e.Store, prog, params, 1, 0, false)
 		stream := engine.NewStreamingSession(sess)
 		for {
 			rows, more, err := stream.NextBatch(100)
-			e.mu.Unlock()
 			if err != nil {
 				e.writeResponse(conn, id, nil, nil, false, err.Error())
 				return
@@ -257,7 +263,6 @@ func (e *Engine) execScheme(conn net.Conn, m msgpack.Map, id string) {
 			if !more {
 				return
 			}
-			e.mu.Lock()
 		}
 	}
 	// exec
@@ -278,9 +283,7 @@ func (e *Engine) execScheme(conn net.Conn, m msgpack.Map, id string) {
 }
 
 func (e *Engine) handleSchema(conn net.Conn, id string) {
-	e.mu.Lock()
 	stats := e.Store.Eavt.BuildCompileStats()
-	e.mu.Unlock()
 	data := datalog.EncodeCompileStats(stats)
 	var fields []msgpack.Pair
 	if id != "" {
@@ -308,9 +311,7 @@ func (e *Engine) handleAdmin(conn net.Conn, command, id string) {
 		case "VAET":
 			cf = 3
 		}
-		e.mu.Lock()
 		datoms := e.Store.Eavt.ScanDatoms(cf)
-		e.mu.Unlock()
 		var rows [][]sexpr.Expr
 		for _, d := range datoms {
 			if d.Retracted {
@@ -393,21 +394,16 @@ func (e *Engine) handleKv(conn net.Conn, m msgpack.Map, id string) {
 	value := bytesField(m, "value")
 	switch op {
 	case "put":
-		e.mu.Lock()
 		e.KV.PutKv(cf, key, value)
-		e.mu.Unlock()
 		e.writeResponse(conn, id, nil, nil, false, "")
 	case "get":
-		e.mu.Lock()
 		val, ok, _ := e.KV.GetKv(cf, key)
-		e.mu.Unlock()
 		if ok {
 			e.writeResponse(conn, id, nil, [][]sexpr.Expr{{sexpr.Bytes(val)}}, false, "")
 		} else {
 			e.writeResponse(conn, id, nil, nil, false, "")
 		}
 	case "scan":
-		e.mu.Lock()
 		mc := e.KV.OpenScanCursorKv(cf)
 		var rows [][]sexpr.Expr
 		for {
@@ -417,18 +413,13 @@ func (e *Engine) handleKv(conn net.Conn, m msgpack.Map, id string) {
 			}
 			rows = append(rows, []sexpr.Expr{sexpr.Bytes(p[0]), sexpr.Bytes(p[1])})
 			if len(rows) >= 100 {
-				e.mu.Unlock()
 				e.writeResponse(conn, id, []string{"key", "value"}, rows, true, "")
 				rows = nil
-				e.mu.Lock()
 			}
 		}
-		e.mu.Unlock()
 		e.writeResponse(conn, id, []string{"key", "value"}, rows, false, "")
 	case "delete":
-		e.mu.Lock()
 		e.KV.DeleteKv(cf, key)
-		e.mu.Unlock()
 		e.writeResponse(conn, id, nil, nil, false, "")
 	default:
 		e.writeResponse(conn, id, nil, nil, false, "unknown kv op: "+op)

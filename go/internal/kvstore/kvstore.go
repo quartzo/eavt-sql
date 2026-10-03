@@ -80,7 +80,7 @@ func FromMap(m map[string]string) Config {
 type KVStore struct {
 	PS             *pagestore.Store
 	MT             *memtable.MemTable
-	memSize        uint64
+	memSize        atomic.Uint64
 	ReadOnly       bool
 	NumCf          int
 	FlushThreshold uint64
@@ -91,7 +91,7 @@ type KVStore struct {
 	// it a cursor opening mid-publish could see the new root AND the old
 	// draining runs, double-counting the flushed data.
 	snapshotMu  sync.RWMutex
-	flushActive bool
+	flushActive atomic.Bool
 	path        string
 	ownsPath    bool
 
@@ -168,7 +168,7 @@ func (kv *KVStore) Close() error {
 }
 
 // MemtableSize returns the active memtable size.
-func (kv *KVStore) MemtableSize() uint64 { return kv.memSize }
+func (kv *KVStore) MemtableSize() uint64 { return kv.memSize.Load() }
 
 func (kv *KVStore) journaling() bool { return kv.path != "" && !kv.ReadOnly }
 
@@ -300,7 +300,7 @@ func (kv *KVStore) replayJournals() error {
 		}
 		recs := ParseJournalRecords(data)
 		if len(recs) > 0 {
-			kv.memSize = kv.MT.Batch(recs)
+			kv.memSize.Store(kv.MT.Batch(recs))
 		}
 	}
 	return nil
@@ -353,7 +353,7 @@ func (kv *KVStore) ApplyJournalRecords(data []byte) {
 	}
 	entries := ParseJournalRecords(data)
 	if len(entries) > 0 {
-		kv.memSize = kv.MT.Batch(entries)
+		kv.memSize.Store(kv.MT.Batch(entries))
 	}
 }
 
@@ -362,14 +362,14 @@ func (kv *KVStore) ApplyJournalRecordsExpanded(entries []memtable.CfKey) {
 	if len(entries) == 0 {
 		return
 	}
-	kv.memSize = kv.MT.Batch(entries)
+	kv.memSize.Store(kv.MT.Batch(entries))
 }
 
 // SealLiveToFlush freezes the live memtable into draining runs.
 func (kv *KVStore) SealLiveToFlush() {
 	kv.MT.FreezeAllCapture()
-	kv.flushActive = true
-	kv.memSize = 0
+	kv.flushActive.Store(true)
+	kv.memSize.Store(0)
 }
 
 // RootHasData reports whether any of CFs 0..3 carries leaves.
@@ -393,8 +393,8 @@ func (kv *KVStore) PublishRoot(rootName string) {
 	loaded, err := kv.PS.LoadRoot(rootName)
 	if err == nil && loaded {
 		kv.MT.Publish()
-		kv.flushActive = false
-		kv.memSize = 0
+		kv.flushActive.Store(false)
+		kv.memSize.Store(0)
 	}
 	kv.snapshotMu.Unlock()
 }
@@ -423,7 +423,7 @@ func (kv *KVStore) GetKv(cf int, key []byte) ([]byte, bool, error) {
 
 // Put writes a key-only entry.
 func (kv *KVStore) Put(cf int, key []byte) {
-	kv.memSize = kv.MT.Put(cf, key)
+	kv.memSize.Store(kv.MT.Put(cf, key))
 	if kv.journaling() {
 		kv.journalDeliver([]memtable.CfKey{{Cf: uint8(cf), Key: append([]byte(nil), key...)}})
 	}
@@ -432,7 +432,7 @@ func (kv *KVStore) Put(cf int, key []byte) {
 
 // PutKv writes a key-value entry.
 func (kv *KVStore) PutKv(cf int, key, value []byte) {
-	kv.memSize = kv.MT.PutKv(cf, key, value)
+	kv.memSize.Store(kv.MT.PutKv(cf, key, value))
 	if kv.journaling() {
 		kv.journalDeliver([]memtable.CfKey{{Cf: uint8(cf), Key: append([]byte(nil), key...)}})
 	}
@@ -459,7 +459,7 @@ func (kv *KVStore) BatchWrite(entries []memtable.CfKey, journal bool) {
 	if journal && kv.journaling() && len(entries) > 0 {
 		kv.journalDeliver(entries)
 	}
-	kv.memSize = kv.MT.Batch(entries)
+	kv.memSize.Store(kv.MT.Batch(entries))
 	kv.maybeArmFlush()
 }
 
@@ -471,7 +471,7 @@ func (kv *KVStore) JournalOnly(entries []memtable.CfKey) {
 }
 
 func (kv *KVStore) maybeArmFlush() {
-	if kv.memSize >= kv.FlushThreshold && kv.OnFlushRequest != nil {
+	if kv.memSize.Load() >= kv.FlushThreshold && kv.OnFlushRequest != nil {
 		kv.OnFlushRequest()
 	}
 }
@@ -489,17 +489,16 @@ type FlushBatch struct {
 }
 
 // FlushActive reports whether a capture is in flight.
-func (kv *KVStore) FlushActive() bool { return kv.flushActive }
+func (kv *KVStore) FlushActive() bool { return kv.flushActive.Load() }
 
 // CaptureFlush freezes the memtable and collects the draining data.  Call
 // under the engine lock; returns false when read-only or a flush is in flight.
 func (kv *KVStore) CaptureFlush() (*FlushBatch, bool) {
-	if kv.ReadOnly || kv.flushActive {
+	if kv.ReadOnly || !kv.flushActive.CompareAndSwap(false, true) {
 		return nil, false
 	}
 	captured := kv.MT.FreezeAllCapture()
-	kv.flushActive = true
-	kv.memSize = 0
+	kv.memSize.Store(0)
 	b := &FlushBatch{
 		KeysByCf: map[int][][]byte{}, PairsByCf: map[int][][2][]byte{},
 		DeletedByCf: map[int][][]byte{}, SealBoundary: -1, MaxT: -1,
@@ -568,8 +567,8 @@ func (kv *KVStore) PublishFlush(b *FlushBatch, trees []pagestore.CfTree, root st
 	kv.snapshotMu.Lock()
 	kv.PS.PublishTrees(trees, root)
 	kv.MT.Publish()
-	kv.flushActive = false
-	kv.memSize = 0
+	kv.flushActive.Store(false)
+	kv.memSize.Store(0)
 	kv.snapshotMu.Unlock()
 	if b.SealBoundary >= 0 && kv.WalDurableUpTo != nil {
 		kv.WalDurableUpTo.Store(b.SealBoundary)
