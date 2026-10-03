@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -582,13 +583,18 @@ type FlushBatch struct {
 	BaseTrees    []pagestore.CfTree
 	SealBoundary int64
 	MaxT         int64
+	// captured holds the frozen runs handed over by CaptureFlush; they are
+	// drained (chunked, off the engine lock) by PrepareFlush.
+	captured [][]*memtable.Run
 }
 
 // FlushActive reports whether a capture is in flight.
 func (kv *KVStore) FlushActive() bool { return kv.flushActive.Load() }
 
-// CaptureFlush freezes the memtable and collects the draining data.  Call
-// under the engine lock; returns false when read-only or a flush is in flight.
+// CaptureFlush freezes the memtable and stashes the frozen runs.  Call under
+// the engine lock — this part is SHORT (freeze + seal + root snapshot); the
+// heavy drain runs in PrepareFlush, off the lock.  Returns false when
+// read-only or a flush is in flight.
 func (kv *KVStore) CaptureFlush() (*FlushBatch, bool) {
 	if kv.ReadOnly || !kv.flushActive.CompareAndSwap(false, true) {
 		return nil, false
@@ -598,17 +604,27 @@ func (kv *KVStore) CaptureFlush() (*FlushBatch, bool) {
 	b := &FlushBatch{
 		KeysByCf: map[int][][]byte{}, PairsByCf: map[int][][2][]byte{},
 		DeletedByCf: map[int][][]byte{}, SealBoundary: -1, MaxT: -1,
+		captured: captured,
 	}
 	if kv.JournalSeal != nil {
 		b.SealBoundary = kv.JournalSeal()
 	}
+	b.BaseTrees = kv.PS.BaseTrees()
+	return b, true
+}
+
+// drainBatch materialises the frozen runs into the batch, chunked for loop
+// fairness.  Runs are immutable after the freeze, so this is safe off the
+// engine lock while writers continue into the fresh live ladder.
+func (kv *KVStore) drainBatch(b *FlushBatch) {
+	yield := func() { runtime.Gosched() }
 	for cf := 0; cf < kv.NumCf; cf++ {
-		runs := captured[cf]
+		runs := b.captured[cf]
 		if len(runs) == 0 {
 			continue
 		}
 		if cf >= 10 {
-			pairs, deleted := memtable.DrainKvSorted(runs)
+			pairs, deleted := memtable.DrainKvSorted(runs, yield)
 			if len(pairs) > 0 {
 				b.PairsByCf[cf] = pairs
 			}
@@ -616,12 +632,14 @@ func (kv *KVStore) CaptureFlush() (*FlushBatch, bool) {
 				b.DeletedByCf[cf] = deleted
 			}
 		} else {
-			keys := memtable.DrainSorted(runs)
+			keys := memtable.DrainSorted(runs, yield)
 			if len(keys) > 0 {
 				b.KeysByCf[cf] = keys
 			}
 		}
+		yield() // CF boundary
 	}
+	b.captured = nil // release the frozen-run references early
 	for cf, keys := range b.KeysByCf {
 		if cf >= 10 {
 			continue
@@ -639,12 +657,12 @@ func (kv *KVStore) CaptureFlush() (*FlushBatch, bool) {
 			}
 		}
 	}
-	b.BaseTrees = kv.PS.BaseTrees()
-	return b, true
 }
 
-// PrepareFlush does the heavy blob I/O off the engine lock.
+// PrepareFlush drains the frozen runs (chunked, OFF the engine lock) and does
+// the heavy blob I/O.
 func (kv *KVStore) PrepareFlush(b *FlushBatch) ([]pagestore.CfTree, string, error) {
+	kv.drainBatch(b)
 	trees, root, err := kv.PS.PrepareMergeMap(b.BaseTrees, b.KeysByCf)
 	if err != nil {
 		return nil, "", err

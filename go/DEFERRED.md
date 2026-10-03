@@ -15,13 +15,19 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
 
 ## 1. Adiado (não implementado)
 
-- **Fatiamento do drain em ~256 KiB.** O Nim fatia o drain em fatias de
-  ~256 KiB com `await sleepAsync(0)` (serve queries no próprio loop do drain).
-  No Go isso não é necessário para a *latência*: o `PrepareFlush` roda numa
-  goroutine **fora** do `e.mu`, e queries rodam em outras goroutines — ver a
-  entrada resolvida `Flush + blob pool` abaixo. O que fica de fora é
-  fatiar um único CF gigante em merges intermediários (o Go faz um passe
-  ordenado por CF); o worker pool já paraleliza a compressão/escrita.
+- ~~**Fatiamento do drain em ~256 KiB.**~~ **Portado** — e foi o achado mais
+  importante do flush: no Go o `CaptureFlush` (que **incluía o drain**:
+  `DrainSorted`/`DrainKvSorted`) rodava **dentro de `e.mu`**, ou seja, o
+  materializar do ladder congelado travava todos os writes do transactor. Agora
+  `CaptureFlush` só congela (curto, sob lock) e **`PrepareFlush` drena fora do
+  lock**, fatiado de `DrainChunkBytes` (256 KiB, igual ao Nim) com
+  `runtime.Gosched()` entre fatias e entre CFs (`internal/memtable`
+  `DrainSorted`/`DrainKvSorted` ganharam o parâmetro `yield`;
+  `kvstore.drainBatch`). As runs são imutáveis após o freeze, então o drain
+  fora do lock é seguro enquanto os writers seguem na escada ativa.
+  O que ainda fica de fora: dividir um merge de *página* gigante em merges
+  intermediários (o Go faz um passe por CF); a compressão/escrita já é
+  paralelizada pelo pool. Teste: `TestDrainSortedYields`.
 - ~~**Cursor hidratado do scanner — variante `/as-of`/history.**~~ **Resolvido
   no Go (mais estrito que o Nim).** O modo hid do `MergedCursor` só é ligado
   para CF-0 em scanners **não** history/as-of: `EngineOps.OpenCursor(cfID,
@@ -314,7 +320,7 @@ de um flush continua vendo o snapshot antigo.
 
 | Item | Onde |
 |---|---|
-| Flush faseado (sem pause) | `internal/kvstore/kvstore.go`, `internal/pagestore/store.go`, `internal/transactor/server.go` |
+| Flush: freeze curto + drain off-lock fatiado + merge no pool | `internal/kvstore/kvstore.go` (`CaptureFlush`/`drainBatch`/`PrepareFlush`), `internal/memtable/memtable.go` (`DrainSorted`), `internal/pagestore/store.go`, `internal/transactor/server.go` |
 | KV não WAL'd (só flush) | `internal/kvstore/kvstore.go` (`PutKv`/`DeleteKv`/`journalRecord`) |
 | hydrated (M6) / anchor (M7) | `internal/hydrated/*`, `internal/anchor/*`, `internal/eavt/*`, `internal/engine/{engine,write}.go`, `internal/cursor/cursor.go` |
 | Cursor hid vs history (resolvido, mais estrito) | `internal/cursor/cursor.go`, `internal/engine/engine.go` (`OpenCursor`) |

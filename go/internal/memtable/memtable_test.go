@@ -2,6 +2,7 @@ package memtable
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 )
 
@@ -163,7 +164,7 @@ func TestDrainSorted(t *testing.T) {
 	mt.Put(0, []byte{2})
 	mt.Put(0, []byte{9})
 	mt.MaterializeAll()
-	got := DrainSorted(mt.SnapshotRuns(0))
+	got := DrainSorted(mt.SnapshotRuns(0), nil)
 	want := [][]byte{{1}, {2}, {5}, {9}}
 	if len(got) != len(want) {
 		t.Fatalf("drain = %v", got)
@@ -181,11 +182,36 @@ func TestDrainKvSorted(t *testing.T) {
 	mt.PutKv(10, []byte{2}, []byte{20})
 	mt.DeleteKv(10, []byte{2})
 	mt.MaterializeAll()
-	pairs, deleted := DrainKvSorted(mt.SnapshotRuns(10))
+	pairs, deleted := DrainKvSorted(mt.SnapshotRuns(10), nil)
 	if len(pairs) != 1 || !bytes.Equal(pairs[0][0], []byte{1}) || !bytes.Equal(pairs[0][1], []byte{10}) {
 		t.Fatalf("pairs = %v", pairs)
 	}
 	if len(deleted) != 1 || !bytes.Equal(deleted[0], []byte{2}) {
 		t.Fatalf("deleted = %v", deleted)
+	}
+}
+
+// TestDrainSortedYields checks the drain calls the loop-fairness callback
+// every DrainChunkBytes of output (Nim slices the drain the same way).
+func TestDrainSortedYields(t *testing.T) {
+	mt := New(1)
+	const n = 4000
+	for i := 0; i < n; i++ {
+		k := make([]byte, 100)
+		binary.BigEndian.PutUint64(k, uint64(i))
+		mt.Put(0, k)
+	}
+	mt.MaterializeAll()
+	yields := 0
+	got := DrainSorted(mt.SnapshotRuns(0), func() { yields++ })
+	if len(got) != n {
+		t.Fatalf("drain = %d keys, want %d", len(got), n)
+	}
+	want := n * 100 / DrainChunkBytes
+	if yields < want {
+		t.Fatalf("yields = %d, want >= %d", yields, want)
+	}
+	if keys := DrainSorted(mt.SnapshotRuns(0), nil); len(keys) != n {
+		t.Fatalf("nil-yield drain = %d keys", len(keys))
 	}
 }

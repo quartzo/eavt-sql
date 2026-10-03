@@ -494,14 +494,23 @@ func copyBytes(b []byte) []byte {
 
 // ── drain (flush) — k-way sobre runs congelados, newest-wins ─────────────
 
-// DrainSorted merges runs (old -> new) into ascending deduped keys.
-func DrainSorted(runs []*Run) [][]byte {
+// DrainChunkBytes is the yield budget for the drain pass (the Nim
+// AsyncFlusher slices at the same size).  The frozen runs are immutable, so
+// the ONLY reason to slice is loop fairness: each slice is ~1-2 ms of
+// pointer-chasing, comparable to a VM query batch.
+const DrainChunkBytes = 256 * 1024
+
+// DrainSorted merges runs (old -> new) into ascending deduped keys.  yield,
+// when non-nil, is called every DrainChunkBytes of emitted key bytes so the
+// flush goroutine does not monopolise the scheduler.
+func DrainSorted(runs []*Run, yield func()) [][]byte {
 	k := len(runs)
 	if k == 0 {
 		return nil
 	}
 	heads := make([]int, k)
 	var out [][]byte
+	budget := 0
 	for {
 		best := -1
 		for i := 0; i < k; i++ {
@@ -522,6 +531,13 @@ func DrainSorted(runs []*Run) [][]byte {
 		}
 		win := runs[best].Records[heads[best]]
 		out = append(out, copyBytes(recKey(win)))
+		if yield != nil {
+			budget += len(out[len(out)-1])
+			if budget >= DrainChunkBytes {
+				budget = 0
+				yield()
+			}
+		}
 		heads[best]++
 		for i := 0; i < k; i++ {
 			if i == best {
@@ -535,13 +551,15 @@ func DrainSorted(runs []*Run) [][]byte {
 	return out
 }
 
-// DrainKvSorted returns active pairs and tombstones, newest-wins.
-func DrainKvSorted(runs []*Run) (pairs [][2][]byte, deleted [][]byte) {
+// DrainKvSorted returns active pairs and tombstones, newest-wins.  yield has
+// the same contract as in DrainSorted.
+func DrainKvSorted(runs []*Run, yield func()) (pairs [][2][]byte, deleted [][]byte) {
 	k := len(runs)
 	if k == 0 {
 		return nil, nil
 	}
 	heads := make([]int, k)
+	budget := 0
 	for {
 		best := -1
 		for i := 0; i < k; i++ {
@@ -565,7 +583,15 @@ func DrainKvSorted(runs []*Run) (pairs [][2][]byte, deleted [][]byte) {
 		if recDeleted(win) {
 			deleted = append(deleted, key)
 		} else {
-			pairs = append(pairs, [2][]byte{key, copyBytes(recValue(win))})
+			val := copyBytes(recValue(win))
+			if yield != nil {
+				budget += len(key) + len(val)
+				if budget >= DrainChunkBytes {
+					budget = 0
+					yield()
+				}
+			}
+			pairs = append(pairs, [2][]byte{key, val})
 		}
 		heads[best]++
 		for i := 0; i < k; i++ {
