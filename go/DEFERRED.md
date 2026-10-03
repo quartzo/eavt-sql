@@ -120,6 +120,14 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   blobs vão para o bucket. Testes: vetor de signing key da AWS, HMAC/SHA,
   round-trip S3 contra um S3 in-process (blobstore e pagestore), read-only e
   config faltando; E2E transactor+query ambos em S3 OK (write→flush→query).
+- **Backlog da replicação só crescia (bug, achado na carga real).** O `Subscriber`
+  incrementava `backlog` por cada byte enfileirado e **nunca decrementava** ao
+  escrever — era um acumulado total, não o pendente. Com isso qualquer carga que
+  empurrasse 64 MiB de tráfego de replicação fechava o subscriber
+  (`BacklogMaxBytes`) e o cliente recebia "transactor disconnected". O Nim
+  credita o frame ao escrevê-lo. Corrigido no `drain()`
+  (`internal/replication/replication.go`) com clamping em 0; regressão:
+  `TestBacklogCreditsOnWrite` (70 MiB de tráfego, falha sem o crédito).
 - **`logutil` + `memledger` + `stats`** — `internal/logutil` porta o logger do
   Nim (níveis DEBUG<INFO<WARN<ERROR, threshold `EAVT_LOG`, uma linha
   timestamped no stderr, concorrência-safe). O transactor ganhou o

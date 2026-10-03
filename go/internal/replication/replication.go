@@ -158,6 +158,17 @@ func (s *Subscriber) drain() {
 			s.markClosed()
 			return
 		}
+		// Credit the frame that just left the queue (4-byte header + body),
+		// so backlog tracks PENDING bytes — not the cumulative total.  The
+		// Nim subscriber does the same in sendFrame; without it a fast
+		// writer trips BacklogMaxBytes after 64 MiB of total traffic and the
+		// subscriber is closed for no reason.
+		s.mu.Lock()
+		s.backlog -= int64(4 + len(body))
+		if s.backlog < 0 {
+			s.backlog = 0
+		}
+		s.mu.Unlock()
 	}
 }
 
