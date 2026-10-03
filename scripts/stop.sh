@@ -18,7 +18,7 @@ for pid in $(pgrep -f eavt-sql || true); do
   # binário substituído em disco enquanto o processo roda → sufixo do kernel
   exe="${exe% (deleted)}"
   case "$exe" in
-    */build/eavt-sql-transactor|*/build/eavt-sql-query)
+    */build/eavt-sql-transactor|*/build/eavt-sql-query|*/build/eavt-sql-transactor-go|*/build/eavt-sql-query-go)
       term_pids+=("$pid")
       echo "killing $exe (pid $pid)"
       ;;

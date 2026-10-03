@@ -6,8 +6,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 BIN_DIR="build"
-TRANSACTOR="$BIN_DIR/eavt-sql-transactor"
-QUERY="$BIN_DIR/eavt-sql-query"
+# EAVT_STACK=nim (default) | go — allows the benchmark harness to A/B the two
+# stacks with the same driver/client.
+SUFFIX=""
+if [ "${EAVT_STACK:-nim}" = "go" ]; then SUFFIX="-go"; fi
+TRANSACTOR="$BIN_DIR/eavt-sql-transactor$SUFFIX"
+QUERY="$BIN_DIR/eavt-sql-query$SUFFIX"
 DB_DIR="${HOME}/.local/state/eavt/db"
 LOG_DIR="/tmp"
 
@@ -37,7 +41,11 @@ fi
 # Memory guard: heavy processes run with a 3GB virtual memory cap so a
 # pathological write path degrades (allocation failure) instead of OOM-
 # killing the whole machine (seen: 5GB RSS under bulk load, 2026-09-04).
-MEM_GUARD="ulimit -v 3145728; "
+# Applied to the Nim stack only (it was the source of the 5GB RSS); the Go
+# stack stays inside the cap naturally and Go's runtime needs headroom to
+# reserve heap arenas.
+MEM_GUARD=""
+if [ "${EAVT_STACK:-nim}" != "go" ]; then MEM_GUARD="ulimit -v 3145728; "; fi
 
 nohup bash -c "$MEM_GUARD exec '$TRANSACTOR'" </dev/null >"$LOG_DIR/transactor.log" 2>&1 &
 trans_pid=$!

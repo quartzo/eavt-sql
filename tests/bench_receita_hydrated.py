@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import random
 import statistics
@@ -324,6 +325,9 @@ def dump_results(results: dict, label: str) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--label", default="edn")
+    ap.add_argument("--stack", choices=("nim", "go"), default="nim",
+                    help="which stack scripts/start.sh should launch "
+                         "(nim = reference, go = Go port A/B)")
     ap.add_argument("--sizes", default=",".join(map(str, DEFAULT_SIZES)))
     ap.add_argument("--ops", type=int, default=500)
     ap.add_argument("--warmup", type=int, default=50)
@@ -333,10 +337,13 @@ def main() -> int:
     ap.add_argument("--skip-estabs", action="store_true")
     ap.add_argument("--skip-socios", action="store_true")
     args = ap.parse_args()
+    # scripts/start.sh|stop.sh select the binaries from EAVT_STACK.
+    os.environ["EAVT_STACK"] = args.stack
 
     results = {
         "meta": {
             "label": args.label,
+            "stack": args.stack,
             "date": time.strftime("%Y-%m-%d %H:%M:%S"),
             "host": platform.node(),
             "python": platform.python_version(),

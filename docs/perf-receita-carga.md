@@ -13,7 +13,7 @@ re-portado em `load_receita_sql.py`, roda no build atual a 7,3k estabs/s).
 
 ## Instrumento
 
-`tests/bench_receita_hydrated.py` — modo padrão **goc dessincronizado**:
+`tests/bench_receita_hydrated.py` — modo padrão **goc dessincronizado**; `--stack nim|go` escolhe qual stack o `scripts/start.sh` sobe (mesmo cliente Python, mesmo protocolo, mesmo host — só o servidor muda):
 
 - cada estágio lê apenas as primeiras linhas dos arquivos (proporcionais ao
   tamanho), sem filtro de membros — cada linha ancora sua entidade por
@@ -54,6 +54,56 @@ M7 — não é regressão do M8. O smoke histórico de 1M era só empresas
 ambos (M8: 15,4k/s empresas no debug, 20k/s no M7 release). Investigação
 própria: ciclo de vida de job no pool (cancel/recycle vs completion) —
 arquivo como Known Issue no AGENTS.md.
+
+## Referência Go (port da stack, 2026-10-03)
+
+Rodada com o **mesmo harness e o mesmo cliente**: `uv run python
+tests/bench_receita_hydrated.py --stack go --label go --sizes
+10000,25000,50000` (JSON: `/tmp/opencode/receita_bench/go.json`). A única
+variável é o servidor (stack Go em vez da Nim); a guarda `ulimit -v 3 GB`
+do `start.sh` vale só para o Nim (o Go fica abaixo dela naturalmente).
+
+### Taxas (rows/s)
+
+| estágio | Go @10k | Go @25k | Go @50k | Nim ref @25k (M8) |
+|---|---|---|---|---|
+| empresas | 26.223 | 27.102 | 25.738 | 28.298 |
+| estabs   | **6.978** | **7.450** | 7.774 | 6.181 |
+| simples  | 32.856 | 29.070 | 30.848 | 30.064 |
+| sócios   | **12.671** | **14.232** | 13.333 | 11.691 |
+| load total | 3,1 s | 7,2 s | 14,1 s | — |
+
+### Probes (p50, 500 ops)
+
+| probe | Go @10k | Go @25k | Go @50k | Nim ref @25k |
+|---|---|---|---|---|
+| eid_lookup (AVET) | 40,9 µs | **36,7 µs** | 38,7 µs | 78,5 µs |
+| attr_by_eid (EAVT) | 41,4 µs | **41,3 µs** | 40,5 µs | 107 µs |
+| attrs_x3 | 82,2 µs | **85,8 µs** | 79,9 µs | 220 µs |
+| upsert (retract-scan) | 71,3 µs | 80,6 µs | 72,6 µs | **52 µs** |
+
+### Extrapolação da carga completa (@ taxas de 50k, Go)
+
+```
+empresas   46M / 25.738/s → 0,50 h
+estabs     73M /  7.774/s → 2,61 h   ← continua dominando
+simples    50M / 30.848/s → 0,45 h
+sócios     28M / 13.333/s → 0,58 h
+TOTAL ≈ 4,1 h   (Nim @25k: 4,9 h)
+```
+
+**Leitura**: a stack Go fica **dentro de ±5%** das taxas de escrita do Nim
+(empresas −4%, simples −3%) e é **20–22% mais rápida** em estabs/sócios; os
+probes pontuais ficam **2,1–2,6× mais rápidos** (eid_lookup/attr_by_eid/
+attrs_x3). O único regresso é o **upsert (tx)**, ~1,55× mais lento — o
+caminho de tx Go passa por `TransactTx` (decode + lookup único + retract
+scan) sem o atalho do `hasDatom` do editor. A extrapolação total cai de
+4,9 h → 4,1 h.
+
+Rodada nesta data com o código do port já incluindo as correções de perf
+(`hydrated` M6, `anchor` M7, blob pool do flush, arena plana do page store,
+drain fora do lock, credit do backlog de replicação). Contagem fixa
+(declare+lookups) ≈ 0,1 s.
 
 ## Referência @50k (todas as taxas em linhas/s)
 
