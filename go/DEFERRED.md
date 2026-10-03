@@ -67,16 +67,19 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
 
 ## 2. Deixado errado / divergências conhecidas
 
-- **KV CFs (>= 10) NÃO são duráveis nem replicam (bug real).**
-  - `PutKv` (`internal/kvstore/kvstore.go`) chama `journalDeliver` com um
-    `CfKey` **só-chave** — o **valor é descartado**. No replay,
-    `ParseJournalRecords` só processa `cf <= 3`, então o registro KV nem é
-    lido. Resultado: `.kv-put`/`PutKv` não sobrevivem a restart.
-  - `DeleteKv` grava direto no arquivo legacy `journal/journal`, **ignorando o
-    sink WAL** (divergente do Nim, que não grava nada quando o sink existe).
-  - Impacto: superfície KV (`.kv-*`, qualquer uso de CF >= 10) não é durável
-    nem replicada. **O caminho de datoms (CF 0-3) está correto** (WAL CF-0),
-    então datalog/tx estão íntegros.
+- **KV CFs (>= 10) só são duráveis via flush** (limitação do Nim, não bug do
+  port). Com sink WAL instalado, `PutKv`/`DeleteKv` **não journalam** — o WAL é
+  CF-0-only por design (o datom é a verdade) e CFs KV são duráveis quando o
+  flush publica no page-store. Sem sink, caem no arquivo legacy `journal/`
+  **com o valor** (o `journalRecord` agora emite o formato exato do parser:
+  key-only `vlen=1/value=0x00`, valor `vlen=len(value)`; o formato antigo
+  tinha um byte extra e era inconsistente com `journalRecordLenAt`). O
+  `ParseJournalRecords` continua processando só `cf <= 3`, então KV não é
+  *replayado* (igual ao Nim). **O caminho de datoms (CF 0-3) está correto**
+  (WAL CF-0), então datalog/tx estão íntegros. Correção anterior de
+  fidelidade: o Go escrevia um record WAL só-chave para `PutKv` (valor
+  descartado, e o Nim não escreve nada com sink) e `DeleteKv` ignorava o sink
+  — agora ambos seguem a regra do Nim (`JournalSink == nil`).
 - **`slotToPackedValue` de keyword** (`internal/query/edn_tx.go`): para
   `TskKw` retorna `v.S`, que é vazio (o slot guarda só `Sym`). Espelha o
   comportamento do Nim, mas keyword usada **como valor de datom** codifica
@@ -101,8 +104,9 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   idempotentes, mas existe uma janela (a mesma do Nim).
 - **`admin tree` não existe** (retorna `unknown admin command: tree`) e
   `status` só reporta `memtable: N bytes` — igual ao Nim, porém pobre.
-- **`deleteKv`/`putKv` com sink**: ver o primeiro item. `journalDeliver` do Go
-  usa o sink para puts (mas perde o valor) e o `DeleteKv` nem usa o sink.
+- **`deleteKv`/`putKv` com sink**: resolvido — ambos não journalam com sink
+  (`JournalSink == nil`); sem sink, gravam o valor/tombstone no legacy com o
+  formato correto. Ver o primeiro item.
 
 ---
 
@@ -201,7 +205,7 @@ de um flush continua vendo o snapshot antigo.
 | Item | Onde |
 |---|---|
 | Flush faseado (sem pause) | `internal/kvstore/kvstore.go`, `internal/pagestore/store.go`, `internal/transactor/server.go` |
-| KV não durável | `internal/kvstore/kvstore.go` (`PutKv`/`DeleteKv`/`journalDeliver`) |
+| KV não WAL'd (só flush) | `internal/kvstore/kvstore.go` (`PutKv`/`DeleteKv`/`journalRecord`) |
 | hydrated/anchor ausentes | `internal/eavt/*`, `internal/engine/write.go` |
 | Planner blind-first | `internal/datalog/planner.go` |
 | Snapshot (memtable/kvstore) | `internal/memtable/memtable.go`, `internal/kvstore/kvstore.go`, `internal/pagestore/{store,cache}.go`, `internal/eavt/resolver.go` |

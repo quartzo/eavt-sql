@@ -2,6 +2,8 @@ package kvstore
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -133,10 +135,36 @@ func TestApplyJournalExpanded(t *testing.T) {
 }
 
 func TestJournalParseRoundTrip(t *testing.T) {
-	rec := writeJournalRecord(0, []byte{9, 8, 7}, nil, false)
+	rec := journalRecord(0, []byte{9, 8, 7}, nil, false)
 	entries := ParseJournalRecords(rec)
 	if len(entries) != 1 || entries[0].Cf != 0 || !bytes.Equal(entries[0].Key, []byte{9, 8, 7}) {
 		t.Fatalf("parse = %#v", entries)
+	}
+	// A value record's encoded length must match the parser's computed length.
+	if vrec := journalRecord(10, []byte("k"), []byte("v"), false); journalRecordLenAt(vrec, 0) != len(vrec) {
+		t.Fatalf("value record len mismatch: parser %d, encoded %d", journalRecordLenAt(vrec, 0), len(vrec))
+	}
+	// Tombstones carry vlen=0xFFFFFFFF and are rejected by the parser (as Nim).
+	if d := journalRecordLenAt(journalRecord(10, []byte("k"), nil, true), 0); d != -1 {
+		t.Fatalf("tombstone accepted by parser: %d", d)
+	}
+}
+
+// TestKvNotJournaledThroughSink matches Nim: the WAL is CF-0-only, so a KV
+// write with a sink installed must not emit a (misleading) WAL record nor a
+// legacy journal file.
+func TestKvNotJournaledThroughSink(t *testing.T) {
+	kv := newStore(t)
+	var got []memtable.CfKey
+	kv.JournalSink = func(e []memtable.CfKey) { got = append(got, e...) }
+	kv.PutKv(10, []byte("k"), []byte("v"))
+	kv.DeleteKv(10, []byte("k"))
+	if len(got) != 0 {
+		t.Fatalf("sink received %#v, want none", got)
+	}
+	legacy := filepath.Join(kv.path, "journal", "journal")
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("legacy journal created with sink installed")
 	}
 }
 

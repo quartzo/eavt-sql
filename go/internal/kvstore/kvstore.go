@@ -306,23 +306,48 @@ func (kv *KVStore) replayJournals() error {
 	return nil
 }
 
-func writeJournalRecord(cf uint8, key, value []byte, deleted bool) []byte {
+// journalRecord encodes one record in the WAL/journal format consumed by
+// ParseJournalRecords:
+//
+//	[4B totKlen][cf][key][4B vlen][value]
+//
+// totKlen includes the cf byte.  Key-only records (value == nil) use vlen=1,
+// value=0x00 — the sink's format.  Tombstones use vlen=0xFFFFFFFF (no value);
+// note the parser rejects those (vlen bound), so deletes are not replayable —
+// same as the Nim reader.
+func journalRecord(cf uint8, key, value []byte, deleted bool) []byte {
 	totKlen := 1 + len(key)
-	out := make([]byte, 0, 4+totKlen+4+len(value)+1)
+	out := make([]byte, 0, 4+totKlen+4+len(value))
 	var hdr [4]byte
 	binary.BigEndian.PutUint32(hdr[:], uint32(totKlen))
 	out = append(out, hdr[:]...)
 	out = append(out, cf)
 	out = append(out, key...)
 	if deleted {
-		out = append(out, 0xff, 0xff, 0xff, 0xff, 0)
+		out = append(out, 0xff, 0xff, 0xff, 0xff)
+		return out
+	}
+	if value == nil {
+		out = append(out, 0, 0, 0, 1, 0)
 		return out
 	}
 	binary.BigEndian.PutUint32(hdr[:], uint32(len(value)))
 	out = append(out, hdr[:]...)
 	out = append(out, value...)
-	out = append(out, 0)
 	return out
+}
+
+func (kv *KVStore) appendLegacyJournal(rec []byte) {
+	path := filepath.Join(kv.path, "journal", "journal")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	_, _ = f.Write(rec)
+	_ = f.Close()
 }
 
 func (kv *KVStore) journalDeliver(entries []memtable.CfKey) {
@@ -340,7 +365,7 @@ func (kv *KVStore) journalDeliver(entries []memtable.CfKey) {
 	}
 	defer f.Close()
 	for _, e := range entries {
-		_, _ = f.Write(writeJournalRecord(e.Cf, e.Key, nil, false))
+		_, _ = f.Write(journalRecord(e.Cf, e.Key, nil, false))
 	}
 }
 
@@ -433,8 +458,11 @@ func (kv *KVStore) Put(cf int, key []byte) {
 // PutKv writes a key-value entry.
 func (kv *KVStore) PutKv(cf int, key, value []byte) {
 	kv.memSize.Store(kv.MT.PutKv(cf, key, value))
-	if kv.journaling() {
-		kv.journalDeliver([]memtable.CfKey{{Cf: uint8(cf), Key: append([]byte(nil), key...)}})
+	// The WAL is CF-0-only (datoms); KV CFs are durable via the page-store
+	// flush.  Without a WAL sink, fall back to the legacy journal WITH the
+	// value (matches Nim putKv when journalSink == nil).
+	if kv.journaling() && kv.JournalSink == nil {
+		kv.appendLegacyJournal(journalRecord(uint8(cf), key, value, false))
 	}
 	kv.maybeArmFlush()
 }
@@ -442,14 +470,8 @@ func (kv *KVStore) PutKv(cf int, key, value []byte) {
 // DeleteKv writes a tombstone.
 func (kv *KVStore) DeleteKv(cf int, key []byte) {
 	kv.MT.DeleteKv(cf, key)
-	if kv.journaling() {
-		path := filepath.Join(kv.path, "journal", "journal")
-		_ = os.MkdirAll(filepath.Dir(path), 0o755)
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-		if err == nil {
-			_, _ = f.Write(writeJournalRecord(uint8(cf), key, nil, true))
-			_ = f.Close()
-		}
+	if kv.journaling() && kv.JournalSink == nil {
+		kv.appendLegacyJournal(journalRecord(uint8(cf), key, nil, true))
 	}
 	kv.maybeArmFlush()
 }
