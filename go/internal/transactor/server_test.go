@@ -1,6 +1,7 @@
 package transactor
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -80,4 +81,36 @@ func TestPerfBuckets(t *testing.T) {
 		}
 	}
 	e.perfText()
+}
+
+// TestAutoGCPostFlush verifies the post-flush auto-GC keeps the root count
+// within GcMaxRootCount.
+func TestAutoGCPostFlush(t *testing.T) {
+	dir := t.TempDir()
+	e, err := NewEngine(filepath.Join(dir, "db"), filepath.Join(dir, "blobs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	e.KV.GcMaxAgeSecs = 43200
+	e.KV.GcMaxRootCount = 2
+	if _, _, err := e.Store.Eavt.EavtDeclareAttr("person/name", eavt.DbTypeString, false, false); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		eid := e.Store.Eavt.AllocateEntityId()
+		if _, err := e.Store.Eavt.EavtSave(eid, "person/name", fmt.Sprintf("n%d", i), int64(i+1)); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.KV.Flush(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	roots, err := e.KV.PS.ListRoots()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roots) > e.KV.GcMaxRootCount {
+		t.Fatalf("roots = %d after auto-GC, want <= %d", len(roots), e.KV.GcMaxRootCount)
+	}
 }

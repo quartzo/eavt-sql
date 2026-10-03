@@ -5,6 +5,7 @@
 package querysrv
 
 import (
+	"errors"
 	"net"
 	"strings"
 	"sync"
@@ -52,6 +53,34 @@ func NewGatewayConfig(downstreamPath string, rcfg replica.Config) *Gateway {
 	}
 	return g
 }
+
+// Connected reports whether the downstream link is up.
+func (g *Gateway) Connected() bool { return g.Conn != nil && g.Conn.Connected() }
+
+// Close stops the downstream (and waits for the in-flight event apply) before
+// releasing the replica, so shutdown never races a background apply.
+func (g *Gateway) Close() {
+	if g.Conn != nil {
+		g.Conn.Close()
+		g.Conn.WaitEvents()
+	}
+	if g.Replica != nil {
+		g.Replica.Close()
+	}
+}
+
+// Forward sends a raw request on the downstream (replication) connection and
+// returns the collected response bytes.  A forwarded write's response flushes
+// the queued WAL on the same connection (single-queue ordering), so this is
+// how the query server exercises the volatile replication path.
+func (g *Gateway) Forward(raw []byte) ([]byte, error) {
+	if g.Conn == nil {
+		return nil, errNoDownstream
+	}
+	return g.Conn.RequestCollect(raw)
+}
+
+var errNoDownstream = errors.New("no downstream connection")
 
 // GetSnapshot returns the (cached) CompileStats for query compilation.
 func (g *Gateway) GetSnapshot() *datalog.CompileStats {

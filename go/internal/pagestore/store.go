@@ -177,6 +177,9 @@ func (s *Store) Tree(cf int) CfTree {
 func (s *Store) NumCf() int { return s.numCf }
 
 // CurrentRoot returns the current root name.
+// ListRoots returns the sorted root names (delegates to the blob backend).
+func (s *Store) ListRoots() ([]string, error) { return s.blobs.ListRoots() }
+
 func (s *Store) CurrentRoot() string {
 	s.treeMu.RLock()
 	defer s.treeMu.RUnlock()

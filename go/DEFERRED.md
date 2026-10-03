@@ -274,14 +274,17 @@ de um flush continua vendo o snapshot antigo.
 - **Sem paridade A/B da stack completa** (transactor Go × Nim) além do REPL
   (51 linhas). A stack Go foi validada funcionalmente (tx/kv/dump/query/float),
   não byte-a-byte em todas as combinações.
-- **Sem teste E2E de replicação** (transactor Go → réplica Go) além do teste
-  de ordem do hub (`internal/replication/replication_test.go`); a réplica foi
-  exercitada indiretamente pelo query server Go no E2E.
-- **Restart/recovery** agora coberto por `scripts/restart_recovery.sh`
-  (Alice flushed + Bob via WAL replay + bootstrap no WAL, sem legacy journal).
-- **Sem teste de concorrência do transactor** (o `-race` cobre o query server,
-  não vários clientes concorrentes no transactor).
-- **Sem teste E2E do auto-GC pós-flush** (só unitário do `gcFull`).
+- ~~**Sem teste E2E de replicação**~~ — `internal/e2e.TestReplicationE2E`:
+  transactor real num socket + `Gateway`/réplica, tx volátil (flush do WAL na
+  resposta encaminhada) e pós-flush (adoção de root).
+- **Restart/recovery** coberto por `scripts/restart_recovery.sh` (Alice flushed
+  + Bob via WAL replay + bootstrap no WAL, sem legacy journal).
+- ~~**Sem teste de concorrência do transactor**~~ —
+  `internal/e2e.TestTransactorConcurrentClients`: 8 conexões × 25 txs em
+  paralelo sob `-race`, todos os datoms presentes.
+- ~~**Sem teste E2E do auto-GC pós-flush**~~ —
+  `internal/transactor.TestAutoGCPostFlush` (5 flushes, roots ≤
+  `GcMaxRootCount`).
 - **WAL delete-durável** coberto só em unitário, não em E2E.
 - ~~**`ocaml/` no repo / `dune` no `dist`.**~~ **Resolvido**: a trilha OCaml
   (abandonada) foi removida — `ocaml/` apagado, o passo `dune` saiu do

@@ -27,7 +27,10 @@ type Conn struct {
 	path    string
 	onEvent func(frame []byte)
 	evCh    chan []byte
+	evDone  chan struct{}
+	stop    chan struct{}
 
+	closeOnce sync.Once
 	mu        sync.Mutex
 	conn      net.Conn
 	connected bool
@@ -39,7 +42,11 @@ type Conn struct {
 
 // Open creates and starts the connection (reconnect loop in the background).
 func Open(path string, onEvent func(frame []byte)) *Conn {
-	c := &Conn{path: path, onEvent: onEvent, evCh: make(chan []byte, eventQueueSize), pending: map[string]chan []byte{}}
+	c := &Conn{
+		path: path, onEvent: onEvent,
+		evCh: make(chan []byte, eventQueueSize), evDone: make(chan struct{}),
+		stop: make(chan struct{}), pending: map[string]chan []byte{},
+	}
 	go c.eventLoop()
 	go c.connectLoop()
 	return c
@@ -47,9 +54,15 @@ func Open(path string, onEvent func(frame []byte)) *Conn {
 
 // eventLoop applies replication events in arrival order.
 func (c *Conn) eventLoop() {
-	for frame := range c.evCh {
-		if c.onEvent != nil {
-			c.onEvent(frame)
+	defer close(c.evDone)
+	for {
+		select {
+		case <-c.stop:
+			return
+		case frame := <-c.evCh:
+			if c.onEvent != nil {
+				c.onEvent(frame)
+			}
 		}
 	}
 }
@@ -73,11 +86,27 @@ func (c *Conn) Connected() bool {
 	return c.connected
 }
 
+func (c *Conn) sleepOrStop() bool {
+	select {
+	case <-c.stop:
+		return true
+	case <-time.After(time.Second):
+		return false
+	}
+}
+
 func (c *Conn) connectLoop() {
 	for {
+		select {
+		case <-c.stop:
+			return
+		default:
+		}
 		conn, err := net.Dial("unix", c.path)
 		if err != nil {
-			time.Sleep(time.Second)
+			if c.sleepOrStop() {
+				return
+			}
 			continue
 		}
 		c.mu.Lock()
@@ -96,7 +125,9 @@ func (c *Conn) connectLoop() {
 		c.mu.Unlock()
 		c.dropEvents()
 		_ = conn.Close()
-		time.Sleep(time.Second)
+		if c.sleepOrStop() {
+			return
+		}
 	}
 }
 
@@ -247,8 +278,10 @@ func (c *Conn) RequestCollect(raw []byte) ([]byte, error) {
 	}
 }
 
-// Close tears down the connection.
+// Close stops the reconnect loop and tears down the connection.  Call
+// WaitEvents to ensure the in-flight event apply has finished.
 func (c *Conn) Close() {
+	c.closeOnce.Do(func() { close(c.stop) })
 	c.mu.Lock()
 	conn := c.conn
 	c.mu.Unlock()
@@ -256,6 +289,9 @@ func (c *Conn) Close() {
 		_ = conn.Close()
 	}
 }
+
+// WaitEvents blocks until the event loop has drained and returned.
+func (c *Conn) WaitEvents() { <-c.evDone }
 
 func (c *Conn) sendFrame(body []byte) error {
 	c.writeMu.Lock()
