@@ -332,11 +332,12 @@ já é irrelevante em Go (2 CPU-s) mas é **metade do wall no harness Python**.
   **+44%** (servidor Go) / **+33%** (servidor Nim) em estabs — mesmo tamanho
   do efeito de trocar Nim → Go no servidor.
 
-### Achado lateral: `--depth ≥ 16` trava (sem fluxo de controle de resposta)
+### `--depth ≥ 16` — travava nas duas stacks; resolvido no Go ✅
 
-Com `batch 500` e 16 batches em voo o pipeline **trava de vez** — **nas duas
-stacks** (Go: timeout de 5 min sem progresso; Nim: idem, medido com 180 s;
-mesmo ponto do pipeline, estágio `estabs`). Evidências (rodada Go):
+**Sintoma (rodada original):** com `batch 500` e 16 batches em voo o pipeline
+**trava de vez** — em **ambas** as stacks (Go: timeout de 5 min sem progresso;
+Nim: idem, medido com 180 s; mesmo ponto do pipeline, estágio `estabs`).
+Evidências (rodada Go):
 
 - dump de goroutines (`SIGQUIT`) do query server: `Gateway.serve →
   Conn.Request → downstream.WriteFrame` **[IO wait]** — o servidor está
@@ -362,28 +363,59 @@ Go):
   presa, loop de requests parado. Medido: mesmo `--depth 16` trava em 180 s.
 
 Ou seja: **duas tasks (leitor/escritor) são a base, mas não bastam** — sem
-teto na fila de respostas, troca-se deadlock por memória sem limite, e o leitor
-precisa estar desacoplado da entrega (completar o future ao *enfileirar*, não
-ao escrever). O padrão correto **já existe no repo**: o `Subscriber` da
-replicação (`go/internal/replication`) é fila + `go s.drain()` (escritor
-próprio) + `BacklogMaxBytes = 64 MiB` (teto → fecha o subscriber). Para o
-lado de cliente o teto vira **janela/créditos**: o cliente anuncia quantas
-respostas cabem, e o servidor nunca tenta escrever além disso — aí nem caminho
-duplo precisa. Correção pontual que **não** resolveu: `SO_RCVBUF` de 8 MB no
-cliente (mesmo ponto de bloqueio no dump) — causa exata a fechar.
+teto na fila de respostas troca-se deadlock por memória sem limite, e o leitor
+precisa estar desacoplado da entrega. O padrão correto já existia no repo (o
+`Subscriber` da replicação: fila + `go s.drain()` + `BacklogMaxBytes`), e foi
+ele que foi trazido para o lado de cliente — **sem nenhuma camada de protocolo
+nova**:
 
-Até lá: `depth ≤ 8` (medido, estável nas duas stacks).
+**Resolvido no Go:**
+
+- `querysrv.frameWriter` (`go/internal/querysrv/writer.go`): fila de respostas
+  por conexão + goroutine de escrita própria (um único `writev` por lote). O
+  loop de requests (`serve`) só espera quando a fila cruza o teto — daí em
+  diante o backpressure é o do próprio socket (janela do transporte), que é o
+  mecanismo certo.
+- Todas as respostas passam pela fila: os handlers agora recebem `*clientConn`
+  em vez de `net.Conn` (`server.go`), então frames de handlers diferentes nunca
+  se intercalam no wire.
+- Teto = **constante de política**, não handshake: `EAVT_CLIENT_QUEUE_MAX`
+  (default 64 MiB, espelhando `BacklogMaxBytes`). Cliente que estoura fica
+  preso — justo, ultrapassou o limite do servidor — e a memória fica limitada.
+- `downstream`: canal de entrega da resposta com buffer (`responseQueueSize=4`)
+  para o `readerLoop` nunca depender do ritmo do cliente (ele é o único leitor
+  do link do transactor; travar ele é o que encheria a fila da réplica).
+
+**Validação:** `--depth 16` **e** `--depth 64` completam (estabs 8.664 / 8.585
+rows/s; antes: hang de 5 min) · regressão
+`TestServeKeepsReadingWhileClientIsSilent` (705 requests enviados em silêncio =
+558 KiB de respostas > buffers do kernel) · `go vet`/`go test ./...`/`-race`
+verdes · carga real 50k **sem regressão** (empresas 43.879/s vs 43.833 do
+baseline; estabs 13.286 vs 13.466) · nenhum `backlog`/`markClosed` no
+transactor durante as rodadas · `BenchmarkTxUpsertStack` 55,8 → 56,0 µs (ruído).
+
+A pergunta em aberto sobre `SO_RCVBUF` (8 MB não evitava o travamento) perde o
+objeto: com o leitor desacoplado o cliente sempre termina de enviar — o
+registro histórico fica acima.
+
+**Pendente:** o **Nim continua travando** no `--depth 16` (mesmo defeito pelo
+caminho do `await fut` em `downstream.nim`) — fora do escopo desta rodada.
 
 ### Próximos passos de perf (por ordem de retorno)
 
-1. **Pipelining no harness** (`--depth 8`): +45–61% sem tocar o servidor.
+1. **Pipelining no harness** (`--depth 8`): +45–61% sem tocar o servidor. Com
+   o `frameWriter` no query server o depth deixa de ser limitado pelos buffers
+   do kernel — o limite agora é o teto da fila (política); `--depth 16` e 64
+   medidos completando. O harness oficial continua em depth 1.
 2. **Mathe o `to_wire` recursivo**: codificar `Kw → ExtType(0x06)` na
    construção da op (1 passe) em vez de varrer a estrutura de novo — maior
    fase do cliente. Ou empacotar direto com `Packer` streaming.
 3. **Adotar o cliente Go na carga** (`build/eavt-sql-load-go`, medido acima):
    **+44%** no servidor Go / **+33%** no Nim e extrapolação 4,1 h → **2,9 h**.
    O harness Python continua sendo o instrumento oficial de A/B.
-4. **Fluxo de controle de resposta** (créditos) antes de suportar depth alto.
+4. **Nim**: mesma desacoplagem leitor/escritor (fila de respostas + completar
+   o future ao *enfileirar*, não ao escrever) — **fora do escopo** desta
+   rodada; até lá `--depth 16` continua travando lá.
 
 ## Referência @50k (todas as taxas em linhas/s)
 

@@ -178,7 +178,13 @@ func (g *Gateway) ServeClient(conn net.Conn) { g.serve(conn, false) }
 func (g *Gateway) ServeInternal(conn net.Conn) { g.serve(conn, true) }
 
 func (g *Gateway) serve(conn net.Conn, internal bool) {
-	defer conn.Close()
+	// Responses go through this connection's writer so the read loop below
+	// never blocks on a client that is not reading (see writer.go).
+	c := newClientConn(conn)
+	defer func() {
+		c.w.close()
+		conn.Close()
+	}()
 	for {
 		raw, err := downstream.ReadFrame(conn)
 		if err != nil {
@@ -186,49 +192,49 @@ func (g *Gateway) serve(conn net.Conn, internal bool) {
 		}
 		v, err := msgpack.Unmarshal(raw)
 		if err != nil {
-			downstream.RelayError(conn, "parse error: request must be an object")
+			c.writeError("parse error: request must be an object")
 			continue
 		}
 		m, ok := v.(msgpack.Map)
 		if !ok {
-			downstream.RelayError(conn, "parse error: request must be an object")
+			c.writeError("parse error: request must be an object")
 			continue
 		}
 		typ := memberStr(m, "type")
 		if internal {
 			switch typ {
 			case "datalog":
-				g.handleDatalog(conn, raw, m)
+				g.handleDatalog(c, raw, m)
 			case "scheme-local":
-				g.handleSchemeLocal(conn, m)
+				g.handleSchemeLocal(c, m)
 			case "schema":
-				g.handleSchema(conn)
+				g.handleSchema(c)
 			case "tx", "admin", "kv", "scheme":
-				g.forward(conn, raw)
+				g.forward(c, raw)
 			default:
-				downstream.RelayError(conn, "internal socket: unknown request type: "+typ)
+				c.writeError("internal socket: unknown request type: " + typ)
 			}
 			continue
 		}
 		switch typ {
 		case "datalog":
-			g.handleDatalog(conn, raw, m)
+			g.handleDatalog(c, raw, m)
 		case "schema":
-			g.handleSchema(conn)
+			g.handleSchema(c)
 		case "tx", "admin", "kv", "scheme":
-			g.forward(conn, raw)
+			g.forward(c, raw)
 		case "":
-			downstream.RelayError(conn, "parse error: request must be an object with a type")
+			c.writeError("parse error: request must be an object with a type")
 		default:
-			downstream.RelayError(conn, "unknown request type: "+typ)
+			c.writeError("unknown request type: " + typ)
 		}
 	}
 }
 
-func (g *Gateway) handleDatalog(conn net.Conn, raw []byte, m msgpack.Map) {
+func (g *Gateway) handleDatalog(c *clientConn, raw []byte, m msgpack.Map) {
 	query := memberStr(m, "query")
 	if query == "" {
-		downstream.RelayError(conn, "datalog request missing query field")
+		c.writeError("datalog request missing query field")
 		return
 	}
 	var params []sexpr.Expr
@@ -242,23 +248,23 @@ func (g *Gateway) handleDatalog(conn net.Conn, raw []byte, m msgpack.Map) {
 		}
 	}
 	if strings.Contains(query, ":db/add") || strings.Contains(query, ":db/retract") {
-		g.forwardTxData(conn, query)
+		g.forwardTxData(c, query)
 		return
 	}
 	if memberBool(m, "explain") {
-		g.handleExplain(conn, query)
+		g.handleExplain(c, query)
 		return
 	}
 	if g.Replica == nil {
-		downstream.RelayError(conn, "replica unavailable")
+		c.writeError("replica unavailable")
 		return
 	}
 	prog, findVars, err := g.compile(query)
 	if err != nil {
-		downstream.RelayError(conn, err.Error())
+		c.writeError(err.Error())
 		return
 	}
-	g.streamProgram(conn, prog, params, findVars)
+	g.streamProgram(c, prog, params, findVars)
 }
 
 func (g *Gateway) compile(query string) (scheme.Program, []string, error) {
@@ -285,9 +291,9 @@ func (g *Gateway) refreshResolver() {
 	}
 }
 
-func (g *Gateway) handleExplain(conn net.Conn, query string) {
+func (g *Gateway) handleExplain(c *clientConn, query string) {
 	if g.Replica == nil {
-		downstream.RelayError(conn, "replica unavailable")
+		c.writeError("replica unavailable")
 		return
 	}
 	attempt := func() (*datalog.CompileResult, error) {
@@ -300,7 +306,7 @@ func (g *Gateway) handleExplain(conn net.Conn, query string) {
 		res, err = attempt()
 	}
 	if err != nil {
-		downstream.RelayError(conn, err.Error())
+		c.writeError(err.Error())
 		return
 	}
 	explainStr := datalog.RenderExplain(res)
@@ -309,23 +315,23 @@ func (g *Gateway) handleExplain(conn net.Conn, query string) {
 		{Key: msgpack.Str("rows"), Value: msgpack.Array{msgpack.Array{msgpack.Str(explainStr)}}},
 		{Key: msgpack.Str("more"), Value: msgpack.Bool(false)},
 	})
-	_ = downstream.WriteFrame(conn, frame)
+	_ = c.writeFrame(frame)
 }
 
-func (g *Gateway) handleSchemeLocal(conn net.Conn, m msgpack.Map) {
+func (g *Gateway) handleSchemeLocal(c *clientConn, m msgpack.Map) {
 	if mode := memberStr(m, "mode"); mode != "" && mode != "query" {
-		downstream.RelayError(conn, "scheme-local: only mode \"query\" is served locally; exec goes to the transactor")
+		c.writeError("scheme-local: only mode \"query\" is served locally; exec goes to the transactor")
 		return
 	}
 	progVal, ok := msgpack.Member(m, msgpack.Str("program"))
 	if !ok {
-		downstream.RelayError(conn, "scheme-local: request is missing program")
+		c.writeError("scheme-local: request is missing program")
 		return
 	}
 	progBytes := msgpack.Marshal(progVal)
 	body, err := sexpr.UnmarshalWire(progBytes)
 	if err != nil {
-		downstream.RelayError(conn, "scheme-local: bad program wire ("+err.Error()+")")
+		c.writeError("scheme-local: bad program wire (" + err.Error() + ")")
 		return
 	}
 	var params []sexpr.Expr
@@ -341,23 +347,23 @@ func (g *Gateway) handleSchemeLocal(conn net.Conn, m msgpack.Map) {
 	var columns []string
 	if a, ok := msgpack.Member(m, msgpack.Str("columns")); ok {
 		if arr, ok := a.(msgpack.Array); ok {
-			for _, c := range arr {
-				if s, ok := c.(msgpack.Str); ok {
+			for _, cv := range arr {
+				if s, ok := cv.(msgpack.Str); ok {
 					columns = append(columns, string(s))
 				}
 			}
 		}
 	}
 	if g.Replica == nil {
-		downstream.RelayError(conn, "replica unavailable")
+		c.writeError("replica unavailable")
 		return
 	}
-	g.streamProgram(conn, scheme.Program{Body: body}, params, columns)
+	g.streamProgram(c, scheme.Program{Body: body}, params, columns)
 }
 
-func (g *Gateway) handleSchema(conn net.Conn) {
+func (g *Gateway) handleSchema(c *clientConn) {
 	if g.Replica == nil {
-		downstream.RelayError(conn, "replica unavailable")
+		c.writeError("replica unavailable")
 		return
 	}
 	stats := g.GetSnapshot()
@@ -365,12 +371,12 @@ func (g *Gateway) handleSchema(conn net.Conn) {
 		{Key: msgpack.Str("schema"), Value: msgpack.Raw(datalog.EncodeCompileStats(stats))},
 		{Key: msgpack.Str("more"), Value: msgpack.Bool(false)},
 	})
-	_ = downstream.WriteFrame(conn, frame)
+	_ = c.writeFrame(frame)
 }
 
 // ── execution ────────────────────────────────────────────────────────────
 
-func (g *Gateway) streamProgram(conn net.Conn, prog scheme.Program, params []sexpr.Expr, columns []string) {
+func (g *Gateway) streamProgram(c *clientConn, prog scheme.Program, params []sexpr.Expr, columns []string) {
 	sess := engine.NewQuerySession(g.Replica.Store, prog, params, 1, 0, false)
 	stream := engine.NewStreamingSession(sess)
 	first := true
@@ -379,7 +385,7 @@ func (g *Gateway) streamProgram(conn net.Conn, prog scheme.Program, params []sex
 		// execution is lock-free; WAL apply and other queries run concurrently.
 		rows, more, err := stream.NextBatch(batchSize)
 		if err != nil {
-			downstream.RelayError(conn, err.Error())
+			c.writeError(err.Error())
 			return
 		}
 		cols := msgpack.Array{}
@@ -401,7 +407,7 @@ func (g *Gateway) streamProgram(conn net.Conn, prog scheme.Program, params []sex
 			{Key: msgpack.Str("rows"), Value: arr},
 			{Key: msgpack.Str("more"), Value: msgpack.Bool(more)},
 		})
-		if err := downstream.WriteFrame(conn, frame); err != nil {
+		if err := c.writeFrame(frame); err != nil {
 			return
 		}
 		first = false
@@ -413,23 +419,26 @@ func (g *Gateway) streamProgram(conn net.Conn, prog scheme.Program, params []sex
 
 // ── forwarding ───────────────────────────────────────────────────────────
 
-func (g *Gateway) forward(conn net.Conn, raw []byte) {
+func (g *Gateway) forward(c *clientConn, raw []byte) {
 	if g.Conn == nil || !g.Conn.Connected() {
-		downstream.RelayError(conn, "transactor disconnected")
+		c.writeError("transactor disconnected")
 		return
 	}
+	// The relay enqueues instead of writing: a slow client no longer stops
+	// this loop (or the downstream reader that feeds it) — only the queue cap
+	// does, which is where socket backpressure belongs.
 	err := g.Conn.Request(raw, func(frame []byte) error {
-		return downstream.WriteFrame(conn, frame)
+		return c.writeFrame(frame)
 	})
 	if err != nil {
-		downstream.RelayError(conn, err.Error())
+		c.writeError(err.Error())
 	}
 }
 
-func (g *Gateway) forwardTxData(conn net.Conn, query string) {
+func (g *Gateway) forwardTxData(c *clientConn, query string) {
 	ops, err := edn.ReadVector(query)
 	if err != nil {
-		downstream.RelayError(conn, "EDN parse: "+err.Error())
+		c.writeError("EDN parse: " + err.Error())
 		return
 	}
 	wire := make(msgpack.Array, len(ops))
@@ -440,7 +449,7 @@ func (g *Gateway) forwardTxData(conn net.Conn, query string) {
 		{Key: msgpack.Str("type"), Value: msgpack.Str("tx")},
 		{Key: msgpack.Str("txdata"), Value: wire},
 	})
-	g.forward(conn, req)
+	g.forward(c, req)
 }
 
 func ednToMsgpack(v edn.Value) msgpack.Value {

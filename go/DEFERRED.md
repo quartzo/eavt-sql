@@ -102,6 +102,23 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   o caminho de produção (`flushSync`). Medido numa carga real (50k, tudo Go):
   `admin gc` 21 ms e `gc-dry` 3,2 ms **com a carga correndo** — estabs
   13,9k/s vs 13,5k/s do baseline, sem degradação.
+- ~~**Leitura e escrita acopladas no query server: um cliente que não lê as
+  respostas travava o próprio loop de requests** (`--depth 16` travava em
+  ~359 KB de respostas > 208 KB de buffer)~~ — **Resolvido (só Go)**: fila de
+  respostas por conexão com escritor próprio (`internal/querysrv/writer.go`,
+  um `writev` por lote), handlers recebem `*clientConn` em vez de `net.Conn`
+  (toda resposta passa pela fila → sem intercalação de frames), teto por
+  **política** (`EAVT_CLIENT_QUEUE_MAX`, default 64 MiB; acima dele o
+  produtor bloqueia e o backpressure é o do socket — sem créditos no wire), e
+  canal de entrega com buffer no `downstream` (`responseQueueSize=4`) para o
+  `readerLoop` não depender do ritmo do cliente. Regressões:
+  `TestServeKeepsReadingWhileClientIsSilent` (705 requests em silêncio = 558
+  KiB de respostas) + unitários do writer. Medido: `--depth 16` e `64`
+  completam (antes: hang de 5 min), carga 50k sem regressão (empresas
+  43.879/s vs 43.833), `BenchmarkTxUpsertStack` no ruído, nenhum
+  `backlog`/`markClosed` na réplica. **O Nim continua com o defeito** (o
+  future completa depois do write — `downstream.nim:131,136`), fora de
+  escopo desta rodada.
 - **`explain`** — renderer portado (`internal/datalog/explain.go`), golden
   25/25.
 - **Concorrência do query server** — o mutex global foi removido. Agora vale
@@ -302,7 +319,9 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   (`memSize`/`flushActive` atômicos, WAL com mutex próprio, hub com mutex).
 - **Query server**: goroutine por conexão, **sem lock global**. A consistência
   vem da snapshot isolation (ver §"Snapshot" abaixo): o cursor pina runs +
-  root no open e itera lock-free. WAL apply e queries não se bloqueiam.
+  root no open e itera lock-free. WAL apply e queries não se bloqueiam. As
+  respostas saem por fila própria (`frameWriter`, ver §Resolvidos): o loop de
+  requests nunca espera o cliente ler.
 - **`EncodeCompileStats`**: usa encoding de int mínimo em vez do `uint64`
   explícito do Nim — compatível com os decoders (Nim/Go), bytes
   diferentes.

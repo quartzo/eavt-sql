@@ -17,6 +17,14 @@ import (
 
 const maxFrame = 100_000_000
 
+// responseQueueSize is the per-request response hand-off capacity.  The
+// socket reader (readerLoop) delivers into this channel and the request
+// goroutine relays to the client; a few slots let the reader keep draining the
+// transactor while that relay waits on socket backpressure.  A slow client
+// must never stall this reader — it is the only reader of the replication
+// link, and stopping it backs up the transactor's subscriber queue.
+const responseQueueSize = 4
+
 // eventQueueSize bounds the replication-event backlog.  The reader enqueues
 // events and a dedicated applier drains them in order, so a slow snapshot
 // apply (sealed-segment file reads) never blocks the socket reader.
@@ -190,7 +198,7 @@ func (c *Conn) register(raw []byte) (string, chan []byte, error) {
 	}
 	c.nextID++
 	id := itoa(c.nextID)
-	ch := make(chan []byte)
+	ch := make(chan []byte, responseQueueSize)
 	c.pending[id] = ch
 	c.mu.Unlock()
 
