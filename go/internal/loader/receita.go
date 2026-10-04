@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"eavt-go/internal/client"
 	"eavt-go/internal/edn"
@@ -41,6 +42,7 @@ type Opts struct {
 	SkipEstabs  bool
 	SkipSocios  bool
 	MaxEstabs   int // stop estabs after N saved (0 = first batch, like Python)
+	MaxSimples  int // stop simples after N matched (0 = unlimited)
 	MaxSocios   int // stop socios after N scanned (0 = unlimited)
 }
 
@@ -687,37 +689,68 @@ func loadSocios(c Txer, dataDir string, batch, maxScan int) (int, error) {
 
 // ── orchestration ────────────────────────────────────────────────────────
 
+// stage prints a stage's wall time and rate, mirroring the Python reference
+// loader so the two clients can be A/B'd on the same server.
+func stage(name string, rows int, t0 time.Time) {
+	el := time.Since(t0).Seconds()
+	if rows > 0 && el > 0 {
+		fmt.Printf("  [t] %s: %s rows in %.1fs (%s/s)\n",
+			name, commas(rows), el, commas(int(float64(rows)/el+0.5)))
+		return
+	}
+	fmt.Printf("  [t] %s: %.1fs\n", name, el)
+}
+
 // Load runs the full load (schema → lookups → empresas → simples → estabs →
-// socios).
+// socios), printing one [t] line per stage.
 func Load(c Txer, o Opts) error {
+	t0 := time.Now()
 	if err := declareSchema(c); err != nil {
 		return err
 	}
+	stage("schema", 0, t0)
+
+	t0 = time.Now()
 	fmt.Printf("== Lookups (data: %s) ==\n", o.DataDir)
 	if err := loadLookups(c, o.DataDir, o.Batch); err != nil {
 		return err
 	}
+	stage("lookups", 0, t0)
+
+	t0 = time.Now()
 	fmt.Printf("== Empresas0 (first %s) ==\n", commas(o.N))
-	if _, err := loadEmpresas(c, o.DataDir, o.N, o.Batch); err != nil {
+	empresas, err := loadEmpresas(c, o.DataDir, o.N, o.Batch)
+	if err != nil {
 		return err
 	}
+	stage("empresas", empresas, t0)
+
 	if !o.SkipSimples {
+		t0 = time.Now()
 		fmt.Println("== Simples (merge via tx upsert) ==")
-		if _, err := mergeSimples(c, o.DataDir, o.Batch, 0); err != nil {
+		matched, err := mergeSimples(c, o.DataDir, o.Batch, o.MaxSimples)
+		if err != nil {
 			return err
 		}
+		stage("simples", matched, t0)
 	}
 	if !o.SkipEstabs {
+		t0 = time.Now()
 		fmt.Println("== Estabelecimentos0 ==")
-		if _, err := loadEstabs(c, o.DataDir, o.MaxEstabs, o.Batch); err != nil {
+		saved, err := loadEstabs(c, o.DataDir, o.MaxEstabs, o.Batch)
+		if err != nil {
 			return err
 		}
+		stage("estabs", saved, t0)
 	}
 	if !o.SkipSocios {
+		t0 = time.Now()
 		fmt.Println("== Socios0 ==")
-		if _, err := loadSocios(c, o.DataDir, o.Batch, o.MaxSocios); err != nil {
+		socios, err := loadSocios(c, o.DataDir, o.Batch, o.MaxSocios)
+		if err != nil {
 			return err
 		}
+		stage("socios", socios, t0)
 	}
 	return nil
 }

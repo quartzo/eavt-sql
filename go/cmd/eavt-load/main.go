@@ -27,6 +27,7 @@ func main() {
 	skipEstabs := flag.Bool("skip-estabs", false, "skip Estabelecimentos0")
 	skipSocios := flag.Bool("skip-socios", false, "skip Socios0")
 	maxEstabs := flag.Int("max-estabs", 0, "stop estabs after N saved rows; 0 = FIRST BATCH ONLY (reference behavior) — pass a large value for a full load")
+	maxSimples := flag.Int("max-simples", 0, "stop simples merge after N matched rows (0 = unlimited)")
 	maxSocios := flag.Int("max-socios", 0, "stop socios after N scanned rows (0 = unlimited)")
 	flag.Parse()
 
@@ -57,6 +58,7 @@ func main() {
 		SkipEstabs:  *skipEstabs,
 		SkipSocios:  *skipSocios,
 		MaxEstabs:   *maxEstabs,
+		MaxSimples:  *maxSimples,
 		MaxSocios:   *maxSocios,
 	}
 	if err := loader.Load(c, opts); err != nil {
