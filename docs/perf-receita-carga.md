@@ -334,8 +334,9 @@ já é irrelevante em Go (2 CPU-s) mas é **metade do wall no harness Python**.
 
 ### Achado lateral: `--depth ≥ 16` trava (sem fluxo de controle de resposta)
 
-Com `batch 500` e 16 batches em voo o pipeline **trava de vez** (Go; timeout de
-5 min sem progresso). Evidências:
+Com `batch 500` e 16 batches em voo o pipeline **trava de vez** — **nas duas
+stacks** (Go: timeout de 5 min sem progresso; Nim: idem, medido com 180 s;
+mesmo ponto do pipeline, estágio `estabs`). Evidências (rodada Go):
 
 - dump de goroutines (`SIGQUIT`) do query server: `Gateway.serve →
   Conn.Request → downstream.WriteFrame` **[IO wait]** — o servidor está
@@ -349,11 +350,29 @@ Com `batch 500` e 16 batches em voo o pipeline **trava de vez** (Go; timeout de
   rodada sintética — o mecanismo é função do tamanho do payload, não dos
   dados).
 
-Ou seja: o `serve` escreve a resposta no mesmo goroutine que lê os requests —
-se o cliente ainda está escrevendo e não lê, os dois buffers enchem e os dois
-lados travam. Aumentar `SO_RCVBUF` para 8 MB no cliente **não** evitou o
-travamento no teste (mesmo ponto de bloqueio no dump) — causa exata a fechar.
-Até lá: `depth ≤ 8` (medido, estável).
+**Por que trava nas duas stacks** (não é problema do modelo de goroutines do
+Go):
+
+- **Go**: `serve` faz `ReadFrame → forward → WriteFrame` na mesma goroutine —
+  a escrita presa impede a leitura de novos requests.
+- **Nim**: já há tarefas separadas (loop de requests + `readerLoop` do
+  downstream), mas o caminho de leitura **depende** da escrita: `request()`
+  fica em `await fut` (`downstream.nim:240`) e o future só completa **depois**
+  de `p.transp.writeFrameAsync(body)` (`downstream.nim:131,136`) — escrita
+  presa, loop de requests parado. Medido: mesmo `--depth 16` trava em 180 s.
+
+Ou seja: **duas tasks (leitor/escritor) são a base, mas não bastam** — sem
+teto na fila de respostas, troca-se deadlock por memória sem limite, e o leitor
+precisa estar desacoplado da entrega (completar o future ao *enfileirar*, não
+ao escrever). O padrão correto **já existe no repo**: o `Subscriber` da
+replicação (`go/internal/replication`) é fila + `go s.drain()` (escritor
+próprio) + `BacklogMaxBytes = 64 MiB` (teto → fecha o subscriber). Para o
+lado de cliente o teto vira **janela/créditos**: o cliente anuncia quantas
+respostas cabem, e o servidor nunca tenta escrever além disso — aí nem caminho
+duplo precisa. Correção pontual que **não** resolveu: `SO_RCVBUF` de 8 MB no
+cliente (mesmo ponto de bloqueio no dump) — causa exata a fechar.
+
+Até lá: `depth ≤ 8` (medido, estável nas duas stacks).
 
 ### Próximos passos de perf (por ordem de retorno)
 
