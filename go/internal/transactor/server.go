@@ -38,21 +38,26 @@ type Engine struct {
 	Hub   *replication.Hub
 	Path  string
 
-	// mu serializes transaction application (tx / scheme exec), the short
-	// capture and publish windows of a flush, and GC — mirroring the Nim
-	// single-loop for writes.  Reads (scheme query, kv get/scan, dump,
-	// schema) and the flush's blob I/O run without it: cursors pin a snapshot
+	// mu serializes transaction application (tx / scheme exec) and the short
+	// capture and publish windows of a flush — mirroring the Nim single-loop
+	// for writes.  Reads (scheme query, kv get/scan, dump, schema), the
+	// flush's blob I/O and the GC pass run without it: cursors pin a snapshot
 	// and the memtable keeps the active ladder while the frozen (draining)
-	// one is drained, released only at publish.
+	// one is drained, released only at publish.  GC in particular never takes
+	// it — the pass runs on the runner goroutine below, which is also the
+	// only place that publishes, so the root set is frozen by construction
+	// (see runGC).
 	mu sync.Mutex
 
-	// Flush driver (the Nim AsyncFlusher's single-flight + coalescing): a
-	// background worker drains one capture at a time; requests arriving during
-	// a drain collapse into one follow-up pass.
+	// Flush/GC driver (the Nim AsyncFlusher's single-flight + coalescing): a
+	// background runner drains one requested flush and one queued GC pass at
+	// a time; requests arriving during a drain coalesce.  flushMu/flushing
+	// cover both kinds of work, so flushSync also waits for a queued GC pass.
 	flushMu    sync.Mutex
 	flushCond  *sync.Cond
 	flushing   bool
-	flushAgain bool
+	flushWant  bool // a flush is requested (coalescing flag)
+	gcQueue    []*gcRequest
 
 	// stopCh stops the periodic memledger (nil when disabled); stopOnce
 	// makes Close idempotent without racing the reader.
@@ -111,11 +116,10 @@ func NewEngineConfig(ecfg EngineConfig) (*Engine, error) {
 	w.OnWal = e.Hub.BroadcastWal
 	w.OnSeal = e.Hub.BroadcastSeal
 	kv.OnFlushPublish = func(root string, maxT int64) {
+		// Auto-GC is queued by runFlush (on the runner), not here: this
+		// callback also runs on the synchronous kv.Flush() path, and the pass
+		// must stay serialized with publish — which only the runner is.
 		e.Hub.BroadcastRoot(root, maxT)
-		// Post-flush auto-GC: cheap root-only check, then a full pass.
-		if e.KV.PS.HasOldRoots(e.KV.GcMaxAgeSecs, e.KV.GcMaxRootCount) {
-			_, _ = e.KV.PS.GcFull(e.KV.GcMaxAgeSecs, e.KV.GcMaxRootCount, false)
-		}
 	}
 
 	e.Store = engine.New(kv)
@@ -272,35 +276,147 @@ func (e *Engine) statsText() string {
 }
 
 // requestFlush arms the single-flight background flusher.  Requests arriving
-// while a drain is in progress are coalesced into one follow-up pass.
+// during a drain coalesce into one follow-up pass (flushWant).
 func (e *Engine) requestFlush() {
 	e.flushMu.Lock()
-	if e.flushing {
-		e.flushAgain = true
-		e.flushMu.Unlock()
-		return
+	e.flushWant = true
+	start := !e.flushing
+	if start {
+		e.flushing = true
 	}
-	e.flushing = true
 	e.flushMu.Unlock()
-	go e.flushLoop()
+	if start {
+		go e.flushLoop()
+	}
 }
 
+// gcRequest is one queued GC pass.  Manual requests (admin gc / gc-dry) wait
+// on done for the report; the post-flush auto request is fire-and-forget
+// (done == nil) and coalesces with a pending one.
+type gcRequest struct {
+	dryRun bool
+	auto   bool
+	done   chan struct{}
+	report []byte
+	err    error
+}
+
+// requestGc queues a GC pass on the flush/GC runner, starting it when idle.
+//
+// The pass never takes e.mu: it runs on the runner goroutine, and that same
+// goroutine is the only one that publishes a new root (runFlush) — so the
+// visible root set cannot change while the live-set is computed and blobs are
+// deleted.  Listing roots, reading them and unlinking blobs is blobstore work
+// and must not stop tx application (GC is off the operational path).
+func (e *Engine) requestGc(dryRun, auto bool) *gcRequest {
+	req := &gcRequest{dryRun: dryRun, auto: auto}
+	if !auto {
+		req.done = make(chan struct{})
+	}
+	e.flushMu.Lock()
+	if auto {
+		for _, r := range e.gcQueue {
+			if r.auto {
+				// coalesce: one pending auto pass is enough
+				e.flushMu.Unlock()
+				return req
+			}
+		}
+	}
+	e.gcQueue = append(e.gcQueue, req)
+	start := !e.flushing
+	if start {
+		e.flushing = true
+	}
+	e.flushMu.Unlock()
+	if start {
+		go e.flushLoop()
+	}
+	return req
+}
+
+// flushLoop is the single-flight runner: per iteration it runs at most one
+// queued GC pass and one requested flush.  Publishing and a GC pass never
+// overlap because both happen here — that is what freezes the root set for a
+// pass without holding e.mu (see requestGc).  GC runs first so a manual pass
+// never waits behind a flush that is itself waiting on e.mu, and the auto pass
+// queued by a publish is consumed in the same iteration: every publish queues
+// one, so leaving it for the next iteration would keep the runner busy forever.
 func (e *Engine) flushLoop() {
 	for {
-		e.runFlush()
+		e.runGC()
+		if e.takeFlushWant() {
+			e.runFlush()
+			e.runGC()
+		}
 		e.flushMu.Lock()
-		if !e.flushAgain {
+		if !e.flushWant && len(e.gcQueue) == 0 {
 			e.flushing = false
 			e.flushCond.Broadcast()
 			e.flushMu.Unlock()
 			return
 		}
-		e.flushAgain = false
 		e.flushMu.Unlock()
 	}
 }
 
-// flushSync waits for every pending/queued flush to complete.
+// takeFlushWant reports whether a flush is requested, clearing the flag.
+func (e *Engine) takeFlushWant() bool {
+	e.flushMu.Lock()
+	defer e.flushMu.Unlock()
+	want := e.flushWant
+	e.flushWant = false
+	return want
+}
+
+// runGC runs at most one queued GC pass, off the engine lock (see requestGc).
+// A failed pass logs and keeps going: it deletes nothing before the live-set
+// walk succeeds (fail-stop inside GcFull) and the candidates come back after
+// the next flush (AGENTS.md: log + continue, retry next pass).
+func (e *Engine) runGC() {
+	e.flushMu.Lock()
+	if len(e.gcQueue) == 0 {
+		e.flushMu.Unlock()
+		return
+	}
+	req := e.gcQueue[0]
+	e.gcQueue = e.gcQueue[1:]
+	e.flushMu.Unlock()
+
+	finish := func(report []byte, err error) {
+		if req.done != nil {
+			req.report, req.err = report, err
+			close(req.done)
+		}
+	}
+	switch {
+	case e.KV.ReadOnly:
+		finish(nil, fmt.Errorf("read-only"))
+	case e.KV.PS == nil:
+		finish(nil, fmt.Errorf("no page store"))
+	case e.KV.FlushActive():
+		// A synchronous kv.Flush() is mid-flight: never overlap it — its
+		// blobs are not reachable from any visible root yet.  The auto pass
+		// is retried after the next flush; a manual one gets the old error.
+		if req.auto {
+			finish(nil, nil)
+			return
+		}
+		finish(nil, fmt.Errorf("flush in progress"))
+	case req.auto && !e.KV.PS.HasOldRoots(e.KV.GcMaxAgeSecs, e.KV.GcMaxRootCount):
+		finish(nil, nil) // cheap candidate check, nothing to do
+	default:
+		report, err := e.KV.PS.GcFull(e.KV.GcMaxAgeSecs, e.KV.GcMaxRootCount,
+			req.dryRun)
+		if err != nil {
+			logutil.Error("gc", fmt.Sprintf("gc pass failed: %v", err))
+		}
+		finish(report, err)
+	}
+}
+
+// flushSync waits for the runner to drain: every pending flush (and any GC
+// pass queued with it).
 func (e *Engine) flushSync() {
 	e.requestFlush()
 	e.flushMu.Lock()
@@ -332,10 +448,21 @@ func (e *Engine) runFlush() {
 	e.mu.Lock()
 	e.KV.PublishFlush(b, trees, root)
 	e.mu.Unlock()
+	// Post-flush auto-GC: queued on this runner, never on the engine lock.
+	// The pass does the cheap HasOldRoots check and the full walk itself,
+	// and it is serialized with publish by running here (see requestGc).
+	e.requestGc(false, true)
 }
 
 // Close stops the WAL, the memledger and closes the store.
 func (e *Engine) Close() {
+	// Drain the flush/GC runner first: neither a prepare nor a GC pass may
+	// run against a closed KV/blob store.
+	e.flushMu.Lock()
+	for e.flushing {
+		e.flushCond.Wait()
+	}
+	e.flushMu.Unlock()
 	if e.stopCh != nil {
 		e.stopOnce.Do(func() { close(e.stopCh) })
 	}
@@ -615,18 +742,17 @@ func (e *Engine) handleAdmin(conn net.Conn, command, id string) {
 		if e.KV.ReadOnly {
 			output = "error: read-only"
 		} else {
-			e.mu.Lock()
-			if e.KV.FlushActive() {
-				e.mu.Unlock()
-				output = "error: flush in progress"
-				break
-			}
-			rep, err := e.KV.PS.GcFull(e.KV.GcMaxAgeSecs, e.KV.GcMaxRootCount, command == "gc-dry")
-			e.mu.Unlock()
-			if err != nil {
-				output = "error: " + err.Error()
+			// Off the operational path: the pass runs on the flush/GC
+			// runner, which is serialized with publish by construction — no
+			// e.mu, so tx application keeps flowing while roots are listed
+			// and blobs deleted.  This goroutine (one per connection) just
+			// waits for the report.
+			req := e.requestGc(command == "gc-dry", false)
+			<-req.done
+			if req.err != nil {
+				output = "error: " + req.err.Error()
 			} else {
-				output = gcReportText(rep)
+				output = gcReportText(req.report)
 			}
 		}
 	case "status":

@@ -62,6 +62,15 @@ func (s *Store) HasOldRoots(maxAgeSecs uint64, maxRootCount int) bool {
 
 // GcFull removes unreachable roots and blobs; returns a 41-byte report
 // (5 little-endian uint64 + dry-run flag).
+//
+// Caller contract: the visible root set must not change while the pass runs —
+// a root published mid-pass would have its page blobs outside the computed
+// live-set and be deleted out from under a live snapshot.  Callers freeze it
+// by serialization (the transactor runs this on the same single-flight
+// goroutine that publishes), NOT by holding an engine-wide write lock:
+// listing, reading and unlinking blobs is blobstore work and must never block
+// tx application.  Deletions only start after the live-set walk succeeds
+// (fail-stop); a failed pass leaves everything in place and is retried later.
 func (s *Store) GcFull(maxAgeSecs uint64, maxRootCount int, dryRun bool) ([]byte, error) {
 	if s.readOnly {
 		return nil, errf("read-only")

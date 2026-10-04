@@ -86,7 +86,22 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
 ### Resolvidos depois de terem sido adiados
 - **GC do pagestore** — implementado em `internal/pagestore/gc.go`
   (`GcFull`/`HasOldRoots`/`ClassifyRoots`), wire em `.gc`/`.gc-dry` e
-  auto-GC pós-flush.
+  auto-GC pós-flush. O passe roda no runner de flush/GC, **fora** do `e.mu`
+  (ver §Transactor): ele se serializa com o publish por construção, e os erros
+  são logados com retry no próximo passe.
+- ~~**GC travava o `e.mu`: o passe inteiro (listar roots, ler blobs, apagar
+  arquivos) parava toda a aplicação de tx**~~ — **Resolvido**: `admin gc`,
+  `gc-dry` e o auto-GC pós-flush passaram a enfileirar no runner
+  single-flight de flush/GC (`requestGc`/`runGC`) em vez de segurar o lock;
+  como o publish também acontece só ali, o conjunto de roots continua congelado
+  para o passe sem travar escrita. O auto-GC virou fire-and-forget com
+  coalescing (era síncrono dentro de `PublishFlush`) e o erro deixou de ser
+  descartado (`_, _ =` → `logutil.Error`). Regressões:
+  `TestGcRunsOffEngineLock` (segura `e.mu` durante o passe e exige o
+  relatório), `TestAdminGcDryResponse` e o `TestAutoGCPostFlush` migrado para
+  o caminho de produção (`flushSync`). Medido numa carga real (50k, tudo Go):
+  `admin gc` 21 ms e `gc-dry` 3,2 ms **com a carga correndo** — estabs
+  13,9k/s vs 13,5k/s do baseline, sem degradação.
 - **`explain`** — renderer portado (`internal/datalog/explain.go`), golden
   25/25.
 - **Concorrência do query server** — o mutex global foi removido. Agora vale
@@ -275,7 +290,11 @@ Referência dos binários: `build/eavt-sql-{cli-go,query-front-go,query-go,trans
   o fsync fica no tick de ~100 ms → crash de processo não perde nada, crash de
   máquina perde ≤ ~100 ms.
 - **Transactor**: `e.mu` serializa apenas a aplicação de tx/exec (como o
-  single-loop do Nim) e as janelas curtas de capture/publish do flush e do GC.
+  single-loop do Nim) e as janelas curtas de capture/publish do flush. **O GC
+  não pega esse lock**: o passe roda no mesmo runner single-flight do flush
+  (`requestGc`/`runGC`), que é o único lugar que publica — o conjunto de roots
+  fica congelado por construção e a aplicação de tx nunca para. Listar ler e
+  apagar blobs é trabalho de blobstore, fora do caminho operacional.
   Leituras (scheme query, kv get/scan, dump, schema) e o I/O de blobs do flush
   (`PrepareFlush`) rodam **sem** esse lock. Writes continuam na memtable
   **ativa** enquanto o flush drena a **congelada** (draining), liberada só no
